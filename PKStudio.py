@@ -919,9 +919,10 @@ class Run1App:
         ttk.Entry(frame, textvariable=self.run3_ppm_var, width=18).grid(row=0, column=3, sticky="w", pady=4)
 
         ttk.Checkbutton(frame, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=1, column=0, sticky="w", pady=(2,4))
-        ttk.Label(frame, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง", foreground="#666666").grid(row=1, column=1, columnspan=3, sticky="w", pady=(2,4))
+        ttk.Label(frame, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง", foreground="#666666").grid(row=1, column=1, columnspan=2, sticky="w", pady=(2,4))
+        ttk.Button(frame, text="🎯 Perspective Calibration (คลิก 4 จุด)", command=self.open_perspective_calibration).grid(row=1, column=3, sticky="e", pady=(2,4))
 
-        ttk.Label(frame, text="Perspective calibration: P1→P2→P3→P4 รอบพื้นที่สี่เหลี่ยมบนผิวถนน (x,y pixels)").grid(row=2, column=0, columnspan=4, sticky="w", pady=(2,2))
+        ttk.Label(frame, text="Perspective calibration: P1→P2→P3→P4 รอบพื้นที่สี่เหลี่ยมบนผิวถนน (พิกัดจะกรอกให้อัตโนมัติ)").grid(row=2, column=0, columnspan=4, sticky="w", pady=(2,2))
         ttk.Label(frame, text="P1").grid(row=3, column=0, sticky="e", padx=4, pady=2)
         ttk.Entry(frame, textvariable=self.run3_perspective_p1_var, width=18).grid(row=3, column=1, sticky="w", pady=2)
         ttk.Label(frame, text="P2").grid(row=3, column=2, sticky="e", padx=4, pady=2)
@@ -975,8 +976,9 @@ class Run1App:
             ttk.Label(frame, text=name).grid(row=row, column=pair_col, sticky="e", padx=(4, 4), pady=2)
             ttk.Entry(frame, textvariable=self.run3_width_vars[name], width=10).grid(row=row, column=pair_col + 1, sticky="w", padx=(0, 8), pady=2)
 
-        ttk.Label(frame, text="Default preset: Site 8 + PPM 57.822. Perspective correction is OFF until calibrated; locked CSVs are redirected to a timestamped file.", foreground="#666666").grid(row=21, column=0, columnspan=4, sticky="w", pady=(6, 2))
-        ttk.Label(frame, textvariable=self.run3_result_text, foreground="#444444").grid(row=22, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        ttk.Label(frame, text="Perspective: กดปุ่มด้านบนเพื่อเปิดภาพและคลิก P1→P2→P3→P4; โปรแกรมจะเติมพิกัดให้เอง จากนั้นกรอกระยะจริง Length/Width แล้วกด Apply.", foreground="#666666").grid(row=21, column=0, columnspan=4, sticky="w", pady=(6, 2))
+        ttk.Label(frame, text="Default preset: Site 8 + PPM 57.822. Perspective correction จะเริ่มทำงานเมื่อ Calibration ครบ.", foreground="#666666").grid(row=22, column=0, columnspan=4, sticky="w", pady=(2, 2))
+        ttk.Label(frame, textvariable=self.run3_result_text, foreground="#444444").grid(row=23, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
     # ========================================================
     # INTEGRATED ZONE / LINE MEASUREMENT
@@ -2562,6 +2564,251 @@ class Run1App:
             self.save_csv_var.set(True)
 
         return True
+
+    # ========================================================
+    # PERSPECTIVE CALIBRATION UI
+    # ========================================================
+
+    def open_perspective_calibration(self):
+        """Open an in-app Tkinter calibration window.
+
+        The user clicks P1 -> P2 -> P3 -> P4 on one road-plane quadrilateral.
+        Coordinates are converted from the displayed image back to original-video
+        pixel coordinates automatically, so the user never needs to type x,y.
+        """
+        video_path = str(self.video_var.get() or "").strip()
+        if not video_path:
+            messagebox.showerror("Perspective Calibration", "Please select a video first.")
+            return
+        if not os.path.isfile(video_path):
+            messagebox.showerror("Perspective Calibration", f"Video not found:\n\n{video_path}")
+            return
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            messagebox.showerror("Perspective Calibration", "Could not open the selected video.")
+            return
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        default_frame = max(0, min(total_frames - 1, total_frames // 2 if total_frames else 0))
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, default_frame)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            cap.release()
+            messagebox.showerror("Perspective Calibration", "Could not read a calibration frame from the video.")
+            return
+
+        top = tk.Toplevel(self.root)
+        top.title("PK Studio — Perspective Calibration")
+        top.geometry("1280x900")
+        top.minsize(900, 700)
+        top.transient(self.root)
+        top.grab_set()
+
+        state = {
+            "cap": cap,
+            "frame": frame.copy(),
+            "frame_index": default_frame,
+            "points": [],
+            "photo": None,
+            "scale": 1.0,
+            "offset_x": 0,
+            "offset_y": 0,
+            "image_w": width,
+            "image_h": height,
+        }
+
+        controls = ttk.Frame(top, padding=8)
+        controls.pack(fill="x")
+        canvas_frame = ttk.Frame(top, padding=(8, 0, 8, 8))
+        canvas_frame.pack(fill="both", expand=True)
+
+        ttk.Label(controls, text="ลำดับจุด: P1 → P2 → P3 → P4 | คลิกบนพื้นถนนที่เป็นพื้นที่เดียวกัน").grid(row=0, column=0, columnspan=6, sticky="w", pady=(0,6))
+        ttk.Label(controls, text="Frame").grid(row=1, column=0, sticky="e", padx=(0,5))
+        frame_var = tk.StringVar(value=str(default_frame + 1))
+        frame_entry = ttk.Entry(controls, textvariable=frame_var, width=10)
+        frame_entry.grid(row=1, column=1, sticky="w")
+        ttk.Button(controls, text="Load Frame", command=lambda: load_frame()).grid(row=1, column=2, padx=5)
+        ttk.Button(controls, text="Reset Points", command=lambda: reset_points()).grid(row=1, column=3, padx=5)
+        ttk.Label(controls, text="Known Length P1→P2 (m)").grid(row=1, column=4, sticky="e", padx=(15,5))
+        length_var = tk.StringVar(value=str(self.run3_perspective_length_var.get() or ""))
+        ttk.Entry(controls, textvariable=length_var, width=10).grid(row=1, column=5, sticky="w")
+        ttk.Label(controls, text="Known Width P2→P3 (m)").grid(row=2, column=4, sticky="e", padx=(15,5), pady=(6,0))
+        width_var = tk.StringVar(value=str(self.run3_perspective_width_var.get() or ""))
+        ttk.Entry(controls, textvariable=width_var, width=10).grid(row=2, column=5, sticky="w", pady=(6,0))
+
+        point_text_var = tk.StringVar(value="ยังไม่ได้เลือกจุด")
+        ttk.Label(controls, textvariable=point_text_var, foreground="#555555").grid(row=2, column=0, columnspan=4, sticky="w", pady=(6,0))
+
+        canvas = tk.Canvas(canvas_frame, background="#202020", highlightthickness=1)
+        canvas.pack(fill="both", expand=True)
+
+        def render():
+            img = state["frame"]
+            h, w = img.shape[:2]
+            cw = max(100, int(canvas.winfo_width()))
+            ch = max(100, int(canvas.winfo_height()))
+            scale = min(cw / w, ch / h)
+            if scale <= 0:
+                scale = 1.0
+            state["scale"] = scale
+            new_w = max(1, int(round(w * scale)))
+            new_h = max(1, int(round(h * scale)))
+            resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+            view = resized.copy()
+            labels = ["P1", "P2", "P3", "P4"]
+            for idx, (px, py) in enumerate(state["points"]):
+                vx = int(round(px * scale))
+                vy = int(round(py * scale))
+                cv2.circle(view, (vx, vy), 7, (0, 255, 255), -1)
+                cv2.putText(view, labels[idx], (vx + 10, vy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2, cv2.LINE_AA)
+            if len(state["points"]) >= 2:
+                for i in range(1, len(state["points"])):
+                    a = state["points"][i-1]; b = state["points"][i]
+                    cv2.line(view, (int(a[0]*scale), int(a[1]*scale)), (int(b[0]*scale), int(b[1]*scale)), (0,255,255), 2, cv2.LINE_AA)
+            if len(state["points"]) == 4:
+                a = state["points"][3]; b = state["points"][0]
+                cv2.line(view, (int(a[0]*scale), int(a[1]*scale)), (int(b[0]*scale), int(b[1]*scale)), (0,255,255), 2, cv2.LINE_AA)
+
+            ok, buf = cv2.imencode('.png', view)
+            if not ok:
+                return
+            photo = tk.PhotoImage(data=buf.tobytes())
+            state["photo"] = photo
+            canvas.delete("all")
+            state["offset_x"] = max(0, (cw - new_w) // 2)
+            state["offset_y"] = max(0, (ch - new_h) // 2)
+            canvas.create_image(state["offset_x"], state["offset_y"], anchor="nw", image=photo)
+            canvas.create_text(10, 10, anchor="nw", text=f"Frame {state['frame_index']+1} | Image {w}×{h}", fill="white", font=("Segoe UI", 10, "bold"))
+            point_text_var.set("  ".join(f"P{i+1}=({x:.1f},{y:.1f})" for i,(x,y) in enumerate(state["points"])) if state["points"] else "ยังไม่ได้เลือกจุด")
+
+        def load_frame():
+            try:
+                requested = int(float(frame_var.get())) - 1
+            except Exception:
+                messagebox.showerror("Perspective Calibration", "Frame must be an integer.", parent=top)
+                return
+            if total_frames > 0:
+                requested = max(0, min(total_frames - 1, requested))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, requested)
+            ok, new_frame = cap.read()
+            if not ok or new_frame is None:
+                messagebox.showerror("Perspective Calibration", "Could not read that frame.", parent=top)
+                return
+            state["frame"] = new_frame.copy()
+            state["frame_index"] = requested
+            state["points"] = []
+            render()
+
+        def reset_points():
+            state["points"] = []
+            render()
+
+        def on_click(event):
+            if len(state["points"]) >= 4:
+                return
+            sx = state["scale"]
+            ox = state["offset_x"]
+            oy = state["offset_y"]
+            x = (event.x - ox) / sx
+            y = (event.y - oy) / sx
+            if x < 0 or y < 0 or x > state["image_w"] or y > state["image_h"]:
+                return
+            state["points"].append((float(x), float(y)))
+            render()
+
+        def apply_calibration():
+            if len(state["points"]) != 4:
+                messagebox.showerror("Perspective Calibration", "Please click exactly 4 points in order: P1 → P2 → P3 → P4.", parent=top)
+                return
+            try:
+                length = float(length_var.get().strip())
+                width_m = float(width_var.get().strip())
+                if length <= 0 or width_m <= 0:
+                    raise ValueError
+            except Exception:
+                messagebox.showerror("Perspective Calibration", "Known Length and Known Width must be positive numbers in meters.", parent=top)
+                return
+
+            pts = np.array(state["points"], dtype=np.float32)
+            area = abs(cv2.contourArea(pts.reshape((-1,1,2))))
+            if area < 100.0:
+                messagebox.showerror("Perspective Calibration", "The 4 selected points are too close together. Select a larger road-plane area.", parent=top)
+                return
+            src = np.float32(state["points"])
+            dst = np.float32([[0.0,0.0],[length,0.0],[length,width_m],[0.0,width_m]])
+            try:
+                H = cv2.getPerspectiveTransform(src, dst)
+            except Exception as exc:
+                messagebox.showerror("Perspective Calibration", f"Could not create perspective transform:\n\n{exc}", parent=top)
+                return
+            if not np.isfinite(H).all():
+                messagebox.showerror("Perspective Calibration", "The selected points produced an invalid transformation.", parent=top)
+                return
+
+            self.run3_perspective_p1_var.set(f"{state['points'][0][0]:.3f},{state['points'][0][1]:.3f}")
+            self.run3_perspective_p2_var.set(f"{state['points'][1][0]:.3f},{state['points'][1][1]:.3f}")
+            self.run3_perspective_p3_var.set(f"{state['points'][2][0]:.3f},{state['points'][2][1]:.3f}")
+            self.run3_perspective_p4_var.set(f"{state['points'][3][0]:.3f},{state['points'][3][1]:.3f}")
+            self.run3_perspective_length_var.set(f"{length:g}")
+            self.run3_perspective_width_var.set(f"{width_m:g}")
+            self.run3_perspective_enabled_var.set(True)
+            self.run3_result_text.set(f"Perspective calibrated: Frame {state['frame_index']+1}, {state['image_w']}×{state['image_h']} | P1–P4 saved automatically")
+
+            # Save a site-specific calibration JSON beside the selected output when possible.
+            try:
+                out_dir = str(self.output_var.get() or "").strip()
+                if out_dir:
+                    os.makedirs(out_dir, exist_ok=True)
+                    site = re.sub(r"[^A-Za-z0-9_-]+", "_", self.run3_site_id_var.get().strip() or "Unknown")
+                    cal_path = os.path.join(out_dir, f"Site_{site}_Perspective_Calibration.json")
+                    payload = {
+                        "Site_ID": self.run3_site_id_var.get().strip(),
+                        "video_path": video_path,
+                        "frame_index_zero_based": state["frame_index"],
+                        "frame_number_one_based": state["frame_index"] + 1,
+                        "image_width": state["image_w"],
+                        "image_height": state["image_h"],
+                        "P1": list(state["points"][0]), "P2": list(state["points"][1]),
+                        "P3": list(state["points"][2]), "P4": list(state["points"][3]),
+                        "Known_Length_m": length, "Known_Width_m": width_m,
+                        "point_order": "P1->P2->P3->P4",
+                        "calibration_method": "Four-point planar homography",
+                    }
+                    with open(cal_path, "w", encoding="utf-8") as f:
+                        json.dump(payload, f, indent=2, ensure_ascii=False)
+                    self.status_var.set(f"Perspective calibration saved: {os.path.basename(cal_path)}")
+            except Exception as exc:
+                self.status_var.set(f"Perspective applied; JSON save skipped: {exc}")
+
+            top.grab_release()
+            top.destroy()
+
+        def on_resize(event=None):
+            render()
+
+        canvas.bind("<Button-1>", on_click)
+        canvas.bind("<Configure>", on_resize)
+        ttk.Button(controls, text="✅ Apply Calibration", command=apply_calibration).grid(row=2, column=2, padx=5, pady=(6,0))
+        ttk.Button(controls, text="Cancel", command=lambda: (cap.release(), top.grab_release(), top.destroy())).grid(row=2, column=3, padx=5, pady=(6,0))
+
+        def on_close():
+            try:
+                cap.release()
+            finally:
+                try:
+                    top.grab_release()
+                except Exception:
+                    pass
+                top.destroy()
+        top.protocol("WM_DELETE_WINDOW", on_close)
+
+        # Initial render after the canvas gets its first size.
+        top.after(100, render)
 
     # ========================================================
     # RUN 3 VALIDATION
