@@ -649,6 +649,13 @@ class Run1App:
         self.content.columnconfigure(0, weight=1)
         self.content.columnconfigure(1, weight=1)
 
+        # ----------------------------------------------------
+        # Main settings layout (2 columns)
+        # Row 0: Preset / Experiment (full width)
+        # Row 1: File & Zone | Detection
+        # Row 2: Processing | ByteTrack
+        # Row 3: Display & Output | Run 1 Flow
+        # ----------------------------------------------------
         self.build_preset_section()
         self.build_file_section()
         self.build_detection_section()
@@ -1308,6 +1315,10 @@ class Run1App:
             pady=5
         )
 
+        # Main content uses exactly two visible columns.
+        # Keeping all sections inside columns 0-1 prevents a section
+        # from being placed outside the scrollable content area.
+
         frame.columnconfigure(1, weight=1)
 
         return frame
@@ -1706,7 +1717,7 @@ class Run1App:
         frame = self.section(
             "Display & Output",
             0,
-            2
+            3
         )
 
         ttk.Checkbutton(
