@@ -342,8 +342,8 @@ DEFAULT_SETTINGS = {
     "match_threshold": "0.80",
 
     "show_preview": True,
-    "draw_center": True,
-    "draw_trail": True,
+    "draw_center": False,
+    "draw_trail": False,
     "trail_length": "30",
 
     "save_video": True,
@@ -352,17 +352,17 @@ DEFAULT_SETTINGS = {
 
     "research_mode": True,
 
-    # Zone assignment / reference-point settings
-    "zone_assignment_method": "Weighted",
-    "zone_point_preset": "Bottom Center",
+    # Simple Zone assignment: choose only the reference point used to decide Zone.
+    "zone_assignment_method": "Point",
+    "zone_point_preset": "Center",
     "zone_point_x": "50",
     "zone_point_y": "50",
     "zone_bottom_weight": "50",
     "zone_bbox_weight": "35",
     "zone_custom_weight": "15",
-    "zone_min_confidence": "60",
-    "zone_min_difference": "15",
-    "zone_confirmation_frames": "3",
+    "zone_min_confidence": "0",
+    "zone_min_difference": "0",
+    "zone_confirmation_frames": "1",
 }
 
 
@@ -779,74 +779,91 @@ class Run1App:
 
         frame = ttk.LabelFrame(
             self.content,
-            text="Measurement: PK Studio Zones (Integrated with Run 1)",
-            padding=10
+            text="Zone Settings",
+            padding=12
         )
-        frame.grid(row=6, column=0, columnspan=2, sticky="ew", pady=5)
+        frame.grid(row=6, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
         frame.columnconfigure(1, weight=1)
 
+        # Zone file
+        ttk.Label(
+            frame, text="PK Studio Zone File"
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=5)
+
+        ttk.Entry(
+            frame, textvariable=self.zone_line_config_var
+        ).grid(row=0, column=1, columnspan=4, sticky="ew", pady=5)
+
+        ttk.Button(
+            frame, text="Browse", command=self.load_measurement_config
+        ).grid(row=0, column=5, padx=4, pady=5)
+
+        ttk.Button(
+            frame, text="Reload", command=self.load_measurement_config
+        ).grid(row=0, column=6, padx=(0, 4), pady=5)
+
+        # Reference point controls
+        ttk.Label(
+            frame, text="Zone Reference Point"
+        ).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(10, 5))
+
+        self.zone_point_combo = ttk.Combobox(
+            frame,
+            textvariable=self.zone_point_preset_var,
+            values=["Center", "Bottom", "Custom"],
+            state="readonly",
+            width=16
+        )
+        self.zone_point_combo.grid(row=1, column=1, sticky="w", pady=(10, 5))
+        self.zone_point_combo.bind(
+            "<<ComboboxSelected>>",
+            self.update_reference_point_controls
+        )
+
+        ttk.Label(frame, text="X").grid(
+            row=1, column=2, sticky="e", padx=(18, 4), pady=(10, 5)
+        )
+        self.zone_x_spin = ttk.Spinbox(
+            frame, from_=0, to=100, increment=1,
+            textvariable=self.zone_point_x_var, width=6
+        )
+        self.zone_x_spin.grid(row=1, column=3, sticky="w", pady=(10, 5))
+
+        ttk.Label(frame, text="Y").grid(
+            row=1, column=4, sticky="e", padx=(12, 4), pady=(10, 5)
+        )
+        self.zone_y_spin = ttk.Spinbox(
+            frame, from_=0, to=100, increment=1,
+            textvariable=self.zone_point_y_var, width=6
+        )
+        self.zone_y_spin.grid(row=1, column=5, sticky="w", pady=(10, 5))
+
         ttk.Label(
             frame,
-            text="Load a PK Studio Zone export. Both .JSON and .PY formats are supported.",
-        ).grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 8))
-
-        ttk.Label(frame, text="PK Studio Zone File").grid(
-            row=1, column=0, sticky="w", padx=(0, 8)
-        )
-        ttk.Entry(frame, textvariable=self.zone_line_config_var).grid(
-            row=1, column=1, columnspan=4, sticky="ew"
-        )
-        ttk.Button(frame, text="Browse", command=self.load_measurement_config).grid(
-            row=1, column=5, padx=4
-        )
-        ttk.Button(frame, text="Reload", command=self.load_measurement_config).grid(
-            row=1, column=6, padx=4
-        )
-
-        ttk.Label(frame, text="Zone Assignment Method").grid(row=2, column=0, sticky="w", pady=(8, 3))
-        ttk.Combobox(
-            frame, textvariable=self.zone_assignment_method_var,
-            values=["Point", "Bottom Center", "Bounding Box Majority", "Weighted"],
-            state="readonly", width=24
-        ).grid(row=2, column=1, sticky="w", pady=(8, 3))
-
-        ttk.Label(frame, text="Reference Point").grid(row=2, column=2, sticky="e", padx=(15, 5), pady=(8, 3))
-        ttk.Combobox(
-            frame, textvariable=self.zone_point_preset_var,
-            values=["Top Center", "Center", "Bottom Center", "Bottom 25%", "Custom"],
-            state="readonly", width=18
-        ).grid(row=2, column=3, sticky="w", pady=(8, 3))
-
-        ttk.Label(frame, text="X %").grid(row=2, column=4, sticky="e", padx=(10, 3), pady=(8, 3))
-        ttk.Entry(frame, textvariable=self.zone_point_x_var, width=7).grid(row=2, column=5, sticky="w", pady=(8, 3))
-        ttk.Label(frame, text="Y %").grid(row=2, column=6, sticky="e", padx=(8, 3), pady=(8, 3))
-        ttk.Entry(frame, textvariable=self.zone_point_y_var, width=7).grid(row=2, column=7, sticky="w", pady=(8, 3))
-
-        ttk.Label(frame, text="Weighted: Bottom %").grid(row=3, column=0, sticky="w", pady=3)
-        ttk.Entry(frame, textvariable=self.zone_bottom_weight_var, width=8).grid(row=3, column=1, sticky="w", pady=3)
-        ttk.Label(frame, text="BBox %").grid(row=3, column=2, sticky="e", padx=(10, 5), pady=3)
-        ttk.Entry(frame, textvariable=self.zone_bbox_weight_var, width=8).grid(row=3, column=3, sticky="w", pady=3)
-        ttk.Label(frame, text="Custom Point %").grid(row=3, column=4, sticky="e", padx=(10, 5), pady=3)
-        ttk.Entry(frame, textvariable=self.zone_custom_weight_var, width=8).grid(row=3, column=5, sticky="w", pady=3)
-        ttk.Label(frame, text="Weights are normalized automatically").grid(row=3, column=6, columnspan=2, sticky="w", pady=3)
-
-        ttk.Label(frame, text="Minimum Confidence %").grid(row=4, column=0, sticky="w", pady=3)
-        ttk.Entry(frame, textvariable=self.zone_min_confidence_var, width=8).grid(row=4, column=1, sticky="w", pady=3)
-        ttk.Label(frame, text="Minimum Difference %").grid(row=4, column=2, sticky="e", padx=(10, 5), pady=3)
-        ttk.Entry(frame, textvariable=self.zone_min_difference_var, width=8).grid(row=4, column=3, sticky="w", pady=3)
-        ttk.Label(frame, text="Temporal Confirmation (frames)").grid(row=4, column=4, sticky="e", padx=(10, 5), pady=3)
-        ttk.Entry(frame, textvariable=self.zone_confirmation_frames_var, width=8).grid(row=4, column=5, sticky="w", pady=3)
+            text="0% = ซ้าย/บน   50% = กลาง   100% = ขวา/ล่าง",
+            foreground="#666666"
+        ).grid(row=2, column=1, columnspan=5, sticky="w", pady=(0, 6))
 
         ttk.Label(
             frame,
-            text="Primary default: Bottom Center + BBox Area + Custom Point | Ambiguous results stay Uncertain until confirmed.",
-        ).grid(row=5, column=0, columnspan=8, sticky="w", pady=(5, 2))
+            text="หมายเหตุ: X/Y ใช้เมื่อเลือก Custom เท่านั้น",
+            foreground="#777777"
+        ).grid(row=3, column=1, columnspan=5, sticky="w", pady=(0, 6))
 
         ttk.Label(
             frame,
             textvariable=self.measurement_status_var,
             anchor="w"
-        ).grid(row=6, column=0, columnspan=8, sticky="w", pady=(8, 0))
+        ).grid(row=4, column=0, columnspan=7, sticky="w", pady=(8, 0))
+
+        self.update_reference_point_controls()
+
+    def update_reference_point_controls(self, event=None):
+        """Enable custom X/Y only when Custom reference point is selected."""
+        custom = self.zone_point_preset_var.get().strip() == "Custom"
+        state = "normal" if custom else "disabled"
+        self.zone_x_spin.configure(state=state)
+        self.zone_y_spin.configure(state=state)
 
     def refresh_measurement_status(self):
         z = sum(1 for v in self.zones.values() if len(v) >= 3)
@@ -1206,46 +1223,46 @@ class Run1App:
                     duration = max(0.0, now - float(zs["entry_time"]))
                     active.append(f"{zname}: {duration:.1f}s")
 
+            # Show Zone information ONLY while the tracked object is actually
+            # inside a confirmed Zone. Nothing is shown for objects outside Zones.
+            if not active:
+                continue
+
             point = zmap.get("last_point") or zmap.get("previous_confirmed_point")
             if point is None:
                 continue
 
             x, y = map(int, point)
-            confirmed = zmap.get("confirmed_zone") or "Uncertain"
-            conf = float(zmap.get("confirmed_confidence", 0.0)) * 100.0
-            cv2.putText(
-                frame,
-                f"ID {track_id} | Zone: {confirmed} ({conf:.0f}%)",
-                (x + 8, max(20, y - 22)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2, cv2.LINE_AA
-            )
             for idx, text in enumerate(active):
                 cv2.putText(
                     frame, f"ID {track_id} | {text}",
-                    (x + 8, y + 22 + idx * 22),
+                    (x + 8, max(20, y - 22 + idx * 22)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA
                 )
 
     def get_zone_reference_point(self, x1, y1, x2, y2):
-        """Return the user-selected reference point inside a bounding box."""
+        """Return the selected reference point inside the bounding box."""
         preset = self.zone_point_preset_var.get().strip()
-        presets = {
-            "Top Center": (50.0, 0.0),
-            "Center": (50.0, 50.0),
-            "Bottom Center": (50.0, 100.0),
-            "Bottom 25%": (50.0, 75.0),
-        }
-        if preset in presets:
-            px, py = presets[preset]
+
+        if preset in ("Bottom", "Bottom Center"):
+            px, py = 50.0, 100.0
+        elif preset == "Custom":
+            try:
+                px = min(100.0, max(0.0, float(self.zone_point_x_var.get())))
+            except Exception:
+                px = 50.0
+            try:
+                py = min(100.0, max(0.0, float(self.zone_point_y_var.get())))
+            except Exception:
+                py = 50.0
         else:
-            px = float(self.zone_point_x_var.get())
-            py = float(self.zone_point_y_var.get())
-        px = max(0.0, min(100.0, px))
-        py = max(0.0, min(100.0, py))
+            px, py = 50.0, 50.0
+
         return (
             int(round(x1 + (x2 - x1) * px / 100.0)),
             int(round(y1 + (y2 - y1) * py / 100.0)),
         )
+
 
     @staticmethod
     def bbox_zone_overlap_ratio(x1, y1, x2, y2, polygon):
@@ -1260,91 +1277,69 @@ class Run1App:
         return float(np.count_nonzero(mask)) / float(w * h)
 
     def assign_zone_candidate(self, x1, y1, x2, y2):
-        """Calculate the best Zone candidate using point, bottom-center and bbox overlap."""
+        """Assign a Zone using ONLY the selected reference point.
+
+        The bounding box is only the visual detection box; it is not used to
+        decide Zone membership.  This prevents a large box from being assigned
+        to a Zone merely because part of the box overlaps that Zone.
+        """
         zones = [z for z in ZONE_NAMES if len(self.zones.get(z, [])) >= 3]
         if not zones:
             return None, 0.0, {}, None, {}
 
-        custom_point = self.get_zone_reference_point(x1, y1, x2, y2)
-        bottom_point = (int(round((x1 + x2) / 2.0)), int(y2))
-        custom_zone = next((z for z in zones if self.point_in_zone(*custom_point, self.zones[z])), None)
-        bottom_zone = next((z for z in zones if self.point_in_zone(*bottom_point, self.zones[z])), None)
-        overlaps = {z: self.bbox_zone_overlap_ratio(x1, y1, x2, y2, self.zones[z]) for z in zones}
+        point = self.get_zone_reference_point(x1, y1, x2, y2)
 
-        method = self.zone_assignment_method_var.get().strip() or "Weighted"
-        if method == "Point":
-            scores = {z: (1.0 if z == custom_zone else 0.0) for z in zones}
-            return custom_zone, (1.0 if custom_zone else 0.0), overlaps, custom_point, scores
-
-        if method == "Bottom Center":
-            scores = {z: (1.0 if z == bottom_zone else 0.0) for z in zones}
-            return bottom_zone, (1.0 if bottom_zone else 0.0), overlaps, bottom_point, scores
-
-        if method == "Bounding Box Majority":
-            scores = dict(overlaps)
-            ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-            if not ordered or ordered[0][1] <= 0:
-                return None, 0.0, overlaps, custom_point, scores
-            return ordered[0][0], ordered[0][1], overlaps, custom_point, scores
-
-        # Weighted mode: Bottom Center + BBox Area + Custom Point.
-        try:
-            wb = max(0.0, float(self.zone_bottom_weight_var.get()))
-            wbox = max(0.0, float(self.zone_bbox_weight_var.get()))
-            wc = max(0.0, float(self.zone_custom_weight_var.get()))
-        except Exception:
-            wb, wbox, wc = 50.0, 35.0, 15.0
-        total_w = wb + wbox + wc
-        if total_w <= 0:
-            wb, wbox, wc, total_w = 50.0, 35.0, 15.0, 100.0
-        wb, wbox, wc = wb / total_w, wbox / total_w, wc / total_w
-
-        scores = {z: wbox * overlaps.get(z, 0.0) for z in zones}
-        if bottom_zone:
-            scores[bottom_zone] += wb
-        if custom_zone:
-            scores[custom_zone] += wc
-
-        ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-        if not ordered or ordered[0][1] <= 0:
-            return None, 0.0, overlaps, custom_point, scores
-        return ordered[0][0], float(ordered[0][1]), overlaps, custom_point, scores
+        zone = next((z for z in zones if self.point_in_zone(*point, self.zones[z])), None)
+        scores = {z: (1.0 if z == zone else 0.0) for z in zones}
+        return zone, (1.0 if zone else 0.0), {}, point, scores
 
 
     def zone_has_any_overlap(self, x1, y1, x2, y2):
-        """True when the detection bbox or its reference points touch any configured Zone."""
-        zones = [z for z in ZONE_NAMES if len(self.zones.get(z, [])) >= 3]
-        if not zones:
-            return False
-        custom_point = self.get_zone_reference_point(x1, y1, x2, y2)
-        bottom_point = (int(round((x1 + x2) / 2.0)), int(y2))
-        if any(self.point_in_zone(*custom_point, self.zones[z]) for z in zones):
-            return True
-        if any(self.point_in_zone(*bottom_point, self.zones[z]) for z in zones):
-            return True
-        return any(self.bbox_zone_overlap_ratio(x1, y1, x2, y2, self.zones[z]) > 0 for z in zones)
+        """Return True only when the selected reference point is inside a Zone."""
+        point = self.get_zone_reference_point(x1, y1, x2, y2)
+        return any(
+            len(self.zones.get(z, [])) >= 3 and
+            self.point_in_zone(*point, self.zones[z])
+            for z in ZONE_NAMES
+        )
+
 
     def confirm_zone(self, track_state, candidate, candidate_confidence, frame_index, confirmation_frames):
-        """Apply temporal confirmation so Zone changes do not flicker frame-to-frame."""
+        """Confirm a Zone and clear it when the selected point leaves all Zones."""
+        confirmation_frames = max(1, int(confirmation_frames))
+
         if candidate is None:
             track_state["candidate_zone"] = None
             track_state["candidate_count"] = 0
             track_state["candidate_confidence"] = 0.0
+            track_state["no_zone_count"] = track_state.get("no_zone_count", 0) + 1
+
+            # Important: a tracked object must stop being displayed as a Zone
+            # object after its selected reference point leaves the Zone.
+            if track_state["no_zone_count"] >= confirmation_frames:
+                changed = track_state.get("confirmed_zone") is not None
+                track_state["confirmed_zone"] = None
+                track_state["confirmed_confidence"] = 0.0
+                return None, changed
+
             return track_state.get("confirmed_zone"), False
+
+        track_state["no_zone_count"] = 0
 
         if candidate == track_state.get("candidate_zone"):
             track_state["candidate_count"] = track_state.get("candidate_count", 0) + 1
         else:
             track_state["candidate_zone"] = candidate
             track_state["candidate_count"] = 1
-            track_state["candidate_confidence"] = candidate_confidence
 
         track_state["candidate_confidence"] = candidate_confidence
-        if track_state["candidate_count"] >= max(1, confirmation_frames):
+
+        if track_state["candidate_count"] >= confirmation_frames:
             changed = track_state.get("confirmed_zone") != candidate
             track_state["confirmed_zone"] = candidate
             track_state["confirmed_confidence"] = candidate_confidence
             return candidate, changed
+
         return track_state.get("confirmed_zone"), False
 
     @staticmethod
@@ -1780,9 +1775,9 @@ class Run1App:
     def build_output_section(self):
 
         frame = self.section(
-            "Output Settings",
+            "Display & Output",
             0,
-            3
+            2
         )
 
         ttk.Checkbutton(
@@ -1793,34 +1788,22 @@ class Run1App:
 
         ttk.Checkbutton(
             frame,
-            text="Draw Center Point",
+            text="Show Reference Point",
             variable=self.draw_center_var
         ).grid(row=0, column=1, sticky="w", pady=3)
 
         ttk.Checkbutton(
             frame,
-            text="Draw Track Trail",
+            text="Show Trajectory",
             variable=self.draw_trail_var
         ).grid(row=1, column=0, sticky="w", pady=3)
 
-        ttk.Label(
-            frame,
-            text="Trail Length"
-        ).grid(
-            row=1,
-            column=1,
-            sticky="w"
+        ttk.Label(frame, text="Trail Length").grid(
+            row=1, column=1, sticky="e", padx=(15, 5)
         )
-
-        ttk.Entry(
-            frame,
-            textvariable=self.trail_length_var,
-            width=10
-        ).grid(
-            row=1,
-            column=2,
-            sticky="w"
-        )
+        ttk.Spinbox(
+            frame, from_=1, to=300, textvariable=self.trail_length_var, width=8
+        ).grid(row=1, column=2, sticky="w")
 
         ttk.Checkbutton(
             frame,
@@ -1830,77 +1813,41 @@ class Run1App:
 
         ttk.Checkbutton(
             frame,
-            text="Save CSV Trajectory",
+            text="Save CSV",
             variable=self.save_csv_var
         ).grid(row=2, column=1, sticky="w", pady=3)
 
         ttk.Label(
             frame,
-            text="CSV Flush Every"
-        ).grid(
-            row=3,
-            column=0,
-            sticky="w"
-        )
-
-        ttk.Entry(
-            frame,
-            textvariable=self.csv_flush_var,
-            width=10
-        ).grid(
-            row=3,
-            column=1,
-            sticky="w"
-        )
+            text="กรอบวัตถุและ Reference Point จะแสดงเฉพาะเมื่อจุดที่เลือกอยู่ใน Zone",
+            foreground="#666666"
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(7, 0))
 
     # ========================================================
     # INFORMATION
     # ========================================================
 
+
+    # ========================================================
+
     def build_information_section(self):
 
         frame = self.section(
-            "Run 1 Information",
+            "Run 1 Flow",
             1,
             3
         )
 
         text = (
-            "Run 1 Research Processing Flow\n\n"
-            "Input Video\n"
-            "      ↓\n"
-            "Vehicle Detection\n"
-            "      ↓\n"
-            "ByteTrack / BoT-SORT\n"
-            "      ↓\n"
-            "Persistent Track ID\n"
-            "      ↓\n"
-            "Reference Point + BBox Zone Assignment\n"
-            "      ↓\n"
-            "Temporal Zone Confirmation\n"
-            "      ↓\n"
-            "Trajectory / Zone CSV\n\n"
-            "CSV:\n"
-            "frame\n"
-            "timestamp\n"
-            "track_id\n"
-            "class_id\n"
-            "class_name\n"
-            "confidence\n"
-            "bbox_x1 / y1 / x2 / y2\n"
-            "center_x / center_y"
+            "Video → Detection → ByteTrack → Reference Point → Zone → CSV\n\n"
+            "Zone decision: ใช้จุด Reference Point เพียงจุดเดียว\n"
+            "Display: แสดงกรอบเฉพาะวัตถุที่อยู่ใน Zone\n"
+            "Reference Point: Center / Bottom / Custom"
         )
 
         ttk.Label(
-            frame,
-            text=text,
-            justify="left"
-        ).grid(
-            row=0,
-            column=0,
-            columnspan=3,
-            sticky="w"
-        )
+            frame, text=text, justify="left", foreground="#444444"
+        ).grid(row=0, column=0, sticky="w")
 
     # ========================================================
     # ADD ENTRY
@@ -2036,16 +1983,18 @@ class Run1App:
 
     def set_zone_assignment_defaults(self):
         """Apply the research defaults described in the PK Studio Zone guidance."""
-        self.zone_assignment_method_var.set("Weighted")
-        self.zone_point_preset_var.set("Bottom Center")
+        self.zone_assignment_method_var.set("Point")
+        self.zone_point_preset_var.set("Center")
         self.zone_point_x_var.set("50")
         self.zone_point_y_var.set("50")
         self.zone_bottom_weight_var.set("50")
         self.zone_bbox_weight_var.set("35")
         self.zone_custom_weight_var.set("15")
-        self.zone_min_confidence_var.set("60")
-        self.zone_min_difference_var.set("15")
-        self.zone_confirmation_frames_var.set("3")
+        self.zone_min_confidence_var.set("0")
+        self.zone_min_difference_var.set("0")
+        self.zone_confirmation_frames_var.set("1")
+        if hasattr(self, "zone_x_spin"):
+            self.update_reference_point_controls()
 
     def apply_preset(self):
 
@@ -2073,7 +2022,7 @@ class Run1App:
 
             self.show_preview_var.set(True)
             self.draw_center_var.set(True)
-            self.draw_trail_var.set(True)
+            self.draw_trail_var.set(False)
 
             self.trail_length_var.set("30")
 
@@ -2338,6 +2287,10 @@ class Run1App:
                     DEFAULT_SETTINGS[key]
                 )
             )
+
+        # Refresh the Custom X/Y controls after loading settings.
+        if hasattr(self, "zone_x_spin"):
+            self.update_reference_point_controls()
 
     # ========================================================
     # VALIDATION
@@ -3492,21 +3445,11 @@ class Run1App:
                                         x1, y1, x2, y2
                                     )
 
-                                    method_now = self.zone_assignment_method_var.get().strip() or zone_assignment_method
-                                    ordered_scores = sorted(decision_scores.values(), reverse=True)
-                                    top2_difference = (
-                                        ordered_scores[0] - ordered_scores[1]
-                                        if len(ordered_scores) >= 2
-                                        else (ordered_scores[0] if ordered_scores else 0.0)
-                                    )
-
-                                    # Dead Zone: area/weighted assignments must have both
-                                    # enough confidence and enough separation from the runner-up.
-                                    if method_now in ("Bounding Box Majority", "Weighted"):
-                                        if raw_confidence < zone_min_confidence or top2_difference < zone_min_difference:
-                                            candidate = None
-
-                                    no_zone = not self.zone_has_any_overlap(x1, y1, x2, y2)
+                                    # Zone membership is determined only by the selected
+                                    # reference point (Center or Bottom).  The bbox is not
+                                    # used for Zone assignment.
+                                    method_now = "Point"
+                                    no_zone = candidate is None
                                     zstate = zone_track_state.setdefault(track_id, {
                                         "candidate_zone": None,
                                         "candidate_count": 0,
@@ -3529,7 +3472,7 @@ class Run1App:
 
                                     confirmed_zone, zone_changed = self.confirm_zone(
                                         zstate, candidate, raw_confidence,
-                                        frame_index, zone_confirmation_frames
+                                        frame_index, 1
                                     )
                                     zstate["last_point"] = point
                                     zstate["last_bbox"] = (x1, y1, x2, y2)
@@ -3648,78 +3591,62 @@ class Run1App:
                                     )
                                 )
 
-                            cv2.rectangle(
-                                frame,
-                                (x1, y1),
-                                (x2, y2),
-                                (0, 255, 0),
-                                2
+                            # A Zone-enabled run displays the object ONLY while the
+                            # selected Reference Point is inside a Zone.
+                            confirmed_label = None
+                            if measurement_enabled and track_id >= 0:
+                                confirmed_label = zone_track_state.get(track_id, {}).get("confirmed_zone")
+
+                            zones_available = any(
+                                len(self.zones.get(z, [])) >= 3 for z in ZONE_NAMES
+                            )
+                            show_object = (
+                                not zones_available
+                                or confirmed_label is not None
                             )
 
-                            if settings["draw_center"]:
-                                # Red = geometric center; cyan = selected Zone reference point.
-                                cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)
-                                try:
-                                    ref_x, ref_y = self.get_zone_reference_point(x1, y1, x2, y2)
-                                    cv2.circle(frame, (ref_x, ref_y), 6, (255, 255, 0), -1)
-                                except Exception:
-                                    pass
-
-                            if (
-                                settings["draw_trail"]
-                                and track_id >= 0
-                                and track_id in trails
-                            ):
-
-                                points = list(
-                                    trails[
-                                        track_id
-                                    ]
+                            if show_object:
+                                cv2.rectangle(
+                                    frame,
+                                    (x1, y1),
+                                    (x2, y2),
+                                    (0, 255, 0),
+                                    2
                                 )
 
-                                for p in range(
-                                    1,
-                                    len(points)
-                                ):
-
-                                    cv2.line(
-                                        frame,
-                                        points[p - 1],
-                                        points[p],
-                                        (255, 0, 255),
-                                        2
+                                if settings["draw_center"] and confirmed_label:
+                                    ref_point = self.get_zone_reference_point(
+                                        x1, y1, x2, y2
+                                    )
+                                    cv2.circle(
+                                        frame, ref_point, 5,
+                                        (0, 255, 255), -1
                                     )
 
-                            zone_label = ""
-                            if measurement_enabled and track_id >= 0:
-                                zs_for_label = zone_track_state.get(track_id, {})
-                                confirmed_label = zs_for_label.get("confirmed_zone") or "Uncertain"
-                                zone_label = f" | Z:{confirmed_label}"
-                            label = (
-                                f"ID {track_id} | "
-                                f"{class_name} | "
-                                f"{confidence:.2f}"
-                                f"{zone_label}"
-                            )
+                                if (
+                                    settings["draw_trail"]
+                                    and confirmed_label
+                                    and track_id >= 0
+                                    and track_id in trails
+                                ):
+                                    points = list(trails[track_id])
+                                    for p in range(1, len(points)):
+                                        cv2.line(
+                                            frame,
+                                            points[p - 1],
+                                            points[p],
+                                            (255, 0, 255),
+                                            2
+                                        )
 
-                            label_y = max(
-                                y1 - 10,
-                                20
-                            )
-
-                            cv2.putText(
-                                frame,
-                                label,
-                                (
-                                    x1,
-                                    label_y
-                                ),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.55,
-                                (0, 255, 0),
-                                2,
-                                cv2.LINE_AA
-                            )
+                                if confirmed_label:
+                                    label = f"ID {track_id} | {class_name} | Z:{confirmed_label}"
+                                    label_y = max(y1 - 10, 20)
+                                    cv2.putText(
+                                        frame, label, (x1, label_y),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                                        (0, 255, 0), 2, cv2.LINE_AA
+                                    )
 
                             if csv_writer is not None:
 
