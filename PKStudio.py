@@ -351,6 +351,18 @@ DEFAULT_SETTINGS = {
     "csv_flush": "100",
 
     "research_mode": True,
+
+    # Zone assignment / reference-point settings
+    "zone_assignment_method": "Weighted",
+    "zone_point_preset": "Bottom Center",
+    "zone_point_x": "50",
+    "zone_point_y": "50",
+    "zone_bottom_weight": "50",
+    "zone_bbox_weight": "35",
+    "zone_custom_weight": "15",
+    "zone_min_confidence": "60",
+    "zone_min_difference": "15",
+    "zone_confirmation_frames": "3",
 }
 
 
@@ -502,6 +514,18 @@ class Run1App:
         self.research_mode_var = tk.BooleanVar(
             value=DEFAULT_SETTINGS["research_mode"]
         )
+
+        # Zone assignment / reference point controls.
+        self.zone_assignment_method_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_assignment_method"])
+        self.zone_point_preset_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_point_preset"])
+        self.zone_point_x_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_point_x"])
+        self.zone_point_y_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_point_y"])
+        self.zone_bottom_weight_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_bottom_weight"])
+        self.zone_bbox_weight_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_bbox_weight"])
+        self.zone_custom_weight_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_custom_weight"])
+        self.zone_min_confidence_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_min_confidence"])
+        self.zone_min_difference_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_min_difference"])
+        self.zone_confirmation_frames_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_confirmation_frames"])
 
         self.status_var = tk.StringVar(
             value="Ready"
@@ -764,26 +788,65 @@ class Run1App:
         ttk.Label(
             frame,
             text="Load a PK Studio Zone export. Both .JSON and .PY formats are supported.",
-        ).grid(row=0, column=0, columnspan=5, sticky="w", pady=(0, 8))
+        ).grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 8))
 
         ttk.Label(frame, text="PK Studio Zone File").grid(
             row=1, column=0, sticky="w", padx=(0, 8)
         )
         ttk.Entry(frame, textvariable=self.zone_line_config_var).grid(
-            row=1, column=1, sticky="ew"
+            row=1, column=1, columnspan=4, sticky="ew"
         )
         ttk.Button(frame, text="Browse", command=self.load_measurement_config).grid(
-            row=1, column=2, padx=4
+            row=1, column=5, padx=4
         )
         ttk.Button(frame, text="Reload", command=self.load_measurement_config).grid(
-            row=1, column=3, padx=4
+            row=1, column=6, padx=4
         )
+
+        ttk.Label(frame, text="Zone Assignment Method").grid(row=2, column=0, sticky="w", pady=(8, 3))
+        ttk.Combobox(
+            frame, textvariable=self.zone_assignment_method_var,
+            values=["Point", "Bottom Center", "Bounding Box Majority", "Weighted"],
+            state="readonly", width=24
+        ).grid(row=2, column=1, sticky="w", pady=(8, 3))
+
+        ttk.Label(frame, text="Reference Point").grid(row=2, column=2, sticky="e", padx=(15, 5), pady=(8, 3))
+        ttk.Combobox(
+            frame, textvariable=self.zone_point_preset_var,
+            values=["Top Center", "Center", "Bottom Center", "Bottom 25%", "Custom"],
+            state="readonly", width=18
+        ).grid(row=2, column=3, sticky="w", pady=(8, 3))
+
+        ttk.Label(frame, text="X %").grid(row=2, column=4, sticky="e", padx=(10, 3), pady=(8, 3))
+        ttk.Entry(frame, textvariable=self.zone_point_x_var, width=7).grid(row=2, column=5, sticky="w", pady=(8, 3))
+        ttk.Label(frame, text="Y %").grid(row=2, column=6, sticky="e", padx=(8, 3), pady=(8, 3))
+        ttk.Entry(frame, textvariable=self.zone_point_y_var, width=7).grid(row=2, column=7, sticky="w", pady=(8, 3))
+
+        ttk.Label(frame, text="Weighted: Bottom %").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Entry(frame, textvariable=self.zone_bottom_weight_var, width=8).grid(row=3, column=1, sticky="w", pady=3)
+        ttk.Label(frame, text="BBox %").grid(row=3, column=2, sticky="e", padx=(10, 5), pady=3)
+        ttk.Entry(frame, textvariable=self.zone_bbox_weight_var, width=8).grid(row=3, column=3, sticky="w", pady=3)
+        ttk.Label(frame, text="Custom Point %").grid(row=3, column=4, sticky="e", padx=(10, 5), pady=3)
+        ttk.Entry(frame, textvariable=self.zone_custom_weight_var, width=8).grid(row=3, column=5, sticky="w", pady=3)
+        ttk.Label(frame, text="Weights are normalized automatically").grid(row=3, column=6, columnspan=2, sticky="w", pady=3)
+
+        ttk.Label(frame, text="Minimum Confidence %").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Entry(frame, textvariable=self.zone_min_confidence_var, width=8).grid(row=4, column=1, sticky="w", pady=3)
+        ttk.Label(frame, text="Minimum Difference %").grid(row=4, column=2, sticky="e", padx=(10, 5), pady=3)
+        ttk.Entry(frame, textvariable=self.zone_min_difference_var, width=8).grid(row=4, column=3, sticky="w", pady=3)
+        ttk.Label(frame, text="Temporal Confirmation (frames)").grid(row=4, column=4, sticky="e", padx=(10, 5), pady=3)
+        ttk.Entry(frame, textvariable=self.zone_confirmation_frames_var, width=8).grid(row=4, column=5, sticky="w", pady=3)
+
+        ttk.Label(
+            frame,
+            text="Primary default: Bottom Center + BBox Area + Custom Point | Ambiguous results stay Uncertain until confirmed.",
+        ).grid(row=5, column=0, columnspan=8, sticky="w", pady=(5, 2))
 
         ttk.Label(
             frame,
             textvariable=self.measurement_status_var,
             anchor="w"
-        ).grid(row=2, column=0, columnspan=5, sticky="w", pady=(8, 0))
+        ).grid(row=6, column=0, columnspan=8, sticky="w", pady=(8, 0))
 
     def refresh_measurement_status(self):
         z = sum(1 for v in self.zones.values() if len(v) >= 3)
@@ -1136,25 +1199,153 @@ class Run1App:
         # the tracked centroid is first detected inside the zone.
         now = frame_index / fps if fps > 0 else 0.0
         for track_id, zmap in zone_track_state.items():
+            zone_states = zmap.get("zone_states", {})
             active = []
-            for zname, zs in zmap.items():
+            for zname, zs in zone_states.items():
                 if zs.get("inside") and zs.get("entry_time") is not None:
                     duration = max(0.0, now - float(zs["entry_time"]))
                     active.append(f"{zname}: {duration:.1f}s")
-            if not active:
-                continue
-            # Put the live zone timers near the last known center.
-            point = None
-            for zname in zmap:
-                lp = zmap[zname].get("last_point")
-                if lp is not None:
-                    point = lp; break
+
+            point = zmap.get("last_point") or zmap.get("previous_confirmed_point")
             if point is None:
                 continue
+
             x, y = map(int, point)
+            confirmed = zmap.get("confirmed_zone") or "Uncertain"
+            conf = float(zmap.get("confirmed_confidence", 0.0)) * 100.0
+            cv2.putText(
+                frame,
+                f"ID {track_id} | Zone: {confirmed} ({conf:.0f}%)",
+                (x + 8, max(20, y - 22)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2, cv2.LINE_AA
+            )
             for idx, text in enumerate(active):
-                cv2.putText(frame, f"ID {track_id} | {text}", (x + 8, y + 22 + idx * 22),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(
+                    frame, f"ID {track_id} | {text}",
+                    (x + 8, y + 22 + idx * 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA
+                )
+
+    def get_zone_reference_point(self, x1, y1, x2, y2):
+        """Return the user-selected reference point inside a bounding box."""
+        preset = self.zone_point_preset_var.get().strip()
+        presets = {
+            "Top Center": (50.0, 0.0),
+            "Center": (50.0, 50.0),
+            "Bottom Center": (50.0, 100.0),
+            "Bottom 25%": (50.0, 75.0),
+        }
+        if preset in presets:
+            px, py = presets[preset]
+        else:
+            px = float(self.zone_point_x_var.get())
+            py = float(self.zone_point_y_var.get())
+        px = max(0.0, min(100.0, px))
+        py = max(0.0, min(100.0, py))
+        return (
+            int(round(x1 + (x2 - x1) * px / 100.0)),
+            int(round(y1 + (y2 - y1) * py / 100.0)),
+        )
+
+    @staticmethod
+    def bbox_zone_overlap_ratio(x1, y1, x2, y2, polygon):
+        """Return the fraction of the detection bounding-box area inside a Zone polygon."""
+        if len(polygon) < 3 or x2 <= x1 or y2 <= y1:
+            return 0.0
+        bx1, by1, bx2, by2 = int(x1), int(y1), int(x2), int(y2)
+        w, h = bx2 - bx1, by2 - by1
+        shifted = np.array([[(int(px) - bx1, int(py) - by1) for px, py in polygon]], dtype=np.int32)
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(mask, shifted, 1)
+        return float(np.count_nonzero(mask)) / float(w * h)
+
+    def assign_zone_candidate(self, x1, y1, x2, y2):
+        """Calculate the best Zone candidate using point, bottom-center and bbox overlap."""
+        zones = [z for z in ZONE_NAMES if len(self.zones.get(z, [])) >= 3]
+        if not zones:
+            return None, 0.0, {}, None, {}
+
+        custom_point = self.get_zone_reference_point(x1, y1, x2, y2)
+        bottom_point = (int(round((x1 + x2) / 2.0)), int(y2))
+        custom_zone = next((z for z in zones if self.point_in_zone(*custom_point, self.zones[z])), None)
+        bottom_zone = next((z for z in zones if self.point_in_zone(*bottom_point, self.zones[z])), None)
+        overlaps = {z: self.bbox_zone_overlap_ratio(x1, y1, x2, y2, self.zones[z]) for z in zones}
+
+        method = self.zone_assignment_method_var.get().strip() or "Weighted"
+        if method == "Point":
+            scores = {z: (1.0 if z == custom_zone else 0.0) for z in zones}
+            return custom_zone, (1.0 if custom_zone else 0.0), overlaps, custom_point, scores
+
+        if method == "Bottom Center":
+            scores = {z: (1.0 if z == bottom_zone else 0.0) for z in zones}
+            return bottom_zone, (1.0 if bottom_zone else 0.0), overlaps, bottom_point, scores
+
+        if method == "Bounding Box Majority":
+            scores = dict(overlaps)
+            ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+            if not ordered or ordered[0][1] <= 0:
+                return None, 0.0, overlaps, custom_point, scores
+            return ordered[0][0], ordered[0][1], overlaps, custom_point, scores
+
+        # Weighted mode: Bottom Center + BBox Area + Custom Point.
+        try:
+            wb = max(0.0, float(self.zone_bottom_weight_var.get()))
+            wbox = max(0.0, float(self.zone_bbox_weight_var.get()))
+            wc = max(0.0, float(self.zone_custom_weight_var.get()))
+        except Exception:
+            wb, wbox, wc = 50.0, 35.0, 15.0
+        total_w = wb + wbox + wc
+        if total_w <= 0:
+            wb, wbox, wc, total_w = 50.0, 35.0, 15.0, 100.0
+        wb, wbox, wc = wb / total_w, wbox / total_w, wc / total_w
+
+        scores = {z: wbox * overlaps.get(z, 0.0) for z in zones}
+        if bottom_zone:
+            scores[bottom_zone] += wb
+        if custom_zone:
+            scores[custom_zone] += wc
+
+        ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        if not ordered or ordered[0][1] <= 0:
+            return None, 0.0, overlaps, custom_point, scores
+        return ordered[0][0], float(ordered[0][1]), overlaps, custom_point, scores
+
+
+    def zone_has_any_overlap(self, x1, y1, x2, y2):
+        """True when the detection bbox or its reference points touch any configured Zone."""
+        zones = [z for z in ZONE_NAMES if len(self.zones.get(z, [])) >= 3]
+        if not zones:
+            return False
+        custom_point = self.get_zone_reference_point(x1, y1, x2, y2)
+        bottom_point = (int(round((x1 + x2) / 2.0)), int(y2))
+        if any(self.point_in_zone(*custom_point, self.zones[z]) for z in zones):
+            return True
+        if any(self.point_in_zone(*bottom_point, self.zones[z]) for z in zones):
+            return True
+        return any(self.bbox_zone_overlap_ratio(x1, y1, x2, y2, self.zones[z]) > 0 for z in zones)
+
+    def confirm_zone(self, track_state, candidate, candidate_confidence, frame_index, confirmation_frames):
+        """Apply temporal confirmation so Zone changes do not flicker frame-to-frame."""
+        if candidate is None:
+            track_state["candidate_zone"] = None
+            track_state["candidate_count"] = 0
+            track_state["candidate_confidence"] = 0.0
+            return track_state.get("confirmed_zone"), False
+
+        if candidate == track_state.get("candidate_zone"):
+            track_state["candidate_count"] = track_state.get("candidate_count", 0) + 1
+        else:
+            track_state["candidate_zone"] = candidate
+            track_state["candidate_count"] = 1
+            track_state["candidate_confidence"] = candidate_confidence
+
+        track_state["candidate_confidence"] = candidate_confidence
+        if track_state["candidate_count"] >= max(1, confirmation_frames):
+            changed = track_state.get("confirmed_zone") != candidate
+            track_state["confirmed_zone"] = candidate
+            track_state["confirmed_confidence"] = candidate_confidence
+            return candidate, changed
+        return track_state.get("confirmed_zone"), False
 
     @staticmethod
     def point_in_zone(x, y, points):
@@ -1684,9 +1875,11 @@ class Run1App:
             "      ↓\n"
             "Persistent Track ID\n"
             "      ↓\n"
-            "Center Point\n"
+            "Reference Point + BBox Zone Assignment\n"
             "      ↓\n"
-            "Trajectory CSV\n\n"
+            "Temporal Zone Confirmation\n"
+            "      ↓\n"
+            "Trajectory / Zone CSV\n\n"
             "CSV:\n"
             "frame\n"
             "timestamp\n"
@@ -1841,6 +2034,19 @@ class Run1App:
     # PRESETS
     # ========================================================
 
+    def set_zone_assignment_defaults(self):
+        """Apply the research defaults described in the PK Studio Zone guidance."""
+        self.zone_assignment_method_var.set("Weighted")
+        self.zone_point_preset_var.set("Bottom Center")
+        self.zone_point_x_var.set("50")
+        self.zone_point_y_var.set("50")
+        self.zone_bottom_weight_var.set("50")
+        self.zone_bbox_weight_var.set("35")
+        self.zone_custom_weight_var.set("15")
+        self.zone_min_confidence_var.set("60")
+        self.zone_min_difference_var.set("15")
+        self.zone_confirmation_frames_var.set("3")
+
     def apply_preset(self):
 
         preset = self.preset_var.get()
@@ -1875,6 +2081,7 @@ class Run1App:
             self.save_csv_var.set(True)
 
             self.research_mode_var.set(True)
+            self.set_zone_assignment_defaults()
 
         elif preset == "ID Stability Test":
 
@@ -1983,7 +2190,18 @@ class Run1App:
 
             "csv_flush": self.csv_flush_var.get(),
 
-            "research_mode": self.research_mode_var.get()
+            "research_mode": self.research_mode_var.get(),
+
+            "zone_assignment_method": self.zone_assignment_method_var.get(),
+            "zone_point_preset": self.zone_point_preset_var.get(),
+            "zone_point_x": self.zone_point_x_var.get(),
+            "zone_point_y": self.zone_point_y_var.get(),
+            "zone_bottom_weight": self.zone_bottom_weight_var.get(),
+            "zone_bbox_weight": self.zone_bbox_weight_var.get(),
+            "zone_custom_weight": self.zone_custom_weight_var.get(),
+            "zone_min_confidence": self.zone_min_confidence_var.get(),
+            "zone_min_difference": self.zone_min_difference_var.get(),
+            "zone_confirmation_frames": self.zone_confirmation_frames_var.get(),
         }
 
     def save_settings(self):
@@ -2100,6 +2318,16 @@ class Run1App:
             ("save_csv", self.save_csv_var),
             ("csv_flush", self.csv_flush_var),
             ("research_mode", self.research_mode_var),
+            ("zone_assignment_method", self.zone_assignment_method_var),
+            ("zone_point_preset", self.zone_point_preset_var),
+            ("zone_point_x", self.zone_point_x_var),
+            ("zone_point_y", self.zone_point_y_var),
+            ("zone_bottom_weight", self.zone_bottom_weight_var),
+            ("zone_bbox_weight", self.zone_bbox_weight_var),
+            ("zone_custom_weight", self.zone_custom_weight_var),
+            ("zone_min_confidence", self.zone_min_confidence_var),
+            ("zone_min_difference", self.zone_min_difference_var),
+            ("zone_confirmation_frames", self.zone_confirmation_frames_var),
         ]
 
         for key, variable in pairs:
@@ -2200,6 +2428,34 @@ class Run1App:
                 str(e)
             )
 
+            return False
+
+        try:
+            for value in [
+                float(self.zone_point_x_var.get()),
+                float(self.zone_point_y_var.get()),
+                float(self.zone_bottom_weight_var.get()),
+                float(self.zone_bbox_weight_var.get()),
+                float(self.zone_custom_weight_var.get()),
+                float(self.zone_min_confidence_var.get()),
+                float(self.zone_min_difference_var.get()),
+            ]:
+                if value < 0:
+                    raise ValueError("Zone assignment numeric values cannot be negative")
+            if not 0 <= float(self.zone_point_x_var.get()) <= 100:
+                raise ValueError("Reference Point X must be between 0 and 100%")
+            if not 0 <= float(self.zone_point_y_var.get()) <= 100:
+                raise ValueError("Reference Point Y must be between 0 and 100%")
+            if not 0 <= float(self.zone_min_confidence_var.get()) <= 100:
+                raise ValueError("Minimum Confidence must be between 0 and 100%")
+            if not 0 <= float(self.zone_min_difference_var.get()) <= 100:
+                raise ValueError("Minimum Difference must be between 0 and 100%")
+            if int(self.zone_confirmation_frames_var.get()) < 1:
+                raise ValueError("Temporal Confirmation must be at least 1 frame")
+            if (float(self.zone_bottom_weight_var.get()) + float(self.zone_bbox_weight_var.get()) + float(self.zone_custom_weight_var.get())) <= 0:
+                raise ValueError("At least one Weighted Zone component must be greater than 0")
+        except Exception as e:
+            messagebox.showerror("Zone Assignment Settings", str(e))
             return False
 
         if self.research_mode_var.get():
@@ -2727,7 +2983,12 @@ class Run1App:
                     "bbox_x2",
                     "bbox_y2",
                     "center_x",
-                    "center_y"
+                    "center_y",
+                    "reference_x",
+                    "reference_y",
+                    "zone_assigned",
+                    "zone_confidence",
+                    "zone_method"
                 ])
 
             else:
@@ -2844,6 +3105,11 @@ class Run1App:
             # Integrated measurement state. This is updated directly from Run 1 tracking.
             zone_track_state = {}
             line_track_state = {}
+            zone_assignment_summary = defaultdict(lambda: defaultdict(int))
+            zone_assignment_method = settings.get("zone_assignment_method", "Weighted")
+            zone_min_confidence = float(settings.get("zone_min_confidence", "60")) / 100.0
+            zone_min_difference = float(settings.get("zone_min_difference", "15")) / 100.0
+            zone_confirmation_frames = max(1, int(settings.get("zone_confirmation_frames", "3")))
             zone_entry_count = defaultdict(int)
             zone_exit_count = defaultdict(int)
             line_cross_count = defaultdict(int)
@@ -2897,6 +3163,9 @@ class Run1App:
             if measurement_enabled:
                 print("Zones       :", [k for k, v in self.zones.items() if len(v) >= 3])
                 print("Lines       :", [k for k, v in self.lines.items() if len(v) == 2])
+                print("Zone Method :", self.zone_assignment_method_var.get())
+                print("Zone Point  :", self.zone_point_preset_var.get())
+                print("Zone Confirm:", zone_confirmation_frames, "frames")
 
             window_name = "PK Studio - Run 1"
 
@@ -3216,52 +3485,128 @@ class Run1App:
                                 # INTEGRATED ZONE MEASUREMENT
                                 # ==============================
                                 if measurement_enabled:
-                                    point = (center_x, center_y)
-                                    zstate = zone_track_state.setdefault(track_id, {})
-                                    for zname in ZONE_NAMES:
-                                        polygon = self.zones.get(zname, [])
-                                        if len(polygon) < 3:
-                                            continue
-                                        inside = self.point_in_zone(center_x, center_y, polygon)
-                                        zs = zstate.setdefault(zname, {
-                                            "inside": False, "entry_frame": None, "entry_time": None,
-                                            "distance_px": 0.0, "last_point": None
-                                        })
-                                        timestamp_now = frame_index / fps
-                                        previous_zone_point = zs.get("last_point")
-                                        # ENTRY is defined by the first processed frame in which
-                                        # the tracked centroid is inside this polygon. Therefore a
-                                        # vehicle that appears already inside a zone starts counting
-                                        # immediately at that observation; it does not need to cross
-                                        # the polygon boundary while being tracked.
-                                        if inside and not zs["inside"]:
-                                            zs["inside"] = True
-                                            zs["entry_frame"] = frame_index
-                                            zs["entry_time"] = timestamp_now
-                                            zs["distance_px"] = 0.0
-                                            zs["last_point"] = point
-                                            zone_entry_count[zname] += 1
-                                            measurement_events_writer.writerow([frame_index, f"{timestamp_now:.6f}", track_id, class_name, "ZONE", zname, "ENTRY", "0.000000", "0.000", "", ""])
-                                        elif inside and zs["inside"]:
-                                            if previous_zone_point is not None:
-                                                px, py = previous_zone_point
-                                                zs["distance_px"] += ((center_x-px)**2 + (center_y-py)**2) ** 0.5
-                                            zs["last_point"] = point
-                                        elif (not inside) and zs["inside"]:
-                                            duration = max(0.0, timestamp_now - float(zs["entry_time"]))
-                                            zone_exit_count[zname] += 1
-                                            avg_speed = zs["distance_px"] / duration if duration > 0 else 0.0
-                                            measurement_events_writer.writerow([frame_index, f"{timestamp_now:.6f}", track_id, class_name, "ZONE", zname, "EXIT", f"{duration:.6f}", f"{zs['distance_px']:.3f}", f"{avg_speed:.6f}", ""])
-                                            zone_summary_writer.writerow([zname, track_id, class_name, zs["entry_frame"], f"{zs['entry_time']:.6f}", frame_index, f"{timestamp_now:.6f}", f"{duration:.6f}", f"{zs['distance_px']:.3f}", f"{avg_speed:.6f}"])
-                                            zs["inside"] = False
-                                            zs["entry_frame"] = None
-                                            zs["entry_time"] = None
-                                            zs["distance_px"] = 0.0
-                                            zs["last_point"] = None
-                                        else:
-                                            zs["last_point"] = None
+                                    # Multi-signal Zone assignment: reference point + bottom
+                                    # center + bounding-box overlap, followed by temporal confirmation.
+                                    point = self.get_zone_reference_point(x1, y1, x2, y2)
+                                    candidate, raw_confidence, overlap_map, custom_point, decision_scores = self.assign_zone_candidate(
+                                        x1, y1, x2, y2
+                                    )
 
-                                    # ==============================
+                                    method_now = self.zone_assignment_method_var.get().strip() or zone_assignment_method
+                                    ordered_scores = sorted(decision_scores.values(), reverse=True)
+                                    top2_difference = (
+                                        ordered_scores[0] - ordered_scores[1]
+                                        if len(ordered_scores) >= 2
+                                        else (ordered_scores[0] if ordered_scores else 0.0)
+                                    )
+
+                                    # Dead Zone: area/weighted assignments must have both
+                                    # enough confidence and enough separation from the runner-up.
+                                    if method_now in ("Bounding Box Majority", "Weighted"):
+                                        if raw_confidence < zone_min_confidence or top2_difference < zone_min_difference:
+                                            candidate = None
+
+                                    no_zone = not self.zone_has_any_overlap(x1, y1, x2, y2)
+                                    zstate = zone_track_state.setdefault(track_id, {
+                                        "candidate_zone": None,
+                                        "candidate_count": 0,
+                                        "candidate_confidence": 0.0,
+                                        "confirmed_zone": None,
+                                        "confirmed_confidence": 0.0,
+                                        "previous_confirmed_zone": None,
+                                        "previous_confirmed_point": None,
+                                        "no_zone_count": 0,
+                                        "zone_states": {},
+                                    })
+
+                                    if no_zone:
+                                        zstate["no_zone_count"] = zstate.get("no_zone_count", 0) + 1
+                                        if zstate["no_zone_count"] >= zone_confirmation_frames:
+                                            zstate["confirmed_zone"] = None
+                                            zstate["confirmed_confidence"] = 0.0
+                                    else:
+                                        zstate["no_zone_count"] = 0
+
+                                    confirmed_zone, zone_changed = self.confirm_zone(
+                                        zstate, candidate, raw_confidence,
+                                        frame_index, zone_confirmation_frames
+                                    )
+                                    zstate["last_point"] = point
+                                    zstate["last_bbox"] = (x1, y1, x2, y2)
+                                    zstate["last_candidate"] = candidate
+                                    zstate["last_candidate_confidence"] = raw_confidence
+                                    zstate["last_overlap"] = overlap_map
+                                    zstate["last_method"] = method_now
+
+                                    if candidate:
+                                        zone_assignment_summary[candidate]["observations"] += 1
+                                    if confirmed_zone:
+                                        zone_assignment_summary[confirmed_zone]["confirmed_frames"] += 1
+
+                                    timestamp_now = frame_index / fps
+                                    previous_zone_point = zstate.get("previous_confirmed_point")
+                                    previous_confirmed_zone = zstate.get("previous_confirmed_zone")
+
+                                    # Close the previous confirmed Zone when a new Zone is confirmed.
+                                    if previous_confirmed_zone and previous_confirmed_zone != confirmed_zone:
+                                        oldzs = zstate.get("zone_states", {}).get(previous_confirmed_zone)
+                                        if oldzs and oldzs.get("inside"):
+                                            duration = max(0.0, timestamp_now - float(oldzs["entry_time"]))
+                                            avg_speed = oldzs["distance_px"] / duration if duration > 0 else 0.0
+                                            zone_exit_count[previous_confirmed_zone] += 1
+                                            measurement_events_writer.writerow([
+                                                frame_index, f"{timestamp_now:.6f}", track_id, class_name,
+                                                "ZONE", previous_confirmed_zone, "EXIT",
+                                                f"{duration:.6f}", f"{oldzs['distance_px']:.3f}",
+                                                f"{avg_speed:.6f}", "ZONE_CHANGE"
+                                            ])
+                                            zone_summary_writer.writerow([
+                                                previous_confirmed_zone, track_id, class_name,
+                                                oldzs["entry_frame"], f"{oldzs['entry_time']:.6f}",
+                                                frame_index, f"{timestamp_now:.6f}", f"{duration:.6f}",
+                                                f"{oldzs['distance_px']:.3f}", f"{avg_speed:.6f}"
+                                            ])
+                                            oldzs["inside"] = False
+                                            oldzs["entry_frame"] = None
+                                            oldzs["entry_time"] = None
+                                            oldzs["distance_px"] = 0.0
+                                            oldzs["last_point"] = None
+
+                                    zone_states = zstate["zone_states"]
+                                    for zname in ZONE_NAMES:
+                                        if len(self.zones.get(zname, [])) < 3:
+                                            continue
+                                        zs = zone_states.setdefault(zname, {
+                                            "inside": False,
+                                            "entry_frame": None,
+                                            "entry_time": None,
+                                            "distance_px": 0.0,
+                                            "last_point": None,
+                                        })
+
+                                        if confirmed_zone == zname:
+                                            if not zs["inside"]:
+                                                zs["inside"] = True
+                                                zs["entry_frame"] = frame_index
+                                                zs["entry_time"] = timestamp_now
+                                                zs["distance_px"] = 0.0
+                                                zs["last_point"] = point
+                                                zone_entry_count[zname] += 1
+                                                measurement_events_writer.writerow([
+                                                    frame_index, f"{timestamp_now:.6f}", track_id, class_name,
+                                                    "ZONE", zname, "ENTRY", "0.000000", "0.000", "", "CONFIRMED"
+                                                ])
+                                            elif previous_confirmed_zone == zname and previous_zone_point is not None:
+                                                px, py = previous_zone_point
+                                                zs["distance_px"] += (
+                                                    (point[0] - px) ** 2 + (point[1] - py) ** 2
+                                                ) ** 0.5
+                                                zs["last_point"] = point
+
+                                    zstate["previous_confirmed_zone"] = confirmed_zone
+                                    zstate["previous_confirmed_point"] = point if confirmed_zone else None
+
+                                # ==============================
                                     # INTEGRATED LINE MEASUREMENT
                                     # ==============================
                                     lstate = line_track_state.setdefault(track_id, {})
@@ -3311,20 +3656,14 @@ class Run1App:
                                 2
                             )
 
-                            if settings[
-                                "draw_center"
-                            ]:
-
-                                cv2.circle(
-                                    frame,
-                                    (
-                                        center_x,
-                                        center_y
-                                    ),
-                                    5,
-                                    (0, 0, 255),
-                                    -1
-                                )
+                            if settings["draw_center"]:
+                                # Red = geometric center; cyan = selected Zone reference point.
+                                cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)
+                                try:
+                                    ref_x, ref_y = self.get_zone_reference_point(x1, y1, x2, y2)
+                                    cv2.circle(frame, (ref_x, ref_y), 6, (255, 255, 0), -1)
+                                except Exception:
+                                    pass
 
                             if (
                                 settings["draw_trail"]
@@ -3351,10 +3690,16 @@ class Run1App:
                                         2
                                     )
 
+                            zone_label = ""
+                            if measurement_enabled and track_id >= 0:
+                                zs_for_label = zone_track_state.get(track_id, {})
+                                confirmed_label = zs_for_label.get("confirmed_zone") or "Uncertain"
+                                zone_label = f" | Z:{confirmed_label}"
                             label = (
                                 f"ID {track_id} | "
                                 f"{class_name} | "
                                 f"{confidence:.2f}"
+                                f"{zone_label}"
                             )
 
                             label_y = max(
@@ -3394,7 +3739,12 @@ class Run1App:
                                     x2,
                                     y2,
                                     center_x,
-                                    center_y
+                                    center_y,
+                                    (self.get_zone_reference_point(x1, y1, x2, y2)[0] if measurement_enabled else center_x),
+                                    (self.get_zone_reference_point(x1, y1, x2, y2)[1] if measurement_enabled else center_y),
+                                    (zone_track_state.get(track_id, {}).get("confirmed_zone", "") if measurement_enabled else ""),
+                                    (f"{zone_track_state.get(track_id, {}).get('confirmed_confidence', 0.0):.6f}" if measurement_enabled else ""),
+                                    (zone_track_state.get(track_id, {}).get("last_method", "") if measurement_enabled else "")
                                 ])
 
                     if active_tracks:
@@ -3644,7 +3994,7 @@ class Run1App:
                     class_name_final = state_info.get("class_name", "")
                     last_frame_final = state_info.get("last_frame", frame_index)
                     last_time_final = last_frame_final / fps
-                    for zname, zs in zmap.items():
+                    for zname, zs in zmap.get("zone_states", {}).items():
                         if zs.get("inside") and zs.get("entry_time") is not None:
                             duration = max(0.0, last_time_final - float(zs["entry_time"]))
                             avg_speed = zs["distance_px"] / duration if duration > 0 else 0.0
@@ -3675,6 +4025,25 @@ class Run1App:
                         "zone_entries": dict(zone_entry_count),
                         "zone_exits": dict(zone_exit_count),
                         "line_crossings": dict(line_cross_count),
+                        "zone_assignment": {
+                            "method": self.zone_assignment_method_var.get(),
+                            "reference_point_preset": self.zone_point_preset_var.get(),
+                            "reference_point_xy_percent": [
+                                float(self.zone_point_x_var.get()),
+                                float(self.zone_point_y_var.get())
+                            ],
+                            "weights_percent": {
+                                "bottom_center": float(self.zone_bottom_weight_var.get()),
+                                "bbox_area": float(self.zone_bbox_weight_var.get()),
+                                "custom_point": float(self.zone_custom_weight_var.get()),
+                            },
+                            "minimum_confidence_percent": float(self.zone_min_confidence_var.get()),
+                            "minimum_difference_percent": float(self.zone_min_difference_var.get()),
+                            "temporal_confirmation_frames": zone_confirmation_frames,
+                            "assignment_observations": {
+                                z: dict(v) for z, v in zone_assignment_summary.items()
+                            },
+                        },
                         "outputs": {
                             "events": output_measurement_events,
                             "zone_summary": output_zone_summary,
@@ -3837,6 +4206,22 @@ class Run1App:
                 "max_active_tracks": max_active_tracks,
                 "id_switch_warnings": id_switch_warning_count,
                 "detection_loss_events": detection_loss_count,
+                "zone_assignment": {
+                    "method": self.zone_assignment_method_var.get(),
+                    "reference_point_preset": self.zone_point_preset_var.get(),
+                    "reference_point_xy_percent": [
+                        float(self.zone_point_x_var.get()),
+                        float(self.zone_point_y_var.get())
+                    ],
+                    "weights_percent": {
+                        "bottom_center": float(self.zone_bottom_weight_var.get()),
+                        "bbox_area": float(self.zone_bbox_weight_var.get()),
+                        "custom_point": float(self.zone_custom_weight_var.get()),
+                    },
+                    "minimum_confidence_percent": float(self.zone_min_confidence_var.get()),
+                    "minimum_difference_percent": float(self.zone_min_difference_var.get()),
+                    "temporal_confirmation_frames": zone_confirmation_frames,
+                },
                 "processing_time_seconds": round(total_time, 6),
                 "average_fps": round(average_fps, 6),
                 "outputs": {
