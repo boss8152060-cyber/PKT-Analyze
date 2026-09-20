@@ -4264,7 +4264,15 @@ class Run1App:
                 self.run3_lc_enabled_var.get(),
                 self.run3_pet_enabled_var.get(),
             ])
-            if (not stopped) and self.run3_was_requested:
+            # Run 3 is a post-processing step that uses the completed/partial
+            # Run 2 CSVs. It must still execute when the user presses STOP,
+            # because Run 1 + Run 2 finalize and close their files first.
+            # STOP means: stop video processing, then analyze the data already
+            # produced by Run 2.
+            if self.run3_was_requested:
+                self.root.after(0, lambda: self.status_var.set(
+                    "Run 3 — analyzing Run 2 data" + (" (partial run after STOP)" if stopped else "")
+                ))
                 self.run3_last_outputs = self.run3_processing(settings, output_dir, run_name)
                 # Add Run 3 information to the existing Run 1 + 2 summary JSON.
                 try:
