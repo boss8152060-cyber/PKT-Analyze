@@ -1080,7 +1080,11 @@ class Run1App:
         self.status_var.set("Zone configuration snapshot saved")
 
     def draw_measurement_overlay(self, frame, frame_index, fps, zone_track_state, line_track_state, zone_entry_count, line_cross_count):
-        """Draw PK Studio zones/lines and live zone timing/counts on the preview/output frame."""
+        """Draw PK Studio zones/lines and live zone timing/counts on the preview/output frame.
+
+        Object labels are rendered once in the detection loop as:
+        ID | Class | Confidence | Zone.
+        """
         # Draw polygons and labels even when no detection exists.
         for zname in ZONE_NAMES:
             polygon = self.zones.get(zname, [])
@@ -1114,37 +1118,8 @@ class Run1App:
             cv2.putText(frame, f"{lname} | crossings: {line_cross_count.get(lname, 0)}",
                         (mx, max(20, my - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
 
-        # Live per-track zone timer. The timer begins at the exact frame where
-        # the tracked centroid is first detected inside the zone.
-        now = frame_index / fps if fps > 0 else 0.0
-        for track_id, zmap in zone_track_state.items():
-            zone_states = zmap.get("zone_states", {})
-            active = []
-            for zname, zs in zone_states.items():
-                if zs.get("inside") and zs.get("entry_time") is not None:
-                    duration = max(0.0, now - float(zs["entry_time"]))
-                    active.append(f"{zname}: {duration:.1f}s")
-
-            # Show Zone information ONLY while the tracked object is actually
-            # inside a confirmed Zone. Nothing is shown for objects outside Zones.
-            if not active:
-                continue
-
-            # Place the yellow duration beside the same Trajectory Position
-            # that drives Zone assignment and the trail.
-            point = zmap.get("last_point") or zmap.get("previous_confirmed_point")
-            if point is None:
-                continue
-
-            x, y = map(int, point)
-            for idx, text in enumerate(active):
-                # Yellow text is reserved for the Zone duration only.
-                # Do not repeat the Track ID here; the green label already shows it.
-                cv2.putText(
-                    frame, text,
-                    (x + 8, max(20, y - 22 + idx * 22)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA
-                )
+        # Zone duration is kept in the research state / CSV / event outputs.
+        # No separate on-frame duration label is drawn.
 
     def get_zone_reference_point(self, x1, y1, x2, y2):
         """Return the selected Trajectory Position inside the bounding box.
@@ -3610,9 +3585,13 @@ class Run1App:
                                         )
 
                                 if confirmed_label:
-                                    # One compact label only. Zone timer remains in CSV/events,
-                                    # but is intentionally not drawn to avoid duplicate ID text.
-                                    label = f"ID {track_id} | {confirmed_label}"
+                                    # Single compact object label.
+                                    # Show ID + class + detection confidence + Zone once only.
+                                    # No separate yellow Zone-duration label is drawn.
+                                    label = (
+                                        f"ID {track_id} | {class_name} | "
+                                        f"Conf {confidence:.2f} | {confirmed_label}"
+                                    )
                                     label_y = max(y1 - 10, 20)
                                     cv2.putText(
                                         frame, label, (x1, label_y),
