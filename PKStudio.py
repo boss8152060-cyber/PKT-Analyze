@@ -376,6 +376,13 @@ DEFAULT_SETTINGS = {
     "show_zone_label": True,
     "show_zone_label_prefix": True,
     "zone_overlay_opacity": "45",
+
+    # Individual vehicle label controls.
+    "show_label_id": True,
+    "show_label_class": True,
+    "show_label_conf": True,
+    "show_label_zone": True,
+    "show_label_speed": True,
 }
 
 
@@ -586,6 +593,13 @@ class Run1App:
         self.show_zone_label_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_zone_label"])
         self.show_zone_label_prefix_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_zone_label_prefix"])
         self.zone_overlay_opacity_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_overlay_opacity"])
+
+        # Individual vehicle label controls.
+        self.show_label_id_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_label_id"])
+        self.show_label_class_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_label_class"])
+        self.show_label_conf_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_label_conf"])
+        self.show_label_zone_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_label_zone"])
+        self.show_label_speed_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_label_speed"])
 
 
         # ========================================================
@@ -1660,27 +1674,36 @@ class Run1App:
             frame, text="แสดงคำว่า Zone", variable=self.show_zone_label_prefix_var
         ).grid(row=8, column=3, sticky="w", pady=4)
 
-        ttk.Label(frame, text="ความจาง %").grid(
+        ttk.Label(frame, text="Vehicle Label").grid(
             row=9, column=0, sticky="w", padx=(0, 8), pady=4
+        )
+        ttk.Checkbutton(frame, text="ID", variable=self.show_label_id_var).grid(row=9, column=1, sticky="w", pady=4)
+        ttk.Checkbutton(frame, text="Class", variable=self.show_label_class_var).grid(row=9, column=2, sticky="w", pady=4)
+        ttk.Checkbutton(frame, text="Conf", variable=self.show_label_conf_var).grid(row=9, column=3, sticky="w", pady=4)
+        ttk.Checkbutton(frame, text="Zone", variable=self.show_label_zone_var).grid(row=10, column=1, sticky="w", pady=4)
+        ttk.Checkbutton(frame, text="Speed", variable=self.show_label_speed_var).grid(row=10, column=2, sticky="w", pady=4)
+
+        ttk.Label(frame, text="ความจาง %").grid(
+            row=11, column=0, sticky="w", padx=(0, 8), pady=4
         )
         ttk.Spinbox(
             frame, from_=0, to=100, increment=5,
             textvariable=self.zone_overlay_opacity_var, width=7
-        ).grid(row=9, column=1, sticky="w", pady=4)
+        ).grid(row=11, column=1, sticky="w", pady=4)
         ttk.Label(
             frame, text="0 = ไม่เห็น | 100 = ชัดสุด", foreground="#666666"
-        ).grid(row=9, column=2, columnspan=2, sticky="w", pady=4)
+        ).grid(row=11, column=2, columnspan=2, sticky="w", pady=4)
 
         ttk.Label(
             frame,
             text="Zone ใช้ Trajectory Position เป็นจุดตัดสิน | ไม่มีพื้นหลังใต้ชื่อ Zone",
             foreground="#666666"
-        ).grid(row=10, column=1, columnspan=3, sticky="w", pady=(0, 2))
+        ).grid(row=12, column=1, columnspan=3, sticky="w", pady=(0, 2))
 
         ttk.Label(
             frame, textvariable=self.measurement_status_var,
             foreground="#666666", anchor="w"
-        ).grid(row=11, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ).grid(row=13, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         self.update_trajectory_position_controls()
 
@@ -2203,6 +2226,11 @@ class Run1App:
             "show_zone_label": self.show_zone_label_var.get(),
             "show_zone_label_prefix": self.show_zone_label_prefix_var.get(),
             "zone_overlay_opacity": self.zone_overlay_opacity_var.get(),
+            "show_label_id": self.show_label_id_var.get(),
+            "show_label_class": self.show_label_class_var.get(),
+            "show_label_conf": self.show_label_conf_var.get(),
+            "show_label_zone": self.show_label_zone_var.get(),
+            "show_label_speed": self.show_label_speed_var.get(),
             "run3": {
                 "site_id": self.run3_site_id_var.get(),
                 "speed_enabled": self.run3_speed_enabled_var.get(),
@@ -2298,6 +2326,11 @@ class Run1App:
             ("show_zone_label", self.show_zone_label_var),
             ("show_zone_label_prefix", self.show_zone_label_prefix_var),
             ("zone_overlay_opacity", self.zone_overlay_opacity_var),
+            ("show_label_id", self.show_label_id_var),
+            ("show_label_class", self.show_label_class_var),
+            ("show_label_conf", self.show_label_conf_var),
+            ("show_label_zone", self.show_label_zone_var),
+            ("show_label_speed", self.show_label_speed_var),
         ]
 
         for key, variable in pairs:
@@ -3733,22 +3766,30 @@ class Run1App:
                                         )
 
                                 if confirmed_label:
-                                    # Single compact object label.
-                                    # Show ID + class + confidence + Zone + live speed.
+                                    # Individual vehicle label controls.
                                     # Live speed is display-only; research Y1/Y2 remain
                                     # calculated by Run 3 from the stored trajectory.
                                     live_speed = zone_track_state.get(track_id, {}).get("live_speed_kmh")
-                                    speed_text = f"Speed {live_speed:.1f} km/h" if live_speed is not None else "Speed --.- km/h"
-                                    label = (
-                                        f"ID {track_id} | {class_name} | "
-                                        f"Conf {confidence:.2f} | {confirmed_label} | {speed_text}"
-                                    )
-                                    label_y = max(y1 - 10, 20)
-                                    cv2.putText(
-                                        frame, label, (x1, label_y),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                                        (0, 255, 0), 2, cv2.LINE_AA
-                                    )
+                                    parts = []
+                                    if self.show_label_id_var.get():
+                                        parts.append(f"ID {track_id}")
+                                    if self.show_label_class_var.get():
+                                        parts.append(str(class_name))
+                                    if self.show_label_conf_var.get():
+                                        parts.append(f"Conf {confidence:.2f}")
+                                    if self.show_label_zone_var.get():
+                                        parts.append(str(confirmed_label))
+                                    if self.show_label_speed_var.get():
+                                        speed_text = f"Speed {live_speed:.1f} km/h" if live_speed is not None else "Speed --.- km/h"
+                                        parts.append(speed_text)
+                                    label = " | ".join(parts)
+                                    if label:
+                                        label_y = max(y1 - 10, 20)
+                                        cv2.putText(
+                                            frame, label, (x1, label_y),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                                            (0, 255, 0), 2, cv2.LINE_AA
+                                        )
 
                             if csv_writer is not None:
 
