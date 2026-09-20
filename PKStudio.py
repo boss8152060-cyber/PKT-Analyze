@@ -352,17 +352,10 @@ DEFAULT_SETTINGS = {
 
     "research_mode": True,
 
-    # Simple Zone assignment: choose only the reference point used to decide Zone.
-    "zone_assignment_method": "Point",
-    "zone_point_preset": "Center",
-    "zone_point_x": "50",
-    "zone_point_y": "50",
-    "zone_bottom_weight": "50",
-    "zone_bbox_weight": "35",
-    "zone_custom_weight": "15",
-    "zone_min_confidence": "0",
-    "zone_min_difference": "0",
-    "zone_confirmation_frames": "1",
+    # Trajectory Position: choose where the tracked trajectory is anchored
+    # inside each bounding box. Offset moves the anchor inward from the selected edge(s).
+    "trajectory_position": "Center",
+    "trajectory_offset": "0",
 }
 
 
@@ -515,17 +508,9 @@ class Run1App:
             value=DEFAULT_SETTINGS["research_mode"]
         )
 
-        # Zone assignment / reference point controls.
-        self.zone_assignment_method_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_assignment_method"])
-        self.zone_point_preset_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_point_preset"])
-        self.zone_point_x_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_point_x"])
-        self.zone_point_y_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_point_y"])
-        self.zone_bottom_weight_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_bottom_weight"])
-        self.zone_bbox_weight_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_bbox_weight"])
-        self.zone_custom_weight_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_custom_weight"])
-        self.zone_min_confidence_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_min_confidence"])
-        self.zone_min_difference_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_min_difference"])
-        self.zone_confirmation_frames_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_confirmation_frames"])
+        # Trajectory Position controls.
+        self.trajectory_position_var = tk.StringVar(value=DEFAULT_SETTINGS["trajectory_position"])
+        self.trajectory_offset_var = tk.StringVar(value=DEFAULT_SETTINGS["trajectory_offset"])
 
         self.status_var = tk.StringVar(
             value="Ready"
@@ -774,12 +759,13 @@ class Run1App:
     # INTEGRATED ZONE / LINE MEASUREMENT
     # ========================================================
 
-    def update_reference_point_controls(self, event=None):
-        """Enable custom X/Y only when Custom reference point is selected."""
-        custom = self.zone_point_preset_var.get().strip() == "Custom"
-        state = "normal" if custom else "disabled"
-        self.zone_x_spin.configure(state=state)
-        self.zone_y_spin.configure(state=state)
+    def update_trajectory_position_controls(self, event=None):
+        """Update the trajectory-position controls.
+
+        All nine anchor positions use the same inward Offset (%).
+        Center ignores Offset because it is already centered.
+        """
+        return
 
     def refresh_measurement_status(self):
         z = sum(1 for v in self.zones.values() if len(v) >= 3)
@@ -1157,22 +1143,41 @@ class Run1App:
                 )
 
     def get_zone_reference_point(self, x1, y1, x2, y2):
-        """Return the selected reference point inside the bounding box."""
-        preset = self.zone_point_preset_var.get().strip()
+        """Return the selected Trajectory Position inside the bounding box.
 
-        if preset in ("Bottom", "Bottom Center"):
-            px, py = 50.0, 100.0
-        elif preset == "Custom":
-            try:
-                px = min(100.0, max(0.0, float(self.zone_point_x_var.get())))
-            except Exception:
-                px = 50.0
-            try:
-                py = min(100.0, max(0.0, float(self.zone_point_y_var.get())))
-            except Exception:
-                py = 50.0
-        else:
-            px, py = 50.0, 50.0
+        Nine anchors are supported: Top, Center, Bottom, Left, Right,
+        Top Left, Top Right, Bottom Left, Bottom Right.
+        Offset (%) moves the anchor inward from the selected edge(s).
+        """
+        position = self.trajectory_position_var.get().strip()
+        try:
+            offset = max(0.0, min(50.0, float(self.trajectory_offset_var.get())))
+        except Exception:
+            offset = 0.0
+
+        anchors = {
+            "Top": (50.0, 0.0),
+            "Center": (50.0, 50.0),
+            "Bottom": (50.0, 100.0),
+            "Left": (0.0, 50.0),
+            "Right": (100.0, 50.0),
+            "Top Left": (0.0, 0.0),
+            "Top Right": (100.0, 0.0),
+            "Bottom Left": (0.0, 100.0),
+            "Bottom Right": (100.0, 100.0),
+        }
+        px, py = anchors.get(position, anchors["Center"])
+
+        # Move only the coordinates that touch an edge.
+        if px == 0.0:
+            px = offset
+        elif px == 100.0:
+            px = 100.0 - offset
+
+        if py == 0.0:
+            py = offset
+        elif py == 100.0:
+            py = 100.0 - offset
 
         return (
             int(round(x1 + (x2 - x1) * px / 100.0)),
@@ -1461,49 +1466,45 @@ class Run1App:
             frame, text="Browse", command=self.load_measurement_config
         ).grid(row=6, column=3, padx=(5, 0))
 
-        ttk.Label(frame, text="Detection Point").grid(
-            row=7, column=0, sticky="w", padx=(0, 8), pady=4
-        )
-        self.zone_point_combo = ttk.Combobox(
-            frame, textvariable=self.zone_point_preset_var,
-            values=["Center", "Bottom", "Custom"],
-            state="readonly", width=14
-        )
-        self.zone_point_combo.grid(row=7, column=1, sticky="w", pady=4)
-        self.zone_point_combo.bind(
-            "<<ComboboxSelected>>", self.update_reference_point_controls
-        )
+        ttk.Label(
+            frame, text="Trajectory Position"
+        ).grid(row=7, column=0, sticky="w", padx=(0, 8), pady=4)
 
-        ttk.Label(frame, text="X %").grid(
+        self.trajectory_position_combo = ttk.Combobox(
+            frame,
+            textvariable=self.trajectory_position_var,
+            values=[
+                "Top", "Center", "Bottom",
+                "Left", "Right",
+                "Top Left", "Top Right",
+                "Bottom Left", "Bottom Right"
+            ],
+            state="readonly",
+            width=16
+        )
+        self.trajectory_position_combo.grid(row=7, column=1, sticky="w", pady=4)
+
+        ttk.Label(frame, text="Offset %").grid(
             row=7, column=2, sticky="e", padx=(12, 4), pady=4
         )
-        self.zone_x_spin = ttk.Spinbox(
-            frame, from_=0, to=100, increment=1,
-            textvariable=self.zone_point_x_var, width=6
+        self.trajectory_offset_spin = ttk.Spinbox(
+            frame, from_=0, to=50, increment=1,
+            textvariable=self.trajectory_offset_var, width=7
         )
-        self.zone_x_spin.grid(row=7, column=3, sticky="w", pady=4)
-
-        ttk.Label(frame, text="Y %").grid(
-            row=8, column=2, sticky="e", padx=(12, 4), pady=4
-        )
-        self.zone_y_spin = ttk.Spinbox(
-            frame, from_=0, to=100, increment=1,
-            textvariable=self.zone_point_y_var, width=6
-        )
-        self.zone_y_spin.grid(row=8, column=3, sticky="w", pady=4)
+        self.trajectory_offset_spin.grid(row=7, column=3, sticky="w", pady=4)
 
         ttk.Label(
             frame,
-            text="Center = 50/50   |   Bottom = 50/100   |   Custom = กำหนด X/Y เอง",
+            text="Offset = ระยะที่เลื่อนจุดเข้าด้านในจากขอบกรอบ (0–50%) | Center ไม่ใช้ Offset",
             foreground="#666666"
-        ).grid(row=9, column=1, columnspan=3, sticky="w", pady=(0, 2))
+        ).grid(row=8, column=1, columnspan=3, sticky="w", pady=(0, 2))
 
         ttk.Label(
             frame, textvariable=self.measurement_status_var,
             foreground="#666666", anchor="w"
         ).grid(row=10, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
-        self.update_reference_point_controls()
+        self.update_trajectory_position_controls()
 
     # ========================================================
     # DETECTION
@@ -1773,7 +1774,7 @@ class Run1App:
 
         ttk.Label(
             frame,
-            text="กรอบวัตถุจะแสดงเฉพาะเมื่อ Detection Point อยู่ใน Zone",
+            text="กรอบวัตถุจะแสดงเฉพาะเมื่อ Trajectory Position อยู่ใน Zone",
             foreground="#666666"
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(7, 0))
 
@@ -1793,10 +1794,11 @@ class Run1App:
         )
 
         text = (
-            "Video → Detection → ByteTrack → Reference Point → Zone → CSV\n\n"
-            "Zone decision: ใช้จุด Reference Point เพียงจุดเดียว\n"
-            "Display: แสดงกรอบเฉพาะวัตถุที่อยู่ใน Zone\n"
-            "Reference Point: Center / Bottom / Custom"
+            "Video → Detection → ByteTrack → Trajectory Position → Zone → CSV\n\n"
+            "Zone decision: ใช้ตำแหน่งที่เลือกบน Bounding Box เพียงจุดเดียว\n"
+            "Positions: Top / Center / Bottom / Left / Right / 4 Corners\n"
+            "Offset: เลื่อนตำแหน่งเข้าด้านในจากขอบกรอบได้ 0–50%\n"
+            "Display: แสดงกรอบเฉพาะวัตถุที่ตำแหน่งนี้อยู่ใน Zone"
         )
 
         ttk.Label(
@@ -1935,20 +1937,11 @@ class Run1App:
     # PRESETS
     # ========================================================
 
-    def set_zone_assignment_defaults(self):
-        """Apply the research defaults described in the PK Studio Zone guidance."""
-        self.zone_assignment_method_var.set("Point")
-        self.zone_point_preset_var.set("Center")
-        self.zone_point_x_var.set("50")
-        self.zone_point_y_var.set("50")
-        self.zone_bottom_weight_var.set("50")
-        self.zone_bbox_weight_var.set("35")
-        self.zone_custom_weight_var.set("15")
-        self.zone_min_confidence_var.set("0")
-        self.zone_min_difference_var.set("0")
-        self.zone_confirmation_frames_var.set("1")
-        if hasattr(self, "zone_x_spin"):
-            self.update_reference_point_controls()
+    def set_trajectory_position_defaults(self):
+        """Apply the simple Trajectory Position defaults."""
+        self.trajectory_position_var.set("Center")
+        self.trajectory_offset_var.set("0")
+
 
     def apply_preset(self):
 
@@ -1984,7 +1977,7 @@ class Run1App:
             self.save_csv_var.set(True)
 
             self.research_mode_var.set(True)
-            self.set_zone_assignment_defaults()
+            self.set_trajectory_position_defaults()
 
         elif preset == "ID Stability Test":
 
@@ -2096,9 +2089,8 @@ class Run1App:
 
             "research_mode": self.research_mode_var.get(),
 
-            "zone_point_preset": self.zone_point_preset_var.get(),
-            "zone_point_x": self.zone_point_x_var.get(),
-            "zone_point_y": self.zone_point_y_var.get(),
+            "trajectory_position": self.trajectory_position_var.get(),
+            "trajectory_offset": self.trajectory_offset_var.get(),
         }
 
     def save_settings(self):
@@ -2216,9 +2208,8 @@ class Run1App:
             ("save_csv", self.save_csv_var),
             ("csv_flush", self.csv_flush_var),
             ("research_mode", self.research_mode_var),
-            ("zone_point_preset", self.zone_point_preset_var),
-            ("zone_point_x", self.zone_point_x_var),
-            ("zone_point_y", self.zone_point_y_var),
+            ("trajectory_position", self.trajectory_position_var),
+            ("trajectory_offset", self.trajectory_offset_var),
         ]
 
         for key, variable in pairs:
@@ -2230,9 +2221,8 @@ class Run1App:
                 )
             )
 
-        # Refresh the Custom X/Y controls after loading settings.
-        if hasattr(self, "zone_x_spin"):
-            self.update_reference_point_controls()
+        # Refresh Trajectory Position controls after loading settings.
+        self.update_trajectory_position_controls()
 
     # ========================================================
     # VALIDATION
@@ -2326,14 +2316,11 @@ class Run1App:
             return False
 
         try:
-            px = float(self.zone_point_x_var.get())
-            py = float(self.zone_point_y_var.get())
-            if not 0 <= px <= 100:
-                raise ValueError("Detection Point X must be between 0 and 100%")
-            if not 0 <= py <= 100:
-                raise ValueError("Detection Point Y must be between 0 and 100%")
+            offset = float(self.trajectory_offset_var.get())
+            if not 0 <= offset <= 50:
+                raise ValueError("Trajectory Offset must be between 0 and 50%")
         except Exception as e:
-            messagebox.showerror("Zone Settings", str(e))
+            messagebox.showerror("Trajectory Position", str(e))
             return False
 
         if self.research_mode_var.get():
@@ -2984,10 +2971,9 @@ class Run1App:
             zone_track_state = {}
             line_track_state = {}
             zone_assignment_summary = defaultdict(lambda: defaultdict(int))
-            zone_assignment_method = settings.get("zone_assignment_method", "Weighted")
-            zone_min_confidence = float(settings.get("zone_min_confidence", "60")) / 100.0
-            zone_min_difference = float(settings.get("zone_min_difference", "15")) / 100.0
-            zone_confirmation_frames = max(1, int(settings.get("zone_confirmation_frames", "3")))
+            trajectory_position = settings.get("trajectory_position", self.trajectory_position_var.get())
+            trajectory_offset = float(settings.get("trajectory_offset", self.trajectory_offset_var.get() or 0))
+            zone_confirmation_frames = 1
             zone_entry_count = defaultdict(int)
             zone_exit_count = defaultdict(int)
             line_cross_count = defaultdict(int)
@@ -3041,9 +3027,8 @@ class Run1App:
             if measurement_enabled:
                 print("Zones       :", [k for k, v in self.zones.items() if len(v) >= 3])
                 print("Lines       :", [k for k, v in self.lines.items() if len(v) == 2])
-                print("Zone Method :", self.zone_assignment_method_var.get())
-                print("Zone Point  :", self.zone_point_preset_var.get())
-                print("Zone Confirm:", zone_confirmation_frames, "frames")
+                print("Trajectory Position:", self.trajectory_position_var.get())
+                print("Trajectory Offset  :", self.trajectory_offset_var.get(), "%")
 
             window_name = "PK Studio - Run 1"
 
@@ -3363,17 +3348,17 @@ class Run1App:
                                 # INTEGRATED ZONE MEASUREMENT
                                 # ==============================
                                 if measurement_enabled:
-                                    # Multi-signal Zone assignment: reference point + bottom
-                                    # center + bounding-box overlap, followed by temporal confirmation.
+                                    # Zone membership uses the selected Trajectory Position only.
+                                    # The bounding box itself is not used for Zone assignment.
                                     point = self.get_zone_reference_point(x1, y1, x2, y2)
                                     candidate, raw_confidence, overlap_map, custom_point, decision_scores = self.assign_zone_candidate(
                                         x1, y1, x2, y2
                                     )
 
                                     # Zone membership is determined only by the selected
-                                    # reference point (Center or Bottom).  The bbox is not
-                                    # used for Zone assignment.
-                                    method_now = "Point"
+                                    # Trajectory Position. The bounding-box area is not used
+                                    # for Zone assignment.
+                                    method_now = "Trajectory Position"
                                     no_zone = candidate is None
                                     zstate = zone_track_state.setdefault(track_id, {
                                         "candidate_zone": None,
@@ -3871,20 +3856,10 @@ class Run1App:
                         "zone_exits": dict(zone_exit_count),
                         "line_crossings": dict(line_cross_count),
                         "zone_assignment": {
-                            "method": self.zone_assignment_method_var.get(),
-                            "reference_point_preset": self.zone_point_preset_var.get(),
-                            "reference_point_xy_percent": [
-                                float(self.zone_point_x_var.get()),
-                                float(self.zone_point_y_var.get())
-                            ],
-                            "weights_percent": {
-                                "bottom_center": float(self.zone_bottom_weight_var.get()),
-                                "bbox_area": float(self.zone_bbox_weight_var.get()),
-                                "custom_point": float(self.zone_custom_weight_var.get()),
-                            },
-                            "minimum_confidence_percent": float(self.zone_min_confidence_var.get()),
-                            "minimum_difference_percent": float(self.zone_min_difference_var.get()),
-                            "temporal_confirmation_frames": zone_confirmation_frames,
+                            "method": "Trajectory Position",
+                            "trajectory_position": self.trajectory_position_var.get(),
+                            "trajectory_offset_percent": float(self.trajectory_offset_var.get()),
+                            "temporal_confirmation_frames": 1,
                             "assignment_observations": {
                                 z: dict(v) for z, v in zone_assignment_summary.items()
                             },
@@ -4052,20 +4027,10 @@ class Run1App:
                 "id_switch_warnings": id_switch_warning_count,
                 "detection_loss_events": detection_loss_count,
                 "zone_assignment": {
-                    "method": self.zone_assignment_method_var.get(),
-                    "reference_point_preset": self.zone_point_preset_var.get(),
-                    "reference_point_xy_percent": [
-                        float(self.zone_point_x_var.get()),
-                        float(self.zone_point_y_var.get())
-                    ],
-                    "weights_percent": {
-                        "bottom_center": float(self.zone_bottom_weight_var.get()),
-                        "bbox_area": float(self.zone_bbox_weight_var.get()),
-                        "custom_point": float(self.zone_custom_weight_var.get()),
-                    },
-                    "minimum_confidence_percent": float(self.zone_min_confidence_var.get()),
-                    "minimum_difference_percent": float(self.zone_min_difference_var.get()),
-                    "temporal_confirmation_frames": zone_confirmation_frames,
+                    "method": "Trajectory Position",
+                    "trajectory_position": self.trajectory_position_var.get(),
+                    "trajectory_offset_percent": float(self.trajectory_offset_var.get()),
+                    "temporal_confirmation_frames": 1,
                 },
                 "processing_time_seconds": round(total_time, 6),
                 "average_fps": round(average_fps, 6),
