@@ -407,6 +407,16 @@ RUN3_DEFAULTS = {
     "lc_enabled": False,
     "pet_enabled": False,
     "ppm": "57.822",
+    # Optional road-plane perspective calibration. Disabled by default because
+    # image points and real dimensions are site/video-specific and were not
+    # supplied in the research documents.
+    "perspective_enabled": False,
+    "perspective_p1": "",
+    "perspective_p2": "",
+    "perspective_p3": "",
+    "perspective_p4": "",
+    "perspective_length_m": "",
+    "perspective_width_m": "",
     "waiting_speed_threshold": "1.00",      # implementation starter value
     "lateral_axis_angle_deg": "0.00",       # implementation starter value; verify per video
     "lc_longitudinal_window_m": "2.00",     # implementation starter value
@@ -611,6 +621,13 @@ class Run1App:
         self.run3_lc_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["lc_enabled"])
         self.run3_pet_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_enabled"])
         self.run3_ppm_var = tk.StringVar(value=RUN3_DEFAULTS["ppm"])
+        self.run3_perspective_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["perspective_enabled"])
+        self.run3_perspective_p1_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p1"])
+        self.run3_perspective_p2_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p2"])
+        self.run3_perspective_p3_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p3"])
+        self.run3_perspective_p4_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p4"])
+        self.run3_perspective_length_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_length_m"])
+        self.run3_perspective_width_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_width_m"])
         self.run3_waiting_speed_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["waiting_speed_threshold"])
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
         self.run3_lc_longitudinal_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_longitudinal_window_m"])
@@ -898,61 +915,68 @@ class Run1App:
 
         ttk.Label(frame, text="Site_ID").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(frame, textvariable=self.run3_site_id_var, width=18).grid(row=0, column=1, sticky="w", pady=4)
-
         ttk.Label(frame, text="PPM").grid(row=0, column=2, sticky="e", padx=(12, 8), pady=4)
         ttk.Entry(frame, textvariable=self.run3_ppm_var, width=18).grid(row=0, column=3, sticky="w", pady=4)
 
-        ttk.Label(frame, text="Analysis").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Checkbutton(frame, text="Speed", variable=self.run3_speed_enabled_var).grid(row=1, column=1, sticky="w")
-        ttk.Checkbutton(frame, text="Gap Acceptance", variable=self.run3_gap_enabled_var).grid(row=1, column=2, sticky="w")
-        ttk.Checkbutton(frame, text="Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=1, column=3, sticky="w")
-        ttk.Checkbutton(frame, text="PET", variable=self.run3_pet_enabled_var).grid(row=2, column=1, sticky="w")
+        ttk.Checkbutton(frame, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=1, column=0, sticky="w", pady=(2,4))
+        ttk.Label(frame, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง", foreground="#666666").grid(row=1, column=1, columnspan=3, sticky="w", pady=(2,4))
 
-        ttk.Label(frame, text="Waiting detection speed threshold (km/h)").grid(row=2, column=2, sticky="e", padx=(12, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_waiting_speed_threshold_var, width=18).grid(row=2, column=3, sticky="w", pady=4)
+        ttk.Label(frame, text="Perspective calibration: P1→P2→P3→P4 รอบพื้นที่สี่เหลี่ยมบนผิวถนน (x,y pixels)").grid(row=2, column=0, columnspan=4, sticky="w", pady=(2,2))
+        ttk.Label(frame, text="P1").grid(row=3, column=0, sticky="e", padx=4, pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_p1_var, width=18).grid(row=3, column=1, sticky="w", pady=2)
+        ttk.Label(frame, text="P2").grid(row=3, column=2, sticky="e", padx=4, pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_p2_var, width=18).grid(row=3, column=3, sticky="w", pady=2)
+        ttk.Label(frame, text="P3").grid(row=4, column=0, sticky="e", padx=4, pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_p3_var, width=18).grid(row=4, column=1, sticky="w", pady=2)
+        ttk.Label(frame, text="P4").grid(row=4, column=2, sticky="e", padx=4, pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_p4_var, width=18).grid(row=4, column=3, sticky="w", pady=2)
+        ttk.Label(frame, text="Known length (m)").grid(row=5, column=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_length_var, width=18).grid(row=5, column=1, sticky="w", pady=2)
+        ttk.Label(frame, text="Known width (m)").grid(row=5, column=2, sticky="e", padx=4, pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_width_var, width=18).grid(row=5, column=3, sticky="w", pady=2)
+        ttk.Label(frame, text="P1..P4 ต้องเรียงรอบพื้นที่เดียวกัน และค่าความยาว/กว้างต้องเป็นระยะจริงบนผิวถนน", foreground="#666666").grid(row=6, column=0, columnspan=4, sticky="w", pady=(0,4))
 
-        ttk.Label(frame, text="Road direction angle (deg) — implementation").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=3, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="LC longitudinal window (m) — implementation").grid(row=3, column=2, sticky="e", padx=(12, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_lc_longitudinal_window_var, width=18).grid(row=3, column=3, sticky="w", pady=4)
+        ttk.Label(frame, text="Analysis").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Checkbutton(frame, text="Speed", variable=self.run3_speed_enabled_var).grid(row=7, column=1, sticky="w")
+        ttk.Checkbutton(frame, text="Gap Acceptance", variable=self.run3_gap_enabled_var).grid(row=7, column=2, sticky="w")
+        ttk.Checkbutton(frame, text="Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=7, column=3, sticky="w")
+        ttk.Checkbutton(frame, text="PET", variable=self.run3_pet_enabled_var).grid(row=8, column=1, sticky="w")
 
-        ttk.Label(frame, text="PET interaction distance (m) — implementation").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_pet_interaction_distance_var, width=18).grid(row=4, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="PET threshold (s)").grid(row=4, column=2, sticky="e", padx=(12, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_pet_threshold_var, width=18).grid(row=4, column=3, sticky="w", pady=4)
+        ttk.Label(frame, text="Waiting detection speed threshold (km/h)").grid(row=8, column=2, sticky="e", padx=(12, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_waiting_speed_threshold_var, width=18).grid(row=8, column=3, sticky="w", pady=4)
+        ttk.Label(frame, text="Road direction angle (deg) — implementation").grid(row=9, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=9, column=1, sticky="w", pady=4)
+        ttk.Label(frame, text="LC longitudinal window (m) — implementation").grid(row=9, column=2, sticky="e", padx=(12, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_lc_longitudinal_window_var, width=18).grid(row=9, column=3, sticky="w", pady=4)
+        ttk.Label(frame, text="PET interaction distance (m) — implementation").grid(row=10, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_pet_interaction_distance_var, width=18).grid(row=10, column=1, sticky="w", pady=4)
+        ttk.Label(frame, text="PET threshold (s)").grid(row=10, column=2, sticky="e", padx=(12, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_pet_threshold_var, width=18).grid(row=10, column=3, sticky="w", pady=4)
 
-        ttk.Separator(frame, orient="horizontal").grid(row=5, column=0, columnspan=4, sticky="ew", pady=(8, 6))
+        ttk.Separator(frame, orient="horizontal").grid(row=11, column=0, columnspan=4, sticky="ew", pady=(8, 6))
+        ttk.Label(frame, text="Gap Acceptance — Subject Movement").grid(row=12, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Checkbutton(frame, text="1 → 3", variable=self.run3_gap_movement_13_var).grid(row=12, column=1, sticky="w")
+        ttk.Checkbutton(frame, text="1 → 5", variable=self.run3_gap_movement_15_var).grid(row=12, column=2, sticky="w")
+        ttk.Checkbutton(frame, text="4 → 1", variable=self.run3_gap_movement_41_var).grid(row=12, column=3, sticky="w")
+        ttk.Label(frame, text="Critical Gap").grid(row=13, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Checkbutton(frame, text="Raff", variable=self.run3_use_raff_var).grid(row=13, column=1, sticky="w")
+        ttk.Checkbutton(frame, text="MLE", variable=self.run3_use_mle_var).grid(row=13, column=2, sticky="w")
 
-        ttk.Label(frame, text="Gap Acceptance — Subject Movement").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Checkbutton(frame, text="1 → 3", variable=self.run3_gap_movement_13_var).grid(row=6, column=1, sticky="w")
-        ttk.Checkbutton(frame, text="1 → 5", variable=self.run3_gap_movement_15_var).grid(row=6, column=2, sticky="w")
-        ttk.Checkbutton(frame, text="4 → 1", variable=self.run3_gap_movement_41_var).grid(row=6, column=3, sticky="w")
-
-        ttk.Label(frame, text="Critical Gap").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Checkbutton(frame, text="Raff", variable=self.run3_use_raff_var).grid(row=7, column=1, sticky="w")
-        ttk.Checkbutton(frame, text="MLE", variable=self.run3_use_mle_var).grid(row=7, column=2, sticky="w")
-
-        ttk.Label(frame, text="Reference Line Mapping (copy/paste): Site_ID|Movement|Line N").grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 2))
-        ttk.Button(frame, text="Copy Template", command=self.copy_run3_mapping_template).grid(row=8, column=3, sticky="e", pady=(4, 2))
+        ttk.Label(frame, text="Reference Line Mapping (copy/paste): Site_ID|Movement|Line N").grid(row=14, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Button(frame, text="Copy Template", command=self.copy_run3_mapping_template).grid(row=14, column=3, sticky="e", pady=(4, 2))
         self.run3_reference_text = tk.Text(frame, height=6, width=90, wrap="none")
-        self.run3_reference_text.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        self.run3_reference_text.grid(row=15, column=0, columnspan=4, sticky="ew", pady=(0, 6))
         self.run3_reference_text.insert("1.0", self.run3_reference_mapping_text)
 
-        ttk.Label(frame, text="Vehicle Widths (m) — source values supplied by researcher").grid(row=10, column=0, columnspan=4, sticky="w", pady=(2, 4))
+        ttk.Label(frame, text="Vehicle Widths (m) — source values supplied by researcher").grid(row=16, column=0, columnspan=4, sticky="w", pady=(2, 4))
         width_pairs = [("Bus", 0), ("Car", 2), ("Motorcycle", 0), ("Pickup", 2), ("Sidecar", 0), ("Truck", 2), ("Van", 0)]
         for idx, (name, pair_col) in enumerate(width_pairs):
-            row = 11 + idx // 2
+            row = 17 + idx // 2
             ttk.Label(frame, text=name).grid(row=row, column=pair_col, sticky="e", padx=(4, 4), pady=2)
             ttk.Entry(frame, textvariable=self.run3_width_vars[name], width=10).grid(row=row, column=pair_col + 1, sticky="w", padx=(0, 8), pady=2)
 
-        ttk.Label(
-            frame,
-            text="Starter preset: Site 8 + PPM 57.822 + width values. Implementation defaults must be verified per site/video; fill Reference Line Mapping before enabling Gap Acceptance.",
-            foreground="#666666"
-        ).grid(row=15, column=0, columnspan=4, sticky="w", pady=(6, 2))
-        ttk.Label(frame, textvariable=self.run3_result_text, foreground="#444444").grid(
-            row=16, column=0, columnspan=4, sticky="w", pady=(2, 0)
-        )
+        ttk.Label(frame, text="Default preset: Site 8 + PPM 57.822. Perspective correction is OFF until calibrated; locked CSVs are redirected to a timestamped file.", foreground="#666666").grid(row=21, column=0, columnspan=4, sticky="w", pady=(6, 2))
+        ttk.Label(frame, textvariable=self.run3_result_text, foreground="#444444").grid(row=22, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
     # ========================================================
     # INTEGRATED ZONE / LINE MEASUREMENT
@@ -2238,6 +2262,13 @@ class Run1App:
                 "lc_enabled": self.run3_lc_enabled_var.get(),
                 "pet_enabled": self.run3_pet_enabled_var.get(),
                 "ppm": self.run3_ppm_var.get(),
+                "perspective_enabled": self.run3_perspective_enabled_var.get(),
+                "perspective_p1": self.run3_perspective_p1_var.get(),
+                "perspective_p2": self.run3_perspective_p2_var.get(),
+                "perspective_p3": self.run3_perspective_p3_var.get(),
+                "perspective_p4": self.run3_perspective_p4_var.get(),
+                "perspective_length_m": self.run3_perspective_length_var.get(),
+                "perspective_width_m": self.run3_perspective_width_var.get(),
                 "waiting_speed_threshold": self.run3_waiting_speed_threshold_var.get(),
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
                 "lc_longitudinal_window_m": self.run3_lc_longitudinal_window_var.get(),
@@ -2346,6 +2377,13 @@ class Run1App:
                 ("lc_enabled", self.run3_lc_enabled_var),
                 ("pet_enabled", self.run3_pet_enabled_var),
                 ("ppm", self.run3_ppm_var),
+                ("perspective_enabled", self.run3_perspective_enabled_var),
+                ("perspective_p1", self.run3_perspective_p1_var),
+                ("perspective_p2", self.run3_perspective_p2_var),
+                ("perspective_p3", self.run3_perspective_p3_var),
+                ("perspective_p4", self.run3_perspective_p4_var),
+                ("perspective_length_m", self.run3_perspective_length_var),
+                ("perspective_width_m", self.run3_perspective_width_var),
                 ("waiting_speed_threshold", self.run3_waiting_speed_threshold_var),
                 ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
                 ("lc_longitudinal_window_m", self.run3_lc_longitudinal_window_var),
@@ -2541,6 +2579,70 @@ class Run1App:
             raise ValueError(f"Run 3 {name} must be greater than 0.")
         return number
 
+    def _run3_parse_xy(self, text, label):
+        raw = str(text or "").strip()
+        if not raw:
+            raise ValueError(f"Perspective correction: {label} is required")
+        parts = [p.strip() for p in raw.replace(";", ",").split(",")]
+        if len(parts) != 2:
+            raise ValueError(f"Perspective correction: {label} must be x,y in pixels")
+        return float(parts[0]), float(parts[1])
+
+    def _run3_get_perspective_matrix(self, silent=False):
+        if not bool(self.run3_perspective_enabled_var.get()):
+            return None
+        try:
+            p1 = self._run3_parse_xy(self.run3_perspective_p1_var.get(), "P1")
+            p2 = self._run3_parse_xy(self.run3_perspective_p2_var.get(), "P2")
+            p3 = self._run3_parse_xy(self.run3_perspective_p3_var.get(), "P3")
+            p4 = self._run3_parse_xy(self.run3_perspective_p4_var.get(), "P4")
+            length_m = float(self.run3_perspective_length_var.get())
+            width_m = float(self.run3_perspective_width_var.get())
+            if length_m <= 0 or width_m <= 0:
+                raise ValueError("Perspective correction: Known length and width must be > 0")
+            src = np.float32([p1,p2,p3,p4])
+            dst = np.float32([[0,0],[length_m,0],[length_m,width_m],[0,width_m]])
+            H = cv2.getPerspectiveTransform(src, dst)
+            return {"H": H, "length_m": length_m, "width_m": width_m, "points": [p1,p2,p3,p4]}
+        except Exception:
+            if silent:
+                return None
+            raise
+
+    @staticmethod
+    def _run3_transform_point(point, perspective):
+        if perspective is None or point is None:
+            return point
+        arr = np.array([[list(point)]], dtype=np.float32)
+        mapped = cv2.perspectiveTransform(arr, perspective["H"])[0,0]
+        return float(mapped[0]), float(mapped[1])
+
+    @staticmethod
+    def _run3_metric_segment_distance_sum(points):
+        if len(points) < 2:
+            return 0.0
+        return sum(math.hypot(b[0]-a[0], b[1]-a[1]) for a,b in zip(points, points[1:]))
+
+    @staticmethod
+    def _run3_unique_output_path(path):
+        base, ext = os.path.splitext(path)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        candidate = f"{base}_{stamp}{ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        for i in range(1,1000):
+            candidate = f"{base}_{stamp}_{i}{ext}"
+            if not os.path.exists(candidate):
+                return candidate
+        raise IOError(f"Could not create unique output path for {path}")
+
+    def _run3_open_csv_safe(self, desired_path):
+        try:
+            return open(desired_path, "w", newline="", encoding="utf-8-sig"), desired_path
+        except PermissionError:
+            fallback = self._run3_unique_output_path(desired_path)
+            return open(fallback, "w", newline="", encoding="utf-8-sig"), fallback
+
     def validate_run3_settings(self):
         enabled = any([
             self.run3_speed_enabled_var.get(),
@@ -2553,6 +2655,9 @@ class Run1App:
 
         if not self.run3_site_id_var.get().strip():
             raise ValueError("Run 3 Site_ID is required when Run 3 is enabled.")
+
+        if self.run3_perspective_enabled_var.get():
+            self._run3_get_perspective_matrix(silent=False)
 
         if self.run3_speed_enabled_var.get() or self.run3_lc_enabled_var.get():
             self._run3_float(self.run3_ppm_var.get(), "PPM")
@@ -2869,6 +2974,8 @@ class Run1App:
             run_name = self.safe_filename(
                 settings["run_name"]
             )
+
+            self._run3_live_perspective = self._run3_get_perspective_matrix(silent=True)
 
             # =========================================================
             # CSV OUTPUTS — ONLY 3 MAIN CSV FILES
@@ -3604,22 +3711,24 @@ class Run1App:
                                     except Exception:
                                         live_ppm = 0.0
                                     hist = zstate.get("live_speed_history", [])
-                                    hist.append((timestamp_now if 'timestamp_now' in locals() else frame_index / fps, point[0], point[1]))
+                                    hist.append((frame_index / fps, point[0], point[1]))
                                     if len(hist) > 6:
                                         hist = hist[-6:]
                                     zstate["live_speed_history"] = hist
                                     zstate["live_speed_kmh"] = None
-                                    if live_ppm > 0 and len(hist) >= 2:
-                                        t0, x0, y0 = hist[0]
-                                        t1, x1p, y1p = hist[-1]
+                                    if len(hist) >= 2:
+                                        t0 = hist[0][0]
+                                        t1 = hist[-1][0]
                                         dt_live = float(t1) - float(t0)
                                         if dt_live > 0:
-                                            dist_px_live = 0.0
-                                            for h in range(1, len(hist)):
-                                                xa, ya = hist[h-1][1], hist[h-1][2]
-                                                xb, yb = hist[h][1], hist[h][2]
-                                                dist_px_live += math.hypot(xb - xa, yb - ya)
-                                            zstate["live_speed_kmh"] = (dist_px_live / live_ppm) / dt_live * 3.6
+                                            live_persp = getattr(self, "_run3_live_perspective", None)
+                                            if live_persp is not None:
+                                                metric_points = [self._run3_transform_point((hh[1],hh[2]), live_persp) for hh in hist]
+                                                dist_m_live = self._run3_metric_segment_distance_sum(metric_points)
+                                                zstate["live_speed_kmh"] = (dist_m_live / dt_live) * 3.6
+                                            elif live_ppm > 0:
+                                                dist_px_live = self._run3_segment_distance_sum([(hh[1],hh[2]) for hh in hist])
+                                                zstate["live_speed_kmh"] = (dist_px_live / live_ppm) / dt_live * 3.6
 
                                     if candidate:
                                         zone_assignment_summary[candidate]["observations"] += 1
@@ -4561,7 +4670,7 @@ class Run1App:
         summaries = {str(r.get("track_id", "")): r for r in id_rows}
         return tracks, summaries
 
-    def _run3_speed(self, tracks, ppm):
+    def _run3_speed(self, tracks, ppm, perspective=None):
         results = []
         for tid, rows in tracks.items():
             if not rows:
@@ -4569,37 +4678,31 @@ class Run1App:
             cls = rows[0].get("class_name", "")
             if str(cls).lower() == "person":
                 continue
-
             metrics = {}
             for zone, label in [(2, "Y1"), (4, "Y1"), (3, "Y2"), (5, "Y2")]:
                 zr = [r for r in rows if r.get("_zone_num") == zone and r.get("_point") is not None]
                 if len(zr) < 2:
                     continue
-                d_px = self._run3_segment_distance_sum([r["_point"] for r in zr])
+                if perspective is not None:
+                    pts_m = [self._run3_transform_point(r["_point"], perspective) for r in zr]
+                    d_m = self._run3_metric_segment_distance_sum(pts_m)
+                else:
+                    d_m = self._run3_segment_distance_sum([r["_point"] for r in zr]) / ppm
                 dt = zr[-1]["_timestamp"] - zr[0]["_timestamp"]
-                if dt <= 0 or d_px <= 0:
+                if dt <= 0 or d_m <= 0:
                     continue
-                speed_kmh = (d_px / ppm) / dt * 3.6
+                speed_kmh = d_m / dt * 3.6
                 if label not in metrics:
-                    metrics[label] = {
-                        "zone": f"Zone {zone}",
-                        "start": zr[0]["_timestamp"],
-                        "end": zr[-1]["_timestamp"],
-                        "distance": d_px / ppm,
-                        "speed": speed_kmh,
-                    }
-
+                    metrics[label] = {"zone": f"Zone {zone}", "start": zr[0]["_timestamp"], "end": zr[-1]["_timestamp"], "distance": d_m, "speed": speed_kmh}
             y1 = metrics.get("Y1")
             y2 = metrics.get("Y2")
             if not y1 and not y2:
                 continue
-            delta = (y2["speed"] - y1["speed"]) if y1 and y2 else None
+            delta = (y2["speed"]-y1["speed"]) if y1 and y2 else None
             results.append({
                 "Site_ID": self.run3_site_id_var.get().strip(),
-                "Vehicle_ID": tid,
-                "Vehicle_Class": cls,
-                "Approach_Zone": y1["zone"] if y1 else "",
-                "Exit_Zone": y2["zone"] if y2 else "",
+                "Vehicle_ID": tid, "Vehicle_Class": cls,
+                "Approach_Zone": y1["zone"] if y1 else "", "Exit_Zone": y2["zone"] if y2 else "",
                 "Approach_Start_Time": "" if not y1 else f"{y1['start']:.6f}",
                 "Approach_End_Time": "" if not y1 else f"{y1['end']:.6f}",
                 "Approach_Distance_m": "" if not y1 else f"{y1['distance']:.6f}",
@@ -4609,7 +4712,8 @@ class Run1App:
                 "Exit_Distance_m": "" if not y2 else f"{y2['distance']:.6f}",
                 "Y2_Exit_Speed": "" if not y2 else f"{y2['speed']:.6f}",
                 "Delta_Speed": "" if delta is None else f"{delta:.6f}",
-                "QC_Flag": "Incomplete_Y1_or_Y2" if (not y1 or not y2) else "",
+                "Calibration_Mode": "Perspective_Homography" if perspective is not None else "PPM_Only",
+                "QC_Flag": "Incomplete_Y1_or_Y2" if (not y1 or not y2) else ("Perspective_Not_Calibrated" if bool(self.run3_perspective_enabled_var.get()) and perspective is None else ""),
             })
         return results
 
@@ -4849,7 +4953,7 @@ class Run1App:
             "negative_log_likelihood": float(res.fun),
         }
 
-    def _run3_lateral_clearance(self, tracks, ppm, axis_deg, long_window_m):
+    def _run3_lateral_clearance(self, tracks, ppm, axis_deg, long_window_m, perspective=None):
         theta = math.radians(axis_deg)
         road_u = (math.cos(theta), math.sin(theta))
         lat_u = (-math.sin(theta), math.cos(theta))
@@ -4878,12 +4982,20 @@ class Run1App:
                     dy = r_b["_center"][1] - r_a["_center"][1]
                     lateral_px = abs(dx * lat_u[0] + dy * lat_u[1])
                     longitudinal_px = abs(dx * road_u[0] + dy * road_u[1])
-                    longitudinal_m = longitudinal_px / ppm
+                    if perspective is not None:
+                        pa = self._run3_transform_point(r_a["_center"], perspective)
+                        pb = self._run3_transform_point(r_b["_center"], perspective)
+                        signed_lateral_m = pb[1] - pa[1]
+                        longitudinal_m = abs(pb[0] - pa[0])
+                        ls_m = abs(signed_lateral_m)
+                        side = "Left" if signed_lateral_m > 0 else "Right"
+                    else:
+                        longitudinal_m = longitudinal_px / ppm
+                        ls_m = lateral_px / ppm
+                        side = "Left" if (dx * lat_u[0] + dy * lat_u[1]) > 0 else "Right"
                     if longitudinal_m > long_window_m:
                         continue
-                    ls_m = lateral_px / ppm
                     y3 = ls_m - (widths["Motorcycle"] + widths[cls_b]) / 2.0
-                    side = "Left" if (dx * lat_u[0] + dy * lat_u[1]) > 0 else "Right"
                     out.append({
                         "Site_ID": self.run3_site_id_var.get().strip(),
                         "Pair_ID": f"{tid_a}_{tid_b}",
@@ -4900,7 +5012,7 @@ class Run1App:
                         "Wm": f"{widths['Motorcycle']:.6f}",
                         "Wv": f"{widths[cls_b]:.6f}",
                         "Y3_Lateral_Clearance": f"{y3:.6f}",
-                        "QC_Flag": "Negative_Y3" if y3 < 0 else "",
+                        "QC_Flag": ("Negative_Y3" if y3 < 0 else "") + (";Perspective_Homography" if perspective is not None else ""),
                     })
         return out
 
@@ -4929,7 +5041,7 @@ class Run1App:
                 return "Diverging"
         return "Merging/Diverging"
 
-    def _run3_pet(self, tracks, summaries, ppm, axis_deg, interaction_distance_m):
+    def _run3_pet(self, tracks, summaries, ppm, axis_deg, interaction_distance_m, perspective=None):
         candidates = []
         ids = list(tracks)
         movement_by_id = {tid: self._run3_movement_from_sequence(summaries.get(tid, {}).get("zone_sequence", "")) if tid in summaries else "" for tid in ids}
@@ -4948,7 +5060,11 @@ class Run1App:
                 best = None
                 for ra0, ra1 in zip(a_rows, a_rows[1:]):
                     for rb0, rb1 in zip(b_rows, b_rows[1:]):
-                        hit = self._run3_segment_intersection(ra0["_point"], ra1["_point"], rb0["_point"], rb1["_point"])
+                        a0 = self._run3_transform_point(ra0["_point"], perspective) if perspective is not None else ra0["_point"]
+                        a1 = self._run3_transform_point(ra1["_point"], perspective) if perspective is not None else ra1["_point"]
+                        b0 = self._run3_transform_point(rb0["_point"], perspective) if perspective is not None else rb0["_point"]
+                        b1 = self._run3_transform_point(rb1["_point"], perspective) if perspective is not None else rb1["_point"]
+                        hit = self._run3_segment_intersection(a0, a1, b0, b1)
                         if hit:
                             ta_frac, tb_frac, ip = hit
                             ta = ra0["_timestamp"] + ta_frac*(ra1["_timestamp"]-ra0["_timestamp"])
@@ -4962,8 +5078,13 @@ class Run1App:
                     min_pair = None
                     for ra in a_rows:
                         for rb in b_rows:
-                            dpx = math.hypot(ra["_point"][0]-rb["_point"][0], ra["_point"][1]-rb["_point"][1])
-                            dm = dpx / ppm
+                            if perspective is not None:
+                                pra = self._run3_transform_point(ra["_point"], perspective)
+                                prb = self._run3_transform_point(rb["_point"], perspective)
+                                dm = math.hypot(pra[0]-prb[0], pra[1]-prb[1])
+                            else:
+                                dpx = math.hypot(ra["_point"][0]-rb["_point"][0], ra["_point"][1]-rb["_point"][1])
+                                dm = dpx / ppm
                             if dm <= interaction_distance_m and (min_pair is None or dm < min_pair[0]):
                                 min_pair = (dm, ra, rb)
                     if min_pair:
@@ -5006,18 +5127,29 @@ class Run1App:
         detection_rows, id_rows, zone_rows, det_path, id_path, zone_path = self._run3_load_inputs(output_dir, run_name)
         tracks, summaries = self._run3_build_tracks(detection_rows, id_rows)
         outputs = {}
-        summary = {"site_id": self.run3_site_id_var.get().strip(), "inputs": {"detection": det_path, "id_zone_summary": id_path, "zone_summary": zone_path}}
+        perspective = self._run3_get_perspective_matrix(silent=True)
+        summary = {
+            "site_id": self.run3_site_id_var.get().strip(),
+            "inputs": {"detection": det_path, "id_zone_summary": id_path, "zone_summary": zone_path},
+            "calibration": {
+                "mode": "Perspective_Homography" if perspective is not None else "PPM_Only",
+                "ppm": float(self.run3_ppm_var.get()),
+                "perspective_enabled": bool(self.run3_perspective_enabled_var.get()),
+                "perspective_configured": perspective is not None,
+            },
+        }
 
         # Speed
         if self.run3_speed_enabled_var.get():
             ppm = float(self.run3_ppm_var.get())
-            speed_rows = self._run3_speed(tracks, ppm)
+            speed_rows = self._run3_speed(tracks, ppm, perspective)
             path = os.path.join(output_dir, "Run_3_Speed.csv")
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            speed_file, path = self._run3_open_csv_safe(path)
+            with speed_file as f:
                 fields = [
                     "Site_ID","Vehicle_ID","Vehicle_Class","Approach_Zone","Exit_Zone",
                     "Approach_Start_Time","Approach_End_Time","Approach_Distance_m","Y1_Approach_Speed",
-                    "Exit_Start_Time","Exit_End_Time","Exit_Distance_m","Y2_Exit_Speed","Delta_Speed","QC_Flag"
+                    "Exit_Start_Time","Exit_End_Time","Exit_Distance_m","Y2_Exit_Speed","Delta_Speed","Calibration_Mode","QC_Flag"
                 ]
                 w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(speed_rows)
             vals_y1 = [float(r["Y1_Approach_Speed"]) for r in speed_rows if r["Y1_Approach_Speed"] not in ("", None)]
@@ -5035,7 +5167,8 @@ class Run1App:
             gap_rows = self._run3_gap(tracks, summaries, mapping)
             path = os.path.join(output_dir, "Run_3_Gap_Acceptance.csv")
             fields = ["Site_ID","Decision_Event_ID","Subject_ID","Subject_Class","Subject_Movement","Conflicting_Movement","Conflicting_ID_A","Conflicting_ID_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","X32_Waiting_Time","Gap_Role","Y5_Gap_Acceptance","Acceptance_Time","QC_Flag"]
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            gap_file, path = self._run3_open_csv_safe(path)
+            with gap_file as f:
                 w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(gap_rows)
             rejected_by_driver = defaultdict(list); accepted_by_driver = defaultdict(list)
             for r in gap_rows:
@@ -5074,10 +5207,11 @@ class Run1App:
         # Lateral Clearance
         if self.run3_lc_enabled_var.get():
             ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); long_window = float(self.run3_lc_longitudinal_window_var.get())
-            lc_rows = self._run3_lateral_clearance(tracks, ppm, axis, long_window)
+            lc_rows = self._run3_lateral_clearance(tracks, ppm, axis, long_window, perspective)
             path = os.path.join(output_dir, "Run_3_Lateral_Clearance.csv")
             fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Neighbor_ID","Neighbor_Class","Neighbor_Side","LS_Pixel","PPM","LS_Meter","Wm","Wv","Y3_Lateral_Clearance","QC_Flag"]
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            lc_file, path = self._run3_open_csv_safe(path)
+            with lc_file as f:
                 w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(lc_rows)
             vals = [float(r["Y3_Lateral_Clearance"]) for r in lc_rows]
             summary["lateral_clearance"] = {"N": len(vals), "Mean_m": float(np.mean(vals)) if vals else None, "Median_m": float(np.median(vals)) if vals else None, "Minimum_m": float(np.min(vals)) if vals else None, "Maximum_m": float(np.max(vals)) if vals else None}
@@ -5086,10 +5220,11 @@ class Run1App:
         # PET
         if self.run3_pet_enabled_var.get():
             ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); interaction = float(self.run3_pet_interaction_distance_var.get())
-            pet_rows = self._run3_pet(tracks, summaries, ppm, axis, interaction)
+            pet_rows = self._run3_pet(tracks, summaries, ppm, axis, interaction, perspective)
             path = os.path.join(output_dir, "Run_3_PET.csv")
             fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Y4_PET","QC_Flag"]
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            pet_file, path = self._run3_open_csv_safe(path)
+            with pet_file as f:
                 w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(pet_rows)
             vals = [float(r["Y4_PET"]) for r in pet_rows]
             threshold = float(self.run3_pet_threshold_var.get())
