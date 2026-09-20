@@ -1,5 +1,5 @@
 # ============================================================
-# PK Studio - Run 1
+# PK Studio V17 - Run 1 + 2 + 3
 # ============================================================
 #
 # Vehicle Detection + Tracking + Trajectory + Zone/Line Measurement Research
@@ -30,6 +30,8 @@ import time
 import threading
 import subprocess
 import shutil
+import math
+import re
 import numpy as np
 from collections import deque, defaultdict
 
@@ -378,6 +380,41 @@ DEFAULT_SETTINGS = {
 
 
 # ============================================================
+# RUN 3 DEFAULTS
+# ============================================================
+
+RUN3_VEHICLE_CLASSES = [
+    "Bus", "Car", "Motorcycle", "Pickup", "Sidecar", "Truck", "Van"
+]
+
+RUN3_MOVEMENTS = ["1→3", "1→5", "4→1"]
+RUN3_ALL_MOVEMENTS = ["1→3", "1→5", "4→1", "2→3", "4→5"]
+
+RUN3_DEFAULTS = {
+    "site_id": "",
+    "speed_enabled": True,
+    "gap_enabled": True,
+    "lc_enabled": True,
+    "pet_enabled": True,
+    "ppm": "",
+    "waiting_speed_threshold": "",
+    "lateral_axis_angle_deg": "",
+    "lc_longitudinal_window_m": "",
+    "pet_interaction_distance_m": "",
+    "pet_threshold_s": "1.00",
+    "gap_movement_13": True,
+    "gap_movement_15": True,
+    "gap_movement_41": True,
+    "use_raff": True,
+    "use_mle": True,
+    # One mapping per line: Site_ID|Movement|Line N
+    "reference_line_mapping": "",
+    # Widths are intentionally blank until the researcher supplies source values.
+    "vehicle_widths": {name: "" for name in RUN3_VEHICLE_CLASSES},
+}
+
+
+# ============================================================
 # APPLICATION
 # ============================================================
 
@@ -536,6 +573,36 @@ class Run1App:
         self.show_zone_label_prefix_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_zone_label_prefix"])
         self.zone_overlay_opacity_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_overlay_opacity"])
 
+
+        # ========================================================
+        # RUN 3 SAFETY ANALYSIS VARIABLES
+        # ========================================================
+        self.run3_site_id_var = tk.StringVar(value=RUN3_DEFAULTS["site_id"])
+        self.run3_speed_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["speed_enabled"])
+        self.run3_gap_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_enabled"])
+        self.run3_lc_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["lc_enabled"])
+        self.run3_pet_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_enabled"])
+        self.run3_ppm_var = tk.StringVar(value=RUN3_DEFAULTS["ppm"])
+        self.run3_waiting_speed_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["waiting_speed_threshold"])
+        self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
+        self.run3_lc_longitudinal_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_longitudinal_window_m"])
+        self.run3_pet_interaction_distance_var = tk.StringVar(value=RUN3_DEFAULTS["pet_interaction_distance_m"])
+        self.run3_pet_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["pet_threshold_s"])
+        self.run3_gap_movement_13_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_13"])
+        self.run3_gap_movement_15_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_15"])
+        self.run3_gap_movement_41_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_41"])
+        self.run3_use_raff_var = tk.BooleanVar(value=RUN3_DEFAULTS["use_raff"])
+        self.run3_use_mle_var = tk.BooleanVar(value=RUN3_DEFAULTS["use_mle"])
+        self.run3_reference_mapping_text = ""
+        self.run3_width_vars = {
+            name: tk.StringVar(value=RUN3_DEFAULTS["vehicle_widths"].get(name, ""))
+            for name in RUN3_VEHICLE_CLASSES
+        }
+        self.run3_result_text = tk.StringVar(value="Run 3: not executed")
+        self.run3_last_outputs = {}
+        self.run3_last_summary = {}
+        self.run3_was_requested = False
+
         self.status_var = tk.StringVar(
             value="Ready"
         )
@@ -596,13 +663,13 @@ class Run1App:
 
         ttk.Label(
             header,
-            text="PK Studio - Run 1 Research",
+            text="PK Studio V17 - Run 1 + 2 + 3 Research",
             font=("Segoe UI", 20, "bold")
         ).grid(row=0, column=0)
 
         ttk.Label(
             header,
-            text="Vehicle Detection + Tracking + Trajectory Research",
+            text="Vehicle Detection + Tracking + Trajectory + Safety Analysis",
             font=("Segoe UI", 10)
         ).grid(row=1, column=0, pady=(2, 0))
 
@@ -687,6 +754,7 @@ class Run1App:
         self.build_bytetrack_section()
         self.build_output_section()
         self.build_information_section()
+        self.build_run3_section()
 
         bottom = ttk.Frame(main)
 
@@ -757,7 +825,7 @@ class Run1App:
 
         self.start_button = ttk.Button(
             bottom,
-            text="▶ START RUN 1",
+            text="▶ START RUN",
             command=self.start_run
         )
 
@@ -784,6 +852,77 @@ class Run1App:
             padx=(5, 0),
             ipadx=12,
             ipady=8
+        )
+
+    # ========================================================
+    # RUN 3 GUI
+    # ========================================================
+
+    def build_run3_section(self):
+        frame = ttk.LabelFrame(
+            self.content,
+            text="RUN 3 — Safety Analysis",
+            padding=10
+        )
+        frame.grid(row=4, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(3, weight=1)
+
+        ttk.Label(frame, text="Site_ID").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_site_id_var, width=18).grid(row=0, column=1, sticky="w", pady=4)
+
+        ttk.Label(frame, text="PPM").grid(row=0, column=2, sticky="e", padx=(12, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_ppm_var, width=18).grid(row=0, column=3, sticky="w", pady=4)
+
+        ttk.Label(frame, text="Analysis").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Checkbutton(frame, text="Speed", variable=self.run3_speed_enabled_var).grid(row=1, column=1, sticky="w")
+        ttk.Checkbutton(frame, text="Gap Acceptance", variable=self.run3_gap_enabled_var).grid(row=1, column=2, sticky="w")
+        ttk.Checkbutton(frame, text="Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=1, column=3, sticky="w")
+        ttk.Checkbutton(frame, text="PET", variable=self.run3_pet_enabled_var).grid(row=2, column=1, sticky="w")
+
+        ttk.Label(frame, text="Waiting detection speed threshold (km/h)").grid(row=2, column=2, sticky="e", padx=(12, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_waiting_speed_threshold_var, width=18).grid(row=2, column=3, sticky="w", pady=4)
+
+        ttk.Label(frame, text="Road direction angle (deg) — implementation").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=3, column=1, sticky="w", pady=4)
+        ttk.Label(frame, text="LC longitudinal window (m) — implementation").grid(row=3, column=2, sticky="e", padx=(12, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_lc_longitudinal_window_var, width=18).grid(row=3, column=3, sticky="w", pady=4)
+
+        ttk.Label(frame, text="PET interaction distance (m) — implementation").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_pet_interaction_distance_var, width=18).grid(row=4, column=1, sticky="w", pady=4)
+        ttk.Label(frame, text="PET threshold (s)").grid(row=4, column=2, sticky="e", padx=(12, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_pet_threshold_var, width=18).grid(row=4, column=3, sticky="w", pady=4)
+
+        ttk.Separator(frame, orient="horizontal").grid(row=5, column=0, columnspan=4, sticky="ew", pady=(8, 6))
+
+        ttk.Label(frame, text="Gap Acceptance — Subject Movement").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Checkbutton(frame, text="1 → 3", variable=self.run3_gap_movement_13_var).grid(row=6, column=1, sticky="w")
+        ttk.Checkbutton(frame, text="1 → 5", variable=self.run3_gap_movement_15_var).grid(row=6, column=2, sticky="w")
+        ttk.Checkbutton(frame, text="4 → 1", variable=self.run3_gap_movement_41_var).grid(row=6, column=3, sticky="w")
+
+        ttk.Label(frame, text="Critical Gap").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Checkbutton(frame, text="Raff", variable=self.run3_use_raff_var).grid(row=7, column=1, sticky="w")
+        ttk.Checkbutton(frame, text="MLE", variable=self.run3_use_mle_var).grid(row=7, column=2, sticky="w")
+
+        ttk.Label(frame, text="Reference Line Mapping (one line: Site_ID|Movement|Line N)").grid(row=8, column=0, columnspan=4, sticky="w", pady=(4, 2))
+        self.run3_reference_text = tk.Text(frame, height=5, width=90, wrap="none")
+        self.run3_reference_text.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        self.run3_reference_text.insert("1.0", self.run3_reference_mapping_text)
+
+        ttk.Label(frame, text="Vehicle Widths (m) — source values supplied by researcher").grid(row=10, column=0, columnspan=4, sticky="w", pady=(2, 4))
+        width_pairs = [("Bus", 0), ("Car", 2), ("Motorcycle", 0), ("Pickup", 2), ("Sidecar", 0), ("Truck", 2), ("Van", 0)]
+        for idx, (name, pair_col) in enumerate(width_pairs):
+            row = 11 + idx // 2
+            ttk.Label(frame, text=name).grid(row=row, column=pair_col, sticky="e", padx=(4, 4), pady=2)
+            ttk.Entry(frame, textvariable=self.run3_width_vars[name], width=10).grid(row=row, column=pair_col + 1, sticky="w", padx=(0, 8), pady=2)
+
+        ttk.Label(
+            frame,
+            text="Run 3 uses Run 2 outputs after Run 1 + 2 finish. Research values without a source are not given numeric defaults.",
+            foreground="#666666"
+        ).grid(row=15, column=0, columnspan=4, sticky="w", pady=(6, 2))
+        ttk.Label(frame, textvariable=self.run3_result_text, foreground="#444444").grid(
+            row=16, column=0, columnspan=4, sticky="w", pady=(2, 0)
         )
 
     # ========================================================
@@ -2049,6 +2188,26 @@ class Run1App:
             "show_zone_label": self.show_zone_label_var.get(),
             "show_zone_label_prefix": self.show_zone_label_prefix_var.get(),
             "zone_overlay_opacity": self.zone_overlay_opacity_var.get(),
+            "run3": {
+                "site_id": self.run3_site_id_var.get(),
+                "speed_enabled": self.run3_speed_enabled_var.get(),
+                "gap_enabled": self.run3_gap_enabled_var.get(),
+                "lc_enabled": self.run3_lc_enabled_var.get(),
+                "pet_enabled": self.run3_pet_enabled_var.get(),
+                "ppm": self.run3_ppm_var.get(),
+                "waiting_speed_threshold": self.run3_waiting_speed_threshold_var.get(),
+                "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
+                "lc_longitudinal_window_m": self.run3_lc_longitudinal_window_var.get(),
+                "pet_interaction_distance_m": self.run3_pet_interaction_distance_var.get(),
+                "pet_threshold_s": self.run3_pet_threshold_var.get(),
+                "gap_movement_13": self.run3_gap_movement_13_var.get(),
+                "gap_movement_15": self.run3_gap_movement_15_var.get(),
+                "gap_movement_41": self.run3_gap_movement_41_var.get(),
+                "use_raff": self.run3_use_raff_var.get(),
+                "use_mle": self.run3_use_mle_var.get(),
+                "reference_line_mapping": self.run3_reference_text.get("1.0", "end-1c") if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text,
+                "vehicle_widths": {name: var.get() for name, var in self.run3_width_vars.items()},
+            },
         }
 
     def save_settings(self):
@@ -2129,6 +2288,39 @@ class Run1App:
         for key, variable in pairs:
             if key in settings:
                 variable.set(settings[key])
+
+        run3 = settings.get("run3", {})
+        if isinstance(run3, dict):
+            mapping_pairs = [
+                ("site_id", self.run3_site_id_var),
+                ("speed_enabled", self.run3_speed_enabled_var),
+                ("gap_enabled", self.run3_gap_enabled_var),
+                ("lc_enabled", self.run3_lc_enabled_var),
+                ("pet_enabled", self.run3_pet_enabled_var),
+                ("ppm", self.run3_ppm_var),
+                ("waiting_speed_threshold", self.run3_waiting_speed_threshold_var),
+                ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
+                ("lc_longitudinal_window_m", self.run3_lc_longitudinal_window_var),
+                ("pet_interaction_distance_m", self.run3_pet_interaction_distance_var),
+                ("pet_threshold_s", self.run3_pet_threshold_var),
+                ("gap_movement_13", self.run3_gap_movement_13_var),
+                ("gap_movement_15", self.run3_gap_movement_15_var),
+                ("gap_movement_41", self.run3_gap_movement_41_var),
+                ("use_raff", self.run3_use_raff_var),
+                ("use_mle", self.run3_use_mle_var),
+            ]
+            for key, variable in mapping_pairs:
+                if key in run3:
+                    variable.set(run3[key])
+            self.run3_reference_mapping_text = str(run3.get("reference_line_mapping", "") or "")
+            if hasattr(self, "run3_reference_text"):
+                self.run3_reference_text.delete("1.0", "end")
+                self.run3_reference_text.insert("1.0", self.run3_reference_mapping_text)
+            widths = run3.get("vehicle_widths", {})
+            if isinstance(widths, dict):
+                for name, var in self.run3_width_vars.items():
+                    if name in widths:
+                        var.set(widths[name])
 
         snapshot = settings.get("zone_snapshot")
         restored = False
@@ -2286,6 +2478,65 @@ class Run1App:
         return True
 
     # ========================================================
+    # RUN 3 VALIDATION
+    # ========================================================
+
+    def _run3_float(self, value, name, positive=True):
+        text = str(value).strip()
+        if not text:
+            raise ValueError(f"Run 3 requires {name}.")
+        try:
+            number = float(text)
+        except Exception as exc:
+            raise ValueError(f"Run 3 {name} must be numeric.") from exc
+        if positive and number <= 0:
+            raise ValueError(f"Run 3 {name} must be greater than 0.")
+        return number
+
+    def validate_run3_settings(self):
+        enabled = any([
+            self.run3_speed_enabled_var.get(),
+            self.run3_gap_enabled_var.get(),
+            self.run3_lc_enabled_var.get(),
+            self.run3_pet_enabled_var.get(),
+        ])
+        if not enabled:
+            return True
+
+        if not self.run3_site_id_var.get().strip():
+            raise ValueError("Run 3 Site_ID is required when Run 3 is enabled.")
+
+        if self.run3_speed_enabled_var.get() or self.run3_lc_enabled_var.get():
+            self._run3_float(self.run3_ppm_var.get(), "PPM")
+
+        if self.run3_gap_enabled_var.get():
+            if not any([
+                self.run3_gap_movement_13_var.get(),
+                self.run3_gap_movement_15_var.get(),
+                self.run3_gap_movement_41_var.get(),
+            ]):
+                raise ValueError("Select at least one Gap Acceptance subject movement.")
+            self._run3_float(self.run3_waiting_speed_threshold_var.get(), "waiting detection speed threshold (km/h)")
+            if not (self.run3_use_raff_var.get() or self.run3_use_mle_var.get()):
+                raise ValueError("Select at least one Critical Gap method.")
+            mapping_text = self.run3_reference_text.get("1.0", "end-1c").strip() if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text.strip()
+            if not mapping_text:
+                raise ValueError("Reference Line Mapping is required for Gap Acceptance.")
+            self.run3_reference_mapping_text = mapping_text
+
+        if self.run3_lc_enabled_var.get():
+            self._run3_float(self.run3_lateral_axis_angle_var.get(), "road direction angle (deg)")
+            self._run3_float(self.run3_lc_longitudinal_window_var.get(), "LC longitudinal window (m)")
+            for name in RUN3_VEHICLE_CLASSES:
+                self._run3_float(self.run3_width_vars[name].get(), f"vehicle width for {name}")
+
+        if self.run3_pet_enabled_var.get():
+            self._run3_float(self.run3_pet_interaction_distance_var.get(), "PET interaction distance (m)")
+            self._run3_float(self.run3_pet_threshold_var.get(), "PET threshold (s)")
+
+        return True
+
+    # ========================================================
     # DEVICE
     # ========================================================
 
@@ -2415,8 +2666,9 @@ class Run1App:
     def start_run(self):
         try:
             self.validate_measurements()
+            self.validate_run3_settings()
         except Exception as exc:
-            messagebox.showerror("Measurement Configuration", str(exc))
+            messagebox.showerror("Run 3 / Measurement Configuration", str(exc))
             return
 
         if self.running:
@@ -2457,7 +2709,7 @@ class Run1App:
         )
 
         self.status_var.set(
-            f"Starting Run 1 | Device = {selected_device}"
+            f"Starting Run 1 + 2 + 3 | Device = {selected_device}"
         )
 
         self.progress_var.set("")
@@ -3986,18 +4238,38 @@ class Run1App:
             print("Run Summary         :", output_summary)
             print("=" * 75)
 
+            # ------------------------------------------------------------
+            # RUN 3 — execute only after Run 1 + Run 2 files are closed.
+            # ------------------------------------------------------------
+            self.run3_last_outputs = {}
+            self.run3_last_summary = {}
+            self.run3_was_requested = any([
+                self.run3_speed_enabled_var.get(),
+                self.run3_gap_enabled_var.get(),
+                self.run3_lc_enabled_var.get(),
+                self.run3_pet_enabled_var.get(),
+            ])
+            if (not stopped) and self.run3_was_requested:
+                self.run3_last_outputs = self.run3_processing(settings, output_dir, run_name)
+                # Add Run 3 information to the existing Run 1 + 2 summary JSON.
+                try:
+                    with open(output_summary, "r", encoding="utf-8") as sf:
+                        integrated_summary = json.load(sf)
+                    integrated_summary["run_type"] = "Run 1 + 2 + 3 Integrated Research"
+                    integrated_summary["run3"] = self.run3_last_summary
+                    with open(output_summary, "w", encoding="utf-8") as sf:
+                        json.dump(integrated_summary, sf, indent=4, ensure_ascii=False)
+                except Exception:
+                    pass
+
             self.root.after(
                 0,
-                lambda: self.finish_ui(
+                lambda: self.finish_integrated_ui(
                     stopped,
                     output_video,
                     output_csv,
                     output_settings,
                     output_summary,
-                    None,
-                    None,
-                    None,
-                    None,
                     output_id_zone_summary,
                     output_zone_summary
                 )
@@ -4054,6 +4326,703 @@ class Run1App:
                     message
                 )
             )
+
+    # ========================================================
+    # RUN 3 PROCESSING
+    # ========================================================
+
+    @staticmethod
+    def _run3_read_csv(path):
+        if not os.path.isfile(path):
+            raise FileNotFoundError(path)
+        with open(path, "r", newline="", encoding="utf-8-sig") as f:
+            return list(csv.DictReader(f))
+
+    @staticmethod
+    def _run3_parse_zone_sequence(text):
+        nums = []
+        for match in re.finditer(r"Zone\s*(\d+)", str(text or ""), flags=re.I):
+            n = int(match.group(1))
+            if not nums or nums[-1] != n:
+                nums.append(n)
+        return nums
+
+    @staticmethod
+    def _run3_movement_from_sequence(sequence):
+        seq = Run1App._run3_parse_zone_sequence(sequence)
+        supported = {
+            (1, 3): "1→3",
+            (1, 5): "1→5",
+            (4, 1): "4→1",
+            (2, 3): "2→3",
+            (4, 5): "4→5",
+        }
+        for a, b in zip(seq, seq[1:]):
+            if (a, b) in supported:
+                return supported[(a, b)]
+        return ""
+
+    @staticmethod
+    def _run3_float_safe(value):
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _run3_point_from_row(row):
+        x = Run1App._run3_float_safe(row.get("trajectory_x"))
+        y = Run1App._run3_float_safe(row.get("trajectory_y"))
+        if x is None or y is None:
+            return None
+        return (x, y)
+
+    @staticmethod
+    def _run3_bbox_center(row):
+        try:
+            x1 = float(row["bbox_x1"]); y1 = float(row["bbox_y1"])
+            x2 = float(row["bbox_x2"]); y2 = float(row["bbox_y2"])
+            return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _run3_segment_distance_sum(points):
+        total = 0.0
+        for a, b in zip(points, points[1:]):
+            total += math.hypot(b[0] - a[0], b[1] - a[1])
+        return total
+
+    @staticmethod
+    def _run3_interp_point_time(p0, t0, p1, t1, target):
+        vx = p1[0] - p0[0]
+        vy = p1[1] - p0[1]
+        den = vx * vx + vy * vy
+        if den <= 0:
+            return None
+        u = ((target[0] - p0[0]) * vx + (target[1] - p0[1]) * vy) / den
+        if u < 0 or u > 1:
+            return None
+        return (t0 + u * (t1 - t0), (p0[0] + u * vx, p0[1] + u * vy))
+
+    @staticmethod
+    def _run3_line_crossing_time(prev_point, prev_t, curr_point, curr_t, line):
+        if not prev_point or not curr_point or len(line) < 2:
+            return None
+        a, b = line[0], line[1]
+        def side(p):
+            return (b[0]-a[0])*(p[1]-a[1]) - (b[1]-a[1])*(p[0]-a[0])
+        s0 = side(prev_point); s1 = side(curr_point)
+        if s0 == 0 and s1 == 0:
+            return None
+        if s0 == 0:
+            return prev_t
+        if s1 == 0:
+            return curr_t
+        if (s0 < 0 < s1) or (s0 > 0 > s1):
+            u = abs(s0) / (abs(s0) + abs(s1))
+            return prev_t + u * (curr_t - prev_t)
+        return None
+
+    def _run3_load_inputs(self, output_dir, run_name):
+        det = os.path.join(output_dir, run_name + "_Detection_Records.csv")
+        ids = os.path.join(output_dir, run_name + "_ID_Zone_Summary.csv")
+        zone = os.path.join(output_dir, run_name + "_Zone_Summary.csv")
+        return (
+            self._run3_read_csv(det),
+            self._run3_read_csv(ids),
+            self._run3_read_csv(zone),
+            det, ids, zone,
+        )
+
+    def _run3_build_tracks(self, detection_rows, id_rows):
+        tracks = defaultdict(list)
+        for row in detection_rows:
+            tid = str(row.get("track_id", "")).strip()
+            if not tid or tid == "-1":
+                continue
+            ts = self._run3_float_safe(row.get("timestamp"))
+            if ts is None:
+                continue
+            row2 = dict(row)
+            row2["_timestamp"] = ts
+            row2["_point"] = self._run3_point_from_row(row2)
+            row2["_center"] = self._run3_bbox_center(row2)
+            row2["_zone_num"] = None
+            z = str(row.get("zone", ""))
+            m = re.search(r"(\d+)", z)
+            if m:
+                row2["_zone_num"] = int(m.group(1))
+            tracks[tid].append(row2)
+        for rows in tracks.values():
+            rows.sort(key=lambda r: r["_timestamp"])
+        summaries = {str(r.get("track_id", "")): r for r in id_rows}
+        return tracks, summaries
+
+    def _run3_speed(self, tracks, ppm):
+        results = []
+        for tid, rows in tracks.items():
+            if not rows:
+                continue
+            cls = rows[0].get("class_name", "")
+            if str(cls).lower() == "person":
+                continue
+
+            metrics = {}
+            for zone, label in [(2, "Y1"), (4, "Y1"), (3, "Y2"), (5, "Y2")]:
+                zr = [r for r in rows if r.get("_zone_num") == zone and r.get("_point") is not None]
+                if len(zr) < 2:
+                    continue
+                d_px = self._run3_segment_distance_sum([r["_point"] for r in zr])
+                dt = zr[-1]["_timestamp"] - zr[0]["_timestamp"]
+                if dt <= 0 or d_px <= 0:
+                    continue
+                speed_kmh = (d_px / ppm) / dt * 3.6
+                if label not in metrics:
+                    metrics[label] = {
+                        "zone": f"Zone {zone}",
+                        "start": zr[0]["_timestamp"],
+                        "end": zr[-1]["_timestamp"],
+                        "distance": d_px / ppm,
+                        "speed": speed_kmh,
+                    }
+
+            y1 = metrics.get("Y1")
+            y2 = metrics.get("Y2")
+            if not y1 and not y2:
+                continue
+            delta = (y2["speed"] - y1["speed"]) if y1 and y2 else None
+            results.append({
+                "Site_ID": self.run3_site_id_var.get().strip(),
+                "Vehicle_ID": tid,
+                "Vehicle_Class": cls,
+                "Approach_Zone": y1["zone"] if y1 else "",
+                "Exit_Zone": y2["zone"] if y2 else "",
+                "Approach_Start_Time": "" if not y1 else f"{y1['start']:.6f}",
+                "Approach_End_Time": "" if not y1 else f"{y1['end']:.6f}",
+                "Approach_Distance_m": "" if not y1 else f"{y1['distance']:.6f}",
+                "Y1_Approach_Speed": "" if not y1 else f"{y1['speed']:.6f}",
+                "Exit_Start_Time": "" if not y2 else f"{y2['start']:.6f}",
+                "Exit_End_Time": "" if not y2 else f"{y2['end']:.6f}",
+                "Exit_Distance_m": "" if not y2 else f"{y2['distance']:.6f}",
+                "Y2_Exit_Speed": "" if not y2 else f"{y2['speed']:.6f}",
+                "Delta_Speed": "" if delta is None else f"{delta:.6f}",
+                "QC_Flag": "Incomplete_Y1_or_Y2" if (not y1 or not y2) else "",
+            })
+        return results
+
+    def _run3_parse_reference_mapping(self):
+        text = self.run3_reference_text.get("1.0", "end-1c") if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
+        mapping = {}
+        for raw in str(text).splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) != 3:
+                raise ValueError(f"Invalid Reference Line Mapping row: {raw}")
+            site, movement, lname = parts
+            if movement not in RUN3_ALL_MOVEMENTS:
+                raise ValueError(f"Invalid movement in Reference Line Mapping: {movement}")
+            if lname not in LINE_NAMES:
+                raise ValueError(f"Invalid line name in Reference Line Mapping: {lname}")
+            mapping[(site, movement)] = lname
+        return mapping
+
+    def _run3_gap(self, tracks, summaries, mapping):
+        selected = []
+        if self.run3_gap_movement_13_var.get(): selected.append("1→3")
+        if self.run3_gap_movement_15_var.get(): selected.append("1→5")
+        if self.run3_gap_movement_41_var.get(): selected.append("4→1")
+        wait_threshold = float(self.run3_waiting_speed_threshold_var.get())
+
+        movement_by_id = {}
+        for tid, rows in tracks.items():
+            if tid in summaries:
+                movement_by_id[tid] = self._run3_movement_from_sequence(summaries[tid].get("zone_sequence", ""))
+            else:
+                movement_by_id[tid] = ""
+
+        line_times = defaultdict(list)
+        for tid, rows in tracks.items():
+            movement = movement_by_id.get(tid, "")
+            if movement not in RUN3_ALL_MOVEMENTS:
+                continue
+            lname = mapping.get((self.run3_site_id_var.get().strip(), movement))
+            if not lname:
+                continue
+            line = self.lines.get(lname, [])
+            prev = None
+            prev_t = None
+            for r in rows:
+                p = r.get("_point")
+                t = r.get("_timestamp")
+                if p is None:
+                    continue
+                if prev is not None:
+                    cross_t = self._run3_line_crossing_time(prev, prev_t, p, t, line)
+                    if cross_t is not None:
+                        line_times[movement].append((cross_t, tid, r.get("class_name", ""), lname))
+                prev, prev_t = p, t
+        for key in list(line_times):
+            line_times[key].sort(key=lambda x: x[0])
+
+        rows_out = []
+        for tid, rows in tracks.items():
+            movement = movement_by_id.get(tid, "")
+            if movement not in selected:
+                continue
+            wait_zone = 1 if movement in ("1→3", "1→5") else 4
+            wr = []
+            for idx, r in enumerate(rows):
+                if r.get("_zone_num") != wait_zone or r.get("_point") is None:
+                    continue
+                if idx == 0:
+                    continue
+                prev = rows[idx-1]
+                if prev.get("_point") is None:
+                    continue
+                dt = r["_timestamp"] - prev["_timestamp"]
+                if dt <= 0:
+                    continue
+                step_kmh = (math.hypot(r["_point"][0]-prev["_point"][0], r["_point"][1]-prev["_point"][1])) / max(1e-9, 1.0) / dt
+                # step_kmh above is pixel/s only; convert to km/h via PPM below.
+                ppm = float(self.run3_ppm_var.get())
+                step_kmh = (math.hypot(r["_point"][0]-prev["_point"][0], r["_point"][1]-prev["_point"][1]) / ppm) / dt * 3.6
+                if step_kmh <= wait_threshold:
+                    wr.append(r)
+            if not wr:
+                continue
+            wait_start = wr[0]["_timestamp"]
+            accepted_time = None
+            for idx in range(1, len(rows)):
+                prev = rows[idx-1]; cur = rows[idx]
+                if prev.get("_zone_num") == wait_zone and cur.get("_point") is not None and prev.get("_point") is not None:
+                    dt = cur["_timestamp"] - prev["_timestamp"]
+                    if dt <= 0:
+                        continue
+                    speed = (math.hypot(cur["_point"][0]-prev["_point"][0], cur["_point"][1]-prev["_point"][1]) / float(self.run3_ppm_var.get())) / dt * 3.6
+                    if speed > wait_threshold:
+                        accepted_time = cur["_timestamp"]
+                        break
+            if accepted_time is None:
+                continue
+
+            candidates = []
+            # Conflict mapping fixed by the study design for the three subject movements.
+            conflict_movements = {
+                "1→3": ["2→3"],
+                "1→5": ["2→3", "4→5"],
+                "4→1": ["2→3", "1→5"],
+            }.get(movement, [])
+            # The mapping may only contain the subject movements; conflict streams are derived from all IDs.
+            for cm in conflict_movements:
+                events = line_times.get(cm, [])
+                for a, b in zip(events, events[1:]):
+                    if b[0] <= a[0]:
+                        continue
+                    candidates.append({
+                        "conflict_movement": cm,
+                        "conflicting_id_a": a[1],
+                        "conflicting_class_a": a[2],
+                        "conflicting_id_b": b[1],
+                        "conflicting_class_b": b[2],
+                        "reference_line": a[3],
+                        "gap_start": a[0],
+                        "gap_end": b[0],
+                        "gap": b[0]-a[0],
+                    })
+            active = [c for c in candidates if c["gap_start"] <= accepted_time <= c["gap_end"]]
+            controlling = min(active, key=lambda c: c["gap"]) if active else None
+            prior = [c for c in candidates if wait_start <= c["gap_end"] < accepted_time]
+            # Deduplicate identical intervals across repeated candidate generation.
+            seen = set()
+            prior2 = []
+            for c in sorted(prior, key=lambda x: x["gap_end"]):
+                key = (c["conflict_movement"], round(c["gap_start"], 6), round(c["gap_end"], 6))
+                if key not in seen:
+                    seen.add(key); prior2.append(c)
+            decision_id = f"{tid}_{accepted_time:.6f}"
+            waiting_time = accepted_time - wait_start
+            if prior2:
+                for c in prior2:
+                    rows_out.append({
+                        "Site_ID": self.run3_site_id_var.get().strip(),
+                        "Decision_Event_ID": decision_id,
+                        "Subject_ID": tid,
+                        "Subject_Class": rows[0].get("class_name", ""),
+                        "Subject_Movement": movement,
+                        "Conflicting_Movement": c["conflict_movement"],
+                        "Conflicting_ID_A": c["conflicting_id_a"],
+                        "Conflicting_ID_B": c["conflicting_id_b"],
+                        "Reference_Line": c["reference_line"],
+                        "Gap_Start_Time": f"{c['gap_start']:.6f}",
+                        "Gap_End_Time": f"{c['gap_end']:.6f}",
+                        "X31_Available_Gap": f"{c['gap']:.6f}",
+                        "X32_Waiting_Time": f"{waiting_time:.6f}",
+                        "Gap_Role": "Rejected",
+                        "Y5_Gap_Acceptance": 0,
+                        "Acceptance_Time": "",
+                        "QC_Flag": "",
+                    })
+            if controlling:
+                rows_out.append({
+                    "Site_ID": self.run3_site_id_var.get().strip(),
+                    "Decision_Event_ID": decision_id,
+                    "Subject_ID": tid,
+                    "Subject_Class": rows[0].get("class_name", ""),
+                    "Subject_Movement": movement,
+                    "Conflicting_Movement": controlling["conflict_movement"],
+                    "Conflicting_ID_A": controlling["conflicting_id_a"],
+                    "Conflicting_ID_B": controlling["conflicting_id_b"],
+                    "Reference_Line": controlling["reference_line"],
+                    "Gap_Start_Time": f"{controlling['gap_start']:.6f}",
+                    "Gap_End_Time": f"{controlling['gap_end']:.6f}",
+                    "X31_Available_Gap": f"{controlling['gap']:.6f}",
+                    "X32_Waiting_Time": f"{waiting_time:.6f}",
+                    "Gap_Role": "Accepted / Controlling",
+                    "Y5_Gap_Acceptance": 1,
+                    "Acceptance_Time": f"{accepted_time:.6f}",
+                    "QC_Flag": "",
+                })
+        return rows_out
+
+    @staticmethod
+    def _run3_raff(accepted, rejected):
+        if not accepted or not rejected:
+            return None
+        candidates = sorted(set([float(v) for v in accepted + rejected if v is not None and v > 0]))
+        if not candidates:
+            return None
+        best = None
+        for g in candidates:
+            fa = np.mean([v >= g for v in accepted])
+            fr = np.mean([v <= g for v in rejected])
+            diff = abs(fa - fr)
+            if best is None or diff < best[0]:
+                best = (diff, g)
+        return float(best[1]) if best else None
+
+    @staticmethod
+    def _run3_mle_driver_intervals(intervals):
+        if len(intervals) < 1:
+            return None
+        try:
+            from scipy.optimize import minimize
+            from scipy.special import ndtr
+        except Exception:
+            return None
+        lowers = np.array([max(1e-6, r) for r, a in intervals], dtype=float)
+        uppers = np.array([max(r + 1e-6, a) for r, a in intervals], dtype=float)
+        logs_l = np.log(lowers)
+        logs_u = np.log(uppers)
+        mu0 = float(np.median((logs_l + logs_u) / 2.0))
+        sigma0 = float(max(0.25, np.std((logs_l + logs_u) / 2.0)))
+        def nll(x):
+            mu, log_sigma = x
+            sigma = math.exp(log_sigma)
+            z_u = (logs_u - mu) / sigma
+            z_l = (logs_l - mu) / sigma
+            probs = ndtr(z_u) - ndtr(z_l)
+            probs = np.clip(probs, 1e-15, None)
+            return float(-np.sum(np.log(probs)))
+        res = minimize(nll, x0=np.array([mu0, math.log(sigma0)]), method="Nelder-Mead")
+        if not res.success:
+            return None
+        mu, log_sigma = res.x
+        return {
+            "mu": float(mu),
+            "sigma": float(math.exp(log_sigma)),
+            "critical_gap_median": float(math.exp(mu)),
+            "negative_log_likelihood": float(res.fun),
+        }
+
+    def _run3_lateral_clearance(self, tracks, ppm, axis_deg, long_window_m):
+        theta = math.radians(axis_deg)
+        road_u = (math.cos(theta), math.sin(theta))
+        lat_u = (-math.sin(theta), math.cos(theta))
+        widths = {name: float(self.run3_width_vars[name].get()) for name in RUN3_VEHICLE_CLASSES}
+        out = []
+        for tid_a, rows_a in tracks.items():
+            if not rows_a or rows_a[0].get("class_name", "") != "Motorcycle":
+                continue
+            by_time = {round(r["_timestamp"], 6): r for r in rows_a if r.get("_center") is not None and r.get("_zone_num") in (2,4)}
+            for tid_b, rows_b in tracks.items():
+                if tid_b == tid_a or not rows_b:
+                    continue
+                cls_b = rows_b[0].get("class_name", "")
+                if cls_b not in widths:
+                    continue
+                for r_b in rows_b:
+                    if r_b.get("_center") is None or r_b.get("_zone_num") not in (2,4):
+                        continue
+                    key = round(r_b["_timestamp"], 6)
+                    r_a = by_time.get(key)
+                    if not r_a:
+                        continue
+                    if r_a.get("_zone_num") != r_b.get("_zone_num"):
+                        continue
+                    dx = r_b["_center"][0] - r_a["_center"][0]
+                    dy = r_b["_center"][1] - r_a["_center"][1]
+                    lateral_px = abs(dx * lat_u[0] + dy * lat_u[1])
+                    longitudinal_px = abs(dx * road_u[0] + dy * road_u[1])
+                    longitudinal_m = longitudinal_px / ppm
+                    if longitudinal_m > long_window_m:
+                        continue
+                    ls_m = lateral_px / ppm
+                    y3 = ls_m - (widths["Motorcycle"] + widths[cls_b]) / 2.0
+                    side = "Left" if (dx * lat_u[0] + dy * lat_u[1]) > 0 else "Right"
+                    out.append({
+                        "Site_ID": self.run3_site_id_var.get().strip(),
+                        "Pair_ID": f"{tid_a}_{tid_b}",
+                        "Timestamp": f"{r_a['_timestamp']:.6f}",
+                        "Zone": f"Zone {r_a['_zone_num']}",
+                        "Motorcycle_ID": tid_a,
+                        "Motorcycle_Class": "Motorcycle",
+                        "Neighbor_ID": tid_b,
+                        "Neighbor_Class": cls_b,
+                        "Neighbor_Side": side,
+                        "LS_Pixel": f"{lateral_px:.6f}",
+                        "PPM": f"{ppm:.6f}",
+                        "LS_Meter": f"{ls_m:.6f}",
+                        "Wm": f"{widths['Motorcycle']:.6f}",
+                        "Wv": f"{widths[cls_b]:.6f}",
+                        "Y3_Lateral_Clearance": f"{y3:.6f}",
+                        "QC_Flag": "Negative_Y3" if y3 < 0 else "",
+                    })
+        return out
+
+    @staticmethod
+    def _run3_segment_intersection(a0, a1, b0, b1):
+        x1,y1=a0; x2,y2=a1; x3,y3=b0; x4,y4=b1
+        den=(x1-x2)*(y3-y4)-(y1-y2)*(x3-x4)
+        if abs(den) < 1e-9:
+            return None
+        t=((x1-x3)*(y3-y4)-(y1-y3)*(x3-x4))/den
+        u=-((x1-x2)*(y1-y3)-(y1-y2)*(x1-x3))/den
+        if 0 <= t <= 1 and 0 <= u <= 1:
+            return t, u, (x1+t*(x2-x1), y1+t*(y2-y1))
+        return None
+
+    @staticmethod
+    def _run3_conflict_type(movement_a, movement_b, trajectory_intersects=False):
+        if trajectory_intersects:
+            return "Crossing"
+        seq_a = tuple(int(x) for x in re.findall(r"\d+", str(movement_a)))
+        seq_b = tuple(int(x) for x in re.findall(r"\d+", str(movement_b)))
+        if len(seq_a) == 2 and len(seq_b) == 2:
+            if seq_a[1] == seq_b[1]:
+                return "Merging"
+            if seq_a[0] == seq_b[0]:
+                return "Diverging"
+        return "Merging/Diverging"
+
+    def _run3_pet(self, tracks, summaries, ppm, axis_deg, interaction_distance_m):
+        candidates = []
+        ids = list(tracks)
+        movement_by_id = {tid: self._run3_movement_from_sequence(summaries.get(tid, {}).get("zone_sequence", "")) if tid in summaries else "" for tid in ids}
+        for i, a_id in enumerate(ids):
+            for b_id in ids[i+1:]:
+                a_rows = [r for r in tracks[a_id] if r.get("_zone_num") == 6 and r.get("_point") is not None]
+                b_rows = [r for r in tracks[b_id] if r.get("_zone_num") == 6 and r.get("_point") is not None]
+                if len(a_rows) < 2 or len(b_rows) < 2:
+                    continue
+                ma = movement_by_id.get(a_id, ""); mb = movement_by_id.get(b_id, "")
+                if not ma and not mb:
+                    continue
+                # Exclude simple same-direction movement pairs.
+                if ma and mb and ma == mb:
+                    continue
+                best = None
+                for ra0, ra1 in zip(a_rows, a_rows[1:]):
+                    for rb0, rb1 in zip(b_rows, b_rows[1:]):
+                        hit = self._run3_segment_intersection(ra0["_point"], ra1["_point"], rb0["_point"], rb1["_point"])
+                        if hit:
+                            ta_frac, tb_frac, ip = hit
+                            ta = ra0["_timestamp"] + ta_frac*(ra1["_timestamp"]-ra0["_timestamp"])
+                            tb = rb0["_timestamp"] + tb_frac*(rb1["_timestamp"]-rb0["_timestamp"])
+                            best = (ta, tb, ip, self._run3_conflict_type(ma, mb, trajectory_intersects=True))
+                            break
+                    if best:
+                        break
+                if best is None:
+                    # Merging/Diverging: closest sampled trajectory points inside Zone 6.
+                    min_pair = None
+                    for ra in a_rows:
+                        for rb in b_rows:
+                            dpx = math.hypot(ra["_point"][0]-rb["_point"][0], ra["_point"][1]-rb["_point"][1])
+                            dm = dpx / ppm
+                            if dm <= interaction_distance_m and (min_pair is None or dm < min_pair[0]):
+                                min_pair = (dm, ra, rb)
+                    if min_pair:
+                        _, ra, rb = min_pair
+                        best = (ra["_timestamp"], rb["_timestamp"], ((ra["_point"][0]+rb["_point"][0])/2, (ra["_point"][1]+rb["_point"][1])/2), self._run3_conflict_type(ma, mb, trajectory_intersects=False))
+                if best is None:
+                    continue
+                ta, tb, ip, ctype = best
+                if ta <= tb:
+                    first_id, second_id = a_id, b_id
+                    t_first, t_second = ta, tb
+                else:
+                    first_id, second_id = b_id, a_id
+                    t_first, t_second = tb, ta
+                pet = t_second - t_first
+                if pet <= 0:
+                    continue
+                candidates.append({
+                    "Site_ID": self.run3_site_id_var.get().strip(),
+                    "Interaction_ID": f"{a_id}_{b_id}_{min(ta,tb):.6f}",
+                    "Vehicle_ID_A": a_id,
+                    "Vehicle_Class_A": tracks[a_id][0].get("class_name", ""),
+                    "Movement_A": ma,
+                    "Vehicle_ID_B": b_id,
+                    "Vehicle_Class_B": tracks[b_id][0].get("class_name", ""),
+                    "Movement_B": mb,
+                    "Conflict_Type": ctype,
+                    "Conflict_Zone": "Zone 6",
+                    "Interaction_Start": f"{min(ta,tb):.6f}",
+                    "Interaction_End": f"{max(ta,tb):.6f}",
+                    "T1_Exit_Time": f"{t_first:.6f}",
+                    "T2_Entry_Time": f"{t_second:.6f}",
+                    "Y4_PET": f"{pet:.6f}",
+                    "QC_Flag": "Threshold_At_or_Below" if pet <= float(self.run3_pet_threshold_var.get()) else "",
+                })
+        return candidates
+
+    def run3_processing(self, settings, output_dir, run_name):
+        self.root.after(0, lambda: self.status_var.set("Run 3 — loading Run 2 results..."))
+        detection_rows, id_rows, zone_rows, det_path, id_path, zone_path = self._run3_load_inputs(output_dir, run_name)
+        tracks, summaries = self._run3_build_tracks(detection_rows, id_rows)
+        outputs = {}
+        summary = {"site_id": self.run3_site_id_var.get().strip(), "inputs": {"detection": det_path, "id_zone_summary": id_path, "zone_summary": zone_path}}
+
+        # Speed
+        if self.run3_speed_enabled_var.get():
+            ppm = float(self.run3_ppm_var.get())
+            speed_rows = self._run3_speed(tracks, ppm)
+            path = os.path.join(output_dir, "Run_3_Speed.csv")
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                fields = [
+                    "Site_ID","Vehicle_ID","Vehicle_Class","Approach_Zone","Exit_Zone",
+                    "Approach_Start_Time","Approach_End_Time","Approach_Distance_m","Y1_Approach_Speed",
+                    "Exit_Start_Time","Exit_End_Time","Exit_Distance_m","Y2_Exit_Speed","Delta_Speed","QC_Flag"
+                ]
+                w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(speed_rows)
+            vals_y1 = [float(r["Y1_Approach_Speed"]) for r in speed_rows if r["Y1_Approach_Speed"] not in ("", None)]
+            vals_y2 = [float(r["Y2_Exit_Speed"]) for r in speed_rows if r["Y2_Exit_Speed"] not in ("", None)]
+            summary["speed"] = {
+                "Y1_P85": float(np.percentile(vals_y1,85)) if vals_y1 else None,
+                "Y2_P85": float(np.percentile(vals_y2,85)) if vals_y2 else None,
+                "Y1_N": len(vals_y1), "Y2_N": len(vals_y2)
+            }
+            outputs["speed"] = path
+
+        # Gap Acceptance
+        if self.run3_gap_enabled_var.get():
+            mapping = self._run3_parse_reference_mapping()
+            gap_rows = self._run3_gap(tracks, summaries, mapping)
+            path = os.path.join(output_dir, "Run_3_Gap_Acceptance.csv")
+            fields = ["Site_ID","Decision_Event_ID","Subject_ID","Subject_Class","Subject_Movement","Conflicting_Movement","Conflicting_ID_A","Conflicting_ID_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","X32_Waiting_Time","Gap_Role","Y5_Gap_Acceptance","Acceptance_Time","QC_Flag"]
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(gap_rows)
+            rejected_by_driver = defaultdict(list); accepted_by_driver = defaultdict(list)
+            for r in gap_rows:
+                key = (r["Subject_Class"], r["Subject_Movement"], r["Subject_ID"])
+                gap = float(r["X31_Available_Gap"])
+                if r["Y5_Gap_Acceptance"] == 0: rejected_by_driver[key].append(gap)
+                else: accepted_by_driver[key].append(gap)
+            critical = []
+            groups = defaultdict(lambda: {"accepted": [], "rejected": [], "intervals": []})
+            for key in set(rejected_by_driver)|set(accepted_by_driver):
+                acc = accepted_by_driver.get(key, []); rej = rejected_by_driver.get(key, [])
+                if acc and rej:
+                    groups[(key[0], key[1])]["accepted"].append(acc[-1])
+                    groups[(key[0], key[1])]["rejected"].append(max(rej))
+                    groups[(key[0], key[1])]["intervals"].append((max(rej), acc[-1]))
+            for (cls, movement), g in groups.items():
+                cr = self._run3_raff(g["accepted"], g["rejected"]) if self.run3_use_raff_var.get() else None
+                mle = self._run3_mle_driver_intervals(g["intervals"]) if self.run3_use_mle_var.get() else None
+                critical.append({
+                    "Site_ID": self.run3_site_id_var.get().strip(), "Vehicle_Class": cls, "Movement": movement,
+                    "Drivers_With_Pairs": len(g["intervals"]),
+                    "Raff_Critical_Gap_s": "" if cr is None else f"{cr:.6f}",
+                    "MLE_Critical_Gap_Median_s": "" if mle is None else f"{mle['critical_gap_median']:.6f}",
+                    "MLE_mu": "" if mle is None else f"{mle['mu']:.6f}",
+                    "MLE_sigma": "" if mle is None else f"{mle['sigma']:.6f}",
+                })
+            summary["gap_acceptance"] = {
+                "gap_events": len(gap_rows),
+                "decision_events": len(set(r["Decision_Event_ID"] for r in gap_rows)),
+                "accepted_events": sum(1 for r in gap_rows if r["Y5_Gap_Acceptance"] == 1),
+                "rejected_events": sum(1 for r in gap_rows if r["Y5_Gap_Acceptance"] == 0),
+                "critical_gap": critical,
+            }
+            outputs["gap_acceptance"] = path
+
+        # Lateral Clearance
+        if self.run3_lc_enabled_var.get():
+            ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); long_window = float(self.run3_lc_longitudinal_window_var.get())
+            lc_rows = self._run3_lateral_clearance(tracks, ppm, axis, long_window)
+            path = os.path.join(output_dir, "Run_3_Lateral_Clearance.csv")
+            fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Neighbor_ID","Neighbor_Class","Neighbor_Side","LS_Pixel","PPM","LS_Meter","Wm","Wv","Y3_Lateral_Clearance","QC_Flag"]
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(lc_rows)
+            vals = [float(r["Y3_Lateral_Clearance"]) for r in lc_rows]
+            summary["lateral_clearance"] = {"N": len(vals), "Mean_m": float(np.mean(vals)) if vals else None, "Median_m": float(np.median(vals)) if vals else None, "Minimum_m": float(np.min(vals)) if vals else None, "Maximum_m": float(np.max(vals)) if vals else None}
+            outputs["lateral_clearance"] = path
+
+        # PET
+        if self.run3_pet_enabled_var.get():
+            ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); interaction = float(self.run3_pet_interaction_distance_var.get())
+            pet_rows = self._run3_pet(tracks, summaries, ppm, axis, interaction)
+            path = os.path.join(output_dir, "Run_3_PET.csv")
+            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Y4_PET","QC_Flag"]
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(pet_rows)
+            vals = [float(r["Y4_PET"]) for r in pet_rows]
+            threshold = float(self.run3_pet_threshold_var.get())
+            summary["pet"] = {"Total_Events": len(vals), "Mean_s": float(np.mean(vals)) if vals else None, "Median_s": float(np.median(vals)) if vals else None, "Minimum_s": float(np.min(vals)) if vals else None, "Maximum_s": float(np.max(vals)) if vals else None, "PET_At_Or_Below_Threshold": sum(v <= threshold for v in vals)}
+            outputs["pet"] = path
+
+        summary_path = os.path.join(output_dir, "Run_3_Summary.json")
+        summary["outputs"] = outputs
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=4, ensure_ascii=False)
+        outputs["summary"] = summary_path
+        self.run3_last_outputs = outputs
+        self.run3_last_summary = summary
+        self.root.after(0, lambda: self.run3_result_text.set(f"Run 3 completed | outputs: {len([p for p in outputs.values() if p])}"))
+        return outputs
+
+    def finish_integrated_ui(self, stopped, output_video, output_csv, output_settings, output_summary, output_id_zone_summary=None, output_zone_summary=None):
+        self.running = False
+        self.start_button.config(state="normal")
+        self.pause_button.config(state="disabled", text="Ⅱ PAUSE")
+        self.stop_button.config(state="disabled")
+        if stopped:
+            self.status_var.set("Run 1 + 2 + 3 stopped")
+            messagebox.showinfo("PK Studio V17", "Processing was stopped by user.")
+            return
+        if self.run3_was_requested:
+            self.status_var.set("Run 1 + 2 + 3 completed")
+            message = "Run 1 + 2 + 3 completed\n\n"
+        else:
+            self.status_var.set("Run 1 + 2 completed")
+            message = "Run 1 + 2 completed\n\n"
+        self.progress_var.set("100%")
+        if self.save_video_var.get():
+            message += f"Run 1/2 Video:\n{output_video}\n\n"
+        if self.save_csv_var.get():
+            message += f"Run 2 Detection Records:\n{output_csv}\n\n"
+        message += f"Run 2 ID Zone Summary:\n{output_id_zone_summary}\n\nRun 2 Zone Summary:\n{output_zone_summary}\n\n"
+        if self.run3_last_outputs:
+            message += "Run 3 Outputs:\n"
+            for key, value in self.run3_last_outputs.items():
+                if value:
+                    message += f"{key}: {value}\n"
+            message += "\n"
+        message += f"Run 1/2 Summary:\n{output_summary}\n\nSettings:\n{output_settings}"
+        messagebox.showinfo("PK Studio V17 Complete", message)
 
     # ========================================================
     # FORMAT TIME
@@ -4206,7 +5175,7 @@ class Run1App:
         )
 
         messagebox.showerror(
-            "Run 1 Error",
+            "PK Studio V17 Error",
             error
         )
 
@@ -4220,7 +5189,7 @@ class Run1App:
 
             answer = messagebox.askyesno(
                 "Exit",
-                "Run 1 is currently processing\n\n"
+                "PK Studio V17 is currently processing\n\n"
                 "Stop the run and close the program?"
             )
 
