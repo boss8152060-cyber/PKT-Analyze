@@ -356,6 +356,7 @@ DEFAULT_SETTINGS = {
     # inside each bounding box. Offset moves the anchor inward from the selected edge(s).
     "trajectory_position": "Center",
     "trajectory_offset": "0",
+    "zone_opacity": 20,
 }
 
 
@@ -511,6 +512,7 @@ class Run1App:
         # Trajectory Position controls.
         self.trajectory_position_var = tk.StringVar(value=DEFAULT_SETTINGS["trajectory_position"])
         self.trajectory_offset_var = tk.StringVar(value=DEFAULT_SETTINGS["trajectory_offset"])
+        self.zone_opacity_var = tk.IntVar(value=DEFAULT_SETTINGS["zone_opacity"])
 
         self.status_var = tk.StringVar(
             value="Ready"
@@ -1087,12 +1089,37 @@ class Run1App:
         self.status_var.set("Zone configuration snapshot saved")
 
     def draw_measurement_overlay(self, frame, frame_index, fps, zone_track_state, line_track_state, zone_entry_count, line_cross_count):
-        """Draw PK Studio zones/lines and live zone timing/counts on the preview/output frame.
+        """Draw a light Zone overlay.
 
-        Object labels are rendered once in the detection loop as:
-        ID | Class | Confidence | Zone.
+        Zone labels are shown once at the geometric center of each Zone.
+        Entry counts are intentionally NOT displayed on the video.
+        Zone opacity is controlled by the Zone Opacity setting.
         """
-        # Draw polygons and labels even when no detection exists.
+        try:
+            opacity = max(0.0, min(0.80, float(self.zone_opacity_var.get()) / 100.0))
+        except Exception:
+            opacity = 0.20
+
+        # Fill all Zones on a temporary layer so the video/object boxes remain visible.
+        if opacity > 0:
+            overlay = frame.copy()
+            for zname in ZONE_NAMES:
+                polygon = self.zones.get(zname, [])
+                if len(polygon) < 3:
+                    continue
+                pts = np.array(polygon, dtype=np.int32).reshape((-1, 1, 2))
+                meta = getattr(self, "zone_meta", {}).get(zname, {})
+                color_raw = meta.get("color_bgr", [0, 200, 0])
+                try:
+                    color = tuple(int(max(0, min(255, v))) for v in color_raw[:3])
+                    if len(color) != 3:
+                        color = (0, 200, 0)
+                except Exception:
+                    color = (0, 200, 0)
+                cv2.fillPoly(overlay, [pts], color)
+            cv2.addWeighted(overlay, opacity, frame, 1.0 - opacity, 0, frame)
+
+        # Zone boundary + centered label. No entry counts on the video.
         for zname in ZONE_NAMES:
             polygon = self.zones.get(zname, [])
             if len(polygon) < 3:
@@ -1106,13 +1133,26 @@ class Run1App:
                     color = (0, 200, 0)
             except Exception:
                 color = (0, 200, 0)
-            cv2.polylines(frame, [pts], True, color, 3, cv2.LINE_AA)
-            if meta.get("show_label", True):
-                x, y = map(int, polygon[0])
-                cv2.putText(frame, f"{zname} | entries: {zone_entry_count.get(zname, 0)}", (x, max(20, y - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
+            cv2.polylines(frame, [pts], True, color, 2, cv2.LINE_AA)
 
-        # Draw line geometry when supplied by a compatible config.
+            if meta.get("show_label", True):
+                moments = cv2.moments(pts)
+                if abs(moments.get("m00", 0.0)) > 1e-6:
+                    cx = int(moments["m10"] / moments["m00"])
+                    cy = int(moments["m01"] / moments["m00"])
+                else:
+                    cx = int(np.mean([p[0] for p in polygon]))
+                    cy = int(np.mean([p[1] for p in polygon]))
+
+                label = zname
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.70, 2)
+                tx = max(5, cx - tw // 2)
+                ty = max(th + 5, cy + th // 2)
+                # Small translucent background keeps the Zone name readable without blocking the scene.
+                cv2.rectangle(frame, (tx - 6, ty - th - 5), (tx + tw + 6, ty + 6), (0, 0, 0), -1)
+                cv2.putText(frame, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.70, color, 2, cv2.LINE_AA)
+
+        # Keep line geometry behavior unchanged.
         for lname in LINE_NAMES:
             line = self.lines.get(lname, [])
             if len(line) != 2:
@@ -1122,11 +1162,7 @@ class Run1App:
             cv2.circle(frame, p1, 6, (255, 255, 255), -1)
             cv2.circle(frame, p2, 6, (255, 255, 255), -1)
             mx, my = (p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2
-            cv2.putText(frame, f"{lname} | crossings: {line_cross_count.get(lname, 0)}",
-                        (mx, max(20, my - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
-
-        # Zone duration is kept in the research state / CSV / event outputs.
-        # No separate on-frame duration label is drawn.
+            cv2.putText(frame, lname, (mx, max(20, my - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
 
     def get_zone_reference_point(self, x1, y1, x2, y2):
         """Return the selected Trajectory Position inside the bounding box.
@@ -1472,11 +1508,23 @@ class Run1App:
         )
         self.trajectory_offset_spin.grid(row=7, column=3, sticky="w", pady=4)
 
+        ttk.Label(frame, text="Zone Opacity").grid(
+            row=8, column=0, sticky="w", padx=(0, 8), pady=4
+        )
+        self.zone_opacity_scale = ttk.Scale(
+            frame, from_=0, to=80, orient="horizontal",
+            variable=self.zone_opacity_var, length=170
+        )
+        self.zone_opacity_scale.grid(row=8, column=1, sticky="ew", pady=4)
+        ttk.Label(frame, textvariable=tk.StringVar(value="")).grid(row=8, column=2)
+        ttk.Label(frame, text="จาง").grid(row=8, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(frame, text="80%").grid(row=8, column=3, sticky="w")
+
         ttk.Label(
             frame,
-            text="เลือกจุดที่ใช้สร้าง Trajectory และตรวจ Zone | Offset = เลื่อนจุดเข้าด้านใน 0–50%",
+            text="Zone ใช้ Trajectory Position เป็นจุดตัดสิน | พื้นที่ Zone โปร่งใสและวางกรอบวัตถุทับได้",
             foreground="#666666"
-        ).grid(row=8, column=1, columnspan=3, sticky="w", pady=(0, 2))
+        ).grid(row=9, column=1, columnspan=3, sticky="w", pady=(0, 2))
 
         ttk.Label(
             frame, textvariable=self.measurement_status_var,
@@ -2113,6 +2161,7 @@ class Run1App:
             "research_mode": self.research_mode_var.get(),
             "trajectory_position": self.trajectory_position_var.get(),
             "trajectory_offset": self.trajectory_offset_var.get(),
+            "zone_opacity": int(self.zone_opacity_var.get()),
         }
 
     def save_settings(self):
@@ -2185,6 +2234,7 @@ class Run1App:
             ("research_mode", self.research_mode_var),
             ("trajectory_position", self.trajectory_position_var),
             ("trajectory_offset", self.trajectory_offset_var),
+            ("zone_opacity", self.zone_opacity_var),
         ]
 
         for key, variable in pairs:
@@ -2326,6 +2376,14 @@ class Run1App:
                 str(e)
             )
 
+            return False
+
+        try:
+            opacity = int(float(self.zone_opacity_var.get()))
+            if not 0 <= opacity <= 80:
+                raise ValueError("Zone Opacity must be between 0 and 80%")
+        except Exception as e:
+            messagebox.showerror("Zone Opacity", str(e))
             return False
 
         try:
@@ -2639,7 +2697,7 @@ class Run1App:
 
             output_csv = os.path.join(
                 output_dir,
-                run_name + "_Research_Trajectory.csv"
+                run_name + "_Detection_Records.csv"
             )
 
             output_track_stats = os.path.join(
@@ -2680,7 +2738,10 @@ class Run1App:
                 output_dir, run_name + "_Research_Zone_Line_Events.csv"
             )
             output_zone_summary = os.path.join(
-                output_dir, run_name + "_Research_Zone_Summary.csv"
+                output_dir, run_name + "_Zone_Summary.csv"
+            )
+            output_id_zone_summary = os.path.join(
+                output_dir, run_name + "_ID_Zone_Summary.csv"
             )
             output_line_summary = os.path.join(
                 output_dir, run_name + "_Research_Line_Summary.csv"
@@ -2850,23 +2911,12 @@ class Run1App:
                 )
 
                 csv_writer.writerow([
-                    "frame",
-                    "timestamp",
-                    "track_id",
-                    "class_id",
-                    "class_name",
-                    "confidence",
-                    "bbox_x1",
-                    "bbox_y1",
-                    "bbox_x2",
-                    "bbox_y2",
-                    "center_x",
-                    "center_y",
-                    "reference_x",
-                    "reference_y",
-                    "zone_assigned",
-                    "zone_confidence",
-                    "zone_method"
+                    "frame", "timestamp", "track_id", "class_id", "class_name",
+                    "confidence", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
+                    "bbox_width", "bbox_height", "bbox_area",
+                    "trajectory_x", "trajectory_y",
+                    "trajectory_position", "trajectory_offset",
+                    "zone"
                 ])
 
             else:
@@ -2970,8 +3020,17 @@ class Run1App:
             zone_summary_file = open(output_zone_summary, "w", newline="", encoding="utf-8-sig")
             zone_summary_writer = csv.writer(zone_summary_file)
             zone_summary_writer.writerow([
-                "zone", "track_id", "class_name", "entry_frame", "entry_timestamp",
-                "exit_frame", "exit_timestamp", "duration_seconds", "distance_px", "average_speed_px_s"
+                "zone", "unique_ids", "total_entries", "average_duration_seconds",
+                "min_duration_seconds", "max_duration_seconds",
+                "first_entry_timestamp", "last_entry_timestamp"
+            ])
+
+            id_zone_summary_file = open(output_id_zone_summary, "w", newline="", encoding="utf-8-sig")
+            id_zone_summary_writer = csv.writer(id_zone_summary_file)
+            id_zone_summary_writer.writerow([
+                "track_id", "class_name", "first_seen_timestamp", "last_seen_timestamp",
+                "track_duration_seconds", "first_zone", "last_zone", "zone_sequence",
+                "unique_zones_visited", "zone_transition_count", "total_zone_time_seconds"
             ])
 
             line_summary_file = open(output_line_summary, "w", newline="", encoding="utf-8-sig")
@@ -2984,6 +3043,7 @@ class Run1App:
             zone_track_state = {}
             line_track_state = {}
             zone_assignment_summary = defaultdict(lambda: defaultdict(int))
+            id_zone_history = defaultdict(list)
             trajectory_position = settings.get("trajectory_position", self.trajectory_position_var.get())
             trajectory_offset = float(settings.get("trajectory_offset", self.trajectory_offset_var.get() or 0))
             zone_confirmation_frames = 1
@@ -3109,6 +3169,14 @@ class Run1App:
                     break
 
                 frame_index += 1
+
+                # Draw Zone overlay BEFORE detections/tracks so bounding boxes and
+                # trajectory lines are rendered on top of the translucent Zone.
+                if measurement_enabled:
+                    self.draw_measurement_overlay(
+                        frame, frame_index, fps, zone_track_state, line_track_state,
+                        zone_entry_count, line_cross_count
+                    )
 
                 should_process = (
                     (frame_index - 1)
@@ -3407,6 +3475,13 @@ class Run1App:
                                     previous_zone_point = zstate.get("previous_confirmed_point")
                                     previous_confirmed_zone = zstate.get("previous_confirmed_zone")
 
+                                    # Keep a compact per-ID route history: Zone A -> Zone B -> ...
+                                    if confirmed_zone and confirmed_zone != previous_confirmed_zone:
+                                        id_zone_history[track_id].append({
+                                            "zone": confirmed_zone,
+                                            "timestamp": timestamp_now,
+                                        })
+
                                     # Close the previous confirmed Zone when a new Zone is confirmed.
                                     if previous_confirmed_zone and previous_confirmed_zone != confirmed_zone:
                                         oldzs = zstate.get("zone_states", {}).get(previous_confirmed_zone)
@@ -3562,24 +3637,17 @@ class Run1App:
                                     frame_index / fps
                                 )
 
+                                trajectory_point_csv = self.get_zone_reference_point(x1, y1, x2, y2)
+                                bbox_width_csv = max(0, x2 - x1)
+                                bbox_height_csv = max(0, y2 - y1)
+                                bbox_area_csv = bbox_width_csv * bbox_height_csv
                                 csv_writer.writerow([
-                                    frame_index,
-                                    f"{timestamp:.6f}",
-                                    track_id,
-                                    class_id,
-                                    class_name,
-                                    f"{confidence:.6f}",
-                                    x1,
-                                    y1,
-                                    x2,
-                                    y2,
-                                    center_x,
-                                    center_y,
-                                    (self.get_zone_reference_point(x1, y1, x2, y2)[0] if measurement_enabled else center_x),
-                                    (self.get_zone_reference_point(x1, y1, x2, y2)[1] if measurement_enabled else center_y),
-                                    (zone_track_state.get(track_id, {}).get("confirmed_zone", "") if measurement_enabled else ""),
-                                    (f"{zone_track_state.get(track_id, {}).get('confirmed_confidence', 0.0):.6f}" if measurement_enabled else ""),
-                                    (zone_track_state.get(track_id, {}).get("last_method", "") if measurement_enabled else "")
+                                    frame_index, f"{timestamp:.6f}", track_id, class_id, class_name,
+                                    f"{confidence:.6f}", x1, y1, x2, y2,
+                                    bbox_width_csv, bbox_height_csv, bbox_area_csv,
+                                    trajectory_point_csv[0], trajectory_point_csv[1],
+                                    trajectory_position, f"{trajectory_offset:.2f}",
+                                    (zone_track_state.get(track_id, {}).get("confirmed_zone", "") if measurement_enabled else "")
                                 ])
 
                     if active_tracks:
@@ -3641,12 +3709,6 @@ class Run1App:
                 eta_text = self.format_time(
                     eta_seconds
                 )
-
-                if measurement_enabled:
-                    self.draw_measurement_overlay(
-                        frame, frame_index, fps, zone_track_state, line_track_state,
-                        zone_entry_count, line_cross_count
-                    )
 
                 info_lines = [
                     f"Frame: {frame_index}/{total_frames}",
@@ -3822,33 +3884,84 @@ class Run1App:
                     status,
                 ])
 
-            # Finalize integrated Zone/Line measurements before closing any files.
+            # Finalize a compact per-ID route summary before closing any files.
             if measurement_enabled:
-                for track_id, zmap in zone_track_state.items():
+                for track_id, history in sorted(id_zone_history.items()):
+                    if not history:
+                        continue
                     state_info = track_stats.get(track_id, {})
                     class_name_final = state_info.get("class_name", "")
+                    zones_sequence = [item["zone"] for item in history]
+                    timestamps = [float(item["timestamp"]) for item in history]
+                    total_zone_time = 0.0
+                    zmap = zone_track_state.get(track_id, {}).get("zone_states", {})
+                    for zs in zmap.values():
+                        if zs.get("entry_time") is not None:
+                            if zs.get("inside"):
+                                end_t = state_info.get("last_frame", frame_index) / fps
+                            else:
+                                end_t = zs.get("last_exit_time")
+                            if end_t is not None:
+                                total_zone_time += max(0.0, float(end_t) - float(zs["entry_time"]))
+                    track_state_final = track_stats.get(track_id, {})
+                    first_seen_final = float(track_state_final.get("first_frame", 0)) / fps if fps > 0 else 0.0
+                    last_seen_final = float(track_state_final.get("last_frame", frame_index)) / fps if fps > 0 else 0.0
+                    unique_zones = []
+                    for z in zones_sequence:
+                        if z not in unique_zones:
+                            unique_zones.append(z)
+                    transitions = sum(1 for i in range(1, len(zones_sequence)) if zones_sequence[i] != zones_sequence[i-1])
+                    id_zone_summary_writer.writerow([
+                        track_id, class_name_final,
+                        f"{first_seen_final:.6f}", f"{last_seen_final:.6f}",
+                        f"{max(0.0, last_seen_final-first_seen_final):.6f}",
+                        zones_sequence[0], zones_sequence[-1],
+                        " > ".join(zones_sequence),
+                        " | ".join(unique_zones), transitions,
+                        f"{total_zone_time:.6f}"
+                    ])
+
+            # Finalize Zone_Summary as one aggregate row per Zone.
+            if measurement_enabled:
+                zone_aggregate = defaultdict(lambda: {
+                    "ids": set(), "durations": [], "entries": 0,
+                    "first_entry": None, "last_entry": None
+                })
+                for track_id, zmap in zone_track_state.items():
+                    state_info = track_stats.get(track_id, {})
                     last_frame_final = state_info.get("last_frame", frame_index)
-                    last_time_final = last_frame_final / fps
+                    last_time_final = last_frame_final / fps if fps > 0 else 0.0
                     for zname, zs in zmap.get("zone_states", {}).items():
-                        if zs.get("inside") and zs.get("entry_time") is not None:
-                            duration = max(0.0, last_time_final - float(zs["entry_time"]))
-                            avg_speed = zs["distance_px"] / duration if duration > 0 else 0.0
-                            zone_summary_writer.writerow([
-                                zname, track_id, class_name_final, zs["entry_frame"],
-                                f"{zs['entry_time']:.6f}", last_frame_final,
-                                f"{last_time_final:.6f}", f"{duration:.6f}",
-                                f"{zs['distance_px']:.3f}", f"{avg_speed:.6f}"
-                            ])
-                            measurement_events_writer.writerow([
-                                last_frame_final, f"{last_time_final:.6f}", track_id,
-                                class_name_final, "ZONE", zname, "EXIT_END_OF_TRACK",
-                                f"{duration:.6f}", f"{zs['distance_px']:.3f}",
-                                f"{avg_speed:.6f}", ""
-                            ])
+                        if zs.get("entry_time") is None:
+                            continue
+                        start_t = float(zs["entry_time"])
+                        end_t = (last_time_final if zs.get("inside") else zs.get("last_exit_time"))
+                        if end_t is None:
+                            continue
+                        duration = max(0.0, float(end_t) - start_t)
+                        agg = zone_aggregate[zname]
+                        agg["ids"].add(track_id)
+                        agg["durations"].append(duration)
+                        agg["entries"] += 1
+                        agg["first_entry"] = start_t if agg["first_entry"] is None else min(agg["first_entry"], start_t)
+                        agg["last_entry"] = start_t if agg["last_entry"] is None else max(agg["last_entry"], start_t)
+
+                for zname in ZONE_NAMES:
+                    agg = zone_aggregate.get(zname)
+                    if not agg or not agg["durations"]:
+                        continue
+                    durations = agg["durations"]
+                    zone_summary_writer.writerow([
+                        zname, len(agg["ids"]), agg["entries"],
+                        f"{sum(durations)/len(durations):.6f}",
+                        f"{min(durations):.6f}", f"{max(durations):.6f}",
+                        f"{agg['first_entry']:.6f}", f"{agg['last_entry']:.6f}"
+                    ])
 
                 measurement_events_file.flush()
                 zone_summary_file.flush()
                 line_summary_file.flush()
+                id_zone_summary_file.flush()
                 with open(output_measurement_summary, "w", encoding="utf-8") as mf:
                     json.dump({
                         "measurement_enabled": measurement_enabled,
@@ -3873,6 +3986,7 @@ class Run1App:
                         "outputs": {
                             "events": output_measurement_events,
                             "zone_summary": output_zone_summary,
+                            "id_zone_summary": output_id_zone_summary,
                             "line_summary": output_line_summary,
                         }
                     }, mf, indent=4, ensure_ascii=False)
@@ -3923,6 +4037,7 @@ class Run1App:
                 measurement_events_file,
                 zone_summary_file,
                 line_summary_file,
+                id_zone_summary_file,
             ):
                 try:
                     research_file.close()
@@ -4001,6 +4116,9 @@ class Run1App:
                 print()
                 print("CSV:")
                 print(output_csv)
+                if measurement_enabled:
+                    print("ID Zone Summary CSV:")
+                    print(output_id_zone_summary)
 
             # Research summary.
             stop_reason = (
@@ -4042,7 +4160,7 @@ class Run1App:
                 "processing_time_seconds": round(total_time, 6),
                 "average_fps": round(average_fps, 6),
                 "outputs": {
-                    "trajectory": output_csv,
+                    "detection_records": output_csv,
                     "tracking_result": output_video if settings["save_video"] else None,
                     "track_statistics": output_track_stats,
                     "id_switch_warnings": output_id_switch,
@@ -4053,6 +4171,7 @@ class Run1App:
                     "bytetrack_yaml": output_tracker_yaml if tracker_name == "ByteTrack" else None,
                     "zone_line_events": output_measurement_events if measurement_enabled else None,
                     "zone_summary": output_zone_summary if measurement_enabled else None,
+                    "id_zone_summary": output_id_zone_summary if measurement_enabled else None,
                     "line_summary": output_line_summary if measurement_enabled else None,
                     "measurement_summary": output_measurement_summary if measurement_enabled else None,
                 },
@@ -4260,7 +4379,7 @@ class Run1App:
         if self.save_csv_var.get():
 
             message += (
-                "Trajectory CSV:\n"
+                "Detection Records CSV:\n"
                 f"{output_csv}\n\n"
             )
 
