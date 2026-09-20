@@ -671,7 +671,6 @@ class Run1App:
         self.build_bytetrack_section()
         self.build_output_section()
         self.build_information_section()
-        self.build_measurement_section()
 
         bottom = ttk.Frame(main)
 
@@ -774,87 +773,6 @@ class Run1App:
     # ========================================================
     # INTEGRATED ZONE / LINE MEASUREMENT
     # ========================================================
-
-    def build_measurement_section(self):
-
-        frame = ttk.LabelFrame(
-            self.content,
-            text="PK Studio Zones",
-            padding=12
-        )
-        frame.grid(row=6, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
-        frame.columnconfigure(1, weight=1)
-
-        ttk.Label(
-            frame, text="Zone File"
-        ).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=5)
-
-        ttk.Entry(
-            frame, textvariable=self.zone_line_config_var
-        ).grid(row=0, column=1, columnspan=4, sticky="ew", pady=5)
-
-        ttk.Button(
-            frame, text="Browse", command=self.load_measurement_config
-        ).grid(row=0, column=5, padx=4, pady=5)
-
-        ttk.Button(
-            frame, text="Reload", command=self.load_measurement_config
-        ).grid(row=0, column=6, padx=(0, 4), pady=5)
-
-        ttk.Label(
-            frame, text="Zone Detection Point"
-        ).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(10, 5))
-
-        self.zone_point_combo = ttk.Combobox(
-            frame,
-            textvariable=self.zone_point_preset_var,
-            values=["Center", "Bottom", "Custom"],
-            state="readonly",
-            width=14
-        )
-        self.zone_point_combo.grid(row=1, column=1, sticky="w", pady=(10, 5))
-        self.zone_point_combo.bind(
-            "<<ComboboxSelected>>",
-            self.update_reference_point_controls
-        )
-
-        ttk.Label(frame, text="X %").grid(
-            row=1, column=2, sticky="e", padx=(18, 4), pady=(10, 5)
-        )
-        self.zone_x_spin = ttk.Spinbox(
-            frame, from_=0, to=100, increment=1,
-            textvariable=self.zone_point_x_var, width=6
-        )
-        self.zone_x_spin.grid(row=1, column=3, sticky="w", pady=(10, 5))
-
-        ttk.Label(frame, text="Y %").grid(
-            row=1, column=4, sticky="e", padx=(12, 4), pady=(10, 5)
-        )
-        self.zone_y_spin = ttk.Spinbox(
-            frame, from_=0, to=100, increment=1,
-            textvariable=self.zone_point_y_var, width=6
-        )
-        self.zone_y_spin.grid(row=1, column=5, sticky="w", pady=(10, 5))
-
-        ttk.Label(
-            frame,
-            text="Center = 50/50   |   Bottom = 50/100   |   Custom = กำหนดตำแหน่งเอง",
-            foreground="#666666"
-        ).grid(row=2, column=1, columnspan=5, sticky="w", pady=(0, 4))
-
-        ttk.Label(
-            frame,
-            text="จุดนี้ใช้สำหรับตัดสินว่าอยู่ Zone ไหนเท่านั้น และจะไม่แสดงจุดบนวิดีโอ",
-            foreground="#777777"
-        ).grid(row=3, column=1, columnspan=5, sticky="w", pady=(0, 4))
-
-        ttk.Label(
-            frame,
-            textvariable=self.measurement_status_var,
-            anchor="w"
-        ).grid(row=4, column=0, columnspan=7, sticky="w", pady=(8, 0))
-
-        self.update_reference_point_controls()
 
     def update_reference_point_controls(self, event=None):
         """Enable custom X/Y only when Custom reference point is selected."""
@@ -1176,17 +1094,12 @@ class Run1App:
         self.status_var.set("Zone configuration snapshot saved")
 
     def draw_measurement_overlay(self, frame, frame_index, fps, zone_track_state, line_track_state, zone_entry_count, line_cross_count):
-        """Draw Zone/Line geometry and counts only.
-
-        Object-level Zone timing is kept in the CSV/event data. It is not
-        rendered on the video, so each tracked object has only one visual ID
-        label and there is no duplicate green/yellow ID text.
-        """
+        """Draw PK Studio zones/lines and live zone timing/counts on the preview/output frame."""
+        # Draw polygons and labels even when no detection exists.
         for zname in ZONE_NAMES:
             polygon = self.zones.get(zname, [])
             if len(polygon) < 3:
                 continue
-
             pts = np.array(polygon, dtype=np.int32).reshape((-1, 1, 2))
             meta = getattr(self, "zone_meta", {}).get(zname, {})
             color_raw = meta.get("color_bgr", [0, 200, 0])
@@ -1196,44 +1109,52 @@ class Run1App:
                     color = (0, 200, 0)
             except Exception:
                 color = (0, 200, 0)
-
             cv2.polylines(frame, [pts], True, color, 3, cv2.LINE_AA)
-
             if meta.get("show_label", True):
                 x, y = map(int, polygon[0])
-                cv2.putText(
-                    frame,
-                    f"{zname} | entries: {zone_entry_count.get(zname, 0)}",
-                    (x, max(20, y - 8)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    color,
-                    2,
-                    cv2.LINE_AA
-                )
+                cv2.putText(frame, f"{zname} | entries: {zone_entry_count.get(zname, 0)}", (x, max(20, y - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
 
+        # Draw line geometry when supplied by a compatible config.
         for lname in LINE_NAMES:
             line = self.lines.get(lname, [])
             if len(line) != 2:
                 continue
-
-            p1 = tuple(map(int, line[0]))
-            p2 = tuple(map(int, line[1]))
+            p1 = tuple(map(int, line[0])); p2 = tuple(map(int, line[1]))
             cv2.line(frame, p1, p2, (255, 255, 255), 4, cv2.LINE_AA)
             cv2.circle(frame, p1, 6, (255, 255, 255), -1)
             cv2.circle(frame, p2, 6, (255, 255, 255), -1)
-
             mx, my = (p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2
-            cv2.putText(
-                frame,
-                f"{lname} | crossings: {line_cross_count.get(lname, 0)}",
-                (mx, max(20, my - 10)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA
-            )
+            cv2.putText(frame, f"{lname} | crossings: {line_cross_count.get(lname, 0)}",
+                        (mx, max(20, my - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # Live per-track zone timer. The timer begins at the exact frame where
+        # the tracked centroid is first detected inside the zone.
+        now = frame_index / fps if fps > 0 else 0.0
+        for track_id, zmap in zone_track_state.items():
+            zone_states = zmap.get("zone_states", {})
+            active = []
+            for zname, zs in zone_states.items():
+                if zs.get("inside") and zs.get("entry_time") is not None:
+                    duration = max(0.0, now - float(zs["entry_time"]))
+                    active.append(f"{zname}: {duration:.1f}s")
+
+            # Show Zone information ONLY while the tracked object is actually
+            # inside a confirmed Zone. Nothing is shown for objects outside Zones.
+            if not active:
+                continue
+
+            point = zmap.get("last_point") or zmap.get("previous_confirmed_point")
+            if point is None:
+                continue
+
+            x, y = map(int, point)
+            for idx, text in enumerate(active):
+                cv2.putText(
+                    frame, f"ID {track_id} | {text}",
+                    (x + 8, max(20, y - 22 + idx * 22)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA
+                )
 
     def get_zone_reference_point(self, x1, y1, x2, y2):
         """Return the selected reference point inside the bounding box."""
@@ -1512,33 +1433,77 @@ class Run1App:
     def build_file_section(self):
 
         frame = self.section(
-            "File Settings",
+            "File & Zone Settings",
             0,
             1
         )
 
-        self.add_entry(
-            frame, 0, "Run Name",
-            self.run_name_var
+        self.add_entry(frame, 0, "Run Name", self.run_name_var)
+        self.add_entry(frame, 1, "Model", self.model_var, self.browse_model)
+        self.add_entry(frame, 2, "Video", self.video_var, self.browse_video)
+        self.add_entry(frame, 3, "Output", self.output_var, self.browse_output)
+
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=4, column=0, columnspan=4, sticky="ew", pady=(10, 8)
         )
 
-        self.add_entry(
-            frame, 1, "Model",
-            self.model_var,
-            self.browse_model
+        ttk.Label(
+            frame, text="PK Studio Zone", font=("Segoe UI", 10, "bold")
+        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(0, 5))
+
+        ttk.Label(frame, text="Zone File").grid(
+            row=6, column=0, sticky="w", padx=(0, 8), pady=4
+        )
+        ttk.Entry(frame, textvariable=self.zone_line_config_var).grid(
+            row=6, column=1, columnspan=2, sticky="ew", pady=4
+        )
+        ttk.Button(
+            frame, text="Browse", command=self.load_measurement_config
+        ).grid(row=6, column=3, padx=(5, 0))
+
+        ttk.Label(frame, text="Detection Point").grid(
+            row=7, column=0, sticky="w", padx=(0, 8), pady=4
+        )
+        self.zone_point_combo = ttk.Combobox(
+            frame, textvariable=self.zone_point_preset_var,
+            values=["Center", "Bottom", "Custom"],
+            state="readonly", width=14
+        )
+        self.zone_point_combo.grid(row=7, column=1, sticky="w", pady=4)
+        self.zone_point_combo.bind(
+            "<<ComboboxSelected>>", self.update_reference_point_controls
         )
 
-        self.add_entry(
-            frame, 2, "Video",
-            self.video_var,
-            self.browse_video
+        ttk.Label(frame, text="X %").grid(
+            row=7, column=2, sticky="e", padx=(12, 4), pady=4
         )
+        self.zone_x_spin = ttk.Spinbox(
+            frame, from_=0, to=100, increment=1,
+            textvariable=self.zone_point_x_var, width=6
+        )
+        self.zone_x_spin.grid(row=7, column=3, sticky="w", pady=4)
 
-        self.add_entry(
-            frame, 3, "Output",
-            self.output_var,
-            self.browse_output
+        ttk.Label(frame, text="Y %").grid(
+            row=8, column=2, sticky="e", padx=(12, 4), pady=4
         )
+        self.zone_y_spin = ttk.Spinbox(
+            frame, from_=0, to=100, increment=1,
+            textvariable=self.zone_point_y_var, width=6
+        )
+        self.zone_y_spin.grid(row=8, column=3, sticky="w", pady=4)
+
+        ttk.Label(
+            frame,
+            text="Center = 50/50   |   Bottom = 50/100   |   Custom = กำหนด X/Y เอง",
+            foreground="#666666"
+        ).grid(row=9, column=1, columnspan=3, sticky="w", pady=(0, 2))
+
+        ttk.Label(
+            frame, textvariable=self.measurement_status_var,
+            foreground="#666666", anchor="w"
+        ).grid(row=10, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        self.update_reference_point_controls()
 
     # ========================================================
     # DETECTION
@@ -1781,9 +1746,6 @@ class Run1App:
             variable=self.show_preview_var
         ).grid(row=0, column=0, sticky="w", pady=3)
 
-        # The Zone reference point is used only for Zone calculation.
-        # It is intentionally NOT drawn on the video.
-
         ttk.Checkbutton(
             frame,
             text="Show Trajectory",
@@ -1811,7 +1773,7 @@ class Run1App:
 
         ttk.Label(
             frame,
-            text="กรอบวัตถุและ Reference Point จะแสดงเฉพาะเมื่อจุดที่เลือกอยู่ใน Zone",
+            text="กรอบวัตถุจะแสดงเฉพาะเมื่อ Detection Point อยู่ใน Zone",
             foreground="#666666"
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(7, 0))
 
@@ -2102,6 +2064,7 @@ class Run1App:
             "model": self.model_var.get(),
             "video": self.video_var.get(),
             "output": self.output_var.get(),
+            "zone_file": self.zone_line_config_var.get(),
 
             "confidence": self.conf_var.get(),
             "iou": self.iou_var.get(),
@@ -2133,16 +2096,9 @@ class Run1App:
 
             "research_mode": self.research_mode_var.get(),
 
-            "zone_assignment_method": self.zone_assignment_method_var.get(),
             "zone_point_preset": self.zone_point_preset_var.get(),
             "zone_point_x": self.zone_point_x_var.get(),
             "zone_point_y": self.zone_point_y_var.get(),
-            "zone_bottom_weight": self.zone_bottom_weight_var.get(),
-            "zone_bbox_weight": self.zone_bbox_weight_var.get(),
-            "zone_custom_weight": self.zone_custom_weight_var.get(),
-            "zone_min_confidence": self.zone_min_confidence_var.get(),
-            "zone_min_difference": self.zone_min_difference_var.get(),
-            "zone_confirmation_frames": self.zone_confirmation_frames_var.get(),
         }
 
     def save_settings(self):
@@ -2239,6 +2195,7 @@ class Run1App:
             ("model", self.model_var),
             ("video", self.video_var),
             ("output", self.output_var),
+            ("zone_file", self.zone_line_config_var),
             ("confidence", self.conf_var),
             ("iou", self.iou_var),
             ("img_size", self.img_size_var),
@@ -2259,16 +2216,9 @@ class Run1App:
             ("save_csv", self.save_csv_var),
             ("csv_flush", self.csv_flush_var),
             ("research_mode", self.research_mode_var),
-            ("zone_assignment_method", self.zone_assignment_method_var),
             ("zone_point_preset", self.zone_point_preset_var),
             ("zone_point_x", self.zone_point_x_var),
             ("zone_point_y", self.zone_point_y_var),
-            ("zone_bottom_weight", self.zone_bottom_weight_var),
-            ("zone_bbox_weight", self.zone_bbox_weight_var),
-            ("zone_custom_weight", self.zone_custom_weight_var),
-            ("zone_min_confidence", self.zone_min_confidence_var),
-            ("zone_min_difference", self.zone_min_difference_var),
-            ("zone_confirmation_frames", self.zone_confirmation_frames_var),
         ]
 
         for key, variable in pairs:
@@ -2376,31 +2326,14 @@ class Run1App:
             return False
 
         try:
-            for value in [
-                float(self.zone_point_x_var.get()),
-                float(self.zone_point_y_var.get()),
-                float(self.zone_bottom_weight_var.get()),
-                float(self.zone_bbox_weight_var.get()),
-                float(self.zone_custom_weight_var.get()),
-                float(self.zone_min_confidence_var.get()),
-                float(self.zone_min_difference_var.get()),
-            ]:
-                if value < 0:
-                    raise ValueError("Zone assignment numeric values cannot be negative")
-            if not 0 <= float(self.zone_point_x_var.get()) <= 100:
-                raise ValueError("Reference Point X must be between 0 and 100%")
-            if not 0 <= float(self.zone_point_y_var.get()) <= 100:
-                raise ValueError("Reference Point Y must be between 0 and 100%")
-            if not 0 <= float(self.zone_min_confidence_var.get()) <= 100:
-                raise ValueError("Minimum Confidence must be between 0 and 100%")
-            if not 0 <= float(self.zone_min_difference_var.get()) <= 100:
-                raise ValueError("Minimum Difference must be between 0 and 100%")
-            if int(self.zone_confirmation_frames_var.get()) < 1:
-                raise ValueError("Temporal Confirmation must be at least 1 frame")
-            if (float(self.zone_bottom_weight_var.get()) + float(self.zone_bbox_weight_var.get()) + float(self.zone_custom_weight_var.get())) <= 0:
-                raise ValueError("At least one Weighted Zone component must be greater than 0")
+            px = float(self.zone_point_x_var.get())
+            py = float(self.zone_point_y_var.get())
+            if not 0 <= px <= 100:
+                raise ValueError("Detection Point X must be between 0 and 100%")
+            if not 0 <= py <= 100:
+                raise ValueError("Detection Point Y must be between 0 and 100%")
         except Exception as e:
-            messagebox.showerror("Zone Assignment Settings", str(e))
+            messagebox.showerror("Zone Settings", str(e))
             return False
 
         if self.research_mode_var.get():
