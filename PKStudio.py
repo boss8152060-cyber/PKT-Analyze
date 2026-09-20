@@ -356,7 +356,12 @@ DEFAULT_SETTINGS = {
     # inside each bounding box. Offset moves the anchor inward from the selected edge(s).
     "trajectory_position": "Center",
     "trajectory_offset": "0",
-    "zone_opacity": 20,
+
+    # Zone overlay display controls.
+    "show_zone_boundary": True,
+    "show_zone_label": True,
+    "show_zone_label_prefix": True,
+    "zone_overlay_opacity": "45",
 }
 
 
@@ -512,7 +517,12 @@ class Run1App:
         # Trajectory Position controls.
         self.trajectory_position_var = tk.StringVar(value=DEFAULT_SETTINGS["trajectory_position"])
         self.trajectory_offset_var = tk.StringVar(value=DEFAULT_SETTINGS["trajectory_offset"])
-        self.zone_opacity_var = tk.IntVar(value=DEFAULT_SETTINGS["zone_opacity"])
+
+        # Zone overlay display controls.
+        self.show_zone_boundary_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_zone_boundary"])
+        self.show_zone_label_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_zone_label"])
+        self.show_zone_label_prefix_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_zone_label_prefix"])
+        self.zone_overlay_opacity_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_overlay_opacity"])
 
         self.status_var = tk.StringVar(
             value="Ready"
@@ -1089,24 +1099,32 @@ class Run1App:
         self.status_var.set("Zone configuration snapshot saved")
 
     def draw_measurement_overlay(self, frame, frame_index, fps, zone_track_state, line_track_state, zone_entry_count, line_cross_count):
-        """Draw a light Zone overlay.
+        """Draw optional, faint Zone boundaries and labels.
 
-        Zone labels are shown once at the geometric center of each Zone.
-        Entry counts are intentionally NOT displayed on the video.
-        Zone opacity is controlled by the Zone Opacity setting.
+        Zone fill/background is never drawn. The user can independently toggle
+        the Zone boundary and Zone label. Label text can be shown as either
+        ``Zone 6`` or simply ``6``. Both are blended onto the original frame
+        so they remain visually faint without a solid background rectangle.
         """
         try:
-            opacity = max(0.0, min(0.80, float(self.zone_opacity_var.get()) / 100.0))
+            opacity = max(0.0, min(1.0, float(self.zone_overlay_opacity_var.get()) / 100.0))
         except Exception:
-            opacity = 0.20
+            opacity = 0.45
 
-        # Fill all Zones on a temporary layer so the video/object boxes remain visible.
-        if opacity > 0:
+        show_boundary = bool(self.show_zone_boundary_var.get())
+        show_label = bool(self.show_zone_label_var.get())
+
+        # Draw only the enabled Zone elements onto a temporary layer, then
+        # blend that layer with the original frame. This creates a faint
+        # appearance and, importantly, no black/solid label background.
+        if show_boundary or show_label:
             overlay = frame.copy()
+
             for zname in ZONE_NAMES:
                 polygon = self.zones.get(zname, [])
                 if len(polygon) < 3:
                     continue
+
                 pts = np.array(polygon, dtype=np.int32).reshape((-1, 1, 2))
                 meta = getattr(self, "zone_meta", {}).get(zname, {})
                 color_raw = meta.get("color_bgr", [0, 200, 0])
@@ -1116,41 +1134,38 @@ class Run1App:
                         color = (0, 200, 0)
                 except Exception:
                     color = (0, 200, 0)
-                cv2.fillPoly(overlay, [pts], color)
-            cv2.addWeighted(overlay, opacity, frame, 1.0 - opacity, 0, frame)
 
-        # Zone boundary + centered label. No entry counts on the video.
-        for zname in ZONE_NAMES:
-            polygon = self.zones.get(zname, [])
-            if len(polygon) < 3:
-                continue
-            pts = np.array(polygon, dtype=np.int32).reshape((-1, 1, 2))
-            meta = getattr(self, "zone_meta", {}).get(zname, {})
-            color_raw = meta.get("color_bgr", [0, 200, 0])
-            try:
-                color = tuple(int(max(0, min(255, v))) for v in color_raw[:3])
-                if len(color) != 3:
-                    color = (0, 200, 0)
-            except Exception:
-                color = (0, 200, 0)
-            cv2.polylines(frame, [pts], True, color, 2, cv2.LINE_AA)
+                if show_boundary:
+                    # 1 px is deliberately light; opacity controls overall strength.
+                    cv2.polylines(overlay, [pts], True, color, 1, cv2.LINE_AA)
 
-            if meta.get("show_label", True):
-                moments = cv2.moments(pts)
-                if abs(moments.get("m00", 0.0)) > 1e-6:
-                    cx = int(moments["m10"] / moments["m00"])
-                    cy = int(moments["m01"] / moments["m00"])
-                else:
-                    cx = int(np.mean([p[0] for p in polygon]))
-                    cy = int(np.mean([p[1] for p in polygon]))
+                if show_label and meta.get("show_label", True):
+                    moments = cv2.moments(pts)
+                    if abs(moments.get("m00", 0.0)) > 1e-6:
+                        cx = int(moments["m10"] / moments["m00"])
+                        cy = int(moments["m01"] / moments["m00"])
+                    else:
+                        cx = int(np.mean([p[0] for p in polygon]))
+                        cy = int(np.mean([p[1] for p in polygon]))
 
-                label = zname
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.70, 2)
-                tx = max(5, cx - tw // 2)
-                ty = max(th + 5, cy + th // 2)
-                # Small translucent background keeps the Zone name readable without blocking the scene.
-                cv2.rectangle(frame, (tx - 6, ty - th - 5), (tx + tw + 6, ty + 6), (0, 0, 0), -1)
-                cv2.putText(frame, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.70, color, 2, cv2.LINE_AA)
+                    # Toggle whether the word "Zone" is included.
+                    label = zname if self.show_zone_label_prefix_var.get() else zname.replace("Zone ", "", 1)
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.55
+                    thickness = 1
+                    (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
+                    tx = max(5, cx - tw // 2)
+                    ty = max(th + 5, cy + th // 2)
+
+                    # No rectangle/background: text is drawn directly on the
+                    # transparent overlay and then blended with the frame.
+                    cv2.putText(
+                        overlay, label, (tx, ty), font, font_scale,
+                        color, thickness, cv2.LINE_AA
+                    )
+
+            if opacity > 0.0:
+                cv2.addWeighted(overlay, opacity, frame, 1.0 - opacity, 0, frame)
 
         # Keep line geometry behavior unchanged.
         for lname in LINE_NAMES:
@@ -1508,28 +1523,41 @@ class Run1App:
         )
         self.trajectory_offset_spin.grid(row=7, column=3, sticky="w", pady=4)
 
-        ttk.Label(frame, text="Zone Opacity").grid(
+        ttk.Label(frame, text="Zone Display").grid(
             row=8, column=0, sticky="w", padx=(0, 8), pady=4
         )
-        self.zone_opacity_scale = ttk.Scale(
-            frame, from_=0, to=80, orient="horizontal",
-            variable=self.zone_opacity_var, length=170
+        ttk.Checkbutton(
+            frame, text="กรอบ Zone", variable=self.show_zone_boundary_var
+        ).grid(row=8, column=1, sticky="w", pady=4)
+        ttk.Checkbutton(
+            frame, text="ชื่อ Zone", variable=self.show_zone_label_var
+        ).grid(row=8, column=2, sticky="w", pady=4)
+
+        ttk.Checkbutton(
+            frame, text="แสดงคำว่า Zone", variable=self.show_zone_label_prefix_var
+        ).grid(row=8, column=3, sticky="w", pady=4)
+
+        ttk.Label(frame, text="ความจาง %").grid(
+            row=9, column=0, sticky="w", padx=(0, 8), pady=4
         )
-        self.zone_opacity_scale.grid(row=8, column=1, sticky="ew", pady=4)
-        ttk.Label(frame, textvariable=tk.StringVar(value="")).grid(row=8, column=2)
-        ttk.Label(frame, text="จาง").grid(row=8, column=2, sticky="w", padx=(8, 0))
-        ttk.Label(frame, text="80%").grid(row=8, column=3, sticky="w")
+        ttk.Spinbox(
+            frame, from_=0, to=100, increment=5,
+            textvariable=self.zone_overlay_opacity_var, width=7
+        ).grid(row=9, column=1, sticky="w", pady=4)
+        ttk.Label(
+            frame, text="0 = ไม่เห็น | 100 = ชัดสุด", foreground="#666666"
+        ).grid(row=9, column=2, columnspan=2, sticky="w", pady=4)
 
         ttk.Label(
             frame,
-            text="Zone ใช้ Trajectory Position เป็นจุดตัดสิน | พื้นที่ Zone โปร่งใสและวางกรอบวัตถุทับได้",
+            text="Zone ใช้ Trajectory Position เป็นจุดตัดสิน | ไม่มีพื้นหลังใต้ชื่อ Zone",
             foreground="#666666"
-        ).grid(row=9, column=1, columnspan=3, sticky="w", pady=(0, 2))
+        ).grid(row=10, column=1, columnspan=3, sticky="w", pady=(0, 2))
 
         ttk.Label(
             frame, textvariable=self.measurement_status_var,
             foreground="#666666", anchor="w"
-        ).grid(row=10, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ).grid(row=11, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         self.update_trajectory_position_controls()
 
@@ -2161,7 +2189,10 @@ class Run1App:
             "research_mode": self.research_mode_var.get(),
             "trajectory_position": self.trajectory_position_var.get(),
             "trajectory_offset": self.trajectory_offset_var.get(),
-            "zone_opacity": int(self.zone_opacity_var.get()),
+            "show_zone_boundary": self.show_zone_boundary_var.get(),
+            "show_zone_label": self.show_zone_label_var.get(),
+            "show_zone_label_prefix": self.show_zone_label_prefix_var.get(),
+            "zone_overlay_opacity": self.zone_overlay_opacity_var.get(),
         }
 
     def save_settings(self):
@@ -2234,7 +2265,10 @@ class Run1App:
             ("research_mode", self.research_mode_var),
             ("trajectory_position", self.trajectory_position_var),
             ("trajectory_offset", self.trajectory_offset_var),
-            ("zone_opacity", self.zone_opacity_var),
+            ("show_zone_boundary", self.show_zone_boundary_var),
+            ("show_zone_label", self.show_zone_label_var),
+            ("show_zone_label_prefix", self.show_zone_label_prefix_var),
+            ("zone_overlay_opacity", self.zone_overlay_opacity_var),
         ]
 
         for key, variable in pairs:
@@ -2376,14 +2410,6 @@ class Run1App:
                 str(e)
             )
 
-            return False
-
-        try:
-            opacity = int(float(self.zone_opacity_var.get()))
-            if not 0 <= opacity <= 80:
-                raise ValueError("Zone Opacity must be between 0 and 80%")
-        except Exception as e:
-            messagebox.showerror("Zone Opacity", str(e))
             return False
 
         try:
