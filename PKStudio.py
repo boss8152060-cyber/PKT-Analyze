@@ -2540,7 +2540,7 @@ class Run1App:
             self.run3_reference_mapping_text = mapping_text
 
         if self.run3_lc_enabled_var.get():
-            self._run3_float(self.run3_lateral_axis_angle_var.get(), "road direction angle (deg)")
+            self._run3_float(self.run3_lateral_axis_angle_var.get(), "road direction angle (deg)", positive=False)
             self._run3_float(self.run3_lc_longitudinal_window_var.get(), "LC longitudinal window (m)")
             for name in RUN3_VEHICLE_CLASSES:
                 self._run3_float(self.run3_width_vars[name].get(), f"vehicle width for {name}")
