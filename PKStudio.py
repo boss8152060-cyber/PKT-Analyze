@@ -1164,44 +1164,29 @@ class Run1App:
         )
 
 
-    @staticmethod
-    def bbox_zone_overlap_ratio(x1, y1, x2, y2, polygon):
-        """Return the fraction of the detection bounding-box area inside a Zone polygon."""
-        if len(polygon) < 3 or x2 <= x1 or y2 <= y1:
-            return 0.0
-        bx1, by1, bx2, by2 = int(x1), int(y1), int(x2), int(y2)
-        w, h = bx2 - bx1, by2 - by1
-        shifted = np.array([[(int(px) - bx1, int(py) - by1) for px, py in polygon]], dtype=np.int32)
-        mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.fillPoly(mask, shifted, 1)
-        return float(np.count_nonzero(mask)) / float(w * h)
+    def get_zone_from_trajectory_point(self, point):
+        """Return the first Zone containing the selected Trajectory Position point.
+
+        Zone membership is based ONLY on the selected Trajectory Position.
+        The bounding-box area, overlap ratio, confidence score, and weighting
+        are not calculated.
+        """
+        if point is None:
+            return None
+        px, py = point
+        for zname in ZONE_NAMES:
+            polygon = self.zones.get(zname, [])
+            if len(polygon) >= 3 and self.point_in_zone(px, py, polygon):
+                return zname
+        return None
 
     def assign_zone_candidate(self, x1, y1, x2, y2):
-        """Assign a Zone using ONLY the selected reference point.
-
-        The bounding box is only the visual detection box; it is not used to
-        decide Zone membership.  This prevents a large box from being assigned
-        to a Zone merely because part of the box overlaps that Zone.
-        """
-        zones = [z for z in ZONE_NAMES if len(self.zones.get(z, [])) >= 3]
-        if not zones:
-            return None, 0.0, {}, None, {}
-
+        """Assign Zone using only the selected Trajectory Position."""
         point = self.get_zone_reference_point(x1, y1, x2, y2)
-
-        zone = next((z for z in zones if self.point_in_zone(*point, self.zones[z])), None)
-        scores = {z: (1.0 if z == zone else 0.0) for z in zones}
-        return zone, (1.0 if zone else 0.0), {}, point, scores
-
-
-    def zone_has_any_overlap(self, x1, y1, x2, y2):
-        """Return True only when the selected reference point is inside a Zone."""
-        point = self.get_zone_reference_point(x1, y1, x2, y2)
-        return any(
-            len(self.zones.get(z, [])) >= 3 and
-            self.point_in_zone(*point, self.zones[z])
-            for z in ZONE_NAMES
-        )
+        zone = self.get_zone_from_trajectory_point(point)
+        confidence = 1.0 if zone else 0.0
+        scores = {zone: 1.0} if zone else {}
+        return zone, confidence, {}, point, scores
 
 
     def confirm_zone(self, track_state, candidate, candidate_confidence, frame_index, confirmation_frames):
@@ -3422,13 +3407,7 @@ class Run1App:
                                         "zone_states": {},
                                     })
 
-                                    if no_zone:
-                                        zstate["no_zone_count"] = zstate.get("no_zone_count", 0) + 1
-                                        if zstate["no_zone_count"] >= zone_confirmation_frames:
-                                            zstate["confirmed_zone"] = None
-                                            zstate["confirmed_confidence"] = 0.0
-                                    else:
-                                        zstate["no_zone_count"] = 0
+                                    zstate["no_zone_count"] = 0 if not no_zone else zstate.get("no_zone_count", 0) + 1
 
                                     confirmed_zone, zone_changed = self.confirm_zone(
                                         zstate, candidate, raw_confidence,
@@ -3907,7 +3886,8 @@ class Run1App:
                             "method": "Trajectory Position",
                             "trajectory_position": self.trajectory_position_var.get(),
                             "trajectory_offset_percent": float(self.trajectory_offset_var.get()),
-                            "temporal_confirmation_frames": 1,
+                            "temporal_confirmation_frames": 0,
+                             "zone_assignment_rule": "Trajectory Position point-in-polygon only",
                             "assignment_observations": {
                                 z: dict(v) for z, v in zone_assignment_summary.items()
                             },
@@ -4078,7 +4058,8 @@ class Run1App:
                     "method": "Trajectory Position",
                     "trajectory_position": self.trajectory_position_var.get(),
                     "trajectory_offset_percent": float(self.trajectory_offset_var.get()),
-                    "temporal_confirmation_frames": 1,
+                    "temporal_confirmation_frames": 0,
+                             "zone_assignment_rule": "Trajectory Position point-in-polygon only",
                 },
                 "processing_time_seconds": round(total_time, 6),
                 "average_fps": round(average_fps, 6),
