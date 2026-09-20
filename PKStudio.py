@@ -298,6 +298,18 @@ from ultralytics import YOLO
 # DEFAULT PATHS
 # ============================================================
 
+class _NullCSVWriter:
+    """No-op writer used for legacy research outputs that are no longer exported."""
+    def writerow(self, *args, **kwargs):
+        pass
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
+
 DEFAULT_MODEL = (
     r"F:\motorcycle group project\PSU Transport Project 2026"
     r"\Test\Run1\Model\best.pt"
@@ -2715,7 +2727,16 @@ class Run1App:
                 settings["run_name"]
             )
 
-            # Research outputs required by Run 1.5 specification.
+            # =========================================================
+            # CSV OUTPUTS — ONLY 3 MAIN CSV FILES
+            # =========================================================
+            # 1) Detection_Records.csv   = raw per-frame detections
+            # 2) ID_Zone_Summary.csv     = one summary per tracked ID
+            # 3) Zone_Summary.csv        = one aggregate summary per Zone
+            #
+            # Legacy Research_*.csv files are intentionally NOT exported.
+            # This keeps the output folder limited to the agreed 3 CSV files.
+
             output_video = os.path.join(
                 output_dir,
                 run_name + "_Research_Tracking_Result.mp4"
@@ -2726,26 +2747,17 @@ class Run1App:
                 run_name + "_Detection_Records.csv"
             )
 
-            output_track_stats = os.path.join(
+            output_id_zone_summary = os.path.join(
                 output_dir,
-                run_name + "_Research_Track_Statistics.csv"
+                run_name + "_ID_Zone_Summary.csv"
             )
 
-            output_id_switch = os.path.join(
+            output_zone_summary = os.path.join(
                 output_dir,
-                run_name + "_Research_ID_Switch_Warnings.csv"
+                run_name + "_Zone_Summary.csv"
             )
 
-            output_detection_loss = os.path.join(
-                output_dir,
-                run_name + "_Research_Detection_Loss.csv"
-            )
-
-            output_processing_log = os.path.join(
-                output_dir,
-                run_name + "_Research_Processing_Log.csv"
-            )
-
+            # Non-CSV metadata files are still allowed.
             output_summary = os.path.join(
                 output_dir,
                 run_name + "_Research_Run_Summary.json"
@@ -2760,28 +2772,35 @@ class Run1App:
                 output_dir,
                 run_name + "_Research_ByteTrack.yaml"
             )
-            output_measurement_events = os.path.join(
-                output_dir, run_name + "_Research_Zone_Line_Events.csv"
-            )
-            output_zone_summary = os.path.join(
-                output_dir, run_name + "_Zone_Summary.csv"
-            )
-            output_id_zone_summary = os.path.join(
-                output_dir, run_name + "_ID_Zone_Summary.csv"
-            )
-            output_line_summary = os.path.join(
-                output_dir, run_name + "_Research_Line_Summary.csv"
-            )
+
             output_measurement_summary = os.path.join(
-                output_dir, run_name + "_Research_Measurement_Summary.json"
+                output_dir,
+                run_name + "_Research_Measurement_Summary.json"
             )
+
+            # Remove obsolete CSV files created by older versions of PK Studio
+            # for this same Run name. Do not touch unrelated files.
+            legacy_csv_names = [
+                run_name + "_Research_Track_Statistics.csv",
+                run_name + "_Research_ID_Switch_Warnings.csv",
+                run_name + "_Research_Detection_Loss.csv",
+                run_name + "_Research_Processing_Log.csv",
+                run_name + "_Research_Zone_Line_Events.csv",
+                run_name + "_Research_Line_Summary.csv",
+            ]
+            for legacy_name in legacy_csv_names:
+                legacy_path = os.path.join(output_dir, legacy_name)
+                try:
+                    if os.path.isfile(legacy_path):
+                        os.remove(legacy_path)
+                except OSError:
+                    pass
 
             with open(
                 output_settings,
                 "w",
                 encoding="utf-8"
             ) as f:
-
                 json.dump(
                     settings,
                     f,
@@ -2950,100 +2969,33 @@ class Run1App:
                 csv_writer = None
 
             # =================================================
-            # RESEARCH OUTPUT FILES / TRACK STATE
+            # INTERNAL / LEGACY RESEARCH WRITERS
             # =================================================
+            # Keep these as no-op writers so the existing tracking logic can
+            # continue calculating internal statistics without creating extra
+            # CSV files on disk.
+            null_writer = _NullCSVWriter()
+            track_stats_file = null_writer
+            id_switch_file = null_writer
+            detection_loss_file = null_writer
+            processing_log_file = null_writer
+            measurement_events_file = null_writer
+            line_summary_file = null_writer
 
-            track_stats_file = open(
-                output_track_stats,
+            track_stats_writer = null_writer
+            id_switch_writer = null_writer
+            detection_loss_writer = null_writer
+            processing_log_writer = null_writer
+            measurement_events_writer = null_writer
+            line_summary_writer = null_writer
+
+            # The two summary CSVs are real output files.
+            zone_summary_file = open(
+                output_zone_summary,
                 "w",
                 newline="",
                 encoding="utf-8-sig"
             )
-            track_stats_writer = csv.writer(track_stats_file)
-            track_stats_writer.writerow([
-                "track_id",
-                "class_id",
-                "class_name",
-                "first_frame",
-                "last_frame",
-                "observed_frames",
-                "duration_seconds",
-                "detection_count",
-                "continuity_ratio",
-                "loss_events",
-                "max_gap_frames",
-                "average_confidence",
-                "average_center_x",
-                "average_center_y",
-                "total_distance_px",
-                "average_step_px",
-                "status"
-            ])
-
-            id_switch_file = open(
-                output_id_switch,
-                "w",
-                newline="",
-                encoding="utf-8-sig"
-            )
-            id_switch_writer = csv.writer(id_switch_file)
-            id_switch_writer.writerow([
-                "frame",
-                "timestamp",
-                "old_track_id",
-                "new_track_id",
-                "class_name",
-                "distance_px",
-                "reason",
-                "warning_level"
-            ])
-
-            detection_loss_file = open(
-                output_detection_loss,
-                "w",
-                newline="",
-                encoding="utf-8-sig"
-            )
-            detection_loss_writer = csv.writer(detection_loss_file)
-            detection_loss_writer.writerow([
-                "track_id",
-                "class_name",
-                "loss_start_frame",
-                "loss_end_frame",
-                "gap_frames",
-                "loss_start_timestamp",
-                "loss_end_timestamp",
-                "recovered",
-                "recovery_frame"
-            ])
-
-            processing_log_file = open(
-                output_processing_log,
-                "w",
-                newline="",
-                encoding="utf-8-sig"
-            )
-            processing_log_writer = csv.writer(processing_log_file)
-            processing_log_writer.writerow([
-                "frame",
-                "timestamp",
-                "processed_frames",
-                "fps",
-                "detections",
-                "active_tracks",
-                "device",
-                "precision",
-                "status"
-            ])
-
-            measurement_events_file = open(output_measurement_events, "w", newline="", encoding="utf-8-sig")
-            measurement_events_writer = csv.writer(measurement_events_file)
-            measurement_events_writer.writerow([
-                "frame", "timestamp", "track_id", "class_name", "measurement_type",
-                "measurement_name", "event", "duration_seconds", "distance_px", "speed_px_s", "direction"
-            ])
-
-            zone_summary_file = open(output_zone_summary, "w", newline="", encoding="utf-8-sig")
             zone_summary_writer = csv.writer(zone_summary_file)
             zone_summary_writer.writerow([
                 "zone", "unique_ids", "total_entries", "average_duration_seconds",
@@ -3051,18 +3003,17 @@ class Run1App:
                 "first_entry_timestamp", "last_entry_timestamp"
             ])
 
-            id_zone_summary_file = open(output_id_zone_summary, "w", newline="", encoding="utf-8-sig")
+            id_zone_summary_file = open(
+                output_id_zone_summary,
+                "w",
+                newline="",
+                encoding="utf-8-sig"
+            )
             id_zone_summary_writer = csv.writer(id_zone_summary_file)
             id_zone_summary_writer.writerow([
                 "track_id", "class_name", "first_seen_timestamp", "last_seen_timestamp",
                 "track_duration_seconds", "first_zone", "last_zone", "zone_sequence",
                 "unique_zones_visited", "zone_transition_count", "total_zone_time_seconds"
-            ])
-
-            line_summary_file = open(output_line_summary, "w", newline="", encoding="utf-8-sig")
-            line_summary_writer = csv.writer(line_summary_file)
-            line_summary_writer.writerow([
-                "line", "track_id", "class_name", "crossing_frame", "crossing_timestamp", "direction"
             ])
 
             # Integrated measurement state. This is updated directly from Run 1 tracking.
@@ -3521,12 +3472,6 @@ class Run1App:
                                                 f"{duration:.6f}", f"{oldzs['distance_px']:.3f}",
                                                 f"{avg_speed:.6f}", "ZONE_CHANGE"
                                             ])
-                                            zone_summary_writer.writerow([
-                                                previous_confirmed_zone, track_id, class_name,
-                                                oldzs["entry_frame"], f"{oldzs['entry_time']:.6f}",
-                                                frame_index, f"{timestamp_now:.6f}", f"{duration:.6f}",
-                                                f"{oldzs['distance_px']:.3f}", f"{avg_speed:.6f}"
-                                            ])
                                             oldzs["inside"] = False
                                             oldzs["entry_frame"] = None
                                             oldzs["entry_time"] = None
@@ -3984,9 +3929,7 @@ class Run1App:
                         f"{agg['first_entry']:.6f}", f"{agg['last_entry']:.6f}"
                     ])
 
-                measurement_events_file.flush()
                 zone_summary_file.flush()
-                line_summary_file.flush()
                 id_zone_summary_file.flush()
                 with open(output_measurement_summary, "w", encoding="utf-8") as mf:
                     json.dump({
@@ -4010,10 +3953,9 @@ class Run1App:
                             },
                         },
                         "outputs": {
-                            "events": output_measurement_events,
-                            "zone_summary": output_zone_summary,
+                            "detection_records": output_csv,
                             "id_zone_summary": output_id_zone_summary,
-                            "line_summary": output_line_summary,
+                            "zone_summary": output_zone_summary,
                         }
                     }, mf, indent=4, ensure_ascii=False)
 
@@ -4036,17 +3978,6 @@ class Run1App:
                 else ("completed_end_of_video" if input_finished else "stopped")
             ])
 
-            for research_file in (
-                track_stats_file,
-                id_switch_file,
-                detection_loss_file,
-                processing_log_file,
-            ):
-                try:
-                    research_file.flush()
-                except Exception:
-                    pass
-
             # Close files only AFTER every final row has been written.
             if csv_file is not None:
                 try:
@@ -4055,18 +3986,9 @@ class Run1App:
                 except Exception:
                     pass
 
-            for research_file in (
-                track_stats_file,
-                id_switch_file,
-                detection_loss_file,
-                processing_log_file,
-                measurement_events_file,
-                zone_summary_file,
-                line_summary_file,
-                id_zone_summary_file,
-            ):
+            for summary_file in (zone_summary_file, id_zone_summary_file):
                 try:
-                    research_file.close()
+                    summary_file.close()
                 except Exception:
                     pass
 
@@ -4140,11 +4062,10 @@ class Run1App:
             if settings["save_csv"]:
 
                 print()
-                print("CSV:")
-                print(output_csv)
-                if measurement_enabled:
-                    print("ID Zone Summary CSV:")
-                    print(output_id_zone_summary)
+                print("CSV OUTPUTS (3 files):")
+                print("1.", output_csv)
+                print("2.", output_id_zone_summary)
+                print("3.", output_zone_summary)
 
             # Research summary.
             stop_reason = (
@@ -4187,18 +4108,12 @@ class Run1App:
                 "average_fps": round(average_fps, 6),
                 "outputs": {
                     "detection_records": output_csv,
+                    "id_zone_summary": output_id_zone_summary,
+                    "zone_summary": output_zone_summary,
                     "tracking_result": output_video if settings["save_video"] else None,
-                    "track_statistics": output_track_stats,
-                    "id_switch_warnings": output_id_switch,
-                    "detection_loss": output_detection_loss,
-                    "processing_log": output_processing_log,
                     "run_summary": output_summary,
                     "settings": output_settings,
                     "bytetrack_yaml": output_tracker_yaml if tracker_name == "ByteTrack" else None,
-                    "zone_line_events": output_measurement_events if measurement_enabled else None,
-                    "zone_summary": output_zone_summary if measurement_enabled else None,
-                    "id_zone_summary": output_id_zone_summary if measurement_enabled else None,
-                    "line_summary": output_line_summary if measurement_enabled else None,
                     "measurement_summary": output_measurement_summary if measurement_enabled else None,
                 },
             }
@@ -4222,14 +4137,9 @@ class Run1App:
             print("Unique Track IDs    :", len(track_stats))
             print("ID Switch Warnings  :", id_switch_warning_count)
             print("Detection Losses    :", detection_loss_count)
-            if measurement_enabled:
-                print("Zone/Line Events    :", output_measurement_events)
-                print("Zone Summary        :", output_zone_summary)
-                print("Line Summary        :", output_line_summary)
-            print("Track Statistics    :", output_track_stats)
-            print("ID Switch Warnings  :", output_id_switch)
-            print("Detection Loss      :", output_detection_loss)
-            print("Processing Log      :", output_processing_log)
+            print("Detection Records   :", output_csv)
+            print("ID Zone Summary     :", output_id_zone_summary)
+            print("Zone Summary        :", output_zone_summary)
             print("Run Summary         :", output_summary)
             print("=" * 75)
 
@@ -4241,10 +4151,12 @@ class Run1App:
                     output_csv,
                     output_settings,
                     output_summary,
-                    output_track_stats,
-                    output_id_switch,
-                    output_detection_loss,
-                    output_processing_log
+                    None,
+                    None,
+                    None,
+                    None,
+                    output_id_zone_summary,
+                    output_zone_summary
                 )
             )
 
@@ -4268,18 +4180,13 @@ class Run1App:
             except Exception:
                 pass
 
-            for research_file in (
-                locals().get("track_stats_file"),
-                locals().get("id_switch_file"),
-                locals().get("detection_loss_file"),
-                locals().get("processing_log_file"),
-                locals().get("measurement_events_file"),
+            for summary_file in (
                 locals().get("zone_summary_file"),
-                locals().get("line_summary_file"),
+                locals().get("id_zone_summary_file"),
             ):
                 try:
-                    if research_file is not None:
-                        research_file.close()
+                    if summary_file is not None:
+                        summary_file.close()
                 except Exception:
                     pass
 
@@ -4352,7 +4259,9 @@ class Run1App:
         output_track_stats,
         output_id_switch,
         output_detection_loss,
-        output_processing_log
+        output_processing_log,
+        output_id_zone_summary=None,
+        output_zone_summary=None
     ):
 
         self.running = False
@@ -4410,16 +4319,12 @@ class Run1App:
             )
 
         message += (
-            "Research Summary:\n"
+            "ID Zone Summary CSV:\n"
+            f"{output_id_zone_summary}\n\n"
+            "Zone Summary CSV:\n"
+            f"{output_zone_summary}\n\n"
+            "Research Summary JSON:\n"
             f"{output_summary}\n\n"
-            "Track Statistics:\n"
-            f"{output_track_stats}\n\n"
-            "ID Switch Warnings:\n"
-            f"{output_id_switch}\n\n"
-            "Detection Loss:\n"
-            f"{output_detection_loss}\n\n"
-            "Processing Log:\n"
-            f"{output_processing_log}\n\n"
             "Settings:\n"
             f"{output_settings}"
         )
