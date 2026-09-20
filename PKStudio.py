@@ -391,26 +391,40 @@ RUN3_MOVEMENTS = ["1→3", "1→5", "4→1"]
 RUN3_ALL_MOVEMENTS = ["1→3", "1→5", "4→1", "2→3", "4→5"]
 
 RUN3_DEFAULTS = {
-    "site_id": "",
+    # Starter preset based on the values currently entered in the researcher UI.
+    # NOTE: values marked as implementation defaults are editable and are NOT
+    # source-derived research constants.
+    "site_id": "8",
     "speed_enabled": True,
-    "gap_enabled": True,
-    "lc_enabled": True,
-    "pet_enabled": True,
-    "ppm": "",
-    "waiting_speed_threshold": "",
-    "lateral_axis_angle_deg": "",
-    "lc_longitudinal_window_m": "",
-    "pet_interaction_distance_m": "",
+    "gap_enabled": False,
+    "lc_enabled": False,
+    "pet_enabled": False,
+    "ppm": "57.822",
+    "waiting_speed_threshold": "1.00",      # implementation starter value
+    "lateral_axis_angle_deg": "0.00",       # implementation starter value; verify per video
+    "lc_longitudinal_window_m": "2.00",     # implementation starter value
+    "pet_interaction_distance_m": "3.00",   # implementation starter value
     "pet_threshold_s": "1.00",
     "gap_movement_13": True,
     "gap_movement_15": True,
     "gap_movement_41": True,
     "use_raff": True,
     "use_mle": True,
-    # One mapping per line: Site_ID|Movement|Line N
-    "reference_line_mapping": "",
-    # Widths are intentionally blank until the researcher supplies source values.
-    "vehicle_widths": {name: "" for name in RUN3_VEHICLE_CLASSES},
+    # Copy/paste template for Reference Line Mapping.
+    # Lines beginning with # are ignored by the program. Replace the Line N
+    # entries with the ACTUAL Line 1–6 geometry for the selected Site before
+    # enabling Gap Acceptance.
+    "reference_line_mapping": "# Site_ID|Movement|Line N\n# 8|1→3|Line N\n# 8|1→5|Line N\n# 8|4→1|Line N\n# 8|2→3|Line N\n# 8|4→5|Line N",
+    # Starter width values entered in the current researcher UI.
+    "vehicle_widths": {
+        "Bus": "2.50",
+        "Car": "1.80",
+        "Motorcycle": "0.80",
+        "Pickup": "1.85",
+        "Sidecar": "1.30",
+        "Truck": "2.50",
+        "Van": "1.90",
+    },
 }
 
 
@@ -593,7 +607,7 @@ class Run1App:
         self.run3_gap_movement_41_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_41"])
         self.run3_use_raff_var = tk.BooleanVar(value=RUN3_DEFAULTS["use_raff"])
         self.run3_use_mle_var = tk.BooleanVar(value=RUN3_DEFAULTS["use_mle"])
-        self.run3_reference_mapping_text = ""
+        self.run3_reference_mapping_text = RUN3_DEFAULTS["reference_line_mapping"]
         self.run3_width_vars = {
             name: tk.StringVar(value=RUN3_DEFAULTS["vehicle_widths"].get(name, ""))
             for name in RUN3_VEHICLE_CLASSES
@@ -904,8 +918,9 @@ class Run1App:
         ttk.Checkbutton(frame, text="Raff", variable=self.run3_use_raff_var).grid(row=7, column=1, sticky="w")
         ttk.Checkbutton(frame, text="MLE", variable=self.run3_use_mle_var).grid(row=7, column=2, sticky="w")
 
-        ttk.Label(frame, text="Reference Line Mapping (one line: Site_ID|Movement|Line N)").grid(row=8, column=0, columnspan=4, sticky="w", pady=(4, 2))
-        self.run3_reference_text = tk.Text(frame, height=5, width=90, wrap="none")
+        ttk.Label(frame, text="Reference Line Mapping (copy/paste): Site_ID|Movement|Line N").grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Button(frame, text="Copy Template", command=self.copy_run3_mapping_template).grid(row=8, column=3, sticky="e", pady=(4, 2))
+        self.run3_reference_text = tk.Text(frame, height=6, width=90, wrap="none")
         self.run3_reference_text.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(0, 6))
         self.run3_reference_text.insert("1.0", self.run3_reference_mapping_text)
 
@@ -918,7 +933,7 @@ class Run1App:
 
         ttk.Label(
             frame,
-            text="Run 3 uses Run 2 outputs after Run 1 + 2 finish. Research values without a source are not given numeric defaults.",
+            text="Starter preset: Site 8 + PPM 57.822 + width values. Implementation defaults must be verified per site/video; fill Reference Line Mapping before enabling Gap Acceptance.",
             foreground="#666666"
         ).grid(row=15, column=0, columnspan=4, sticky="w", pady=(6, 2))
         ttk.Label(frame, textvariable=self.run3_result_text, foreground="#444444").grid(
@@ -4510,6 +4525,16 @@ class Run1App:
                 "QC_Flag": "Incomplete_Y1_or_Y2" if (not y1 or not y2) else "",
             })
         return results
+
+    def copy_run3_mapping_template(self):
+        text = self.run3_reference_text.get("1.0", "end-1c") if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update()
+            self.status_var.set("Reference Line Mapping template copied to clipboard")
+        except Exception as e:
+            self.status_var.set(f"Copy failed: {e}")
 
     def _run3_parse_reference_mapping(self):
         text = self.run3_reference_text.get("1.0", "end-1c") if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
