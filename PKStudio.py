@@ -675,12 +675,12 @@ class Run1App:
 
         # ----------------------------------------------------
         # Main settings layout (2 columns)
-        # Row 0: Preset / Experiment (full width)
+        # Row 0: Settings (full width)
         # Row 1: File & Zone | Detection
         # Row 2: Processing | ByteTrack
         # Row 3: Display & Output | Run 1 Flow
         # ----------------------------------------------------
-        self.build_preset_section()
+        self.build_settings_section()
         self.build_file_section()
         self.build_detection_section()
         self.build_processing_section()
@@ -1387,14 +1387,14 @@ class Run1App:
         return frame
 
     # ========================================================
-    # PRESET
+    # SETTINGS
     # ========================================================
 
-    def build_preset_section(self):
+    def build_settings_section(self):
 
         frame = ttk.LabelFrame(
             self.content,
-            text="Preset / Experiment",
+            text="Settings",
             padding=10
         )
 
@@ -1407,67 +1407,24 @@ class Run1App:
             pady=5
         )
 
-        frame.columnconfigure(1, weight=1)
-
         ttk.Label(
             frame,
-            text="Preset"
+            text="Save or load all Run 1 settings, including Zone geometry and Zone display settings."
         ).grid(
-            row=0,
-            column=0,
-            padx=(0, 10)
+            row=0, column=0, sticky="w", padx=(0, 15)
         )
-
-        self.preset_var = tk.StringVar(
-            value="Research Mode"
-        )
-
-        ttk.Combobox(
-            frame,
-            textvariable=self.preset_var,
-            values=[
-                "Research Mode",
-                "ID Stability Test",
-                "Fast Test",
-                "Custom"
-            ],
-            state="readonly",
-            width=25
-        ).grid(
-            row=0,
-            column=1,
-            sticky="w"
-        )
-
-        ttk.Button(
-            frame,
-            text="Apply Preset",
-            command=self.apply_preset
-        ).grid(row=0, column=2, padx=5)
 
         ttk.Button(
             frame,
             text="Save Settings",
             command=self.save_settings
-        ).grid(row=0, column=3, padx=5)
+        ).grid(row=0, column=1, padx=5)
 
         ttk.Button(
             frame,
             text="Load Settings",
             command=self.load_settings
-        ).grid(row=0, column=4, padx=5)
-
-        ttk.Checkbutton(
-            frame,
-            text="Research Mode",
-            variable=self.research_mode_var
-        ).grid(
-            row=1,
-            column=0,
-            columnspan=2,
-            sticky="w",
-            pady=(8, 0)
-        )
+        ).grid(row=0, column=2, padx=5)
 
     # ========================================================
     # FILE
@@ -2009,118 +1966,6 @@ class Run1App:
             )
 
     # ========================================================
-    # PRESETS
-    # ========================================================
-
-    def set_trajectory_position_defaults(self):
-        """Apply the simple Trajectory Position defaults."""
-        self.trajectory_position_var.set("Center")
-        self.trajectory_offset_var.set("0")
-
-
-    def apply_preset(self):
-
-        preset = self.preset_var.get()
-
-        if preset == "Research Mode":
-
-            self.conf_var.set("0.25")
-            self.iou_var.set("0.50")
-            self.img_size_var.set("640")
-            self.tracker_var.set("ByteTrack")
-
-            self.device_var.set("Auto")
-            self.precision_var.set("Auto")
-
-            self.frame_skip_var.set(
-                "NO - Process every frame"
-            )
-
-            self.track_high_var.set("0.25")
-            self.track_low_var.set("0.10")
-            self.new_track_var.set("0.25")
-            self.track_buffer_var.set("30")
-            self.match_threshold_var.set("0.80")
-
-            self.show_preview_var.set(True)
-            self.draw_center_var.set(True)
-            self.draw_trail_var.set(False)
-
-            self.trail_length_var.set("30")
-
-            self.save_video_var.set(True)
-            self.save_csv_var.set(True)
-
-            self.research_mode_var.set(True)
-            self.set_trajectory_position_defaults()
-
-        elif preset == "ID Stability Test":
-
-            self.conf_var.set("0.25")
-            self.iou_var.set("0.50")
-            self.img_size_var.set("640")
-            self.tracker_var.set("ByteTrack")
-
-            self.device_var.set("Auto")
-            self.precision_var.set("Auto")
-
-            self.frame_skip_var.set(
-                "NO - Process every frame"
-            )
-
-            self.track_high_var.set("0.20")
-            self.track_low_var.set("0.05")
-            self.new_track_var.set("0.20")
-            self.track_buffer_var.set("60")
-            self.match_threshold_var.set("0.80")
-
-            self.show_preview_var.set(True)
-            self.draw_center_var.set(True)
-            self.draw_trail_var.set(True)
-
-            self.trail_length_var.set("60")
-
-            self.save_video_var.set(True)
-            self.save_csv_var.set(True)
-
-            self.research_mode_var.set(False)
-
-        elif preset == "Fast Test":
-
-            self.conf_var.set("0.25")
-            self.iou_var.set("0.50")
-            self.img_size_var.set("416")
-            self.tracker_var.set("ByteTrack")
-
-            self.device_var.set("Auto")
-            self.precision_var.set("Auto")
-
-            self.frame_skip_var.set(
-                "1 - Process every 2nd frame"
-            )
-
-            self.track_high_var.set("0.25")
-            self.track_low_var.set("0.10")
-            self.new_track_var.set("0.25")
-            self.track_buffer_var.set("30")
-            self.match_threshold_var.set("0.80")
-
-            self.show_preview_var.set(False)
-            self.draw_center_var.set(False)
-            self.draw_trail_var.set(False)
-
-            self.trail_length_var.set("30")
-
-            self.save_video_var.set(False)
-            self.save_csv_var.set(True)
-
-            self.research_mode_var.set(False)
-
-        self.status_var.set(
-            f"Preset applied: {preset}"
-        )
-
-    # ========================================================
     # SAVE SETTINGS
     # ========================================================
 
@@ -2172,7 +2017,6 @@ class Run1App:
         """Return every user-editable setting plus an embedded Zone snapshot."""
         return {
             "settings_version": 2,
-            "preset": self.preset_var.get(),
             "run_name": self.run_name_var.get(),
             "model": self.model_var.get(),
             "video": self.video_var.get(),
@@ -2249,7 +2093,6 @@ class Run1App:
     def set_settings(self, settings):
         """Apply settings and restore embedded Zone geometry first, without requiring the original Zone file."""
         pairs = [
-            ("preset", self.preset_var),
             ("run_name", self.run_name_var),
             ("model", self.model_var),
             ("video", self.video_var),
