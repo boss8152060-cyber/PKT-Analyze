@@ -2,7 +2,7 @@
 # PK Studio - Run 1
 # ============================================================
 #
-# Vehicle Detection + Tracking + Trajectory Research
+# Vehicle Detection + Tracking + Trajectory + Zone/Line Measurement Research
 # GUI Version 3 - CUDA Auto Environment
 #
 # IMPORTANT:
@@ -25,10 +25,12 @@ import os
 import sys
 import csv
 import json
+import importlib.util
 import time
 import threading
 import subprocess
 import shutil
+import numpy as np
 from collections import deque, defaultdict
 
 
@@ -356,6 +358,10 @@ DEFAULT_SETTINGS = {
 # APPLICATION
 # ============================================================
 
+ZONE_NAMES = [f"Zone {i}" for i in range(1, 7)]
+LINE_NAMES = [f"Line {i}" for i in range(1, 7)]
+
+
 class Run1App:
 
     def __init__(self, root):
@@ -513,6 +519,18 @@ class Run1App:
             value=""
         )
 
+        # Integrated Run 1 + Zone/Line measurement configuration.
+        self.zone_line_config_var = tk.StringVar(value="")
+        self.measurement_status_var = tk.StringVar(value="No PK Studio Zone file loaded")
+        self.zone_source_video = ""
+        self.zone_source_width = None
+        self.zone_source_height = None
+        self.zones = {name: [] for name in ZONE_NAMES}
+        self.lines = {name: [] for name in LINE_NAMES}
+        self.zone_meta = {}
+        self.zone_file_format = None
+        self.zone_scaled = []
+
     # ========================================================
     # GUI
     # ========================================================
@@ -629,6 +647,7 @@ class Run1App:
         self.build_bytetrack_section()
         self.build_output_section()
         self.build_information_section()
+        self.build_measurement_section()
 
         bottom = ttk.Frame(main)
 
@@ -727,6 +746,451 @@ class Run1App:
             ipadx=12,
             ipady=8
         )
+
+    # ========================================================
+    # INTEGRATED ZONE / LINE MEASUREMENT
+    # ========================================================
+
+    def build_measurement_section(self):
+
+        frame = ttk.LabelFrame(
+            self.content,
+            text="Measurement: PK Studio Zones (Integrated with Run 1)",
+            padding=10
+        )
+        frame.grid(row=6, column=0, columnspan=2, sticky="ew", pady=5)
+        frame.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            frame,
+            text="Load a PK Studio Zone export. Both .JSON and .PY formats are supported.",
+        ).grid(row=0, column=0, columnspan=5, sticky="w", pady=(0, 8))
+
+        ttk.Label(frame, text="PK Studio Zone File").grid(
+            row=1, column=0, sticky="w", padx=(0, 8)
+        )
+        ttk.Entry(frame, textvariable=self.zone_line_config_var).grid(
+            row=1, column=1, sticky="ew"
+        )
+        ttk.Button(frame, text="Browse", command=self.load_measurement_config).grid(
+            row=1, column=2, padx=4
+        )
+        ttk.Button(frame, text="Reload", command=self.load_measurement_config).grid(
+            row=1, column=3, padx=4
+        )
+
+        ttk.Label(
+            frame,
+            textvariable=self.measurement_status_var,
+            anchor="w"
+        ).grid(row=2, column=0, columnspan=5, sticky="w", pady=(8, 0))
+
+    def refresh_measurement_status(self):
+        z = sum(1 for v in self.zones.values() if len(v) >= 3)
+        l = sum(1 for v in self.lines.values() if len(v) >= 2)
+        source = os.path.basename(self.zone_line_config_var.get().strip()) if self.zone_line_config_var.get().strip() else "None"
+        self.measurement_status_var.set(
+            f"PK Studio: {source} | Zones loaded: {z} | Lines loaded: {l} | "
+            f"Zone metrics: entry/exit/duration/distance/speed"
+        )
+
+    @staticmethod
+    def _normalize_zone_item(item, fallback_name=None):
+        """Convert one PK Studio zone record to a common internal format."""
+        if not isinstance(item, dict):
+            return None
+
+        name = str(item.get("name", fallback_name or "")).strip()
+        if not name:
+            zone_id = item.get("id")
+            name = f"Zone {zone_id}" if zone_id is not None else ""
+
+        points = item.get("points") or []
+        points_norm = item.get("points_norm") or []
+
+        def clean_points(raw):
+            result = []
+            for point in raw:
+                try:
+                    if len(point) >= 2:
+                        result.append((float(point[0]), float(point[1])))
+                except Exception:
+                    continue
+            return result
+
+        return {
+            "id": item.get("id"),
+            "name": name,
+            "points": clean_points(points),
+            "points_norm": clean_points(points_norm),
+            "color_bgr": item.get("color_bgr", [0, 255, 0]),
+            "show_label": bool(item.get("show_label", True)),
+            "area_px": item.get("area_px"),
+            "reference_frame_index": item.get("reference_frame_index"),
+        }
+
+    def _actual_video_size(self):
+        video = self.video_var.get().strip()
+        if not video or not os.path.isfile(video):
+            return None, None
+        cap = cv2.VideoCapture(video)
+        try:
+            if not cap.isOpened():
+                return None, None
+            return int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        finally:
+            cap.release()
+
+    def _prepare_zone_points(self, zone, source_width, source_height):
+        """Use pixel points when resolutions match; otherwise use points_norm."""
+        actual_w, actual_h = self._actual_video_size()
+        if not actual_w or not actual_h:
+            actual_w = source_width
+            actual_h = source_height
+
+        points = zone.get("points", [])
+        points_norm = zone.get("points_norm", [])
+
+        if source_width and source_height and (actual_w != source_width or actual_h != source_height):
+            if points_norm and actual_w and actual_h:
+                # PK Studio normalized coordinates are expected in [0, 1].
+                prepared = [(x * actual_w, y * actual_h) for x, y in points_norm]
+                return [(int(round(x)), int(round(y))) for x, y in prepared], True
+            if points and source_width and source_height:
+                # Fallback for older exports without points_norm.
+                sx = actual_w / float(source_width)
+                sy = actual_h / float(source_height)
+                prepared = [(x * sx, y * sy) for x, y in points]
+                return [(int(round(x)), int(round(y))) for x, y in prepared], True
+
+        return [(int(round(x)), int(round(y))) for x, y in points], False
+
+    def _load_pkstudio_json(self, path):
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, dict):
+            raise ValueError("The selected JSON file must contain an object at the top level.")
+
+        raw_zones = data.get("zones")
+        if not isinstance(raw_zones, list):
+            # Compatibility with the older integrated JSON structure.
+            legacy = data.get("zones", {})
+            if isinstance(legacy, dict):
+                raw_zones = []
+                for name, points in legacy.items():
+                    raw_zones.append({"name": name, "points": points})
+            else:
+                raise ValueError("The JSON file does not contain a valid 'zones' list.")
+
+        source_width = data.get("frame_width")
+        source_height = data.get("frame_height")
+        try:
+            source_width = int(source_width) if source_width is not None else None
+            source_height = int(source_height) if source_height is not None else None
+        except Exception:
+            source_width = source_height = None
+
+        zones = {name: [] for name in ZONE_NAMES}
+        zone_meta = {}
+        loaded = []
+        scaled = []
+
+        for raw in raw_zones:
+            zone = self._normalize_zone_item(raw)
+            if not zone:
+                continue
+            name = zone["name"]
+            if name not in zones:
+                # Accept numeric IDs even if the name was omitted/different.
+                zid = zone.get("id")
+                if zid is not None and f"Zone {zid}" in zones:
+                    name = f"Zone {zid}"
+                    zone["name"] = name
+            if name not in zones:
+                continue
+
+            pts, was_scaled = self._prepare_zone_points(zone, source_width, source_height)
+            if len(pts) >= 3:
+                zones[name] = pts
+                zone_meta[name] = zone
+                loaded.append(name)
+                if was_scaled:
+                    scaled.append(name)
+
+        if not loaded:
+            raise ValueError("No valid Zone 1-6 definitions were found in the selected PK Studio file.")
+
+        # JSON is Zone-only in the current PK Studio format.
+        lines = {name: [] for name in LINE_NAMES}
+        raw_lines = data.get("lines", {})
+        if isinstance(raw_lines, dict):
+            for name, pts in raw_lines.items():
+                if name in lines and isinstance(pts, list):
+                    cleaned = []
+                    for p in pts:
+                        try:
+                            cleaned.append((int(p[0]), int(p[1])))
+                        except Exception:
+                            pass
+                    if len(cleaned) == 2:
+                        lines[name] = cleaned
+
+        self.zones = zones
+        self.lines = lines
+        self.zone_line_config_var.set(path)
+        self.zone_source_video = str(data.get("video_path", ""))
+        self.zone_source_width = source_width
+        self.zone_source_height = source_height
+        self.zone_meta = zone_meta
+        self.zone_file_format = "JSON"
+        self.zone_scaled = scaled
+
+        self.refresh_measurement_status()
+
+        status = f"Loaded {len(loaded)} zones from PK Studio JSON"
+        if scaled:
+            status += f" | Rescaled: {', '.join(scaled)}"
+        self.status_var.set(status)
+
+        # The JSON can contain a source video path. It is informational only;
+        # the video selected in Run 1 remains the actual processing input.
+        selected_video = self.video_var.get().strip()
+        source_video = self.zone_source_video.strip()
+        if source_video and selected_video:
+            if os.path.basename(source_video).lower() != os.path.basename(selected_video).lower():
+                self.measurement_status_var.set(
+                    self.measurement_status_var.get()
+                    + " | Warning: JSON video name differs from selected video"
+                )
+
+        return True
+
+    def _load_pkstudio_python(self, path):
+        spec = importlib.util.spec_from_file_location("pkstudio_zone_export", path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Unable to load the PK Studio Zone Python file.")
+
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        raw_zones = getattr(module, "ZONES", None)
+        if not isinstance(raw_zones, list):
+            raise ValueError("The selected Python file does not contain a valid ZONES list exported by PK Studio.")
+
+        zones = {name: [] for name in ZONE_NAMES}
+        meta = {}
+        loaded = []
+
+        for raw in raw_zones:
+            zone = self._normalize_zone_item(raw)
+            if not zone:
+                continue
+            name = zone["name"]
+            zid = zone.get("id")
+            if name not in zones and zid is not None and f"Zone {zid}" in zones:
+                name = f"Zone {zid}"
+                zone["name"] = name
+            if name not in zones:
+                continue
+            if len(zone["points"]) >= 3:
+                zones[name] = [(int(round(x)), int(round(y))) for x, y in zone["points"]]
+                meta[name] = zone
+                loaded.append(name)
+
+        if not loaded:
+            raise ValueError("No Zone 1-6 definitions were found in the PK Studio Python export.")
+
+        lines = {name: [] for name in LINE_NAMES}
+        raw_lines = getattr(module, "LINES", {})
+        if isinstance(raw_lines, dict):
+            for name, pts in raw_lines.items():
+                if name in lines and isinstance(pts, list) and len(pts) == 2:
+                    try:
+                        lines[name] = [tuple(map(int, p[:2])) for p in pts]
+                    except Exception:
+                        pass
+
+        self.zones = zones
+        self.lines = lines
+        self.zone_line_config_var.set(path)
+        self.zone_source_video = str(getattr(module, "VIDEO", ""))
+        self.zone_source_width = getattr(module, "FRAME_WIDTH", None)
+        self.zone_source_height = getattr(module, "FRAME_HEIGHT", None)
+        self.zone_meta = meta
+        self.zone_file_format = "PY"
+        self.zone_scaled = []
+        self.refresh_measurement_status()
+        self.status_var.set(f"Loaded {len(loaded)} zones from PK Studio Python")
+        return True
+
+    def load_pkstudio_zones(self):
+        """Load either the current PK Studio JSON export or the older Python export."""
+        path = self.zone_line_config_var.get().strip()
+        if not path or not os.path.isfile(path):
+            path = filedialog.askopenfilename(
+                title="Load PK Studio Zone File",
+                filetypes=[
+                    ("PK Studio Zone files", "*.json *.py"),
+                    ("JSON files", "*.json"),
+                    ("Python files", "*.py"),
+                    ("All files", "*.*")
+                ]
+            )
+        if not path:
+            return False
+
+        try:
+            if path.lower().endswith(".json"):
+                ok = self._load_pkstudio_json(path)
+            elif path.lower().endswith(".py"):
+                ok = self._load_pkstudio_python(path)
+            else:
+                raise ValueError("Zone file must be .json or .py")
+
+            if ok:
+                self.validate_measurements()
+            return bool(ok)
+
+        except Exception as exc:
+            messagebox.showerror("PK Studio Zone Load Error", str(exc))
+            return False
+
+    def load_measurement_config(self):
+        return self.load_pkstudio_zones()
+
+    def save_measurement_config(self):
+        # Save the currently loaded geometry as a normalized JSON snapshot.
+        path = filedialog.asksaveasfilename(
+            title="Save Zone Configuration Snapshot",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialfile="Run_1_Zone_Config_Used.json"
+        )
+        if not path:
+            return
+
+        zones = []
+        for index, name in enumerate(ZONE_NAMES, start=1):
+            points = self.zones.get(name, [])
+            if len(points) < 3:
+                continue
+            meta = getattr(self, "zone_meta", {}).get(name, {})
+            zones.append({
+                "id": meta.get("id", index),
+                "name": name,
+                "points": [list(p) for p in points],
+                "color_bgr": meta.get("color_bgr", [0, 255, 0]),
+                "show_label": meta.get("show_label", True),
+                "area_px": meta.get("area_px"),
+                "reference_frame_index": meta.get("reference_frame_index"),
+            })
+
+        data = {
+            "video_path": self.zone_source_video,
+            "frame_width": self.zone_source_width,
+            "frame_height": self.zone_source_height,
+            "zones": zones,
+            "source_format": getattr(self, "zone_file_format", None),
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        self.status_var.set("Zone configuration snapshot saved")
+
+    def draw_measurement_overlay(self, frame, frame_index, fps, zone_track_state, line_track_state, zone_entry_count, line_cross_count):
+        """Draw PK Studio zones/lines and live zone timing/counts on the preview/output frame."""
+        # Draw polygons and labels even when no detection exists.
+        for zname in ZONE_NAMES:
+            polygon = self.zones.get(zname, [])
+            if len(polygon) < 3:
+                continue
+            pts = np.array(polygon, dtype=np.int32).reshape((-1, 1, 2))
+            meta = getattr(self, "zone_meta", {}).get(zname, {})
+            color_raw = meta.get("color_bgr", [0, 200, 0])
+            try:
+                color = tuple(int(max(0, min(255, v))) for v in color_raw[:3])
+                if len(color) != 3:
+                    color = (0, 200, 0)
+            except Exception:
+                color = (0, 200, 0)
+            cv2.polylines(frame, [pts], True, color, 3, cv2.LINE_AA)
+            if meta.get("show_label", True):
+                x, y = map(int, polygon[0])
+                cv2.putText(frame, f"{zname} | entries: {zone_entry_count.get(zname, 0)}", (x, max(20, y - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
+
+        # Draw line geometry when supplied by a compatible config.
+        for lname in LINE_NAMES:
+            line = self.lines.get(lname, [])
+            if len(line) != 2:
+                continue
+            p1 = tuple(map(int, line[0])); p2 = tuple(map(int, line[1]))
+            cv2.line(frame, p1, p2, (255, 255, 255), 4, cv2.LINE_AA)
+            cv2.circle(frame, p1, 6, (255, 255, 255), -1)
+            cv2.circle(frame, p2, 6, (255, 255, 255), -1)
+            mx, my = (p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2
+            cv2.putText(frame, f"{lname} | crossings: {line_cross_count.get(lname, 0)}",
+                        (mx, max(20, my - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # Live per-track zone timer. The timer begins at the exact frame where
+        # the tracked centroid is first detected inside the zone.
+        now = frame_index / fps if fps > 0 else 0.0
+        for track_id, zmap in zone_track_state.items():
+            active = []
+            for zname, zs in zmap.items():
+                if zs.get("inside") and zs.get("entry_time") is not None:
+                    duration = max(0.0, now - float(zs["entry_time"]))
+                    active.append(f"{zname}: {duration:.1f}s")
+            if not active:
+                continue
+            # Put the live zone timers near the last known center.
+            point = None
+            for zname in zmap:
+                lp = zmap[zname].get("last_point")
+                if lp is not None:
+                    point = lp; break
+            if point is None:
+                continue
+            x, y = map(int, point)
+            for idx, text in enumerate(active):
+                cv2.putText(frame, f"ID {track_id} | {text}", (x + 8, y + 22 + idx * 22),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA)
+
+    @staticmethod
+    def point_in_zone(x, y, points):
+        if len(points) < 3:
+            return False
+        polygon = np.array(points, dtype=np.int32)
+        return cv2.pointPolygonTest(polygon, (float(x), float(y)), False) >= 0
+
+    @staticmethod
+    def line_side(point, line):
+        if len(line) < 2:
+            return 0.0
+        (x1, y1), (x2, y2) = line
+        x, y = point
+        return (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1)
+
+    @classmethod
+    def line_crossing(cls, prev_point, curr_point, line):
+        if len(line) < 2 or prev_point is None or curr_point is None:
+            return None
+        a = cls.line_side(prev_point, line)
+        b = cls.line_side(curr_point, line)
+        if a == 0 or b == 0 or (a < 0 < b) or (a > 0 > b):
+            direction = "A_to_B" if a < b else "B_to_A"
+            return direction
+        return None
+
+    def validate_measurements(self):
+        has_any = any(len(v) >= 3 for v in self.zones.values()) or any(len(v) >= 2 for v in self.lines.values())
+        if not has_any:
+            return True
+        bad_z = [k for k,v in self.zones.items() if v and len(v) < 3]
+        bad_l = [k for k,v in self.lines.items() if v and len(v) != 2]
+        if bad_z or bad_l:
+            raise ValueError(f"Invalid measurement geometry. Zones need 3+ points; Lines need exactly 2 points.\nZones: {bad_z}\nLines: {bad_l}")
+        return True
 
     # ========================================================
     # SCROLL
@@ -1876,6 +2340,11 @@ class Run1App:
     # ========================================================
 
     def start_run(self):
+        try:
+            self.validate_measurements()
+        except Exception as exc:
+            messagebox.showerror("Measurement Configuration", str(exc))
+            return
 
         if self.running:
             return
@@ -2073,6 +2542,18 @@ class Run1App:
                 output_dir,
                 run_name + "_Research_ByteTrack.yaml"
             )
+            output_measurement_events = os.path.join(
+                output_dir, run_name + "_Research_Zone_Line_Events.csv"
+            )
+            output_zone_summary = os.path.join(
+                output_dir, run_name + "_Research_Zone_Summary.csv"
+            )
+            output_line_summary = os.path.join(
+                output_dir, run_name + "_Research_Line_Summary.csv"
+            )
+            output_measurement_summary = os.path.join(
+                output_dir, run_name + "_Research_Measurement_Summary.json"
+            )
 
             with open(
                 output_settings,
@@ -2119,7 +2600,7 @@ class Run1App:
             print()
             print("=" * 75)
             print("PK Studio - Vehicle Traffic Analysis")
-            print("RUN 1 : Detection + Tracking + Trajectory")
+            print("RUN 1 + 2 : Detection + Tracking + Trajectory + Zone/Line Measurement")
             print("=" * 75)
             print()
             print("Python      :", sys.executable)
@@ -2340,6 +2821,33 @@ class Run1App:
                 "status"
             ])
 
+            measurement_events_file = open(output_measurement_events, "w", newline="", encoding="utf-8-sig")
+            measurement_events_writer = csv.writer(measurement_events_file)
+            measurement_events_writer.writerow([
+                "frame", "timestamp", "track_id", "class_name", "measurement_type",
+                "measurement_name", "event", "duration_seconds", "distance_px", "speed_px_s", "direction"
+            ])
+
+            zone_summary_file = open(output_zone_summary, "w", newline="", encoding="utf-8-sig")
+            zone_summary_writer = csv.writer(zone_summary_file)
+            zone_summary_writer.writerow([
+                "zone", "track_id", "class_name", "entry_frame", "entry_timestamp",
+                "exit_frame", "exit_timestamp", "duration_seconds", "distance_px", "average_speed_px_s"
+            ])
+
+            line_summary_file = open(output_line_summary, "w", newline="", encoding="utf-8-sig")
+            line_summary_writer = csv.writer(line_summary_file)
+            line_summary_writer.writerow([
+                "line", "track_id", "class_name", "crossing_frame", "crossing_timestamp", "direction"
+            ])
+
+            # Integrated measurement state. This is updated directly from Run 1 tracking.
+            zone_track_state = {}
+            line_track_state = {}
+            zone_entry_count = defaultdict(int)
+            zone_exit_count = defaultdict(int)
+            line_cross_count = defaultdict(int)
+
             # Per-track research state.
             track_stats = {}
             active_tracks = {}
@@ -2377,6 +2885,18 @@ class Run1App:
             show_preview = settings[
                 "show_preview"
             ]
+
+            self.validate_measurements()
+            measurement_enabled = (
+                any(len(v) >= 3 for v in self.zones.values())
+                or any(len(v) >= 2 for v in self.lines.values())
+            )
+            if not hasattr(self, "zone_meta"):
+                self.zone_meta = {}
+            print("Measurement :", "Enabled (Zones/Lines integrated)" if measurement_enabled else "Disabled")
+            if measurement_enabled:
+                print("Zones       :", [k for k, v in self.zones.items() if len(v) >= 3])
+                print("Lines       :", [k for k, v in self.lines.items() if len(v) == 2])
 
             window_name = "PK Studio - Run 1"
 
@@ -2692,6 +3212,72 @@ class Run1App:
                                     "class_name": class_name,
                                 }
 
+                                # ==============================
+                                # INTEGRATED ZONE MEASUREMENT
+                                # ==============================
+                                if measurement_enabled:
+                                    point = (center_x, center_y)
+                                    zstate = zone_track_state.setdefault(track_id, {})
+                                    for zname in ZONE_NAMES:
+                                        polygon = self.zones.get(zname, [])
+                                        if len(polygon) < 3:
+                                            continue
+                                        inside = self.point_in_zone(center_x, center_y, polygon)
+                                        zs = zstate.setdefault(zname, {
+                                            "inside": False, "entry_frame": None, "entry_time": None,
+                                            "distance_px": 0.0, "last_point": None
+                                        })
+                                        timestamp_now = frame_index / fps
+                                        previous_zone_point = zs.get("last_point")
+                                        # ENTRY is defined by the first processed frame in which
+                                        # the tracked centroid is inside this polygon. Therefore a
+                                        # vehicle that appears already inside a zone starts counting
+                                        # immediately at that observation; it does not need to cross
+                                        # the polygon boundary while being tracked.
+                                        if inside and not zs["inside"]:
+                                            zs["inside"] = True
+                                            zs["entry_frame"] = frame_index
+                                            zs["entry_time"] = timestamp_now
+                                            zs["distance_px"] = 0.0
+                                            zs["last_point"] = point
+                                            zone_entry_count[zname] += 1
+                                            measurement_events_writer.writerow([frame_index, f"{timestamp_now:.6f}", track_id, class_name, "ZONE", zname, "ENTRY", "0.000000", "0.000", "", ""])
+                                        elif inside and zs["inside"]:
+                                            if previous_zone_point is not None:
+                                                px, py = previous_zone_point
+                                                zs["distance_px"] += ((center_x-px)**2 + (center_y-py)**2) ** 0.5
+                                            zs["last_point"] = point
+                                        elif (not inside) and zs["inside"]:
+                                            duration = max(0.0, timestamp_now - float(zs["entry_time"]))
+                                            zone_exit_count[zname] += 1
+                                            avg_speed = zs["distance_px"] / duration if duration > 0 else 0.0
+                                            measurement_events_writer.writerow([frame_index, f"{timestamp_now:.6f}", track_id, class_name, "ZONE", zname, "EXIT", f"{duration:.6f}", f"{zs['distance_px']:.3f}", f"{avg_speed:.6f}", ""])
+                                            zone_summary_writer.writerow([zname, track_id, class_name, zs["entry_frame"], f"{zs['entry_time']:.6f}", frame_index, f"{timestamp_now:.6f}", f"{duration:.6f}", f"{zs['distance_px']:.3f}", f"{avg_speed:.6f}"])
+                                            zs["inside"] = False
+                                            zs["entry_frame"] = None
+                                            zs["entry_time"] = None
+                                            zs["distance_px"] = 0.0
+                                            zs["last_point"] = None
+                                        else:
+                                            zs["last_point"] = None
+
+                                    # ==============================
+                                    # INTEGRATED LINE MEASUREMENT
+                                    # ==============================
+                                    lstate = line_track_state.setdefault(track_id, {})
+                                    previous_point = lstate.get("previous_point")
+                                    timestamp_now = frame_index / fps
+                                    for lname in LINE_NAMES:
+                                        line = self.lines.get(lname, [])
+                                        if len(line) != 2:
+                                            continue
+                                        direction = self.line_crossing(previous_point, point, line)
+                                        if direction:
+                                            line_cross_count[lname] += 1
+                                            measurement_events_writer.writerow([frame_index, f"{timestamp_now:.6f}", track_id, class_name, "LINE", lname, "CROSS", "", "", "", direction])
+                                            line_summary_writer.writerow([lname, track_id, class_name, frame_index, f"{timestamp_now:.6f}", direction])
+                                    lstate["previous_point"] = point
+
                                 # Remove stale active tracks from the current active set.
                                 for old_id in list(active_tracks):
                                     if frame_index - active_tracks[old_id]["last_frame"] > 1:
@@ -2871,6 +3457,12 @@ class Run1App:
                     eta_seconds
                 )
 
+                if measurement_enabled:
+                    self.draw_measurement_overlay(
+                        frame, frame_index, fps, zone_track_state, line_track_state,
+                        zone_entry_count, line_cross_count
+                    )
+
                 info_lines = [
                     f"Frame: {frame_index}/{total_frames}",
                     f"Processed: {processed_frames}",
@@ -3045,6 +3637,51 @@ class Run1App:
                     status,
                 ])
 
+            # Finalize integrated Zone/Line measurements before closing any files.
+            if measurement_enabled:
+                for track_id, zmap in zone_track_state.items():
+                    state_info = track_stats.get(track_id, {})
+                    class_name_final = state_info.get("class_name", "")
+                    last_frame_final = state_info.get("last_frame", frame_index)
+                    last_time_final = last_frame_final / fps
+                    for zname, zs in zmap.items():
+                        if zs.get("inside") and zs.get("entry_time") is not None:
+                            duration = max(0.0, last_time_final - float(zs["entry_time"]))
+                            avg_speed = zs["distance_px"] / duration if duration > 0 else 0.0
+                            zone_summary_writer.writerow([
+                                zname, track_id, class_name_final, zs["entry_frame"],
+                                f"{zs['entry_time']:.6f}", last_frame_final,
+                                f"{last_time_final:.6f}", f"{duration:.6f}",
+                                f"{zs['distance_px']:.3f}", f"{avg_speed:.6f}"
+                            ])
+                            measurement_events_writer.writerow([
+                                last_frame_final, f"{last_time_final:.6f}", track_id,
+                                class_name_final, "ZONE", zname, "EXIT_END_OF_TRACK",
+                                f"{duration:.6f}", f"{zs['distance_px']:.3f}",
+                                f"{avg_speed:.6f}", ""
+                            ])
+
+                measurement_events_file.flush()
+                zone_summary_file.flush()
+                line_summary_file.flush()
+                with open(output_measurement_summary, "w", encoding="utf-8") as mf:
+                    json.dump({
+                        "measurement_enabled": measurement_enabled,
+                        "zones_defined": [k for k,v in self.zones.items() if len(v) >= 3],
+                        "lines_defined": [k for k,v in self.lines.items() if len(v) == 2],
+                        "zone_source_file": self.zone_line_config_var.get().strip(),
+                        "zone_source_video": self.zone_source_video,
+                        "zone_source_resolution": {"width": self.zone_source_width, "height": self.zone_source_height},
+                        "zone_entries": dict(zone_entry_count),
+                        "zone_exits": dict(zone_exit_count),
+                        "line_crossings": dict(line_cross_count),
+                        "outputs": {
+                            "events": output_measurement_events,
+                            "zone_summary": output_zone_summary,
+                            "line_summary": output_line_summary,
+                        }
+                    }, mf, indent=4, ensure_ascii=False)
+
             # Flush final processing event.
             elapsed_before_summary = time.time() - start_time
             final_fps = (
@@ -3088,6 +3725,9 @@ class Run1App:
                 id_switch_file,
                 detection_loss_file,
                 processing_log_file,
+                measurement_events_file,
+                zone_summary_file,
+                line_summary_file,
             ):
                 try:
                     research_file.close()
@@ -3180,7 +3820,7 @@ class Run1App:
 
             run_summary = {
                 "run_name": run_name,
-                "run_type": "Run 1.5 Research",
+                "run_type": "Run 1 + 2 Integrated Research",
                 "status": "stopped" if stopped else "completed",
                 "stop_reason": stop_reason,
                 "model": model_path,
@@ -3209,6 +3849,10 @@ class Run1App:
                     "run_summary": output_summary,
                     "settings": output_settings,
                     "bytetrack_yaml": output_tracker_yaml if tracker_name == "ByteTrack" else None,
+                    "zone_line_events": output_measurement_events if measurement_enabled else None,
+                    "zone_summary": output_zone_summary if measurement_enabled else None,
+                    "line_summary": output_line_summary if measurement_enabled else None,
+                    "measurement_summary": output_measurement_summary if measurement_enabled else None,
                 },
             }
 
@@ -3231,6 +3875,10 @@ class Run1App:
             print("Unique Track IDs    :", len(track_stats))
             print("ID Switch Warnings  :", id_switch_warning_count)
             print("Detection Losses    :", detection_loss_count)
+            if measurement_enabled:
+                print("Zone/Line Events    :", output_measurement_events)
+                print("Zone Summary        :", output_zone_summary)
+                print("Line Summary        :", output_line_summary)
             print("Track Statistics    :", output_track_stats)
             print("ID Switch Warnings  :", output_id_switch)
             print("Detection Loss      :", output_detection_loss)
@@ -3278,6 +3926,9 @@ class Run1App:
                 locals().get("id_switch_file"),
                 locals().get("detection_loss_file"),
                 locals().get("processing_log_file"),
+                locals().get("measurement_events_file"),
+                locals().get("zone_summary_file"),
+                locals().get("line_summary_file"),
             ):
                 try:
                     if research_file is not None:
