@@ -3538,6 +3538,11 @@ class Run1App:
                                         "previous_confirmed_point": None,
                                         "no_zone_count": 0,
                                         "zone_states": {},
+                                        # Short trajectory history used only for the
+                                        # on-screen live-speed display. This does not
+                                        # replace the research Y1/Y2 calculation.
+                                        "live_speed_history": [],
+                                        "live_speed_kmh": None,
                                     })
 
                                     zstate["no_zone_count"] = 0 if not no_zone else zstate.get("no_zone_count", 0) + 1
@@ -3552,6 +3557,36 @@ class Run1App:
                                     zstate["last_candidate_confidence"] = raw_confidence
                                     zstate["last_overlap"] = overlap_map
                                     zstate["last_method"] = method_now
+
+                                    # --------------------------------------------------
+                                    # LIVE SPEED FOR ON-SCREEN OBJECT LABEL
+                                    # --------------------------------------------------
+                                    # Uses the same Trajectory Position point and the
+                                    # configured PPM. A short rolling window is used
+                                    # only to make the displayed speed less noisy.
+                                    # Y1/Y2 research values are still calculated later
+                                    # by Run 3 and are not changed by this display value.
+                                    try:
+                                        live_ppm = float(self.run3_ppm_var.get())
+                                    except Exception:
+                                        live_ppm = 0.0
+                                    hist = zstate.get("live_speed_history", [])
+                                    hist.append((timestamp_now if 'timestamp_now' in locals() else frame_index / fps, point[0], point[1]))
+                                    if len(hist) > 6:
+                                        hist = hist[-6:]
+                                    zstate["live_speed_history"] = hist
+                                    zstate["live_speed_kmh"] = None
+                                    if live_ppm > 0 and len(hist) >= 2:
+                                        t0, x0, y0 = hist[0]
+                                        t1, x1p, y1p = hist[-1]
+                                        dt_live = float(t1) - float(t0)
+                                        if dt_live > 0:
+                                            dist_px_live = 0.0
+                                            for h in range(1, len(hist)):
+                                                xa, ya = hist[h-1][1], hist[h-1][2]
+                                                xb, yb = hist[h][1], hist[h][2]
+                                                dist_px_live += math.hypot(xb - xa, yb - ya)
+                                            zstate["live_speed_kmh"] = (dist_px_live / live_ppm) / dt_live * 3.6
 
                                     if candidate:
                                         zone_assignment_summary[candidate]["observations"] += 1
@@ -3699,11 +3734,14 @@ class Run1App:
 
                                 if confirmed_label:
                                     # Single compact object label.
-                                    # Show ID + class + detection confidence + Zone once only.
-                                    # No separate yellow Zone-duration label is drawn.
+                                    # Show ID + class + confidence + Zone + live speed.
+                                    # Live speed is display-only; research Y1/Y2 remain
+                                    # calculated by Run 3 from the stored trajectory.
+                                    live_speed = zone_track_state.get(track_id, {}).get("live_speed_kmh")
+                                    speed_text = f"Speed {live_speed:.1f} km/h" if live_speed is not None else "Speed --.- km/h"
                                     label = (
                                         f"ID {track_id} | {class_name} | "
-                                        f"Conf {confidence:.2f} | {confirmed_label}"
+                                        f"Conf {confidence:.2f} | {confirmed_label} | {speed_text}"
                                     )
                                     label_y = max(y1 - 10, 20)
                                     cv2.putText(
