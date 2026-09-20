@@ -2025,155 +2025,126 @@ class Run1App:
     # SAVE SETTINGS
     # ========================================================
 
-    def get_settings(self):
+    def _json_safe(self, value):
+        """Convert settings/Zone data to plain JSON-safe Python values."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, dict):
+            return {str(k): self._json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._json_safe(v) for v in value]
+        # Handle numpy scalar types without importing numpy here.
+        try:
+            return value.item()
+        except Exception:
+            return str(value)
 
-        # Save the complete loaded PK Studio zone state, not only the file path.
-        # This makes Load Settings restore the actual Zone geometry even when
-        # the source file is moved, renamed, or unavailable later.
-        zone_snapshot = {
-            "zones": self.zones,
-            "lines": self.lines,
-            "zone_meta": self.zone_meta,
-            "zone_source_video": self.zone_source_video,
-            "zone_source_width": self.zone_source_width,
-            "zone_source_height": self.zone_source_height,
-            "zone_file_format": self.zone_file_format,
-            "zone_scaled": self.zone_scaled,
-        }
+    def _build_zone_snapshot(self):
+        """Build a simple, self-contained Zone/Line snapshot for Settings."""
+        zones = {}
+        for name in ZONE_NAMES:
+            zones[name] = [
+                [float(p[0]), float(p[1])]
+                for p in self.zones.get(name, [])
+                if isinstance(p, (list, tuple)) and len(p) >= 2
+            ]
+
+        lines = {}
+        for name in LINE_NAMES:
+            lines[name] = [
+                [float(p[0]), float(p[1])]
+                for p in self.lines.get(name, [])
+                if isinstance(p, (list, tuple)) and len(p) >= 2
+            ]
 
         return {
+            "version": 2,
+            "zones": zones,
+            "lines": lines,
+            "zone_meta": self._json_safe(getattr(self, "zone_meta", {})),
+            "zone_source_video": str(getattr(self, "zone_source_video", "") or ""),
+            "zone_source_width": self._json_safe(getattr(self, "zone_source_width", None)),
+            "zone_source_height": self._json_safe(getattr(self, "zone_source_height", None)),
+            "zone_file_format": getattr(self, "zone_file_format", None),
+            "zone_scaled": self._json_safe(getattr(self, "zone_scaled", [])),
+        }
+
+    def get_settings(self):
+        """Return every user-editable setting plus an embedded Zone snapshot."""
+        return {
+            "settings_version": 2,
             "preset": self.preset_var.get(),
             "run_name": self.run_name_var.get(),
-
             "model": self.model_var.get(),
             "video": self.video_var.get(),
             "output": self.output_var.get(),
             "zone_file": self.zone_line_config_var.get(),
-            "zone_snapshot": zone_snapshot,
-
+            "zone_snapshot": self._build_zone_snapshot(),
             "confidence": self.conf_var.get(),
             "iou": self.iou_var.get(),
             "img_size": self.img_size_var.get(),
-
             "tracker": self.tracker_var.get(),
-
             "device": self.device_var.get(),
             "precision": self.precision_var.get(),
-
             "frame_skip": self.frame_skip_var.get(),
-
             "track_high": self.track_high_var.get(),
             "track_low": self.track_low_var.get(),
             "new_track": self.new_track_var.get(),
             "track_buffer": self.track_buffer_var.get(),
             "match_threshold": self.match_threshold_var.get(),
-
             "show_preview": self.show_preview_var.get(),
             "draw_center": self.draw_center_var.get(),
             "draw_trail": self.draw_trail_var.get(),
-
             "trail_length": self.trail_length_var.get(),
-
             "save_video": self.save_video_var.get(),
             "save_csv": self.save_csv_var.get(),
-
             "csv_flush": self.csv_flush_var.get(),
-
             "research_mode": self.research_mode_var.get(),
-
             "trajectory_position": self.trajectory_position_var.get(),
             "trajectory_offset": self.trajectory_offset_var.get(),
         }
 
     def save_settings(self):
-
-        settings = self.get_settings()
-
         path = filedialog.asksaveasfilename(
             title="Save Run 1 Settings",
             defaultextension=".json",
-            filetypes=[
-                ("JSON", "*.json")
-            ],
-            initialfile=(
-                self.run_name_var.get()
-                + "_settings.json"
-            )
+            filetypes=[("PK Studio Settings", "*.json"), ("All Files", "*.*")],
+            initialfile=self.run_name_var.get() + "_settings.json"
         )
-
         if not path:
             return
 
         try:
-
-            with open(
-                path,
-                "w",
-                encoding="utf-8"
-            ) as f:
-
-                json.dump(
-                    settings,
-                    f,
-                    indent=4,
-                    ensure_ascii=False
-                )
-
-            messagebox.showinfo(
-                "Settings",
-                f"All settings saved, including Zone configuration\n\n{path}"
-            )
-
+            settings = self._json_safe(self.get_settings())
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=4, ensure_ascii=False, allow_nan=False)
+            self.status_var.set(f"Settings saved: {os.path.basename(path)}")
+            messagebox.showinfo("Settings Saved", f"Settings and Zone geometry saved successfully.\n\n{path}")
         except Exception as e:
-
-            messagebox.showerror(
-                "Save Error",
-                str(e)
-            )
-
-    # ========================================================
-    # LOAD SETTINGS
-    # ========================================================
+            messagebox.showerror("Save Error", f"Could not save settings:\n\n{e}")
 
     def load_settings(self):
-
         path = filedialog.askopenfilename(
             title="Load Run 1 Settings",
-            filetypes=[
-                ("JSON", "*.json"),
-                ("All Files", "*.*")
-            ]
+            filetypes=[("PK Studio Settings", "*.json"), ("JSON files", "*.json"), ("All Files", "*.*")]
         )
-
         if not path:
             return
 
         try:
-
-            with open(
-                path,
-                "r",
-                encoding="utf-8"
-            ) as f:
-
+            with open(path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
+            if not isinstance(settings, dict):
+                raise ValueError("Settings file must contain a JSON object.")
 
             self.set_settings(settings)
-
-            messagebox.showinfo(
-                "Settings",
-                "Settings loaded"
-            )
-
+            self.status_var.set(f"Settings loaded: {os.path.basename(path)}")
+            messagebox.showinfo("Settings Loaded", "All settings, including Zone geometry, were loaded successfully.")
         except Exception as e:
-
-            messagebox.showerror(
-                "Load Error",
-                str(e)
-            )
+            messagebox.showerror("Load Error", f"Could not load settings:\n\n{e}")
 
     def set_settings(self, settings):
-
+        """Apply settings and restore embedded Zone geometry first, without requiring the original Zone file."""
         pairs = [
             ("preset", self.preset_var),
             ("run_name", self.run_name_var),
@@ -2206,55 +2177,51 @@ class Run1App:
         ]
 
         for key, variable in pairs:
+            if key in settings:
+                variable.set(settings[key])
 
-            variable.set(
-                settings.get(
-                    key,
-                    DEFAULT_SETTINGS[key]
-                )
-            )
+        snapshot = settings.get("zone_snapshot")
+        restored = False
+        if isinstance(snapshot, dict):
+            raw_zones = snapshot.get("zones", {})
+            raw_lines = snapshot.get("lines", {})
+            if isinstance(raw_zones, dict):
+                restored_zones = {name: [] for name in ZONE_NAMES}
+                for name in ZONE_NAMES:
+                    pts = raw_zones.get(name, [])
+                    if isinstance(pts, list):
+                        restored_zones[name] = [
+                            (float(p[0]), float(p[1]))
+                            for p in pts
+                            if isinstance(p, (list, tuple)) and len(p) >= 2
+                        ]
+                self.zones = restored_zones
+                restored = any(len(v) >= 3 for v in restored_zones.values())
 
-        # Restore the actual Zone/Line geometry saved with the settings.
-        # The embedded snapshot takes priority over the external file path.
-        zone_snapshot = settings.get("zone_snapshot")
-        restored_snapshot = False
-        if isinstance(zone_snapshot, dict):
-            try:
-                raw_zones = zone_snapshot.get("zones", {})
-                raw_lines = zone_snapshot.get("lines", {})
-                if isinstance(raw_zones, dict):
-                    restored_zones = {name: [] for name in ZONE_NAMES}
-                    for name in ZONE_NAMES:
-                        pts = raw_zones.get(name, [])
-                        restored_zones[name] = [tuple(map(float, p[:2])) for p in pts if len(p) >= 2]
-                    self.zones = restored_zones
+            if isinstance(raw_lines, dict):
+                restored_lines = {name: [] for name in LINE_NAMES}
+                for name in LINE_NAMES:
+                    pts = raw_lines.get(name, [])
+                    if isinstance(pts, list):
+                        restored_lines[name] = [
+                            (float(p[0]), float(p[1]))
+                            for p in pts
+                            if isinstance(p, (list, tuple)) and len(p) >= 2
+                        ]
+                self.lines = restored_lines
 
-                if isinstance(raw_lines, dict):
-                    restored_lines = {name: [] for name in LINE_NAMES}
-                    for name in LINE_NAMES:
-                        pts = raw_lines.get(name, [])
-                        restored_lines[name] = [tuple(map(float, p[:2])) for p in pts if len(p) >= 2]
-                    self.lines = restored_lines
+            self.zone_meta = snapshot.get("zone_meta", {}) or {}
+            self.zone_source_video = str(snapshot.get("zone_source_video", "") or "")
+            self.zone_source_width = snapshot.get("zone_source_width")
+            self.zone_source_height = snapshot.get("zone_source_height")
+            self.zone_file_format = snapshot.get("zone_file_format")
+            self.zone_scaled = snapshot.get("zone_scaled", []) or []
 
-                self.zone_meta = zone_snapshot.get("zone_meta", {}) or {}
-                self.zone_source_video = str(zone_snapshot.get("zone_source_video", ""))
-                self.zone_source_width = zone_snapshot.get("zone_source_width")
-                self.zone_source_height = zone_snapshot.get("zone_source_height")
-                self.zone_file_format = zone_snapshot.get("zone_file_format")
-                self.zone_scaled = zone_snapshot.get("zone_scaled", []) or []
-                restored_snapshot = True
-            except Exception:
-                restored_snapshot = False
-
-        # Backward compatibility: older settings files only stored the Zone path.
-        # In that case, load the external Zone file automatically.
-        if not restored_snapshot:
+        # Backward compatibility: if there is no embedded snapshot, try the saved Zone file.
+        if not restored:
             zone_path = self.zone_line_config_var.get().strip()
             if zone_path and os.path.isfile(zone_path):
-                try:
-                    self.load_pkstudio_zones()
-                except Exception:
-                    pass
+                self.load_pkstudio_zones()
 
         self.refresh_measurement_status()
         self.update_trajectory_position_controls()
