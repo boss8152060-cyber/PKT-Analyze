@@ -342,7 +342,7 @@ DEFAULT_SETTINGS = {
     "match_threshold": "0.80",
 
     "show_preview": True,
-    "draw_center": False,
+    "draw_center": False,  # retained for settings compatibility; reference point is never drawn
     "draw_trail": False,
     "trail_length": "30",
 
@@ -779,15 +779,14 @@ class Run1App:
 
         frame = ttk.LabelFrame(
             self.content,
-            text="Zone Settings",
+            text="PK Studio Zones",
             padding=12
         )
         frame.grid(row=6, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
         frame.columnconfigure(1, weight=1)
 
-        # Zone file
         ttk.Label(
-            frame, text="PK Studio Zone File"
+            frame, text="Zone File"
         ).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=5)
 
         ttk.Entry(
@@ -802,9 +801,8 @@ class Run1App:
             frame, text="Reload", command=self.load_measurement_config
         ).grid(row=0, column=6, padx=(0, 4), pady=5)
 
-        # Reference point controls
         ttk.Label(
-            frame, text="Zone Reference Point"
+            frame, text="Zone Detection Point"
         ).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(10, 5))
 
         self.zone_point_combo = ttk.Combobox(
@@ -812,7 +810,7 @@ class Run1App:
             textvariable=self.zone_point_preset_var,
             values=["Center", "Bottom", "Custom"],
             state="readonly",
-            width=16
+            width=14
         )
         self.zone_point_combo.grid(row=1, column=1, sticky="w", pady=(10, 5))
         self.zone_point_combo.bind(
@@ -820,7 +818,7 @@ class Run1App:
             self.update_reference_point_controls
         )
 
-        ttk.Label(frame, text="X").grid(
+        ttk.Label(frame, text="X %").grid(
             row=1, column=2, sticky="e", padx=(18, 4), pady=(10, 5)
         )
         self.zone_x_spin = ttk.Spinbox(
@@ -829,7 +827,7 @@ class Run1App:
         )
         self.zone_x_spin.grid(row=1, column=3, sticky="w", pady=(10, 5))
 
-        ttk.Label(frame, text="Y").grid(
+        ttk.Label(frame, text="Y %").grid(
             row=1, column=4, sticky="e", padx=(12, 4), pady=(10, 5)
         )
         self.zone_y_spin = ttk.Spinbox(
@@ -840,15 +838,15 @@ class Run1App:
 
         ttk.Label(
             frame,
-            text="0% = ซ้าย/บน   50% = กลาง   100% = ขวา/ล่าง",
+            text="Center = 50/50   |   Bottom = 50/100   |   Custom = กำหนดตำแหน่งเอง",
             foreground="#666666"
-        ).grid(row=2, column=1, columnspan=5, sticky="w", pady=(0, 6))
+        ).grid(row=2, column=1, columnspan=5, sticky="w", pady=(0, 4))
 
         ttk.Label(
             frame,
-            text="หมายเหตุ: X/Y ใช้เมื่อเลือก Custom เท่านั้น",
+            text="จุดนี้ใช้สำหรับตัดสินว่าอยู่ Zone ไหนเท่านั้น และจะไม่แสดงจุดบนวิดีโอ",
             foreground="#777777"
-        ).grid(row=3, column=1, columnspan=5, sticky="w", pady=(0, 6))
+        ).grid(row=3, column=1, columnspan=5, sticky="w", pady=(0, 4))
 
         ttk.Label(
             frame,
@@ -1178,12 +1176,17 @@ class Run1App:
         self.status_var.set("Zone configuration snapshot saved")
 
     def draw_measurement_overlay(self, frame, frame_index, fps, zone_track_state, line_track_state, zone_entry_count, line_cross_count):
-        """Draw PK Studio zones/lines and live zone timing/counts on the preview/output frame."""
-        # Draw polygons and labels even when no detection exists.
+        """Draw Zone/Line geometry and counts only.
+
+        Object-level Zone timing is kept in the CSV/event data. It is not
+        rendered on the video, so each tracked object has only one visual ID
+        label and there is no duplicate green/yellow ID text.
+        """
         for zname in ZONE_NAMES:
             polygon = self.zones.get(zname, [])
             if len(polygon) < 3:
                 continue
+
             pts = np.array(polygon, dtype=np.int32).reshape((-1, 1, 2))
             meta = getattr(self, "zone_meta", {}).get(zname, {})
             color_raw = meta.get("color_bgr", [0, 200, 0])
@@ -1193,52 +1196,44 @@ class Run1App:
                     color = (0, 200, 0)
             except Exception:
                 color = (0, 200, 0)
+
             cv2.polylines(frame, [pts], True, color, 3, cv2.LINE_AA)
+
             if meta.get("show_label", True):
                 x, y = map(int, polygon[0])
-                cv2.putText(frame, f"{zname} | entries: {zone_entry_count.get(zname, 0)}", (x, max(20, y - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
+                cv2.putText(
+                    frame,
+                    f"{zname} | entries: {zone_entry_count.get(zname, 0)}",
+                    (x, max(20, y - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    color,
+                    2,
+                    cv2.LINE_AA
+                )
 
-        # Draw line geometry when supplied by a compatible config.
         for lname in LINE_NAMES:
             line = self.lines.get(lname, [])
             if len(line) != 2:
                 continue
-            p1 = tuple(map(int, line[0])); p2 = tuple(map(int, line[1]))
+
+            p1 = tuple(map(int, line[0]))
+            p2 = tuple(map(int, line[1]))
             cv2.line(frame, p1, p2, (255, 255, 255), 4, cv2.LINE_AA)
             cv2.circle(frame, p1, 6, (255, 255, 255), -1)
             cv2.circle(frame, p2, 6, (255, 255, 255), -1)
+
             mx, my = (p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2
-            cv2.putText(frame, f"{lname} | crossings: {line_cross_count.get(lname, 0)}",
-                        (mx, max(20, my - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
-
-        # Live per-track zone timer. The timer begins at the exact frame where
-        # the tracked centroid is first detected inside the zone.
-        now = frame_index / fps if fps > 0 else 0.0
-        for track_id, zmap in zone_track_state.items():
-            zone_states = zmap.get("zone_states", {})
-            active = []
-            for zname, zs in zone_states.items():
-                if zs.get("inside") and zs.get("entry_time") is not None:
-                    duration = max(0.0, now - float(zs["entry_time"]))
-                    active.append(f"{zname}: {duration:.1f}s")
-
-            # Show Zone information ONLY while the tracked object is actually
-            # inside a confirmed Zone. Nothing is shown for objects outside Zones.
-            if not active:
-                continue
-
-            point = zmap.get("last_point") or zmap.get("previous_confirmed_point")
-            if point is None:
-                continue
-
-            x, y = map(int, point)
-            for idx, text in enumerate(active):
-                cv2.putText(
-                    frame, f"ID {track_id} | {text}",
-                    (x + 8, max(20, y - 22 + idx * 22)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA
-                )
+            cv2.putText(
+                frame,
+                f"{lname} | crossings: {line_cross_count.get(lname, 0)}",
+                (mx, max(20, my - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA
+            )
 
     def get_zone_reference_point(self, x1, y1, x2, y2):
         """Return the selected reference point inside the bounding box."""
@@ -1786,11 +1781,8 @@ class Run1App:
             variable=self.show_preview_var
         ).grid(row=0, column=0, sticky="w", pady=3)
 
-        ttk.Checkbutton(
-            frame,
-            text="Show Reference Point",
-            variable=self.draw_center_var
-        ).grid(row=0, column=1, sticky="w", pady=3)
+        # The Zone reference point is used only for Zone calculation.
+        # It is intentionally NOT drawn on the video.
 
         ttk.Checkbutton(
             frame,
@@ -3614,15 +3606,6 @@ class Run1App:
                                     2
                                 )
 
-                                if settings["draw_center"] and confirmed_label:
-                                    ref_point = self.get_zone_reference_point(
-                                        x1, y1, x2, y2
-                                    )
-                                    cv2.circle(
-                                        frame, ref_point, 5,
-                                        (0, 255, 255), -1
-                                    )
-
                                 if (
                                     settings["draw_trail"]
                                     and confirmed_label
@@ -3640,7 +3623,9 @@ class Run1App:
                                         )
 
                                 if confirmed_label:
-                                    label = f"ID {track_id} | {class_name} | Z:{confirmed_label}"
+                                    # One compact label only. Zone timer remains in CSV/events,
+                                    # but is intentionally not drawn to avoid duplicate ID text.
+                                    label = f"ID {track_id} | {confirmed_label}"
                                     label_y = max(y1 - 10, 20)
                                     cv2.putText(
                                         frame, label, (x1, label_y),
