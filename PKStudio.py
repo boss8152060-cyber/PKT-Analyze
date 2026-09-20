@@ -1130,14 +1130,18 @@ class Run1App:
             if not active:
                 continue
 
+            # Place the yellow duration beside the same Trajectory Position
+            # that drives Zone assignment and the trail.
             point = zmap.get("last_point") or zmap.get("previous_confirmed_point")
             if point is None:
                 continue
 
             x, y = map(int, point)
             for idx, text in enumerate(active):
+                # Yellow text is reserved for the Zone duration only.
+                # Do not repeat the Track ID here; the green label already shows it.
                 cv2.putText(
-                    frame, f"ID {track_id} | {text}",
+                    frame, text,
                     (x + 8, max(20, y - 22 + idx * 22)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA
                 )
@@ -1443,6 +1447,10 @@ class Run1App:
             1
         )
 
+        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(2, weight=0)
+        frame.columnconfigure(3, weight=0)
+
         self.add_entry(frame, 0, "Run Name", self.run_name_var)
         self.add_entry(frame, 1, "Model", self.model_var, self.browse_model)
         self.add_entry(frame, 2, "Video", self.video_var, self.browse_video)
@@ -1453,7 +1461,7 @@ class Run1App:
         )
 
         ttk.Label(
-            frame, text="PK Studio Zone", font=("Segoe UI", 10, "bold")
+            frame, text="PK Studio Zone & Trajectory", font=("Segoe UI", 10, "bold")
         ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(0, 5))
 
         ttk.Label(frame, text="Zone File").grid(
@@ -1495,7 +1503,7 @@ class Run1App:
 
         ttk.Label(
             frame,
-            text="Offset = ระยะที่เลื่อนจุดเข้าด้านในจากขอบกรอบ (0–50%) | Center ไม่ใช้ Offset",
+            text="เลือกจุดที่ใช้สร้าง Trajectory และตรวจ Zone | Offset = เลื่อนจุดเข้าด้านใน 0–50%",
             foreground="#666666"
         ).grid(row=8, column=1, columnspan=3, sticky="w", pady=(0, 2))
 
@@ -1772,11 +1780,19 @@ class Run1App:
             variable=self.save_csv_var
         ).grid(row=2, column=1, sticky="w", pady=3)
 
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=3, column=0, columnspan=3, sticky="ew", pady=(8, 6)
+        )
         ttk.Label(
             frame,
-            text="กรอบวัตถุจะแสดงเฉพาะเมื่อ Trajectory Position อยู่ใน Zone",
+            text="Trajectory ใช้จุดเดียวกับ Trajectory Position ด้านบน",
             foreground="#666666"
-        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(7, 0))
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 2))
+        ttk.Label(
+            frame,
+            text="กรอบและข้อมูล ID แสดงเฉพาะเมื่อจุด Trajectory อยู่ใน Zone",
+            foreground="#666666"
+        ).grid(row=5, column=0, columnspan=3, sticky="w")
 
     # ========================================================
     # INFORMATION
@@ -2051,13 +2067,29 @@ class Run1App:
 
     def get_settings(self):
 
+        # Save the complete loaded PK Studio zone state, not only the file path.
+        # This makes Load Settings restore the actual Zone geometry even when
+        # the source file is moved, renamed, or unavailable later.
+        zone_snapshot = {
+            "zones": self.zones,
+            "lines": self.lines,
+            "zone_meta": self.zone_meta,
+            "zone_source_video": self.zone_source_video,
+            "zone_source_width": self.zone_source_width,
+            "zone_source_height": self.zone_source_height,
+            "zone_file_format": self.zone_file_format,
+            "zone_scaled": self.zone_scaled,
+        }
+
         return {
+            "preset": self.preset_var.get(),
             "run_name": self.run_name_var.get(),
 
             "model": self.model_var.get(),
             "video": self.video_var.get(),
             "output": self.output_var.get(),
             "zone_file": self.zone_line_config_var.get(),
+            "zone_snapshot": zone_snapshot,
 
             "confidence": self.conf_var.get(),
             "iou": self.iou_var.get(),
@@ -2129,7 +2161,7 @@ class Run1App:
 
             messagebox.showinfo(
                 "Settings",
-                f"Settings saved\n\n{path}"
+                f"All settings saved, including Zone configuration\n\n{path}"
             )
 
         except Exception as e:
@@ -2183,6 +2215,7 @@ class Run1App:
     def set_settings(self, settings):
 
         pairs = [
+            ("preset", self.preset_var),
             ("run_name", self.run_name_var),
             ("model", self.model_var),
             ("video", self.video_var),
@@ -2221,7 +2254,49 @@ class Run1App:
                 )
             )
 
-        # Refresh Trajectory Position controls after loading settings.
+        # Restore the actual Zone/Line geometry saved with the settings.
+        # The embedded snapshot takes priority over the external file path.
+        zone_snapshot = settings.get("zone_snapshot")
+        restored_snapshot = False
+        if isinstance(zone_snapshot, dict):
+            try:
+                raw_zones = zone_snapshot.get("zones", {})
+                raw_lines = zone_snapshot.get("lines", {})
+                if isinstance(raw_zones, dict):
+                    restored_zones = {name: [] for name in ZONE_NAMES}
+                    for name in ZONE_NAMES:
+                        pts = raw_zones.get(name, [])
+                        restored_zones[name] = [tuple(map(float, p[:2])) for p in pts if len(p) >= 2]
+                    self.zones = restored_zones
+
+                if isinstance(raw_lines, dict):
+                    restored_lines = {name: [] for name in LINE_NAMES}
+                    for name in LINE_NAMES:
+                        pts = raw_lines.get(name, [])
+                        restored_lines[name] = [tuple(map(float, p[:2])) for p in pts if len(p) >= 2]
+                    self.lines = restored_lines
+
+                self.zone_meta = zone_snapshot.get("zone_meta", {}) or {}
+                self.zone_source_video = str(zone_snapshot.get("zone_source_video", ""))
+                self.zone_source_width = zone_snapshot.get("zone_source_width")
+                self.zone_source_height = zone_snapshot.get("zone_source_height")
+                self.zone_file_format = zone_snapshot.get("zone_file_format")
+                self.zone_scaled = zone_snapshot.get("zone_scaled", []) or []
+                restored_snapshot = True
+            except Exception:
+                restored_snapshot = False
+
+        # Backward compatibility: older settings files only stored the Zone path.
+        # In that case, load the external Zone file automatically.
+        if not restored_snapshot:
+            zone_path = self.zone_line_config_var.get().strip()
+            if zone_path and os.path.isfile(zone_path):
+                try:
+                    self.load_pkstudio_zones()
+                except Exception:
+                    pass
+
+        self.refresh_measurement_status()
         self.update_trajectory_position_controls()
 
     # ========================================================
@@ -3485,21 +3560,15 @@ class Run1App:
                             if track_id >= 0:
 
                                 if track_id not in trails:
+                                    trails[track_id] = deque(maxlen=trail_length)
 
-                                    trails[
-                                        track_id
-                                    ] = deque(
-                                        maxlen=trail_length
-                                    )
-
-                                trails[
-                                    track_id
-                                ].append(
-                                    (
-                                        center_x,
-                                        center_y
-                                    )
+                                # IMPORTANT: the trajectory trail follows the same
+                                # Trajectory Position used for Zone assignment.
+                                # It no longer uses the geometric bbox center.
+                                trajectory_point = self.get_zone_reference_point(
+                                    x1, y1, x2, y2
                                 )
+                                trails[track_id].append(trajectory_point)
 
                             # A Zone-enabled run displays the object ONLY while the
                             # selected Reference Point is inside a Zone.
