@@ -5816,20 +5816,24 @@ class Run1App:
         return mapping
 
     def _run3_gap(self, tracks, summaries, mapping):
-        """Compute Gap Acceptance from observed Run 2 trajectories.
+        """Compute subject-specific Gap Acceptance opportunities.
 
-        The decision event is anchored to an observed movement from the
-        movement's decision zone (Zone 1 or Zone 4) into Zone 6. Waiting time
-        is therefore the observed elapsed time from first arrival in the
-        decision zone to that observed Zone-6 entry; an immediate acceptance
-        can legitimately have a near-zero waiting time.
+        Each subject receives opportunities based on its own observed decision
+        interval. A conflict gap is not copied to a later subject with the same
+        full X31 value. Instead, X31 is the *remaining available gap at that
+        subject's opportunity time*:
 
-        Conflict-stream events prefer the configured Reference Line. If the
-        configured line has fewer than two observed crossings, the calculation
-        falls back to the first observed timestamp in the movement's conflict
-        reference Zone. The fallback uses real observed timestamps only and is
-        explicitly marked in QC_Flag; no synthetic or interpolated event time is
-        created.
+            rejected opportunity  -> gap_end - opportunity_time
+            accepted opportunity  -> gap_end - acceptance/decision_time
+
+        The raw conflict interval (Gap_Start_Time / Gap_End_Time) remains in the
+        CSV for traceability. This means two subjects may legitimately reference
+        the same conflict pair when they physically overlap the same conflict
+        interval, but their opportunity time and X31 are subject-specific.
+
+        No temporal interpolation or fabricated event time is used. Reference-line
+        events are preferred; when a mapped line does not yield enough observed
+        crossings, observed conflict-zone timestamps are used and marked in QC.
         """
         selected = []
         if self.run3_gap_movement_13_var.get():
@@ -5839,12 +5843,11 @@ class Run1App:
         if self.run3_gap_movement_41_var.get():
             selected.append("4→1")
 
-        perspective = self._run3_get_perspective_matrix(silent=True)
         movement_by_id, _movement_source_by_id = self._run3_build_movement_index(
             tracks, summaries, mapping
         )
-
         site_id = self.run3_site_id_var.get().strip()
+
         conflict_reference_zone = {
             "2→3": 2,
             "4→5": 4,
@@ -5863,20 +5866,21 @@ class Run1App:
             "candidate_intervals_by_movement": {},
             "reference_line_fallback_movements": [],
             "configured_mapping_rows": len(mapping or {}),
+            "subject_opportunities_total": 0,
+            "rejected_opportunities_total": 0,
+            "accepted_opportunities_total": 0,
         }
 
         # ------------------------------------------------------------
-        # 1) Build one conflict-stream event per vehicle/movement.
+        # 1) Build one observed conflict event per vehicle/movement.
         # ------------------------------------------------------------
-        # First collect line-based events.  A robust segment intersection is
-        # also checked so a trajectory that jumps across a short line segment
-        # is not missed merely because both samples are on the same line-side.
         line_events = defaultdict(list)
         for tid, rows in tracks.items():
             tid = str(tid)
             movement = movement_by_id.get(tid, "")
             if movement not in RUN3_ALL_MOVEMENTS:
                 continue
+
             lname = mapping.get((site_id, movement)) if mapping else None
             line = self.lines.get(lname, []) if lname else []
             if len(line) != 2:
@@ -5897,7 +5901,7 @@ class Run1App:
                         except Exception:
                             hit = None
                         if hit is not None:
-                            # Keep the timestamp on an actually observed frame.
+                            # Keep time on an observed sample; no interpolation.
                             cross_t = t
                     if cross_t is not None:
                         line_events[movement].append(
@@ -5906,7 +5910,6 @@ class Run1App:
                         break
                 prev, prev_t = p, t
 
-        # Deduplicate to one event per conflict vehicle.
         for key in list(line_events):
             dedup = {}
             for event in line_events[key]:
@@ -5915,10 +5918,8 @@ class Run1App:
                     dedup[tid] = event
             line_events[key] = sorted(dedup.values(), key=lambda x: x[0])
 
-        # For a movement, use line-based events only when the line actually
-        # yielded at least two vehicles. Otherwise use observed conflict-zone
-        # timestamps for that movement so a valid conflict stream is not lost
-        # solely because the drawn line was not crossed by enough detections.
+        # Use line events when they yield a real stream (>=2 vehicles). Otherwise
+        # fall back to the first observed timestamp in the conflict reference zone.
         reference_times = defaultdict(list)
         fallback_movements = set()
         for movement in RUN3_ALL_MOVEMENTS:
@@ -5953,8 +5954,13 @@ class Run1App:
                     else "Gap_Event_From_Observed_Zone_No_Line_Mapping"
                 )
                 reference_times[movement].append(
-                    (first["_timestamp"], tid, first.get("class_name", ""),
-                     mapped_line or f"Observed Zone {ref_zone}", qc)
+                    (
+                        first["_timestamp"],
+                        tid,
+                        first.get("class_name", ""),
+                        mapped_line or f"Observed Zone {ref_zone}",
+                        qc,
+                    )
                 )
 
         for key in list(reference_times):
@@ -5969,7 +5975,7 @@ class Run1App:
         diag["reference_line_fallback_movements"] = sorted(fallback_movements)
 
         # ------------------------------------------------------------
-        # 2) Build subject decision events from observed zone transitions.
+        # 2) Build subject-specific decision time and opportunities.
         # ------------------------------------------------------------
         rows_out = []
         for tid, rows in tracks.items():
@@ -5990,10 +5996,11 @@ class Run1App:
                 diag["subject_without_decision_zone"] += 1
                 continue
 
-            # First actual observation in the decision zone is the beginning of
-            # the observed decision period. Acceptance is the first observed
-            # Zone-6 sample after that point. No time interpolation is used.
+            # Observed arrival into the decision zone; no interpolation.
             wait_start = min(r["_timestamp"] for r in decision_rows)
+
+            # Decision / acceptance is the first observed Zone-6 sample after
+            # arrival in the decision zone. This is an observed frame time.
             accepted_time = None
             for r in rows:
                 t = r.get("_timestamp")
@@ -6010,107 +6017,165 @@ class Run1App:
             waiting_time = max(0.0, accepted_time - wait_start)
             diag["subject_decision_events"] += 1
 
-            candidates = []
             conflict_movements = {
                 "1→3": ["2→3"],
                 "1→5": ["2→3", "4→5"],
                 "4→1": ["2→3", "1→5"],
             }.get(movement, [])
 
+            # Build all raw conflict gaps, then convert each to a subject-specific
+            # opportunity. A gap is relevant only if it overlaps the subject's
+            # waiting period. The controlling gap is the one containing the actual
+            # observed decision time.
+            opportunities = []
             for cm in conflict_movements:
                 events = reference_times.get(cm, [])
+                valid_pairs = 0
                 for a, b in zip(events, events[1:]):
-                    if b[0] <= a[0] or a[1] == b[1]:
+                    gap_start = a[0]
+                    gap_end = b[0]
+                    if gap_end <= gap_start or a[1] == b[1]:
                         continue
-                    candidates.append({
+                    valid_pairs += 1
+
+                    # Accepted/controlling opportunity: decision time lies inside
+                    # this raw conflict gap. X31 is the remaining time to gap_end.
+                    if gap_start <= accepted_time < gap_end and accepted_time >= wait_start:
+                        available_gap = gap_end - accepted_time
+                        if available_gap > 0:
+                            opportunities.append({
+                                "conflict_movement": cm,
+                                "conflicting_id_a": a[1],
+                                "conflicting_class_a": a[2],
+                                "conflicting_id_b": b[1],
+                                "conflicting_class_b": b[2],
+                                "reference_line": a[3],
+                                "gap_start": gap_start,
+                                "gap_end": gap_end,
+                                "gap": available_gap,
+                                "opportunity_time": accepted_time,
+                                "role": "Accepted (controlling gap)",
+                                "accepted": 1,
+                                "acceptance_time": accepted_time,
+                                "qc_flag": ";".join(dict.fromkeys(v for v in (a[4], b[4]) if v)),
+                            })
+                        continue
+
+                    # Rejected opportunity: the subject was already waiting when
+                    # this gap was available, but the gap ended before the eventual
+                    # decision. X31 is the portion still available when the subject
+                    # could first evaluate that gap.
+                    if gap_end <= wait_start or gap_start >= accepted_time:
+                        continue
+
+                    opportunity_time = max(wait_start, gap_start)
+                    if opportunity_time >= gap_end:
+                        continue
+                    available_gap = gap_end - opportunity_time
+                    opportunities.append({
                         "conflict_movement": cm,
                         "conflicting_id_a": a[1],
                         "conflicting_class_a": a[2],
                         "conflicting_id_b": b[1],
                         "conflicting_class_b": b[2],
                         "reference_line": a[3],
-                        "gap_start": a[0],
-                        "gap_end": b[0],
-                        "gap": b[0] - a[0],
+                        "gap_start": gap_start,
+                        "gap_end": gap_end,
+                        "gap": available_gap,
+                        "opportunity_time": opportunity_time,
+                        "role": "Rejected (prior opportunity)",
+                        "accepted": 0,
+                        "acceptance_time": None,
                         "qc_flag": ";".join(dict.fromkeys(v for v in (a[4], b[4]) if v)),
                     })
+
                 diag["candidate_intervals_by_movement"][cm] = max(
                     diag["candidate_intervals_by_movement"].get(cm, 0),
-                    sum(
-                        1 for a, b in zip(events, events[1:])
-                        if b[0] > a[0] and a[1] != b[1]
-                    )
+                    valid_pairs
                 )
 
-            # The observed acceptance may occur before the first conflict
-            # interval or after the last one. Preserve prior rejected gaps, and
-            # record the controlling gap only when the acceptance lies inside it.
-            active = [
-                c for c in candidates
-                if c["gap_start"] <= accepted_time <= c["gap_end"]
-            ]
-            controlling = min(active, key=lambda c: c["gap"]) if active else None
-            prior = [
-                c for c in candidates
-                if wait_start <= c["gap_end"] < accepted_time
-            ]
+            # If several conflict streams contain the observed decision time,
+            # retain the smallest remaining available gap as the controlling one.
+            controlling = [o for o in opportunities if o["accepted"] == 1]
+            controlling = min(controlling, key=lambda o: o["gap"]) if controlling else None
 
+            # Keep only rejected opportunities strictly before the controlling
+            # decision time, and deduplicate the same subject/opportunity interval.
+            prior = [o for o in opportunities if o["accepted"] == 0 and o["gap_end"] < accepted_time]
             seen = set()
             prior2 = []
-            for c in sorted(prior, key=lambda x: x["gap_end"]):
+            for o in sorted(prior, key=lambda x: (x["opportunity_time"], x["gap_end"], x["conflict_movement"])):
                 key = (
-                    c["conflict_movement"],
-                    c["conflicting_id_a"],
-                    c["conflicting_id_b"],
-                    round(c["gap_start"], 6),
-                    round(c["gap_end"], 6),
+                    o["conflict_movement"],
+                    o["conflicting_id_a"],
+                    o["conflicting_id_b"],
+                    round(o["gap_start"], 6),
+                    round(o["gap_end"], 6),
                 )
-                if key not in seen:
-                    seen.add(key)
-                    prior2.append(c)
+                if key in seen:
+                    continue
+                seen.add(key)
+                prior2.append(o)
 
             decision_id = f"{tid}_{accepted_time:.6f}"
             subject_class = rows[0].get("class_name", "")
+            opportunity_no = 0
 
-            for c in prior2:
+            for o in prior2:
+                opportunity_no += 1
+                diag["subject_opportunities_total"] += 1
+                diag["rejected_opportunities_total"] += 1
                 rows_out.append({
                     "Site_ID": site_id,
                     "Decision_Event_ID": decision_id,
+                    "Opportunity_No": opportunity_no,
                     "Subject_ID": tid,
                     "Subject_Class": subject_class,
                     "Subject_Movement": movement,
-                    "Conflicting_Movement": c["conflict_movement"],
-                    "Conflicting_ID_A": c["conflicting_id_a"],
-                    "Conflicting_ID_B": c["conflicting_id_b"],
-                    "Reference_Line": c["reference_line"],
-                    "Gap_Start_Time": f"{c['gap_start']:.6f}",
-                    "Gap_End_Time": f"{c['gap_end']:.6f}",
-                    "X31_Available_Gap": f"{c['gap']:.6f}",
+                    "Gap_Evaluation_Time": f"{o['opportunity_time']:.6f}",
                     "X32_Waiting_Time": f"{waiting_time:.6f}",
-                    "Gap_Role": "Rejected (prior gap)",
+                    "Conflicting_Movement": o["conflict_movement"],
+                    "Conflicting_ID_A": o["conflicting_id_a"],
+                    "Conflicting_Class_A": o["conflicting_class_a"],
+                    "Conflicting_ID_B": o["conflicting_id_b"],
+                    "Conflicting_Class_B": o["conflicting_class_b"],
+                    "Reference_Line": o["reference_line"],
+                    "Gap_Start_Time": f"{o['gap_start']:.6f}",
+                    "Gap_End_Time": f"{o['gap_end']:.6f}",
+                    "X31_Available_Gap": f"{o['gap']:.6f}",
+                    "Gap_Role": o["role"],
                     "Y5_Gap_Acceptance": 0,
                     "Acceptance_Time": "",
-                    "QC_Flag": c["qc_flag"],
+                    "Decision_Time": f"{accepted_time:.6f}",
+                    "QC_Flag": o["qc_flag"],
                 })
 
             if controlling:
+                opportunity_no += 1
+                diag["subject_opportunities_total"] += 1
+                diag["accepted_opportunities_total"] += 1
                 rows_out.append({
                     "Site_ID": site_id,
                     "Decision_Event_ID": decision_id,
+                    "Opportunity_No": opportunity_no,
                     "Subject_ID": tid,
                     "Subject_Class": subject_class,
                     "Subject_Movement": movement,
+                    "Gap_Evaluation_Time": f"{controlling['opportunity_time']:.6f}",
+                    "X32_Waiting_Time": f"{waiting_time:.6f}",
                     "Conflicting_Movement": controlling["conflict_movement"],
                     "Conflicting_ID_A": controlling["conflicting_id_a"],
+                    "Conflicting_Class_A": controlling["conflicting_class_a"],
                     "Conflicting_ID_B": controlling["conflicting_id_b"],
+                    "Conflicting_Class_B": controlling["conflicting_class_b"],
                     "Reference_Line": controlling["reference_line"],
                     "Gap_Start_Time": f"{controlling['gap_start']:.6f}",
                     "Gap_End_Time": f"{controlling['gap_end']:.6f}",
                     "X31_Available_Gap": f"{controlling['gap']:.6f}",
-                    "X32_Waiting_Time": f"{waiting_time:.6f}",
-                    "Gap_Role": "Accepted (controlling gap)",
+                    "Gap_Role": controlling["role"],
                     "Y5_Gap_Acceptance": 1,
                     "Acceptance_Time": f"{accepted_time:.6f}",
+                    "Decision_Time": f"{accepted_time:.6f}",
                     "QC_Flag": controlling["qc_flag"],
                 })
 
@@ -6468,12 +6533,17 @@ class Run1App:
             try:
                 gap_rows = self._run3_gap(tracks, summaries, mapping)
                 fields = [
-                    # Organized for direct reading: Decision/Subject → Waiting → Conflict → Gap → Decision result → QC
-                    "Site_ID","Decision_Event_ID","Subject_ID","Subject_Class","Subject_Movement",
-                    "X32_Waiting_Time",
-                    "Conflicting_Movement","Conflicting_ID_A","Conflicting_ID_B","Reference_Line",
-                    "Gap_Start_Time","Gap_End_Time","X31_Available_Gap",
-                    "Gap_Role","Y5_Gap_Acceptance","Acceptance_Time",
+                    # Organized for direct reading:
+                    # decision/subject → opportunity → waiting → conflict vehicles → raw gap → X31/Y5 → QC
+                    "Site_ID","Decision_Event_ID","Opportunity_No",
+                    "Subject_ID","Subject_Class","Subject_Movement",
+                    "Gap_Evaluation_Time","X32_Waiting_Time",
+                    "Conflicting_Movement",
+                    "Conflicting_ID_A","Conflicting_Class_A",
+                    "Conflicting_ID_B","Conflicting_Class_B",
+                    "Reference_Line","Gap_Start_Time","Gap_End_Time",
+                    "X31_Available_Gap",
+                    "Gap_Role","Y5_Gap_Acceptance","Acceptance_Time","Decision_Time",
                     "QC_Flag"
                 ]
                 path = write_csv("Run_3_Gap_Acceptance.csv", fields, gap_rows)
@@ -6518,6 +6588,9 @@ class Run1App:
                     conflict_counts = gap_diag.get("conflict_events_by_movement", {})
                     summary["diagnostics"]["gap_acceptance"] = (
                         f"OK; subject_decision_events={subject_events}; "
+                        f"opportunities={gap_diag.get('subject_opportunities_total', 0)}; "
+                        f"rejected_opportunities={gap_diag.get('rejected_opportunities_total', 0)}; "
+                        f"accepted_opportunities={gap_diag.get('accepted_opportunities_total', 0)}; "
                         f"conflict_events={conflict_counts}; "
                         f"fallback_movements={fallback}"
                     )
