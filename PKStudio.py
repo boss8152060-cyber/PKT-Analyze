@@ -5116,6 +5116,51 @@ class Run1App:
             return ""
         return Run1App._run3_movement_from_sequence(" ".join(f"Zone {z}" for z in seq))
 
+    def _run3_build_movement_index(self, tracks, summaries, mapping=None):
+        """Build one canonical Movement index shared by Gap Acceptance and PET.
+
+        Primary source: Run 2 ID Zone Summary first_zone + last_zone.
+        Fallbacks are only used when those endpoints are unavailable or do not
+        map to one of the defined movements. The same resolver is reused by all
+        Run 3 modules so one Vehicle_ID cannot receive conflicting movement labels.
+        """
+        mapping = mapping or {}
+        movement_by_id = {}
+        movement_source_by_id = {}
+        for tid, rows in tracks.items():
+            movement = ""
+            source = ""
+            summary_row = summaries.get(str(tid), {}) if isinstance(summaries, dict) else {}
+
+            first_zone = summary_row.get("first_zone", summary_row.get("First_Zone", ""))
+            last_zone = summary_row.get("last_zone", summary_row.get("Last_Zone", ""))
+            movement = self._run3_movement_from_first_last(first_zone, last_zone)
+            if movement:
+                source = "ID_Zone_Summary_FirstLastZone"
+
+            if not movement:
+                for key in ("zone_sequence", "Zone Sequence", "Zone_Sequence"):
+                    movement = self._run3_movement_from_sequence(summary_row.get(key, ""))
+                    if movement:
+                        source = "ID_Zone_Summary_Sequence"
+                        break
+
+            if not movement:
+                movement = self._run3_movement_from_track_rows(rows)
+                if movement:
+                    source = "Detection_Records_Zones"
+
+            if not movement and mapping:
+                movement = self._run3_movement_from_reference_lines(
+                    rows, self.run3_site_id_var.get().strip(), mapping
+                )
+                if movement:
+                    source = "Reference_Line_Crossing"
+
+            movement_by_id[str(tid)] = movement
+            movement_source_by_id[str(tid)] = source
+        return movement_by_id, movement_source_by_id
+
     def _run3_movement_from_reference_lines(self, rows, site_id, mapping):
         """Optional movement inference from observed line crossings.
 
@@ -5216,13 +5261,19 @@ class Run1App:
         return None
 
     def _run3_load_inputs(self, output_dir, run_name):
+        """Load only the Run 2 sources needed for Run 3 calculations.
+
+        Detection Records are the frame/trajectory source. ID Zone Summary is
+        the track-level route/movement source. Zone Summary remains a Run 2 audit
+        output, but is not re-read or used as a duplicate Run 3 calculation source.
+        """
         det = os.path.join(output_dir, run_name + "_Detection_Records.csv")
         ids = os.path.join(output_dir, run_name + "_ID_Zone_Summary.csv")
         zone = os.path.join(output_dir, run_name + "_Zone_Summary.csv")
         return (
             self._run3_read_csv(det),
             self._run3_read_csv(ids),
-            self._run3_read_csv(zone),
+            [],
             det, ids, zone,
         )
 
@@ -5483,12 +5534,7 @@ class Run1App:
         if self.run3_gap_movement_41_var.get(): selected.append("4→1")
         wait_threshold = float(self.run3_waiting_speed_threshold_var.get())
 
-        movement_by_id = {}
-        for tid, rows in tracks.items():
-            if tid in summaries:
-                movement_by_id[tid] = self._run3_movement_from_sequence(summaries[tid].get("zone_sequence", ""))
-            else:
-                movement_by_id[tid] = ""
+        movement_by_id, _movement_source_by_id = self._run3_build_movement_index(tracks, summaries, mapping)
 
         line_times = defaultdict(list)
         for tid, rows in tracks.items():
@@ -5797,7 +5843,7 @@ class Run1App:
                 return "Diverging"
         return "Merging/Diverging"
 
-    def _run3_pet(self, tracks, summaries, ppm, axis_deg, interaction_distance_m, perspective=None, mapping=None):
+    def _run3_pet(self, tracks, summaries, interaction_distance_m, perspective=None, mapping=None, movement_by_id=None, movement_source_by_id=None):
         """PET using observed trajectory samples only.
         Spatial segment intersection is used to find a candidate interaction point,
         but event timestamps come only from actual observed frames (nearest observed
@@ -5806,39 +5852,10 @@ class Run1App:
         candidates=[]
         diag={"zone6_tracks":0,"movement_identified":0,"pairs_considered":0,"same_movement_excluded":0,"interaction_candidates":0,"fallback_close_pairs":0,"overlap_intervals":0,"insufficient_samples":0}
         ids=list(tracks)
-        movement_by_id={}
-        movement_source_by_id={}
-        for tid in ids:
-            movement = ""
-            source = ""
-            summary_row = summaries.get(tid, {}) if isinstance(summaries, dict) else {}
-            # 1) Primary: track-level first_zone + last_zone from ID Zone Summary.
-            # This is the authoritative movement endpoint logic for PET.
-            movement = self._run3_movement_from_first_last(
-                summary_row.get("first_zone", summary_row.get("First_Zone", "")),
-                summary_row.get("last_zone", summary_row.get("Last_Zone", "")),
+        if movement_by_id is None or movement_source_by_id is None:
+            movement_by_id, movement_source_by_id = self._run3_build_movement_index(
+                tracks, summaries, mapping or {}
             )
-            if movement:
-                source = "ID_Zone_Summary_FirstLastZone"
-            # 2) Fallback: ID Zone Summary zone_sequence.
-            if not movement:
-                for key in ("zone_sequence", "Zone Sequence", "Zone_Sequence"):
-                    movement = self._run3_movement_from_sequence(summary_row.get(key, ""))
-                    if movement:
-                        source = "ID_Zone_Summary_Sequence"
-                        break
-            # 3) Fallback: observed Detection Records.
-            if not movement:
-                movement = self._run3_movement_from_track_rows(tracks.get(tid, []))
-                if movement:
-                    source = "Detection_Records_Zones"
-            # 4) Optional fallback: configured Reference Line Mapping.
-            if not movement:
-                movement = self._run3_movement_from_reference_lines(tracks.get(tid, []), self.run3_site_id_var.get().strip(), mapping or {})
-                if movement:
-                    source = "Reference_Line_Crossing"
-            movement_by_id[tid] = movement
-            movement_source_by_id[tid] = source
         for tid in ids:
             if any(self.run3_pet_zone6_var.get() and r.get("_zone_num")==6 and r.get("_point") is not None for r in tracks[tid]):
                 diag["zone6_tracks"]+=1
@@ -5931,6 +5948,13 @@ class Run1App:
         tracks, summaries = self._run3_build_tracks(detection_rows, id_rows)
         outputs = {}
         perspective = self._run3_get_perspective_matrix(silent=True)
+        mapping = {}
+        mapping_parse_error = ""
+        try:
+            mapping = self._run3_parse_reference_mapping()
+        except Exception as exc:
+            mapping_parse_error = str(exc)
+        movement_by_id, movement_source_by_id = self._run3_build_movement_index(tracks, summaries, mapping)
         summary = {
             "site_id": self.run3_site_id_var.get().strip(),
             "inputs": {"detection": det_path, "id_zone_summary": id_path, "zone_summary": zone_path},
@@ -5944,13 +5968,15 @@ class Run1App:
                 "detection_records": len(detection_rows),
                 "track_ids": len(tracks),
                 "id_zone_summary_rows": len(id_rows),
-                "zone_summary_rows": len(zone_rows),
                 "tracks_by_zone": {str(z): sum(1 for rows in tracks.values() if any(r.get("_zone_num") == z for r in rows)) for z in range(1,7)},
-                "movement_counts": {m: sum(1 for tid, rows in tracks.items() if ((self._run3_movement_from_sequence(summaries.get(tid,{}).get("zone_sequence", "")) or self._run3_movement_from_track_rows(rows)) == m)) for m in RUN3_ALL_MOVEMENTS},
+                "movement_counts": {m: sum(1 for tid in tracks if movement_by_id.get(str(tid), "") == m) for m in RUN3_ALL_MOVEMENTS},
+                "movement_sources": dict(sorted((str(k), v) for k, v in movement_source_by_id.items() if v)),
                 "selected_zones": {"speed": [z for z in range(1,7) if self.run3_speed_zone_vars[z].get()], "lateral_clearance": [z for z in range(1,7) if self.run3_lc_zone_vars[z].get()], "pet": [6] if self.run3_pet_zone6_var.get() else []},
             },
             "diagnostics": {},
         }
+        if mapping_parse_error:
+            summary["diagnostics"]["reference_mapping"] = f"Invalid Reference Line Mapping: {mapping_parse_error}"
 
         def write_csv(filename, fields, rows):
             desired = os.path.join(output_dir, filename)
@@ -6013,7 +6039,6 @@ class Run1App:
         # Gap Acceptance
         if self.run3_gap_enabled_var.get():
             try:
-                mapping = self._run3_parse_reference_mapping()
                 gap_rows = self._run3_gap(tracks, summaries, mapping)
                 fields = ["Site_ID","Decision_Event_ID","Subject_ID","Subject_Class","Subject_Movement","Conflicting_Movement","Conflicting_ID_A","Conflicting_ID_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","X32_Waiting_Time","Gap_Role","Y5_Gap_Acceptance","Acceptance_Time","QC_Flag"]
                 path = write_csv("Run_3_Gap_Acceptance.csv", fields, gap_rows)
@@ -6083,8 +6108,11 @@ class Run1App:
         # PET
         if self.run3_pet_enabled_var.get():
             try:
-                ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); interaction = float(self.run3_pet_interaction_distance_var.get())
-                pet_rows, pet_diag = self._run3_pet(tracks, summaries, ppm, axis, interaction, perspective, mapping)
+                interaction = float(self.run3_pet_interaction_distance_var.get())
+                pet_rows, pet_diag = self._run3_pet(
+                    tracks, summaries, interaction, perspective, mapping,
+                    movement_by_id, movement_source_by_id
+                )
                 fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Y4_PET","QC_Flag"]
                 path = write_csv("Run_3_PET.csv", fields, pet_rows)
                 vals = [float(r["Y4_PET"]) for r in pet_rows]
@@ -6098,6 +6126,13 @@ class Run1App:
                 summary["diagnostics"]["pet"] = f"ERROR: {e}"
                 outputs["pet"] = path
 
+        summary["architecture"] = {
+            "movement_resolver": "Common: ID Zone Summary first_zone + last_zone, then shared fallbacks",
+            "run3_calculation_inputs": ["Run_2_Detection_Records.csv", "Run_2_ID_Zone_Summary.csv"],
+            "run2_zone_summary_role": "Audit-only; not duplicated as a Run 3 calculation input",
+            "pet_uses_ppm": False,
+            "pet_uses_road_direction_angle": False,
+        }
         summary_path = os.path.join(output_dir, "Run_3_Summary.json")
         summary["outputs"] = outputs
         with open(summary_path, "w", encoding="utf-8") as f:
