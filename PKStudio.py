@@ -6032,7 +6032,7 @@ class Run1App:
                         "gap_start": a[0],
                         "gap_end": b[0],
                         "gap": b[0] - a[0],
-                        "qc_flag": ";".join(v for v in (a[4], b[4]) if v),
+                        "qc_flag": ";".join(dict.fromkeys(v for v in (a[4], b[4]) if v)),
                     })
                 diag["candidate_intervals_by_movement"][cm] = max(
                     diag["candidate_intervals_by_movement"].get(cm, 0),
@@ -6087,7 +6087,7 @@ class Run1App:
                     "Gap_End_Time": f"{c['gap_end']:.6f}",
                     "X31_Available_Gap": f"{c['gap']:.6f}",
                     "X32_Waiting_Time": f"{waiting_time:.6f}",
-                    "Gap_Role": "Rejected",
+                    "Gap_Role": "Rejected (prior gap)",
                     "Y5_Gap_Acceptance": 0,
                     "Acceptance_Time": "",
                     "QC_Flag": c["qc_flag"],
@@ -6108,7 +6108,7 @@ class Run1App:
                     "Gap_End_Time": f"{controlling['gap_end']:.6f}",
                     "X31_Available_Gap": f"{controlling['gap']:.6f}",
                     "X32_Waiting_Time": f"{waiting_time:.6f}",
-                    "Gap_Role": "Accepted / Controlling",
+                    "Gap_Role": "Accepted (controlling gap)",
                     "Y5_Gap_Acceptance": 1,
                     "Acceptance_Time": f"{accepted_time:.6f}",
                     "QC_Flag": controlling["qc_flag"],
@@ -6462,10 +6462,20 @@ class Run1App:
                 outputs["speed"] = path
 
         # Gap Acceptance
+        # CSV column order is intentionally grouped for human readability:
+        # subject identity → waiting time → conflicting stream → gap interval/X31 → decision/Y5 → QC.
         if self.run3_gap_enabled_var.get():
             try:
                 gap_rows = self._run3_gap(tracks, summaries, mapping)
-                fields = ["Site_ID","Decision_Event_ID","Subject_ID","Subject_Class","Subject_Movement","Conflicting_Movement","Conflicting_ID_A","Conflicting_ID_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","X32_Waiting_Time","Gap_Role","Y5_Gap_Acceptance","Acceptance_Time","QC_Flag"]
+                fields = [
+                    # Organized for direct reading: Decision/Subject → Waiting → Conflict → Gap → Decision result → QC
+                    "Site_ID","Decision_Event_ID","Subject_ID","Subject_Class","Subject_Movement",
+                    "X32_Waiting_Time",
+                    "Conflicting_Movement","Conflicting_ID_A","Conflicting_ID_B","Reference_Line",
+                    "Gap_Start_Time","Gap_End_Time","X31_Available_Gap",
+                    "Gap_Role","Y5_Gap_Acceptance","Acceptance_Time",
+                    "QC_Flag"
+                ]
                 path = write_csv("Run_3_Gap_Acceptance.csv", fields, gap_rows)
                 rejected_by_driver = defaultdict(list); accepted_by_driver = defaultdict(list)
                 for r in gap_rows:
