@@ -936,134 +936,202 @@ class Run1App:
     # ========================================================
 
     def build_run3_section(self):
+        """Build a compact research-oriented Run 3 UI.
+
+        The visible controls are grouped by research task. Legacy/internal
+        parameters remain in the settings model for backward compatibility but
+        are intentionally not exposed here when they are no longer used by the
+        active calculation path.
+        """
         frame = ttk.LabelFrame(
             self.content,
-            text="RUN 3 — Safety Analysis",
+            text="RUN 3 — Research Safety Analysis",
             padding=10
         )
         frame.grid(row=4, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
-        frame.columnconfigure(1, weight=1)
-        frame.columnconfigure(3, weight=1)
+        frame.columnconfigure(0, weight=1)
 
-        ttk.Label(frame, text="Site_ID").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_site_id_var, width=18).grid(row=0, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="PPM").grid(row=0, column=2, sticky="e", padx=(12, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_ppm_var, width=18).grid(row=0, column=3, sticky="w", pady=4)
+        # ------------------------------------------------------------
+        # A. STUDY / CALIBRATION
+        # ------------------------------------------------------------
+        cal = ttk.LabelFrame(frame, text="A. Study / Calibration", padding=(8, 6))
+        cal.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        cal.columnconfigure(1, weight=1)
+        cal.columnconfigure(3, weight=1)
 
-        ttk.Checkbutton(frame, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=1, column=0, sticky="w", pady=(2,4))
-        ttk.Label(frame, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง", foreground="#666666").grid(row=1, column=1, columnspan=2, sticky="w", pady=(2,4))
-        ttk.Button(frame, text="🎯 Perspective / PPM Calibration", command=self.open_perspective_calibration).grid(row=1, column=3, sticky="e", pady=(2,4))
+        ttk.Label(cal, text="Site_ID").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(cal, textvariable=self.run3_site_id_var, width=14).grid(row=0, column=1, sticky="w", pady=3)
 
-        ttk.Label(frame, text="Perspective / PPM Calibration: คลิก P1→P2→P3→P4 แล้วลากจุดปรับตำแหน่งได้ พร้อมกรอกระยะจริง").grid(row=2, column=0, columnspan=4, sticky="w", pady=(2,2))
-        ttk.Label(frame, text="P1").grid(row=3, column=0, sticky="e", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_p1_var, width=18, state="readonly").grid(row=3, column=1, sticky="w", pady=2)
-        ttk.Label(frame, text="P2").grid(row=3, column=2, sticky="e", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_p2_var, width=18, state="readonly").grid(row=3, column=3, sticky="w", pady=2)
-        ttk.Label(frame, text="P3").grid(row=4, column=0, sticky="e", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_p3_var, width=18, state="readonly").grid(row=4, column=1, sticky="w", pady=2)
-        ttk.Label(frame, text="P4").grid(row=4, column=2, sticky="e", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_p4_var, width=18, state="readonly").grid(row=4, column=3, sticky="w", pady=2)
-        ttk.Label(frame, text="Known Length P1→P2 (m)").grid(row=5, column=0, sticky="w", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_l12_var, width=18).grid(row=5, column=1, sticky="w", pady=2)
-        ttk.Label(frame, text="Known Length P2→P3 (m)").grid(row=5, column=2, sticky="e", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_l23_var, width=18).grid(row=5, column=3, sticky="w", pady=2)
-        ttk.Label(frame, text="Known Length P3→P4 (m)").grid(row=6, column=0, sticky="w", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_l34_var, width=18).grid(row=6, column=1, sticky="w", pady=2)
-        ttk.Label(frame, text="Known Length P4→P1 (m)").grid(row=6, column=2, sticky="e", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_l41_var, width=18).grid(row=6, column=3, sticky="w", pady=2)
-        ttk.Label(frame, text="P1→P2→P3→P4 ต้องเรียงรอบพื้นที่เดียวกัน และระยะทั้ง 4 ด้านต้องเป็นระยะจริงบนผิวถนน", foreground="#666666").grid(row=7, column=0, columnspan=4, sticky="w", pady=(0,4))
+        ttk.Label(cal, text="Calibration").grid(row=0, column=2, sticky="e", padx=(12, 8), pady=3)
+        mode = ttk.Frame(cal)
+        mode.grid(row=0, column=3, sticky="w", pady=3)
+        ttk.Radiobutton(
+            mode, text="PPM only", variable=self.run3_perspective_enabled_var, value=False
+        ).pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(
+            mode, text="Perspective Homography", variable=self.run3_perspective_enabled_var, value=True
+        ).pack(side="left")
 
-        # Analysis master switches
-        frame.columnconfigure(4, weight=1)
-        ttk.Label(frame, text="Analysis").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Checkbutton(frame, text="Speed", variable=self.run3_speed_enabled_var).grid(row=7, column=1, sticky="w", padx=(0, 10))
-        ttk.Checkbutton(frame, text="Gap Acceptance", variable=self.run3_gap_enabled_var).grid(row=7, column=2, sticky="w", padx=(0, 10))
-        ttk.Checkbutton(frame, text="Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=7, column=3, sticky="w", padx=(0, 10))
-        ttk.Checkbutton(frame, text="PET", variable=self.run3_pet_enabled_var).grid(row=7, column=4, sticky="w")
-
-        # --------------------------------------------------------
-        # SPEED: one master switch + selectable Zones 1–6.
-        # CSV assigns the research role by Zone; the UI does not
-        # split the selection into Approach/Exit columns.
-        # --------------------------------------------------------
-        speed_zone_frame = ttk.LabelFrame(frame, text="Speed — Analysis Zones (เลือกได้ 1–6)", padding=(8, 4))
-        speed_zone_frame.grid(row=8, column=0, columnspan=4, sticky="ew", padx=0, pady=(2, 4))
+        ttk.Label(cal, text="PPM / fallback PPM").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(cal, textvariable=self.run3_ppm_var, width=14).grid(row=1, column=1, sticky="w", pady=3)
         ttk.Label(
-            speed_zone_frame,
-            text="เลือก Zone ที่ต้องการเก็บความเร็วลง CSV | CSV จะจัดบทบาทให้อัตโนมัติ: 1=Access_Mouth, 2/4=Approach, 3/5=Exit, 6=Middle_Access",
+            cal,
+            text="ใช้ PPM โดยตรง หรือใช้เป็น fallback เมื่อไม่มี metric transform",
+            foreground="#666666"
+        ).grid(row=1, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=3)
+
+        ttk.Button(
+            cal, text="🎯 เปิด Perspective / PPM Calibration", command=self.open_perspective_calibration
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(5, 3))
+        ttk.Label(
+            cal,
+            text="รายละเอียด P1–P4 และระยะจริงกรอกในหน้าต่าง Calibration โดยเฉพาะ ไม่แสดงซ้ำบนหน้าหลัก",
+            foreground="#666666"
+        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(0, 2))
+
+        # ------------------------------------------------------------
+        # B. ANALYSIS MODULE SWITCHES
+        # ------------------------------------------------------------
+        modules = ttk.LabelFrame(frame, text="B. Analysis Modules", padding=(8, 6))
+        modules.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        ttk.Checkbutton(modules, text="Speed", variable=self.run3_speed_enabled_var).grid(row=0, column=0, sticky="w", padx=(0, 16))
+        ttk.Checkbutton(modules, text="Gap Acceptance", variable=self.run3_gap_enabled_var).grid(row=0, column=1, sticky="w", padx=(0, 16))
+        ttk.Checkbutton(modules, text="Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=0, column=2, sticky="w", padx=(0, 16))
+        ttk.Checkbutton(modules, text="PET", variable=self.run3_pet_enabled_var).grid(row=0, column=3, sticky="w")
+
+        # ------------------------------------------------------------
+        # C. SPEED
+        # ------------------------------------------------------------
+        speed = ttk.LabelFrame(frame, text="C. Speed", padding=(8, 6))
+        speed.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        ttk.Label(
+            speed,
+            text="Analysis Zones — เลือก Zone ที่ต้องการคำนวณความเร็ว (1–6)",
             foreground="#555555"
-        ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 3))
+        ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 4))
         for i, z in enumerate(range(1, 7)):
             ttk.Checkbutton(
-                speed_zone_frame, text=f"Zone {z}", variable=self.run3_speed_zone_vars[z]
-            ).grid(row=1 + i // 6, column=i % 6, sticky="w", padx=(2, 14), pady=2)
-
-        # --------------------------------------------------------
-        # LATERAL CLEARANCE: all Zones 1–6 selectable independently.
-        # Default is all checked so the researcher can uncheck the
-        # Zones that should not be included for a particular study.
-        # --------------------------------------------------------
-        lc_zone_frame = ttk.LabelFrame(frame, text="Lateral Clearance — Analysis Zones (เลือกได้ 1–6)", padding=(8, 4))
-        lc_zone_frame.grid(row=9, column=0, columnspan=4, sticky="ew", padx=0, pady=(0, 4))
+                speed, text=f"Zone {z}", variable=self.run3_speed_zone_vars[z]
+            ).grid(row=1, column=i, sticky="w", padx=(2, 16), pady=2)
         ttk.Label(
-            lc_zone_frame,
-            text="เลือก Zone ที่ต้องการคำนวณ Y3 โดยใช้ observation ที่สังเกตจริงและจับคู่เวลาที่ใกล้กัน — ไม่ทำ interpolation",
-            foreground="#555555"
-        ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 3))
-        for i, z in enumerate(range(1, 7)):
-            ttk.Checkbutton(
-                lc_zone_frame, text=f"Zone {z}", variable=self.run3_lc_zone_vars[z]
-            ).grid(row=1 + i // 6, column=i % 6, sticky="w", padx=(2, 14), pady=2)
+            speed,
+            text="CSV: Zone 1 = Access_Mouth | 2,4 = Approach | 3,5 = Exit | 6 = Middle_Access",
+            foreground="#666666"
+        ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(3, 0))
 
-        ttk.Label(frame, text="Middle / Access Zone (PET)").grid(row=10, column=0, sticky="w", padx=(0,8), pady=2)
-        ttk.Checkbutton(frame, text="Zone 6", variable=self.run3_pet_zone6_var).grid(row=10, column=1, sticky="w", padx=(2,2), pady=2)
+        # ------------------------------------------------------------
+        # D. GAP ACCEPTANCE
+        # ------------------------------------------------------------
+        gap = ttk.LabelFrame(frame, text="D. Gap Acceptance", padding=(8, 6))
+        gap.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        gap.columnconfigure(1, weight=1)
 
-        ttk.Label(frame, text="Waiting detection speed threshold (km/h)").grid(row=11, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_waiting_speed_threshold_var, width=18).grid(row=11, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="Zone stop confirmation duration (s) — implementation").grid(row=11, column=2, sticky="e", padx=(12, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_zone_stop_min_duration_var, width=18).grid(row=11, column=3, sticky="w", pady=4)
+        ttk.Label(gap, text="Subject Movement").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Checkbutton(gap, text="1 → 3", variable=self.run3_gap_movement_13_var).grid(row=0, column=1, sticky="w")
+        ttk.Checkbutton(gap, text="1 → 5", variable=self.run3_gap_movement_15_var).grid(row=0, column=2, sticky="w")
+        ttk.Checkbutton(gap, text="4 → 1", variable=self.run3_gap_movement_41_var).grid(row=0, column=3, sticky="w")
 
-        ttk.Label(frame, text="Road direction angle (deg) — implementation").grid(row=12, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=12, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="LC longitudinal window (m) — implementation").grid(row=12, column=2, sticky="e", padx=(12, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_lc_longitudinal_window_var, width=18).grid(row=12, column=3, sticky="w", pady=4)
+        ttk.Label(gap, text="Critical Gap Method").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Checkbutton(gap, text="Raff", variable=self.run3_use_raff_var).grid(row=1, column=1, sticky="w")
+        ttk.Checkbutton(gap, text="MLE", variable=self.run3_use_mle_var).grid(row=1, column=2, sticky="w")
 
-        ttk.Label(frame, text="PET interaction distance (m) — implementation").grid(row=13, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_pet_interaction_distance_var, width=18).grid(row=13, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="PET threshold (s)").grid(row=13, column=2, sticky="e", padx=(12, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_pet_threshold_var, width=18).grid(row=13, column=3, sticky="w", pady=4)
+        ttk.Label(
+            gap,
+            text="Decision Zone: 1→3 และ 1→5 = Zone 1,6 | 4→1 = Zone 4,6 | ไม่ใช้ Stop Threshold / Stop Duration บน UI แล้ว",
+            foreground="#666666"
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(3, 4))
 
-        ttk.Separator(frame, orient="horizontal").grid(row=14, column=0, columnspan=4, sticky="ew", pady=(8, 6))
-        ttk.Label(frame, text="Gap Acceptance — Subject Movement").grid(row=15, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Checkbutton(frame, text="1 → 3", variable=self.run3_gap_movement_13_var).grid(row=15, column=1, sticky="w")
-        ttk.Checkbutton(frame, text="1 → 5", variable=self.run3_gap_movement_15_var).grid(row=15, column=2, sticky="w")
-        ttk.Checkbutton(frame, text="4 → 1", variable=self.run3_gap_movement_41_var).grid(row=15, column=3, sticky="w")
-        ttk.Label(frame, text="Critical Gap").grid(row=16, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Checkbutton(frame, text="Raff", variable=self.run3_use_raff_var).grid(row=16, column=1, sticky="w")
-        ttk.Checkbutton(frame, text="MLE", variable=self.run3_use_mle_var).grid(row=16, column=2, sticky="w")
-
-        ttk.Label(frame, text="Reference Line Mapping (copy/paste): Site_ID|Movement|Line N").grid(row=17, column=0, columnspan=3, sticky="w", pady=(4, 2))
-        ttk.Button(frame, text="Copy Template", command=self.copy_run3_mapping_template).grid(row=17, column=3, sticky="e", pady=(4, 2))
-        self.run3_reference_text = tk.Text(frame, height=6, width=90, wrap="none")
-        self.run3_reference_text.grid(row=18, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        ttk.Label(gap, text="Reference Line Mapping").grid(row=3, column=0, sticky="nw", padx=(0, 8), pady=3)
+        ttk.Button(gap, text="Copy Template", command=self.copy_run3_mapping_template).grid(row=3, column=3, sticky="ne", pady=3)
+        self.run3_reference_text = tk.Text(gap, height=5, wrap="none")
+        self.run3_reference_text.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(0, 3))
         self.run3_reference_text.insert("1.0", self.run3_reference_mapping_text)
+        ttk.Label(
+            gap,
+            text="รูปแบบ: Site_ID|Movement|Line N  — ตัวอย่าง 8|1→3|Line 1",
+            foreground="#666666"
+        ).grid(row=5, column=0, columnspan=4, sticky="w")
 
-        ttk.Label(frame, text="Vehicle Widths (m) — source values supplied by researcher").grid(row=19, column=0, columnspan=4, sticky="w", pady=(2, 4))
-        width_pairs = [("Bus", 0), ("Car", 2), ("Motorcycle", 0), ("Pickup", 2), ("Sidecar", 0), ("Truck", 2), ("Van", 0)]
-        for idx, (name, pair_col) in enumerate(width_pairs):
-            row = 20 + idx // 2
-            ttk.Label(frame, text=name).grid(row=row, column=pair_col, sticky="e", padx=(4, 4), pady=2)
-            ttk.Entry(frame, textvariable=self.run3_width_vars[name], width=10).grid(row=row, column=pair_col + 1, sticky="w", padx=(0, 8), pady=2)
+        # ------------------------------------------------------------
+        # E. LATERAL CLEARANCE
+        # ------------------------------------------------------------
+        lc = ttk.LabelFrame(frame, text="E. Lateral Clearance", padding=(8, 6))
+        lc.grid(row=4, column=0, sticky="ew", pady=(0, 6))
+        lc.columnconfigure(1, weight=1)
+        lc.columnconfigure(3, weight=1)
 
-        ttk.Label(frame, text="Gap: Zone 1/4 = Decision/Waiting Zone; Zone 6 = Decision/Acceptance Zone และสามารถหยุดใน Zone 6 ได้. Stop state ใช้ observed samples เท่านั้น.", foreground="#666666").grid(row=27, column=0, columnspan=4, sticky="w", pady=(6, 2))
-        ttk.Label(frame, text="รถหยุดที่ Zone 1/4 = นับ Waiting ต่อเมื่อสังเกตได้; เข้า Zone 6 แล้วหยุด = รถคันนั้นยังนับเวลารอของตัวเองต่อจนพบการเคลื่อนที่กลับมา โดยคันอื่นประมวลผลต่อได้ตามปกติ.", foreground="#666666").grid(row=28, column=0, columnspan=4, sticky="w", pady=(2, 2))
-        ttk.Label(frame, text="Perspective: กดปุ่มด้านบนเพื่อเปิดภาพและคลิก P1→P2→P3→P4; โปรแกรมจะเติมพิกัดให้เอง จากนั้นกรอกระยะจริง Length/Width แล้วกด Apply.", foreground="#666666").grid(row=29, column=0, columnspan=4, sticky="w", pady=(2, 2))
-        ttk.Label(frame, text="Speed CSV role: Zone 1 = Access_Mouth | Zones 2,4 = Approach | Zones 3,5 = Exit | Zone 6 = Middle_Access", foreground="#666666").grid(row=30, column=0, columnspan=4, sticky="w", pady=(2, 2))
-        ttk.Label(frame, textvariable=self.run3_result_text, foreground="#444444").grid(row=31, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        ttk.Label(lc, text="Analysis Zones").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        for i, z in enumerate(range(1, 7)):
+            ttk.Checkbutton(lc, text=f"{z}", variable=self.run3_lc_zone_vars[z]).grid(
+                row=0, column=1 + i, sticky="w", padx=(0, 12), pady=3
+            )
 
-    # ========================================================
-    # INTEGRATED ZONE / LINE MEASUREMENT
-    # ========================================================
+        ttk.Label(lc, text="Road Direction (deg)").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(lc, textvariable=self.run3_lateral_axis_angle_var, width=12).grid(row=1, column=1, sticky="w", pady=3)
+        ttk.Label(lc, text="Longitudinal Window (m)").grid(row=1, column=2, sticky="e", padx=(12, 8), pady=3)
+        ttk.Entry(lc, textvariable=self.run3_lc_longitudinal_window_var, width=12).grid(row=1, column=3, sticky="w", pady=3)
+
+        ttk.Label(lc, text="Vehicle Widths (m)").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(5, 3))
+        width_pairs = [("Bus", 1), ("Car", 3), ("Motorcycle", 5)]
+        for name, col in width_pairs:
+            ttk.Label(lc, text=name).grid(row=2, column=col, sticky="e", padx=(4, 4), pady=(5, 3))
+            ttk.Entry(lc, textvariable=self.run3_width_vars[name], width=9).grid(row=2, column=col + 1, sticky="w", pady=(5, 3))
+        width_pairs2 = [("Pickup", 1), ("Sidecar", 3), ("Truck", 5)]
+        for name, col in width_pairs2:
+            ttk.Label(lc, text=name).grid(row=3, column=col, sticky="e", padx=(4, 4), pady=3)
+            ttk.Entry(lc, textvariable=self.run3_width_vars[name], width=9).grid(row=3, column=col + 1, sticky="w", pady=3)
+        ttk.Label(lc, text="Van").grid(row=4, column=1, sticky="e", padx=(4, 4), pady=3)
+        ttk.Entry(lc, textvariable=self.run3_width_vars["Van"], width=9).grid(row=4, column=2, sticky="w", pady=3)
+        ttk.Label(
+            lc,
+            text="Y3 ใช้ observed observations และไม่ทำ temporal interpolation",
+            foreground="#666666"
+        ).grid(row=5, column=0, columnspan=7, sticky="w", pady=(3, 0))
+
+        # ------------------------------------------------------------
+        # F. PET
+        # ------------------------------------------------------------
+        pet = ttk.LabelFrame(frame, text="F. PET", padding=(8, 6))
+        pet.grid(row=5, column=0, sticky="ew", pady=(0, 6))
+        pet.columnconfigure(1, weight=1)
+        pet.columnconfigure(3, weight=1)
+
+        ttk.Label(pet, text="Conflict Area").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(pet, text="Zone 6 (fixed)").grid(row=0, column=1, sticky="w", pady=3)
+        # Zone 6 is now a fixed PET analysis area; retain the legacy variable
+        # only for settings backward compatibility.
+        self.run3_pet_zone6_var.set(True)
+
+        ttk.Label(pet, text="Interaction Distance (m)").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(pet, textvariable=self.run3_pet_interaction_distance_var, width=12).grid(row=1, column=1, sticky="w", pady=3)
+        ttk.Label(pet, text="PET Threshold (s)").grid(row=1, column=2, sticky="e", padx=(12, 8), pady=3)
+        ttk.Entry(pet, textvariable=self.run3_pet_threshold_var, width=12).grid(row=1, column=3, sticky="w", pady=3)
+        ttk.Label(
+            pet,
+            text="PET พิจารณาคู่ movement ตาม conflict pairs ที่กำหนด และใช้เวลาจาก observed trajectory samples",
+            foreground="#666666"
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(3, 0))
+
+        # ------------------------------------------------------------
+        # G. RESEARCH OUTPUT / STATUS
+        # ------------------------------------------------------------
+        status = ttk.LabelFrame(frame, text="G. Research Output / Status", padding=(8, 6))
+        status.grid(row=6, column=0, sticky="ew")
+        ttk.Label(
+            status,
+            text="Run 2: Detection Records + ID/Zone Summary + Zone Summary   |   Run 3: Event Map + Event Index + Speed + Gap + LC + PET",
+            foreground="#555555"
+        ).grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Label(
+            status,
+            text="Research processing: ทุก frame | Research CSV: สร้างอัตโนมัติ | Run 3 QC/summary บันทึกไว้ใน Summary.json",
+            foreground="#555555"
+        ).grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Label(
+            status,
+            textvariable=self.run3_result_text,
+            foreground="#444444"
+        ).grid(row=2, column=0, sticky="w", pady=(4, 0))
 
     def update_trajectory_position_controls(self, event=None):
         """Update the trajectory-position controls.
@@ -1906,96 +1974,29 @@ class Run1App:
             2
         )
 
-        ttk.Label(
-            frame,
-            text="Device"
-        ).grid(
-            row=0,
-            column=0,
-            sticky="w",
-            pady=4
-        )
-
+        ttk.Label(frame, text="Device").grid(row=0, column=0, sticky="w", pady=4)
         ttk.Combobox(
             frame,
             textvariable=self.device_var,
-            values=[
-                "Auto",
-                "CPU",
-                "GPU 0"
-            ],
+            values=["Auto", "CPU", "GPU 0"],
             state="readonly",
             width=18
-        ).grid(
-            row=0,
-            column=1,
-            sticky="w"
-        )
+        ).grid(row=0, column=1, sticky="w")
 
-        ttk.Label(
-            frame,
-            text="Precision"
-        ).grid(
-            row=1,
-            column=0,
-            sticky="w",
-            pady=4
-        )
-
+        ttk.Label(frame, text="Precision").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Combobox(
             frame,
             textvariable=self.precision_var,
-            values=[
-                "Auto",
-                "FP16",
-                "FP32"
-            ],
+            values=["Auto", "FP16", "FP32"],
             state="readonly",
             width=18
-        ).grid(
-            row=1,
-            column=1,
-            sticky="w"
-        )
+        ).grid(row=1, column=1, sticky="w")
 
-        ttk.Label(
-            frame,
-            text="Frame Skip"
-        ).grid(
-            row=2,
-            column=0,
-            sticky="w",
-            pady=4
-        )
-
-        ttk.Combobox(
-            frame,
-            textvariable=self.frame_skip_var,
-            values=[
-                "NO - Process every frame",
-                "1 - Process every 2nd frame",
-                "2 - Process every 3rd frame",
-                "3 - Process every 4th frame",
-                "4 - Process every 5th frame"
-            ],
-            state="readonly",
-            width=28
-        ).grid(
-            row=2,
-            column=1,
-            sticky="w"
-        )
-
-        ttk.Label(
-            frame,
-            text="GPU 0 = NVIDIA GeForce GTX 1650"
-        ).grid(
-            row=3,
-            column=0,
-            columnspan=2,
-            sticky="w",
-            pady=(8, 0)
-        )
+        ttk.Separator(frame, orient="horizontal").grid(row=2, column=0, columnspan=2, sticky="ew", pady=(7, 6))
+        ttk.Label(frame, text="Research Processing", font=("Segoe UI", 10, "bold")).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Label(frame, text="Frame processing: Every frame").grid(row=4, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(frame, text="Frame Skip: ซ่อนใน Research UI และถูกบังคับเป็น Every frame เมื่อ Research Mode ทำงาน", foreground="#666666").grid(row=5, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(frame, text="GPU 0 = NVIDIA GeForce GTX 1650").grid(row=6, column=0, columnspan=2, sticky="w", pady=(7, 0))
 
     # ========================================================
     # BYTETRACK
@@ -2057,50 +2058,17 @@ class Run1App:
             3
         )
 
-        ttk.Checkbutton(
-            frame,
-            text="Show Preview",
-            variable=self.show_preview_var
-        ).grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Checkbutton(frame, text="Show Preview", variable=self.show_preview_var).grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Checkbutton(frame, text="Show Trajectory", variable=self.draw_trail_var).grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Label(frame, text="Trail Length").grid(row=1, column=1, sticky="e", padx=(15, 5))
+        ttk.Spinbox(frame, from_=1, to=300, textvariable=self.trail_length_var, width=8).grid(row=1, column=2, sticky="w")
+        ttk.Checkbutton(frame, text="Save Video", variable=self.save_video_var).grid(row=2, column=0, sticky="w", pady=3)
 
-        ttk.Checkbutton(
-            frame,
-            text="Show Trajectory",
-            variable=self.draw_trail_var
-        ).grid(row=1, column=0, sticky="w", pady=3)
-
-        ttk.Label(frame, text="Trail Length").grid(
-            row=1, column=1, sticky="e", padx=(15, 5)
-        )
-        ttk.Spinbox(
-            frame, from_=1, to=300, textvariable=self.trail_length_var, width=8
-        ).grid(row=1, column=2, sticky="w")
-
-        ttk.Checkbutton(
-            frame,
-            text="Save Video",
-            variable=self.save_video_var
-        ).grid(row=2, column=0, sticky="w", pady=3)
-
-        ttk.Checkbutton(
-            frame,
-            text="Save CSV",
-            variable=self.save_csv_var
-        ).grid(row=2, column=1, sticky="w", pady=3)
-
-        ttk.Separator(frame, orient="horizontal").grid(
-            row=3, column=0, columnspan=3, sticky="ew", pady=(8, 6)
-        )
-        ttk.Label(
-            frame,
-            text="Trajectory ใช้จุดเดียวกับ Trajectory Position ด้านบน",
-            foreground="#666666"
-        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 2))
-        ttk.Label(
-            frame,
-            text="กรอบและข้อมูล ID แสดงเฉพาะเมื่อจุด Trajectory อยู่ใน Zone",
-            foreground="#666666"
-        ).grid(row=5, column=0, columnspan=3, sticky="w")
+        ttk.Separator(frame, orient="horizontal").grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 6))
+        ttk.Label(frame, text="Research CSV: Automatic", font=("Segoe UI", 9, "bold")).grid(row=4, column=0, sticky="w", pady=2)
+        ttk.Label(frame, text="เมื่อ Research Mode ทำงาน CSV ถูกบันทึกอัตโนมัติ — ไม่ต้องตั้งค่า Save CSV ซ้ำ", foreground="#666666").grid(row=5, column=0, columnspan=3, sticky="w", pady=2)
+        ttk.Label(frame, text="Trajectory ใช้จุดเดียวกับ Trajectory Position ด้านบน", foreground="#666666").grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Label(frame, text="กรอบและข้อมูล ID แสดงเฉพาะเมื่อจุด Trajectory อยู่ใน Zone", foreground="#666666").grid(row=7, column=0, columnspan=3, sticky="w")
 
     # ========================================================
     # INFORMATION
@@ -2510,8 +2478,8 @@ class Run1App:
             for key, variable in mapping_pairs:
                 if key in run3:
                     variable.set(run3[key])
-            if "pet_zone6" in run3:
-                self.run3_pet_zone6_var.set(bool(run3.get("pet_zone6")))
+            # PET conflict area is fixed to Zone 6 in the current research UI.
+            self.run3_pet_zone6_var.set(True)
             # Speed zone settings: new v14 key, with backward compatibility to v13.
             speed_zone_values = run3.get("speed_zones")
             if speed_zone_values is None:
@@ -3432,8 +3400,6 @@ class Run1App:
                 self.run3_gap_movement_41_var.get(),
             ]):
                 raise ValueError("Select at least one Gap Acceptance subject movement.")
-            self._run3_float(self.run3_waiting_speed_threshold_var.get(), "waiting detection speed threshold (km/h)")
-            self._run3_float(self.run3_zone_stop_min_duration_var.get(), "Zone stop confirmation duration (s)")
             if not (self.run3_use_raff_var.get() or self.run3_use_mle_var.get()):
                 raise ValueError("Select at least one Critical Gap method.")
             mapping_text = self.run3_reference_text.get("1.0", "end-1c").strip() if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text.strip()
@@ -6954,7 +6920,7 @@ class Run1App:
                 tracks, summaries, mapping or {}
             )
         for tid in ids:
-            if any(self.run3_pet_zone6_var.get() and r.get("_zone_num")==6 and r.get("_point") is not None for r in tracks[tid]):
+            if any(r.get("_zone_num") == 6 and r.get("_point") is not None for r in tracks[tid]):
                 diag["zone6_tracks"]+=1
         def mp(r):
             return self._run3_transform_point(r["_point"], perspective) if perspective is not None else r["_point"]
@@ -6962,8 +6928,8 @@ class Run1App:
             for b_id in ids[i+1:]:
                 event_a = vehicle_event_map.get(str(a_id), {})
                 event_b = vehicle_event_map.get(str(b_id), {})
-                a_rows=[r for r in event_a.get("Rows", tracks[a_id]) if self.run3_pet_zone6_var.get() and r.get("_zone_num")==6 and r.get("_point") is not None]
-                b_rows=[r for r in event_b.get("Rows", tracks[b_id]) if self.run3_pet_zone6_var.get() and r.get("_zone_num")==6 and r.get("_point") is not None]
+                a_rows=[r for r in event_a.get("Rows", tracks[a_id]) if r.get("_zone_num") == 6 and r.get("_point") is not None]
+                b_rows=[r for r in event_b.get("Rows", tracks[b_id]) if r.get("_zone_num") == 6 and r.get("_point") is not None]
                 if not a_rows or not b_rows:
                     diag["insufficient_samples"]+=1; continue
                 ma=event_a.get("Movement", movement_by_id.get(str(a_id),"")); mb=event_b.get("Movement", movement_by_id.get(str(b_id),""))
@@ -7074,7 +7040,7 @@ class Run1App:
                 "tracks_by_zone": {str(z): sum(1 for rows in tracks.values() if any(r.get("_zone_num") == z for r in rows)) for z in range(1,7)},
                 "movement_counts": {m: sum(1 for tid in tracks if movement_by_id.get(str(tid), "") == m) for m in RUN3_ALL_MOVEMENTS},
                 "movement_sources": dict(sorted((str(k), v) for k, v in movement_source_by_id.items() if v)),
-                "selected_zones": {"speed": [z for z in range(1,7) if self.run3_speed_zone_vars[z].get()], "lateral_clearance": [z for z in range(1,7) if self.run3_lc_zone_vars[z].get()], "pet": [6] if self.run3_pet_zone6_var.get() else []},
+                "selected_zones": {"speed": [z for z in range(1,7) if self.run3_speed_zone_vars[z].get()], "lateral_clearance": [z for z in range(1,7) if self.run3_lc_zone_vars[z].get()], "pet": [6] if self.run3_pet_enabled_var.get() else []},
             },
             "diagnostics": {},
         }
