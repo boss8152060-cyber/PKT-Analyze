@@ -6658,10 +6658,10 @@ class Run1App:
             if wait_start is not None:
                 zone6_after_wait = [
                     r for r in rows
-                    if r["timestamp"] > wait_start and r.get("_zone_num") == 6
+                    if float(r["_timestamp"]) > float(wait_start) and r.get("_zone_num") == 6
                 ]
                 if zone6_after_wait:
-                    decision_time = min(zone6_after_wait, key=lambda r: r["timestamp"])["timestamp"]
+                    decision_time = min(zone6_after_wait, key=lambda r: float(r["_timestamp"]))["_timestamp"]
             if decision_time is not None:
                 diag["subject_decision_events"] += 1
             else:
@@ -6687,13 +6687,13 @@ class Run1App:
 
                     overlap_rows = [
                         r for r in decision_rows
-                        if gap_start <= r["timestamp"] < gap_end
+                        if float(r["_timestamp"]) >= float(gap_start) and float(r["_timestamp"]) < float(gap_end)
                     ]
                     if not overlap_rows:
                         continue
 
-                    first_overlap = min(overlap_rows, key=lambda r: r["timestamp"])
-                    opportunity_time = float(first_overlap["timestamp"])
+                    first_overlap = min(overlap_rows, key=lambda r: float(r["_timestamp"]))
+                    opportunity_time = float(first_overlap["_timestamp"])
                     available_gap = float(gap_end) - opportunity_time
                     if available_gap <= 0:
                         continue
@@ -6772,7 +6772,7 @@ class Run1App:
                     "Site_ID": site_id,
                     "Decision_Event_ID": (
                         f"{tid}_{decision_time:.6f}" if decision_time is not None
-                        else f"{tid}_NO_DECISION_{(decision_rows[0]['timestamp'] if decision_rows else rows[0]['timestamp']):.6f}"
+                        else f"{tid}_NO_DECISION_{float((decision_rows[0]['_timestamp'] if decision_rows else rows[0]['_timestamp'])):.6f}"
                     ),
                     "Opportunity_No": opportunity_no,
                     "Subject_ID": tid,
@@ -7165,6 +7165,9 @@ class Run1App:
                 outputs["speed"] = path
 
         # Gap Acceptance
+        # Keep the variable defined even when _run3_gap fails; this prevents a
+        # secondary UnboundLocalError from masking the original diagnostic.
+        gap_rows = []
         # CSV column order is intentionally grouped for human readability:
         # movement filter → Decision Zone (1/4/6) → waiting time → conflict vehicles → gap/X31 → Y5 → QC.
         if self.run3_gap_enabled_var.get():
