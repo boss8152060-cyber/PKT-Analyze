@@ -6121,21 +6121,32 @@ class Run1App:
         }
 
     def _run3_gap(self, tracks, summaries, mapping):
-        """Compute subject-specific Gap Acceptance with simple Decision Zones 1/4/6.
+        """Compute subject-specific Gap Acceptance opportunities over the full
+        observed Decision-Zone occupancy.
 
-        Research rule for Run 3:
-          * 1→3 and 1→5 use Zone 1 as the initial waiting/observation zone.
-          * 4→1 uses Zone 4 as the initial waiting/observation zone.
-          * Zone 6 is also a Decision Zone. The first observed Zone-6 sample after
-            entering the initial waiting zone is the observed gap-evaluation time.
-          * A vehicle may be stopped in Zone 6. A Zone-6 stop does NOT censor the
-            event and does NOT remove the conflict interaction fields.
-          * Conflicting_ID_A / B and their classes are always retained from the
-            raw conflict interval used for the subject-specific opportunity.
-          * Rejected opportunities are evaluated in the initial Decision Zone
-            (Zone 1 or 4). The accepted/controlling opportunity is evaluated in
-            Zone 6. Thus the CSV explicitly uses Decision_Zone = 1, 4, or 6.
-          * No temporal interpolation and no fabricated event time are used.
+        Decision zones are movement-specific:
+          * 1→3, 1→5 : Zone 1 and Zone 6
+          * 4→1      : Zone 4 and Zone 6
+
+        IMPORTANT:
+          The first Zone-6 observation is still retained as the observed decision
+          event, but it is NOT used as a cutoff for subsequent conflict-gap
+          observations. Every conflict gap that overlaps an observed sample while
+          the subject is physically inside one of its Decision Zones is retained.
+
+        This prevents a subject such as 4→1 with a trajectory
+          Zone 4 → Zone 6 → Zone 2 → Zone 6 → Zone 1
+        from losing later interactions simply because its first Zone-6 sample
+        occurred earlier in the track.
+
+        Y5 semantics remain conservative:
+          * 1 = the controlling gap containing the first observed Zone-6 entry.
+          * 0 = an observed opportunity that ended before that controlling event.
+          * blank = an observed post-decision opportunity (retained for interaction
+            traceability, but not treated as a new acceptance/rejection decision).
+
+        No temporal interpolation is introduced. Opportunity time is taken from an
+        observed subject timestamp inside the conflict-gap interval.
         """
         selected = []
         if self.run3_gap_movement_13_var.get():
@@ -6149,20 +6160,6 @@ class Run1App:
             tracks, summaries, mapping
         )
         site_id = self.run3_site_id_var.get().strip()
-
-        try:
-            speed_threshold = float(self.run3_waiting_speed_threshold_var.get())
-        except Exception:
-            speed_threshold = 1.0
-        try:
-            stop_min_duration = float(self.run3_zone_stop_min_duration_var.get())
-        except Exception:
-            stop_min_duration = 1.0
-        try:
-            ppm = float(self.run3_ppm_var.get())
-        except Exception:
-            ppm = 0.0
-        perspective = self._run3_get_perspective_matrix(silent=True)
 
         conflict_reference_zone = {
             "2→3": 2,
@@ -6178,11 +6175,6 @@ class Run1App:
             "subject_decision_events": 0,
             "subject_without_decision_zone": 0,
             "subject_without_zone6_after_decision": 0,
-            "subject_zone6_stopped": 0,
-            "subject_zone6_moving": 0,
-            "subject_zone6_wait_censored": 0,
-            "subject_decision_zone_stopped": 0,
-            "subject_no_observed_decision_censored": 0,
             "conflict_events_by_movement": {},
             "candidate_intervals_by_movement": {},
             "reference_line_fallback_movements": [],
@@ -6190,9 +6182,8 @@ class Run1App:
             "subject_opportunities_total": 0,
             "rejected_opportunities_total": 0,
             "accepted_opportunities_total": 0,
-            "decision_zones_used": [1, 4, 6],
-            "zone_stop_min_duration_s": stop_min_duration,
-            "waiting_speed_threshold_kmh": speed_threshold,
+            "post_decision_observations_total": 0,
+            "subjects_without_observed_acceptance": 0,
         }
 
         # ------------------------------------------------------------
@@ -6225,6 +6216,7 @@ class Run1App:
                         except Exception:
                             hit = None
                         if hit is not None:
+                            # Keep time on an observed sample; no interpolation.
                             cross_t = t
                     if cross_t is not None:
                         line_events[movement].append(
@@ -6241,11 +6233,14 @@ class Run1App:
                     dedup[tid] = event
             line_events[key] = sorted(dedup.values(), key=lambda x: x[0])
 
+        # Use line events when they yield a real stream (>=2 vehicles). Otherwise
+        # fall back to the first observed timestamp in the conflict reference zone.
         reference_times = defaultdict(list)
         fallback_movements = set()
         for movement in RUN3_ALL_MOVEMENTS:
             mapped_line = mapping.get((site_id, movement)) if mapping else None
             usable_line_events = line_events.get(movement, [])
+
             if len(usable_line_events) >= 2:
                 reference_times[movement].extend(usable_line_events)
                 continue
@@ -6295,80 +6290,63 @@ class Run1App:
         diag["reference_line_fallback_movements"] = sorted(fallback_movements)
 
         # ------------------------------------------------------------
-        # 2) Build subject-specific decision time and opportunities.
-        #    Zone 1/4 = initial Decision Zone; Zone 6 = final Decision Zone.
+        # 2) Build subject-specific Decision-Zone observations.
         # ------------------------------------------------------------
         rows_out = []
-        for tid, rows in tracks.items():
+        for tid, raw_rows in tracks.items():
             tid = str(tid)
             movement = movement_by_id.get(tid, "")
             if movement not in selected:
                 continue
             diag["subject_tracks"] += 1
 
-            rows_sorted = sorted(
-                [r for r in rows if r.get("_timestamp") is not None and r.get("_point") is not None],
-                key=lambda r: float(r["_timestamp"])
-            )
             wait_zone = 1 if movement in ("1→3", "1→5") else 4
-            decision_rows = [r for r in rows_sorted if r.get("_zone_num") == wait_zone]
+            decision_zones = {wait_zone, 6}
+            rows = [
+                r for r in raw_rows
+                if r.get("_timestamp") is not None
+                and r.get("_point") is not None
+            ]
+            rows = sorted(rows, key=lambda r: r["_timestamp"])
+
+            decision_rows = [
+                r for r in rows
+                if r.get("_zone_num") in decision_zones
+            ]
             if not decision_rows:
                 diag["subject_without_decision_zone"] += 1
                 continue
 
-            wait_start = float(decision_rows[0]["_timestamp"])
+            # First observed arrival into the movement's initial waiting/decision zone.
+            wait_rows = [r for r in decision_rows if r.get("_zone_num") == wait_zone]
+            wait_start = min((r["_timestamp"] for r in wait_rows), default=None)
 
-            # Preserve stop information at the initial Decision Zone as QC only.
-            decision_zone_state = self._run3_gap_zone_stop_state(
-                rows_sorted,
-                wait_zone,
-                wait_start,
-                speed_threshold,
-                stop_min_duration,
-                ppm,
-                perspective,
-            )
-            if decision_zone_state.get("stop_detected"):
-                diag["subject_decision_zone_stopped"] += 1
-
-            # Zone 6 is an explicit Decision Zone. The first observed Zone-6
-            # timestamp is used regardless of whether the subject is moving or
-            # stopped there. This keeps interaction IDs/classes intact.
+            # First observed Zone-6 entry after the initial waiting zone remains the
+            # conservative controlling-event anchor. It is NOT a cutoff for later
+            # opportunities.
             accepted_time = None
-            for r in rows_sorted:
-                t = float(r["_timestamp"])
-                if t <= wait_start:
-                    continue
-                if r.get("_zone_num") == 6:
-                    accepted_time = t
-                    break
+            accepted_zone_row = None
+            if wait_start is not None:
+                for r in rows:
+                    t = r["_timestamp"]
+                    if t <= wait_start:
+                        continue
+                    if r.get("_zone_num") == 6:
+                        accepted_time = t
+                        accepted_zone_row = r
+                        break
 
             if accepted_time is None:
                 diag["subject_without_zone6_after_decision"] += 1
-                diag["subject_no_observed_decision_censored"] += 1
-                continue
+                diag["subjects_without_observed_acceptance"] += 1
 
-            waiting_time = max(0.0, accepted_time - wait_start)
-            diag["subject_decision_events"] += 1
-            decision_id = f"{tid}_{accepted_time:.6f}"
-            subject_class = rows_sorted[0].get("class_name", "") if rows_sorted else ""
-
-            # Zone-6 stop state is descriptive only; it never removes the Gap row.
-            zone6_state = self._run3_gap_zone_stop_state(
-                rows_sorted,
-                6,
-                accepted_time,
-                speed_threshold,
-                stop_min_duration,
-                ppm,
-                perspective,
+            waiting_time = (
+                max(0.0, accepted_time - wait_start)
+                if accepted_time is not None and wait_start is not None
+                else None
             )
-            if zone6_state.get("stop_detected"):
-                diag["subject_zone6_stopped"] += 1
-                zone6_state_label = "Stopped"
-            else:
-                diag["subject_zone6_moving"] += 1
-                zone6_state_label = "Moving_or_Not_Stopped"
+            if accepted_time is not None:
+                diag["subject_decision_events"] += 1
 
             conflict_movements = {
                 "1→3": ["2→3"],
@@ -6376,48 +6354,62 @@ class Run1App:
                 "4→1": ["2→3", "1→5"],
             }.get(movement, [])
 
+            # For every raw conflict gap, look for an ACTUAL subject observation
+            # while that subject is physically inside Decision Zone 1/4/6.
+            # This is the key fix: later gaps (e.g. between conflict IDs 37 and 40)
+            # are retained when the subject is still observed in a Decision Zone.
             opportunities = []
             for cm in conflict_movements:
                 events = reference_times.get(cm, [])
                 valid_pairs = 0
                 for a, b in zip(events, events[1:]):
-                    gap_start = float(a[0])
-                    gap_end = float(b[0])
+                    gap_start = a[0]
+                    gap_end = b[0]
                     if gap_end <= gap_start or a[1] == b[1]:
                         continue
                     valid_pairs += 1
 
-                    # Accepted/controlling opportunity is evaluated at Zone 6.
-                    if gap_start <= accepted_time < gap_end and accepted_time >= wait_start:
-                        available_gap = gap_end - accepted_time
-                        if available_gap > 0:
-                            opportunities.append({
-                                "conflict_movement": cm,
-                                "conflicting_id_a": a[1],
-                                "conflicting_class_a": a[2],
-                                "conflicting_id_b": b[1],
-                                "conflicting_class_b": b[2],
-                                "reference_line": a[3],
-                                "gap_start": gap_start,
-                                "gap_end": gap_end,
-                                "gap": available_gap,
-                                "opportunity_time": accepted_time,
-                                "decision_zone": 6,
-                                "role": "Accepted (controlling gap)",
-                                "accepted": 1,
-                                "acceptance_time": accepted_time,
-                                "qc_flag": ";".join(dict.fromkeys(v for v in (a[4], b[4]) if v)),
-                            })
+                    overlap_rows = [
+                        r for r in decision_rows
+                        if gap_start <= r["_timestamp"] < gap_end
+                    ]
+                    if not overlap_rows:
                         continue
 
-                    # Rejected prior opportunity is evaluated in initial Decision
-                    # Zone 1/4 while the subject is waiting for the eventual Zone-6 decision.
-                    if gap_end <= wait_start or gap_start >= accepted_time:
-                        continue
-                    opportunity_time = max(wait_start, gap_start)
-                    if opportunity_time >= gap_end:
-                        continue
+                    first_overlap = min(overlap_rows, key=lambda r: r["_timestamp"])
+                    opportunity_time = first_overlap["_timestamp"]
+                    opportunity_zone = int(first_overlap["_zone_num"])
                     available_gap = gap_end - opportunity_time
+                    if available_gap <= 0:
+                        continue
+
+                    qc_parts = [v for v in (a[4], b[4]) if v]
+
+                    is_controlling = (
+                        accepted_time is not None
+                        and gap_start <= accepted_time < gap_end
+                        and opportunity_zone == 6
+                    )
+
+                    if is_controlling:
+                        role = "Accepted (controlling gap)"
+                        y5 = 1
+                        acceptance_time = accepted_time
+                        accepted_flag = 1
+                    elif accepted_time is not None and gap_end <= accepted_time:
+                        role = "Rejected (prior opportunity)"
+                        y5 = 0
+                        acceptance_time = None
+                        accepted_flag = 0
+                    else:
+                        # Retain later interactions without falsely calling them a
+                        # new rejection/acceptance after the subject has already
+                        # entered Zone 6.
+                        role = "Observed after decision"
+                        y5 = ""
+                        acceptance_time = None
+                        accepted_flag = None
+
                     opportunities.append({
                         "conflict_movement": cm,
                         "conflicting_id_a": a[1],
@@ -6429,25 +6421,50 @@ class Run1App:
                         "gap_end": gap_end,
                         "gap": available_gap,
                         "opportunity_time": opportunity_time,
-                        "decision_zone": wait_zone,
-                        "role": "Rejected (prior opportunity)",
-                        "accepted": 0,
-                        "acceptance_time": None,
-                        "qc_flag": ";".join(dict.fromkeys(v for v in (a[4], b[4]) if v)),
+                        "decision_zone": opportunity_zone,
+                        "role": role,
+                        "accepted": accepted_flag,
+                        "acceptance_time": acceptance_time,
+                        "qc_flag": ";".join(dict.fromkeys(qc_parts)),
                     })
 
                 diag["candidate_intervals_by_movement"][cm] = max(
                     diag["candidate_intervals_by_movement"].get(cm, 0),
-                    valid_pairs,
+                    valid_pairs
                 )
 
+            # If multiple streams contain the controlling Zone-6 entry, use the
+            # smallest remaining gap exactly as before. Other same-time alternatives
+            # remain traceable as observed interactions rather than being discarded.
             controlling = [o for o in opportunities if o["accepted"] == 1]
             controlling = min(controlling, key=lambda o: o["gap"]) if controlling else None
 
-            prior = [o for o in opportunities if o["accepted"] == 0 and o["gap_end"] < accepted_time]
+            # The accepted row's ID is the stable anchor for the subject event.
+            # When no observed Zone-6 decision exists, retain an explicit no-decision
+            # event so observed Decision-Zone opportunities are not silently lost.
+            if accepted_time is not None:
+                decision_id = f"{tid}_{accepted_time:.6f}"
+            else:
+                anchor_time = decision_rows[0]["_timestamp"]
+                decision_id = f"{tid}_NO_DECISION_{anchor_time:.6f}"
+
+            subject_class = rows[0].get("class_name", "") if rows else ""
+            opportunity_no = 0
+
+            # Deterministic order across movements/intervals.
+            ordered = sorted(
+                opportunities,
+                key=lambda o: (
+                    o["opportunity_time"],
+                    0 if o["accepted"] == 0 else (1 if o["accepted"] == 1 else 2),
+                    o["conflict_movement"],
+                    str(o["conflicting_id_a"]),
+                    str(o["conflicting_id_b"]),
+                )
+            )
+
             seen = set()
-            prior2 = []
-            for o in sorted(prior, key=lambda x: (x["opportunity_time"], x["gap_end"], x["conflict_movement"])):
+            for o in ordered:
                 key = (
                     o["conflict_movement"],
                     o["conflicting_id_a"],
@@ -6458,43 +6475,17 @@ class Run1App:
                 if key in seen:
                     continue
                 seen.add(key)
-                prior2.append(o)
 
-            opportunity_no = 0
-            decision_zone_stop_start = decision_zone_state.get("stop_start")
-            decision_zone_stop_end = decision_zone_state.get("stop_end")
-            zone6_stop_start = zone6_state.get("stop_start")
-            zone6_stop_end = zone6_state.get("stop_end")
-            subject_state_qc = ";".join(
-                dict.fromkeys(v for v in (
-                    decision_zone_state.get("qc_flag", ""),
-                    zone6_state.get("qc_flag", ""),
-                ) if v)
-            )
-
-            base_fields = {
-                "Decision_Event_ID": decision_id,
-                "Subject_ID": tid,
-                "Subject_Class": subject_class,
-                "Subject_Movement": movement,
-                "Decision_Zone_Stop_Detected": 1 if decision_zone_state.get("stop_detected") else 0,
-                "Decision_Zone_Stop_Start_Time": "" if decision_zone_stop_start is None else f"{decision_zone_stop_start:.6f}",
-                "Decision_Zone_Stop_End_Time": "" if decision_zone_stop_end is None else f"{decision_zone_stop_end:.6f}",
-                "Decision_Zone_Stop_Duration_Observed": f"{decision_zone_state.get('stop_duration', 0.0):.6f}",
-                "Zone6_Entry_Time": f"{accepted_time:.6f}",
-                "Zone6_State": zone6_state_label,
-                "Zone6_Stop_Start_Time": "" if zone6_stop_start is None else f"{zone6_stop_start:.6f}",
-                "Zone6_Stop_End_Time": "" if zone6_stop_end is None else f"{zone6_stop_end:.6f}",
-                "Zone6_Stop_Duration_Observed": f"{zone6_state.get('stop_duration', 0.0):.6f}",
-                "Zone6_Resume_Time": "",
-            }
-
-            for o in prior2:
                 opportunity_no += 1
                 diag["subject_opportunities_total"] += 1
-                diag["rejected_opportunities_total"] += 1
-                row_out = dict(base_fields)
-                row_out.update({
+                if o["accepted"] == 0:
+                    diag["rejected_opportunities_total"] += 1
+                elif o["accepted"] == 1:
+                    diag["accepted_opportunities_total"] += 1
+                else:
+                    diag["post_decision_observations_total"] += 1
+
+                rows_out.append({
                     "Site_ID": site_id,
                     "Decision_Event_ID": decision_id,
                     "Opportunity_No": opportunity_no,
@@ -6503,7 +6494,7 @@ class Run1App:
                     "Subject_Movement": movement,
                     "Decision_Zone": o["decision_zone"],
                     "Gap_Evaluation_Time": f"{o['opportunity_time']:.6f}",
-                    "X32_Waiting_Time": f"{waiting_time:.6f}",
+                    "X32_Waiting_Time": "" if waiting_time is None else f"{waiting_time:.6f}",
                     "Conflicting_Movement": o["conflict_movement"],
                     "Conflicting_ID_A": o["conflicting_id_a"],
                     "Conflicting_Class_A": o["conflicting_class_a"],
@@ -6514,46 +6505,11 @@ class Run1App:
                     "Gap_End_Time": f"{o['gap_end']:.6f}",
                     "X31_Available_Gap": f"{o['gap']:.6f}",
                     "Gap_Role": o["role"],
-                    "Y5_Gap_Acceptance": 0,
-                    "Acceptance_Time": "",
-                    "Decision_Time": f"{accepted_time:.6f}",
-                    "Decision_Status": "Observed_Decision_At_Zone6",
-                    "QC_Flag": ";".join(dict.fromkeys(v for v in (o["qc_flag"], subject_state_qc) if v)),
+                    "Y5_Gap_Acceptance": o["accepted"] if o["accepted"] is not None else "",
+                    "Acceptance_Time": "" if o["acceptance_time"] is None else f"{o['acceptance_time']:.6f}",
+                    "Decision_Time": "" if accepted_time is None else f"{accepted_time:.6f}",
+                    "QC_Flag": o["qc_flag"],
                 })
-                rows_out.append(row_out)
-
-            if controlling:
-                opportunity_no += 1
-                diag["subject_opportunities_total"] += 1
-                diag["accepted_opportunities_total"] += 1
-                row_out = dict(base_fields)
-                row_out.update({
-                    "Site_ID": site_id,
-                    "Decision_Event_ID": decision_id,
-                    "Opportunity_No": opportunity_no,
-                    "Subject_ID": tid,
-                    "Subject_Class": subject_class,
-                    "Subject_Movement": movement,
-                    "Decision_Zone": 6,
-                    "Gap_Evaluation_Time": f"{controlling['opportunity_time']:.6f}",
-                    "X32_Waiting_Time": f"{waiting_time:.6f}",
-                    "Conflicting_Movement": controlling["conflict_movement"],
-                    "Conflicting_ID_A": controlling["conflicting_id_a"],
-                    "Conflicting_Class_A": controlling["conflicting_class_a"],
-                    "Conflicting_ID_B": controlling["conflicting_id_b"],
-                    "Conflicting_Class_B": controlling["conflicting_class_b"],
-                    "Reference_Line": controlling["reference_line"],
-                    "Gap_Start_Time": f"{controlling['gap_start']:.6f}",
-                    "Gap_End_Time": f"{controlling['gap_end']:.6f}",
-                    "X31_Available_Gap": f"{controlling['gap']:.6f}",
-                    "Gap_Role": controlling["role"],
-                    "Y5_Gap_Acceptance": 1,
-                    "Acceptance_Time": f"{accepted_time:.6f}",
-                    "Decision_Time": f"{accepted_time:.6f}",
-                    "Decision_Status": "Observed_Decision_At_Zone6",
-                    "QC_Flag": ";".join(dict.fromkeys(v for v in (controlling["qc_flag"], subject_state_qc) if v)),
-                })
-                rows_out.append(row_out)
 
         self._run3_gap_diag = diag
         return rows_out
@@ -6904,7 +6860,7 @@ class Run1App:
 
         # Gap Acceptance
         # CSV column order is intentionally grouped for human readability:
-        # subject identity → waiting time → conflicting stream → gap interval/X31 → decision/Y5 → QC.
+        # movement filter → Decision Zone (1/4/6) → waiting time → conflict vehicles → gap/X31 → Y5 → QC.
         if self.run3_gap_enabled_var.get():
             try:
                 gap_rows = self._run3_gap(tracks, summaries, mapping)
@@ -6913,15 +6869,13 @@ class Run1App:
                     # decision/subject → opportunity → waiting → conflict vehicles → raw gap → X31/Y5 → QC
                     "Site_ID","Decision_Event_ID","Opportunity_No",
                     "Subject_ID","Subject_Class","Subject_Movement","Decision_Zone",
-                    "Decision_Zone_Stop_Detected","Decision_Zone_Stop_Start_Time","Decision_Zone_Stop_End_Time","Decision_Zone_Stop_Duration_Observed",
-                    "Zone6_Entry_Time","Zone6_State","Zone6_Stop_Start_Time","Zone6_Stop_End_Time","Zone6_Stop_Duration_Observed","Zone6_Resume_Time",
                     "Gap_Evaluation_Time","X32_Waiting_Time",
                     "Conflicting_Movement",
                     "Conflicting_ID_A","Conflicting_Class_A",
                     "Conflicting_ID_B","Conflicting_Class_B",
                     "Reference_Line","Gap_Start_Time","Gap_End_Time",
                     "X31_Available_Gap",
-                    "Gap_Role","Y5_Gap_Acceptance","Acceptance_Time","Decision_Time","Decision_Status",
+                    "Gap_Role","Y5_Gap_Acceptance","Acceptance_Time","Decision_Time",
                     "QC_Flag"
                 ]
                 path = write_csv("Run_3_Gap_Acceptance.csv", fields, gap_rows)
