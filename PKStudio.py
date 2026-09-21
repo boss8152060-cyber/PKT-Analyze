@@ -5545,6 +5545,9 @@ class Run1App:
         if self.run3_gap_movement_41_var.get():
             selected.append("4→1")
         wait_threshold = float(self.run3_waiting_speed_threshold_var.get())
+        # Run 3 calibration is resolved once and shared by Gap Acceptance.
+        # This fixes the previous NameError when Perspective calibration was enabled.
+        perspective = self._run3_get_perspective_matrix(silent=True)
 
         movement_by_id, _movement_source_by_id = self._run3_build_movement_index(
             tracks, summaries, mapping
