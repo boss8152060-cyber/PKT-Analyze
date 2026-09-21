@@ -431,7 +431,7 @@ RUN3_DEFAULTS = {
     # Speed: user can select any of Zones 1–6. CSV assigns each selected zone
     # to the research role: Zone 1 = access mouth, 2/4 = approach, 3/5 = exit, 6 = middle/access.
     "speed_zones": [1, 2, 3, 4, 5, 6],
-    "lc_zones": [2, 4],
+    "lc_zones": [1, 2, 3, 4, 5, 6],
     "pet_zone6": True,
     "gap_movement_13": True,
     "gap_movement_15": True,
@@ -957,22 +957,50 @@ class Run1App:
         ttk.Entry(frame, textvariable=self.run3_perspective_width_var, width=18).grid(row=5, column=3, sticky="w", pady=2)
         ttk.Label(frame, text="P1..P4 ต้องเรียงรอบพื้นที่เดียวกัน และค่าความยาว/กว้างต้องเป็นระยะจริงบนผิวถนน", foreground="#666666").grid(row=6, column=0, columnspan=4, sticky="w", pady=(0,4))
 
+        # Analysis master switches
+        frame.columnconfigure(4, weight=1)
         ttk.Label(frame, text="Analysis").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Checkbutton(frame, text="Speed", variable=self.run3_speed_enabled_var).grid(row=7, column=1, sticky="w")
-        ttk.Checkbutton(frame, text="Gap Acceptance", variable=self.run3_gap_enabled_var).grid(row=7, column=2, sticky="w")
-        ttk.Checkbutton(frame, text="Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=7, column=3, sticky="w")
-        ttk.Checkbutton(frame, text="PET", variable=self.run3_pet_enabled_var).grid(row=8, column=1, sticky="w")
+        ttk.Checkbutton(frame, text="Speed", variable=self.run3_speed_enabled_var).grid(row=7, column=1, sticky="w", padx=(0, 10))
+        ttk.Checkbutton(frame, text="Gap Acceptance", variable=self.run3_gap_enabled_var).grid(row=7, column=2, sticky="w", padx=(0, 10))
+        ttk.Checkbutton(frame, text="Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=7, column=3, sticky="w", padx=(0, 10))
+        ttk.Checkbutton(frame, text="PET", variable=self.run3_pet_enabled_var).grid(row=7, column=4, sticky="w")
 
-        ttk.Label(frame, text="Speed Analysis Zones (เลือกได้ 1–6)").grid(row=8, column=0, sticky="w", padx=(0,8), pady=2)
-        for i,z in enumerate(range(1,7)):
-            ttk.Checkbutton(frame, text=str(z), variable=self.run3_speed_zone_vars[z]).grid(row=8, column=1+(i%3), sticky="w", padx=(2,8), pady=2)
+        # --------------------------------------------------------
+        # SPEED: one master switch + selectable Zones 1–6.
+        # CSV assigns the research role by Zone; the UI does not
+        # split the selection into Approach/Exit columns.
+        # --------------------------------------------------------
+        speed_zone_frame = ttk.LabelFrame(frame, text="Speed — Analysis Zones (เลือกได้ 1–6)", padding=(8, 4))
+        speed_zone_frame.grid(row=8, column=0, columnspan=4, sticky="ew", padx=0, pady=(2, 4))
+        ttk.Label(
+            speed_zone_frame,
+            text="เลือก Zone ที่ต้องการเก็บความเร็วลง CSV | CSV จะจัดบทบาทให้อัตโนมัติ: 1=Access_Mouth, 2/4=Approach, 3/5=Exit, 6=Middle_Access",
+            foreground="#555555"
+        ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 3))
+        for i, z in enumerate(range(1, 7)):
+            ttk.Checkbutton(
+                speed_zone_frame, text=f"Zone {z}", variable=self.run3_speed_zone_vars[z]
+            ).grid(row=1 + i // 6, column=i % 6, sticky="w", padx=(2, 14), pady=2)
 
-        ttk.Label(frame, text="Lateral Clearance Zones (เลือกได้ 1–6)").grid(row=9, column=0, sticky="w", padx=(0,8), pady=2)
-        for i,z in enumerate(range(1,7)):
-            ttk.Checkbutton(frame, text=str(z), variable=self.run3_lc_zone_vars[z]).grid(row=9, column=1+(i%3), sticky="w", padx=(2,8), pady=2)
+        # --------------------------------------------------------
+        # LATERAL CLEARANCE: all Zones 1–6 selectable independently.
+        # Default is all checked so the researcher can uncheck the
+        # Zones that should not be included for a particular study.
+        # --------------------------------------------------------
+        lc_zone_frame = ttk.LabelFrame(frame, text="Lateral Clearance — Analysis Zones (เลือกได้ 1–6)", padding=(8, 4))
+        lc_zone_frame.grid(row=9, column=0, columnspan=4, sticky="ew", padx=0, pady=(0, 4))
+        ttk.Label(
+            lc_zone_frame,
+            text="เลือก Zone ที่ต้องการคำนวณ Y3 โดยใช้ observation ที่สังเกตจริงและจับคู่เวลาที่ใกล้กัน — ไม่ทำ interpolation",
+            foreground="#555555"
+        ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 3))
+        for i, z in enumerate(range(1, 7)):
+            ttk.Checkbutton(
+                lc_zone_frame, text=f"Zone {z}", variable=self.run3_lc_zone_vars[z]
+            ).grid(row=1 + i // 6, column=i % 6, sticky="w", padx=(2, 14), pady=2)
 
         ttk.Label(frame, text="Middle / Access Zone (PET)").grid(row=10, column=0, sticky="w", padx=(0,8), pady=2)
-        ttk.Checkbutton(frame, text="6", variable=self.run3_pet_zone6_var).grid(row=10, column=1, sticky="w", padx=(2,2), pady=2)
+        ttk.Checkbutton(frame, text="Zone 6", variable=self.run3_pet_zone6_var).grid(row=10, column=1, sticky="w", padx=(2,2), pady=2)
 
         ttk.Label(frame, text="Waiting detection speed threshold (km/h)").grid(row=11, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(frame, textvariable=self.run3_waiting_speed_threshold_var, width=18).grid(row=11, column=1, sticky="w", pady=4)
@@ -1009,7 +1037,7 @@ class Run1App:
 
         ttk.Label(frame, text="LC/PET ใช้จุดที่สังเกตจริงและจับคู่เวลาที่ใกล้กัน โดยไม่ interpolation. Gap ใช้ timestamp ของเฟรมที่สังเกตว่าข้ามเส้นจริง.", foreground="#666666").grid(row=27, column=0, columnspan=4, sticky="w", pady=(6, 2))
         ttk.Label(frame, text="Perspective: กดปุ่มด้านบนเพื่อเปิดภาพและคลิก P1→P2→P3→P4; โปรแกรมจะเติมพิกัดให้เอง จากนั้นกรอกระยะจริง Length/Width แล้วกด Apply.", foreground="#666666").grid(row=28, column=0, columnspan=4, sticky="w", pady=(2, 2))
-        ttk.Label(frame, text="Speed CSV role: Zone 1 = Access Mouth | Zones 2,4 = Approach | Zones 3,5 = Exit | Zone 6 = Middle / Access", foreground="#666666").grid(row=29, column=0, columnspan=4, sticky="w", pady=(2, 2))
+        ttk.Label(frame, text="Speed CSV role: Zone 1 = Access_Mouth | Zones 2,4 = Approach | Zones 3,5 = Exit | Zone 6 = Middle_Access", foreground="#666666").grid(row=29, column=0, columnspan=4, sticky="w", pady=(2, 2))
         ttk.Label(frame, textvariable=self.run3_result_text, foreground="#444444").grid(row=30, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
     # ========================================================
