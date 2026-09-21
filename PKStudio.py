@@ -5234,6 +5234,84 @@ class Run1App:
                 })
         return results
 
+
+    def _run3_speed_vehicle_summary(self, speed_rows, tracks):
+        """Return one row per vehicle with the observed zone path and zone-level speeds.
+
+        The detailed table remains available separately. This vehicle-level table is
+        intentionally wide so a single Vehicle_ID row shows which zones were visited
+        and the speed calculated in each selected zone.
+        """
+        role_map = {
+            1: ("", "Access_Mouth"),
+            2: ("Y1", "Approach"),
+            3: ("Y2", "Exit"),
+            4: ("Y1", "Approach"),
+            5: ("Y2", "Exit"),
+            6: ("", "Middle_Access"),
+        }
+
+        # Index speed rows by vehicle + zone so each vehicle gets one summary row.
+        by_vehicle_zone = defaultdict(dict)
+        for row in speed_rows:
+            tid = str(row.get("Vehicle_ID", ""))
+            try:
+                zone = int(row.get("Zone", ""))
+            except Exception:
+                continue
+            by_vehicle_zone[tid][zone] = row
+
+        # Preserve vehicle IDs even when a selected zone has insufficient observations
+        # and therefore has no calculated speed.
+        vehicle_ids = sorted(set(str(tid) for tid in tracks.keys()), key=lambda x: (int(x) if x.isdigit() else 10**18, x))
+        summary_rows = []
+        speed_columns = {
+            1: "Access_Mouth_Zone1_Speed_kmh",
+            2: "Approach_Zone2_Speed_kmh",
+            3: "Exit_Zone3_Speed_kmh",
+            4: "Approach_Zone4_Speed_kmh",
+            5: "Exit_Zone5_Speed_kmh",
+            6: "Middle_Access_Zone6_Speed_kmh",
+        }
+
+        for tid in vehicle_ids:
+            rows = tracks.get(tid, [])
+            if not rows:
+                continue
+            cls = str(rows[0].get("class_name", ""))
+            if cls.lower() == "person":
+                continue
+
+            actual_zones = []
+            for r in sorted(rows, key=lambda x: x.get("_timestamp", 0.0)):
+                z = r.get("_zone_num")
+                if z is None or z not in range(1, 7):
+                    continue
+                if not actual_zones or actual_zones[-1] != z:
+                    actual_zones.append(z)
+
+            row = {
+                "Site_ID": self.run3_site_id_var.get().strip(),
+                "Vehicle_ID": tid,
+                "Vehicle_Class": cls,
+                "Zone_Sequence": "→".join(str(z) for z in actual_zones),
+            }
+            for z, col in speed_columns.items():
+                item = by_vehicle_zone.get(tid, {}).get(z)
+                row[col] = item.get("Speed_kmh", "") if item else ""
+
+            modes = sorted(set(
+                r.get("Calibration_Mode", "") for r in by_vehicle_zone.get(tid, {}).values() if r.get("Calibration_Mode")
+            ))
+            qcs = sorted(set(
+                r.get("QC_Flag", "") for r in by_vehicle_zone.get(tid, {}).values() if r.get("QC_Flag")
+            ))
+            row["Calibration_Mode"] = ";".join(modes)
+            row["QC_Flag"] = ";".join(qcs)
+            summary_rows.append(row)
+
+        return summary_rows
+
     def copy_run3_mapping_template(self):
         text = self.run3_reference_text.get("1.0", "end-1c") if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
         try:
@@ -5718,16 +5796,36 @@ class Run1App:
                     "Site_ID","Vehicle_ID","Vehicle_Class","Speed_Variable","Speed_Type","Analysis_Role","Zone",
                     "Start_Time","End_Time","Distance_m","Speed_kmh","Calibration_Mode","QC_Flag"
                 ]
-                path = write_csv("Run_3_Speed.csv", fields, speed_rows)
+                detail_path = write_csv("Run_3_Speed_Detail.csv", fields, speed_rows)
+
+                # Main Speed CSV: one row per Vehicle_ID, with its complete observed
+                # Zone sequence and one speed field per Zone. This is the compact
+                # human-readable form requested by the researcher.
+                vehicle_summary_fields = [
+                    "Site_ID","Vehicle_ID","Vehicle_Class","Zone_Sequence",
+                    "Access_Mouth_Zone1_Speed_kmh",
+                    "Approach_Zone2_Speed_kmh",
+                    "Exit_Zone3_Speed_kmh",
+                    "Approach_Zone4_Speed_kmh",
+                    "Exit_Zone5_Speed_kmh",
+                    "Middle_Access_Zone6_Speed_kmh",
+                    "Calibration_Mode","QC_Flag"
+                ]
+                vehicle_summary_rows = self._run3_speed_vehicle_summary(speed_rows, tracks)
+                path = write_csv("Run_3_Speed.csv", vehicle_summary_fields, vehicle_summary_rows)
+
                 vals_y1 = [float(r["Speed_kmh"]) for r in speed_rows if r["Speed_Variable"] == "Y1"]
                 vals_y2 = [float(r["Speed_kmh"]) for r in speed_rows if r["Speed_Variable"] == "Y2"]
                 summary["speed"] = {
                     "Y1_P85": float(np.percentile(vals_y1,85)) if vals_y1 else None,
                     "Y2_P85": float(np.percentile(vals_y2,85)) if vals_y2 else None,
-                    "Y1_N": len(vals_y1), "Y2_N": len(vals_y2), "rows": len(speed_rows),
+                    "Y1_N": len(vals_y1), "Y2_N": len(vals_y2),
+                    "vehicle_rows": len(vehicle_summary_rows),
+                    "detail_rows": len(speed_rows),
                 }
+                outputs["speed_detail"] = detail_path
                 summary["diagnostics"]["speed"] = (
-                    f"OK; selected_zones={[z for z in range(1,7) if self.run3_speed_zone_vars[z].get()]}"
+                    f"OK; vehicle_rows={len(vehicle_summary_rows)}; selected_zones={[z for z in range(1,7) if self.run3_speed_zone_vars[z].get()]}"
                     if speed_rows else
                     f"No valid speed observations from selected zones={[z for z in range(1,7) if self.run3_speed_zone_vars[z].get()]}"
                 )
