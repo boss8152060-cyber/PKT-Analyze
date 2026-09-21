@@ -5873,6 +5873,73 @@ class Run1App:
 
         return summary_rows
 
+    def _run3_speed_compact_summary(self, speed_rows, tracks, vehicle_event_map=None):
+        """Compact, human-readable Speed CSV: one row per Vehicle_ID.
+
+        Keeps only research-facing outputs (Y1/Y2) plus the vehicle identity,
+        movement/zone sequence and calibration/QC fields. Detailed frame/time
+        information remains in Run 2 Detection Records and is not duplicated.
+        """
+        vehicle_event_map = vehicle_event_map or {}
+        by_vehicle_zone = defaultdict(dict)
+        for row in speed_rows or []:
+            tid = str(row.get("Vehicle_ID", ""))
+            try:
+                zone = int(row.get("Zone", ""))
+            except Exception:
+                continue
+            by_vehicle_zone[tid][zone] = row
+
+        rows_out = []
+        vehicle_ids = sorted(
+            (str(tid) for tid in tracks.keys()),
+            key=lambda x: (int(x) if x.isdigit() else 10**18, x)
+        )
+        for tid in vehicle_ids:
+            raw_rows = tracks.get(tid, [])
+            if not raw_rows:
+                continue
+            event = vehicle_event_map.get(tid, {})
+            cls = str(event.get("Vehicle_Class", "") or raw_rows[0].get("class_name", ""))
+            if cls.lower() == "person":
+                continue
+            movement = event.get("Movement", "")
+            actual_zones = list(event.get("Zone_Sequence", []))
+            if not actual_zones:
+                for r in sorted(raw_rows, key=lambda x: x.get("_timestamp", 0.0)):
+                    z = r.get("_zone_num")
+                    if z in range(1, 7) and (not actual_zones or actual_zones[-1] != z):
+                        actual_zones.append(z)
+
+            def value(zone, field):
+                item = by_vehicle_zone.get(tid, {}).get(zone)
+                return item.get(field, "") if item else ""
+
+            modes = sorted(set(
+                r.get("Calibration_Mode", "")
+                for r in by_vehicle_zone.get(tid, {}).values()
+                if r.get("Calibration_Mode")
+            ))
+            qcs = sorted(set(
+                r.get("QC_Flag", "")
+                for r in by_vehicle_zone.get(tid, {}).values()
+                if r.get("QC_Flag")
+            ))
+            rows_out.append({
+                "Site_ID": self.run3_site_id_var.get().strip(),
+                "Vehicle_ID": tid,
+                "Vehicle_Class": cls,
+                "Movement": movement,
+                "Zone_Sequence": "→".join(str(z) for z in actual_zones),
+                "Y1_Zone2_Speed_kmh": value(2, "Speed_kmh"),
+                "Y1_Zone4_Speed_kmh": value(4, "Speed_kmh"),
+                "Y2_Zone3_Speed_kmh": value(3, "Speed_kmh"),
+                "Y2_Zone5_Speed_kmh": value(5, "Speed_kmh"),
+                "Calibration_Mode": ";".join(modes),
+                "QC_Flag": ";".join(qcs),
+            })
+        return rows_out
+
     def copy_run3_mapping_template(self):
         text = self.run3_reference_text.get("1.0", "end-1c") if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
         try:
@@ -6907,26 +6974,15 @@ class Run1App:
             try:
                 ppm = float(self.run3_ppm_var.get())
                 speed_rows = self._run3_speed(tracks, ppm, perspective, vehicle_event_map)
-                fields = [
-                    "Site_ID","Vehicle_ID","Vehicle_Class","Movement","Movement_Source","Speed_Variable","Speed_Type","Analysis_Role","Zone",
-                    "Start_Time","End_Time","Start_Frame","End_Frame","Distance_m","Speed_kmh","Calibration_Mode","QC_Flag"
-                ]
-                detail_path = write_csv("Run_3_Speed_Detail.csv", fields, speed_rows)
-
-                # Main Speed CSV: one row per Vehicle_ID, with its complete observed
-                # Zone sequence and one speed field per Zone. This is the compact
-                # human-readable form requested by the researcher.
+                # Main Speed CSV: one row per Vehicle_ID and only research-facing Y1/Y2 outputs.
+                # Frame/time/distance audit details are already available in Run 2 Detection Records.
                 vehicle_summary_fields = [
-                    "Site_ID","Vehicle_ID","Vehicle_Class","Movement","Movement_Source","Zone_Sequence",
-                    "Access_Mouth_Zone1_Timestamp_Range","Access_Mouth_Zone1_Start_Frame","Access_Mouth_Zone1_End_Frame","Access_Mouth_Zone1_Distance_m","Access_Mouth_Zone1_Speed_kmh","Access_Mouth_Zone1_Speed_Variable",
-                    "Approach_Zone2_Timestamp_Range","Approach_Zone2_Start_Frame","Approach_Zone2_End_Frame","Approach_Zone2_Distance_m","Approach_Zone2_Speed_kmh","Approach_Zone2_Speed_Variable",
-                    "Exit_Zone3_Timestamp_Range","Exit_Zone3_Start_Frame","Exit_Zone3_End_Frame","Exit_Zone3_Distance_m","Exit_Zone3_Speed_kmh","Exit_Zone3_Speed_Variable",
-                    "Approach_Zone4_Timestamp_Range","Approach_Zone4_Start_Frame","Approach_Zone4_End_Frame","Approach_Zone4_Distance_m","Approach_Zone4_Speed_kmh","Approach_Zone4_Speed_Variable",
-                    "Exit_Zone5_Timestamp_Range","Exit_Zone5_Start_Frame","Exit_Zone5_End_Frame","Exit_Zone5_Distance_m","Exit_Zone5_Speed_kmh","Exit_Zone5_Speed_Variable",
-                    "Middle_Access_Zone6_Timestamp_Range","Middle_Access_Zone6_Start_Frame","Middle_Access_Zone6_End_Frame","Middle_Access_Zone6_Distance_m","Middle_Access_Zone6_Speed_kmh","Middle_Access_Zone6_Speed_Variable",
+                    "Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone_Sequence",
+                    "Y1_Zone2_Speed_kmh","Y1_Zone4_Speed_kmh",
+                    "Y2_Zone3_Speed_kmh","Y2_Zone5_Speed_kmh",
                     "Calibration_Mode","QC_Flag"
                 ]
-                vehicle_summary_rows = self._run3_speed_vehicle_summary(speed_rows, tracks, vehicle_event_map)
+                vehicle_summary_rows = self._run3_speed_compact_summary(speed_rows, tracks, vehicle_event_map)
                 path = write_csv("Run_3_Speed.csv", vehicle_summary_fields, vehicle_summary_rows)
 
                 vals_y1 = [float(r["Speed_kmh"]) for r in speed_rows if r["Speed_Variable"] == "Y1"]
@@ -6938,7 +6994,6 @@ class Run1App:
                     "vehicle_rows": len(vehicle_summary_rows),
                     "detail_rows": len(speed_rows),
                 }
-                outputs["speed_detail"] = detail_path
                 summary["diagnostics"]["speed"] = (
                     f"OK; vehicle_rows={len(vehicle_summary_rows)}; selected_zones={[z for z in range(1,7) if self.run3_speed_zone_vars[z].get()]}"
                     if speed_rows else
@@ -6966,9 +7021,9 @@ class Run1App:
                     "Conflicting_Movement",
                     "Conflicting_ID_A","Conflicting_Class_A",
                     "Conflicting_ID_B","Conflicting_Class_B",
-                    "Reference_Line","Gap_Start_Time","Gap_End_Time",
+                    "Gap_Start_Time","Gap_End_Time",
                     "X31_Available_Gap",
-                    "Gap_Role","Y5_Gap_Acceptance","Acceptance_Time","Decision_Time",
+                    "Gap_Role","Y5_Gap_Acceptance","Decision_Time",
                     "QC_Flag"
                 ]
                 path = write_csv("Run_3_Gap_Acceptance.csv", fields, gap_rows)
@@ -7051,7 +7106,10 @@ class Run1App:
             try:
                 ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); long_window = float(self.run3_lc_longitudinal_window_var.get())
                 lc_rows, lc_candidates_seen, lc_tol = self._run3_lateral_clearance(tracks, ppm, axis, long_window, perspective, vehicle_event_map)
-                fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Motorcycle_Movement","Neighbor_ID","Neighbor_Class","Neighbor_Movement","Neighbor_Side","LS_Pixel","PPM","LS_Meter","Wm","Wv","Y3_Lateral_Clearance","QC_Flag"]
+                fields = ["Site_ID","Pair_ID","Timestamp","Zone",
+                          "Motorcycle_ID","Motorcycle_Class","Motorcycle_Movement",
+                          "Neighbor_ID","Neighbor_Class","Neighbor_Movement","Neighbor_Side",
+                          "LS_Meter","Y3_Lateral_Clearance","QC_Flag"]
                 path = write_csv("Run_3_Lateral_Clearance.csv", fields, lc_rows)
                 vals = [float(r["Y3_Lateral_Clearance"]) for r in lc_rows]
                 summary["lateral_clearance"] = {"N": len(vals), "Mean_m": float(np.mean(vals)) if vals else None, "Median_m": float(np.median(vals)) if vals else None, "Minimum_m": float(np.min(vals)) if vals else None, "Maximum_m": float(np.max(vals)) if vals else None}
@@ -7071,7 +7129,11 @@ class Run1App:
                     tracks, summaries, interaction, perspective, mapping,
                     movement_by_id, movement_source_by_id, vehicle_event_map
                 )
-                fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Y4_PET","QC_Flag"]
+                fields = ["Site_ID","Interaction_ID",
+                          "Vehicle_ID_A","Vehicle_Class_A","Movement_A",
+                          "Vehicle_ID_B","Vehicle_Class_B","Movement_B",
+                          "Conflict_Type","Conflict_Zone",
+                          "T1_Exit_Time","T2_Entry_Time","Y4_PET","QC_Flag"]
                 path = write_csv("Run_3_PET.csv", fields, pet_rows)
                 vals = [float(r["Y4_PET"]) for r in pet_rows]
                 threshold = float(self.run3_pet_threshold_var.get())
@@ -7090,7 +7152,8 @@ class Run1App:
             "run2_zone_summary_role": "Audit-only; not duplicated as a Run 3 calculation input",
             "pet_uses_ppm": False,
             "pet_uses_road_direction_angle": False,
-            "common_vehicle_event_map": "Shared Vehicle_ID/Class/Movement/Zone records for Speed, LC, and PET; no ID invention or reassignment",
+            "common_vehicle_event_map": "Shared Vehicle_ID/Class/Movement/Zone records for Speed, LC, PET, and Gap; no ID invention or reassignment",
+            "csv_output_policy": "Four main Run 3 CSVs are kept compact; intermediate audit fields are not duplicated when already recoverable from Run 2 Detection Records and Run 3 Summary",
         }
         summary_path = os.path.join(output_dir, "Run_3_Summary.json")
         summary["outputs"] = outputs
