@@ -403,9 +403,9 @@ RUN3_DEFAULTS = {
     # source-derived research constants.
     "site_id": "8",
     "speed_enabled": True,
-    "gap_enabled": False,
-    "lc_enabled": False,
-    "pet_enabled": False,
+    "gap_enabled": True,
+    "lc_enabled": True,
+    "pet_enabled": True,
     "ppm": "57.822",
     # Optional road-plane perspective calibration. Disabled by default because
     # image points and real dimensions are site/video-specific and were not
@@ -2920,8 +2920,9 @@ class Run1App:
             if not (self.run3_use_raff_var.get() or self.run3_use_mle_var.get()):
                 raise ValueError("Select at least one Critical Gap method.")
             mapping_text = self.run3_reference_text.get("1.0", "end-1c").strip() if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text.strip()
-            if not mapping_text:
-                raise ValueError("Reference Line Mapping is required for Gap Acceptance.")
+            # Gap Acceptance can be enabled without a mapping so that the other
+            # Run 3 analyses still execute. Missing mapping is reported in the
+            # Run 3 Summary rather than blocking the whole Run 3 pass.
             self.run3_reference_mapping_text = mapping_text
 
         if self.run3_lc_enabled_var.get():
@@ -5384,99 +5385,137 @@ class Run1App:
                 "perspective_enabled": bool(self.run3_perspective_enabled_var.get()),
                 "perspective_configured": perspective is not None,
             },
+            "source_counts": {
+                "detection_records": len(detection_rows),
+                "track_ids": len(tracks),
+                "id_zone_summary_rows": len(id_rows),
+                "zone_summary_rows": len(zone_rows),
+            },
+            "diagnostics": {},
         }
+
+        def write_csv(filename, fields, rows):
+            desired = os.path.join(output_dir, filename)
+            csv_file, actual = self._run3_open_csv_safe(desired)
+            with csv_file as f:
+                w = csv.DictWriter(f, fieldnames=fields)
+                w.writeheader()
+                w.writerows(rows)
+            return actual
 
         # Speed
         if self.run3_speed_enabled_var.get():
-            ppm = float(self.run3_ppm_var.get())
-            speed_rows = self._run3_speed(tracks, ppm, perspective)
-            path = os.path.join(output_dir, "Run_3_Speed.csv")
-            speed_file, path = self._run3_open_csv_safe(path)
-            with speed_file as f:
+            try:
+                ppm = float(self.run3_ppm_var.get())
+                speed_rows = self._run3_speed(tracks, ppm, perspective)
                 fields = [
                     "Site_ID","Vehicle_ID","Vehicle_Class","Approach_Zone","Exit_Zone",
                     "Approach_Start_Time","Approach_End_Time","Approach_Distance_m","Y1_Approach_Speed",
                     "Exit_Start_Time","Exit_End_Time","Exit_Distance_m","Y2_Exit_Speed","Delta_Speed","Calibration_Mode","QC_Flag"
                 ]
-                w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(speed_rows)
-            vals_y1 = [float(r["Y1_Approach_Speed"]) for r in speed_rows if r["Y1_Approach_Speed"] not in ("", None)]
-            vals_y2 = [float(r["Y2_Exit_Speed"]) for r in speed_rows if r["Y2_Exit_Speed"] not in ("", None)]
-            summary["speed"] = {
-                "Y1_P85": float(np.percentile(vals_y1,85)) if vals_y1 else None,
-                "Y2_P85": float(np.percentile(vals_y2,85)) if vals_y2 else None,
-                "Y1_N": len(vals_y1), "Y2_N": len(vals_y2)
-            }
-            outputs["speed"] = path
+                path = write_csv("Run_3_Speed.csv", fields, speed_rows)
+                vals_y1 = [float(r["Y1_Approach_Speed"]) for r in speed_rows if r["Y1_Approach_Speed"] not in ("", None)]
+                vals_y2 = [float(r["Y2_Exit_Speed"]) for r in speed_rows if r["Y2_Exit_Speed"] not in ("", None)]
+                summary["speed"] = {
+                    "Y1_P85": float(np.percentile(vals_y1,85)) if vals_y1 else None,
+                    "Y2_P85": float(np.percentile(vals_y2,85)) if vals_y2 else None,
+                    "Y1_N": len(vals_y1), "Y2_N": len(vals_y2), "rows": len(speed_rows),
+                }
+                summary["diagnostics"]["speed"] = "OK" if speed_rows else "No valid Y1/Y2 observations from Run 2 Zone 2/4/3/5 data."
+                outputs["speed"] = path
+            except Exception as e:
+                fields = ["Error"]
+                path = write_csv("Run_3_Speed.csv", fields, [{"Error": str(e)}])
+                summary["diagnostics"]["speed"] = f"ERROR: {e}"
+                outputs["speed"] = path
 
         # Gap Acceptance
         if self.run3_gap_enabled_var.get():
-            mapping = self._run3_parse_reference_mapping()
-            gap_rows = self._run3_gap(tracks, summaries, mapping)
-            path = os.path.join(output_dir, "Run_3_Gap_Acceptance.csv")
-            fields = ["Site_ID","Decision_Event_ID","Subject_ID","Subject_Class","Subject_Movement","Conflicting_Movement","Conflicting_ID_A","Conflicting_ID_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","X32_Waiting_Time","Gap_Role","Y5_Gap_Acceptance","Acceptance_Time","QC_Flag"]
-            gap_file, path = self._run3_open_csv_safe(path)
-            with gap_file as f:
-                w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(gap_rows)
-            rejected_by_driver = defaultdict(list); accepted_by_driver = defaultdict(list)
-            for r in gap_rows:
-                key = (r["Subject_Class"], r["Subject_Movement"], r["Subject_ID"])
-                gap = float(r["X31_Available_Gap"])
-                if r["Y5_Gap_Acceptance"] == 0: rejected_by_driver[key].append(gap)
-                else: accepted_by_driver[key].append(gap)
-            critical = []
-            groups = defaultdict(lambda: {"accepted": [], "rejected": [], "intervals": []})
-            for key in set(rejected_by_driver)|set(accepted_by_driver):
-                acc = accepted_by_driver.get(key, []); rej = rejected_by_driver.get(key, [])
-                if acc and rej:
-                    groups[(key[0], key[1])]["accepted"].append(acc[-1])
-                    groups[(key[0], key[1])]["rejected"].append(max(rej))
-                    groups[(key[0], key[1])]["intervals"].append((max(rej), acc[-1]))
-            for (cls, movement), g in groups.items():
-                cr = self._run3_raff(g["accepted"], g["rejected"]) if self.run3_use_raff_var.get() else None
-                mle = self._run3_mle_driver_intervals(g["intervals"]) if self.run3_use_mle_var.get() else None
-                critical.append({
-                    "Site_ID": self.run3_site_id_var.get().strip(), "Vehicle_Class": cls, "Movement": movement,
-                    "Drivers_With_Pairs": len(g["intervals"]),
-                    "Raff_Critical_Gap_s": "" if cr is None else f"{cr:.6f}",
-                    "MLE_Critical_Gap_Median_s": "" if mle is None else f"{mle['critical_gap_median']:.6f}",
-                    "MLE_mu": "" if mle is None else f"{mle['mu']:.6f}",
-                    "MLE_sigma": "" if mle is None else f"{mle['sigma']:.6f}",
-                })
-            summary["gap_acceptance"] = {
-                "gap_events": len(gap_rows),
-                "decision_events": len(set(r["Decision_Event_ID"] for r in gap_rows)),
-                "accepted_events": sum(1 for r in gap_rows if r["Y5_Gap_Acceptance"] == 1),
-                "rejected_events": sum(1 for r in gap_rows if r["Y5_Gap_Acceptance"] == 0),
-                "critical_gap": critical,
-            }
-            outputs["gap_acceptance"] = path
+            try:
+                mapping = self._run3_parse_reference_mapping()
+                gap_rows = self._run3_gap(tracks, summaries, mapping)
+                fields = ["Site_ID","Decision_Event_ID","Subject_ID","Subject_Class","Subject_Movement","Conflicting_Movement","Conflicting_ID_A","Conflicting_ID_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","X32_Waiting_Time","Gap_Role","Y5_Gap_Acceptance","Acceptance_Time","QC_Flag"]
+                path = write_csv("Run_3_Gap_Acceptance.csv", fields, gap_rows)
+                rejected_by_driver = defaultdict(list); accepted_by_driver = defaultdict(list)
+                for r in gap_rows:
+                    key = (r["Subject_Class"], r["Subject_Movement"], r["Subject_ID"])
+                    gap = float(r["X31_Available_Gap"])
+                    if r["Y5_Gap_Acceptance"] == 0: rejected_by_driver[key].append(gap)
+                    else: accepted_by_driver[key].append(gap)
+                critical = []
+                groups = defaultdict(lambda: {"accepted": [], "rejected": [], "intervals": []})
+                for key in set(rejected_by_driver)|set(accepted_by_driver):
+                    acc = accepted_by_driver.get(key, []); rej = rejected_by_driver.get(key, [])
+                    if acc and rej:
+                        groups[(key[0], key[1])]["accepted"].append(acc[-1])
+                        groups[(key[0], key[1])]["rejected"].append(max(rej))
+                        groups[(key[0], key[1])]["intervals"].append((max(rej), acc[-1]))
+                for (cls, movement), g in groups.items():
+                    cr = self._run3_raff(g["accepted"], g["rejected"]) if self.run3_use_raff_var.get() else None
+                    mle = self._run3_mle_driver_intervals(g["intervals"]) if self.run3_use_mle_var.get() else None
+                    critical.append({
+                        "Site_ID": self.run3_site_id_var.get().strip(), "Vehicle_Class": cls, "Movement": movement,
+                        "Drivers_With_Pairs": len(g["intervals"]),
+                        "Raff_Critical_Gap_s": "" if cr is None else f"{cr:.6f}",
+                        "MLE_Critical_Gap_Median_s": "" if mle is None else f"{mle['critical_gap_median']:.6f}",
+                        "MLE_mu": "" if mle is None else f"{mle['mu']:.6f}",
+                        "MLE_sigma": "" if mle is None else f"{mle['sigma']:.6f}",
+                    })
+                summary["gap_acceptance"] = {
+                    "gap_events": len(gap_rows),
+                    "decision_events": len(set(r["Decision_Event_ID"] for r in gap_rows)),
+                    "accepted_events": sum(1 for r in gap_rows if r["Y5_Gap_Acceptance"] == 1),
+                    "rejected_events": sum(1 for r in gap_rows if r["Y5_Gap_Acceptance"] == 0),
+                    "critical_gap": critical,
+                    "reference_mapping_rows": len(mapping),
+                }
+                if not mapping:
+                    summary["diagnostics"]["gap_acceptance"] = "No Reference Line Mapping entered; CSV created with header only. Enter actual Site_ID|Movement|Line N mappings to calculate X31/Y5/X32."
+                elif gap_rows:
+                    summary["diagnostics"]["gap_acceptance"] = "OK"
+                else:
+                    summary["diagnostics"]["gap_acceptance"] = "No valid gap-decision events found from Run 2 data under the configured mapping."
+                outputs["gap_acceptance"] = path
+            except Exception as e:
+                fields = ["Error"]
+                path = write_csv("Run_3_Gap_Acceptance.csv", fields, [{"Error": str(e)}])
+                summary["diagnostics"]["gap_acceptance"] = f"ERROR: {e}"
+                outputs["gap_acceptance"] = path
 
         # Lateral Clearance
         if self.run3_lc_enabled_var.get():
-            ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); long_window = float(self.run3_lc_longitudinal_window_var.get())
-            lc_rows = self._run3_lateral_clearance(tracks, ppm, axis, long_window, perspective)
-            path = os.path.join(output_dir, "Run_3_Lateral_Clearance.csv")
-            fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Neighbor_ID","Neighbor_Class","Neighbor_Side","LS_Pixel","PPM","LS_Meter","Wm","Wv","Y3_Lateral_Clearance","QC_Flag"]
-            lc_file, path = self._run3_open_csv_safe(path)
-            with lc_file as f:
-                w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(lc_rows)
-            vals = [float(r["Y3_Lateral_Clearance"]) for r in lc_rows]
-            summary["lateral_clearance"] = {"N": len(vals), "Mean_m": float(np.mean(vals)) if vals else None, "Median_m": float(np.median(vals)) if vals else None, "Minimum_m": float(np.min(vals)) if vals else None, "Maximum_m": float(np.max(vals)) if vals else None}
-            outputs["lateral_clearance"] = path
+            try:
+                ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); long_window = float(self.run3_lc_longitudinal_window_var.get())
+                lc_rows = self._run3_lateral_clearance(tracks, ppm, axis, long_window, perspective)
+                fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Neighbor_ID","Neighbor_Class","Neighbor_Side","LS_Pixel","PPM","LS_Meter","Wm","Wv","Y3_Lateral_Clearance","QC_Flag"]
+                path = write_csv("Run_3_Lateral_Clearance.csv", fields, lc_rows)
+                vals = [float(r["Y3_Lateral_Clearance"]) for r in lc_rows]
+                summary["lateral_clearance"] = {"N": len(vals), "Mean_m": float(np.mean(vals)) if vals else None, "Median_m": float(np.median(vals)) if vals else None, "Minimum_m": float(np.min(vals)) if vals else None, "Maximum_m": float(np.max(vals)) if vals else None}
+                summary["diagnostics"]["lateral_clearance"] = "OK" if lc_rows else "No valid Motorcycle + neighboring vehicle pairs met the Zone 2/4, same-time and longitudinal-window conditions."
+                outputs["lateral_clearance"] = path
+            except Exception as e:
+                fields = ["Error"]
+                path = write_csv("Run_3_Lateral_Clearance.csv", fields, [{"Error": str(e)}])
+                summary["diagnostics"]["lateral_clearance"] = f"ERROR: {e}"
+                outputs["lateral_clearance"] = path
 
         # PET
         if self.run3_pet_enabled_var.get():
-            ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); interaction = float(self.run3_pet_interaction_distance_var.get())
-            pet_rows = self._run3_pet(tracks, summaries, ppm, axis, interaction, perspective)
-            path = os.path.join(output_dir, "Run_3_PET.csv")
-            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Y4_PET","QC_Flag"]
-            pet_file, path = self._run3_open_csv_safe(path)
-            with pet_file as f:
-                w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(pet_rows)
-            vals = [float(r["Y4_PET"]) for r in pet_rows]
-            threshold = float(self.run3_pet_threshold_var.get())
-            summary["pet"] = {"Total_Events": len(vals), "Mean_s": float(np.mean(vals)) if vals else None, "Median_s": float(np.median(vals)) if vals else None, "Minimum_s": float(np.min(vals)) if vals else None, "Maximum_s": float(np.max(vals)) if vals else None, "PET_At_Or_Below_Threshold": sum(v <= threshold for v in vals)}
-            outputs["pet"] = path
+            try:
+                ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); interaction = float(self.run3_pet_interaction_distance_var.get())
+                pet_rows = self._run3_pet(tracks, summaries, ppm, axis, interaction, perspective)
+                fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Y4_PET","QC_Flag"]
+                path = write_csv("Run_3_PET.csv", fields, pet_rows)
+                vals = [float(r["Y4_PET"]) for r in pet_rows]
+                threshold = float(self.run3_pet_threshold_var.get())
+                summary["pet"] = {"Total_Events": len(vals), "Mean_s": float(np.mean(vals)) if vals else None, "Median_s": float(np.median(vals)) if vals else None, "Minimum_s": float(np.min(vals)) if vals else None, "Maximum_s": float(np.max(vals)) if vals else None, "PET_At_or_Below_Threshold": sum(v <= threshold for v in vals)}
+                summary["diagnostics"]["pet"] = "OK" if pet_rows else "No valid Zone 6 interaction events met the trajectory/conflict conditions."
+                outputs["pet"] = path
+            except Exception as e:
+                fields = ["Error"]
+                path = write_csv("Run_3_PET.csv", fields, [{"Error": str(e)}])
+                summary["diagnostics"]["pet"] = f"ERROR: {e}"
+                outputs["pet"] = path
 
         summary_path = os.path.join(output_dir, "Run_3_Summary.json")
         summary["outputs"] = outputs
@@ -5484,8 +5523,11 @@ class Run1App:
             json.dump(summary, f, indent=4, ensure_ascii=False)
         outputs["summary"] = summary_path
         self.run3_last_outputs = outputs
-        self.run3_last_summary = summary
-        self.root.after(0, lambda: self.run3_result_text.set(f"Run 3 completed | outputs: {len([p for p in outputs.values() if p])}"))
+        counts = []
+        for key in ("speed", "gap_acceptance", "lateral_clearance", "pet"):
+            p = outputs.get(key)
+            counts.append(f"{key}={'written' if p else 'off'}")
+        self.root.after(0, lambda c=" | ".join(counts): self.run3_result_text.set("Run 3 completed | " + c))
         return outputs
 
     def finish_integrated_ui(self, stopped, output_video, output_csv, output_settings, output_summary, output_id_zone_summary=None, output_zone_summary=None):
@@ -5494,15 +5536,13 @@ class Run1App:
         self.pause_button.config(state="disabled", text="Ⅱ PAUSE")
         self.stop_button.config(state="disabled")
         if stopped:
-            self.status_var.set("Run 1 + 2 + 3 stopped")
-            messagebox.showinfo("PK Studio V17", "Processing was stopped by user.")
-            return
+            self.status_var.set("Run 1 + 2 + 3 stopped — Run 3 analyzed available data")
         if self.run3_was_requested:
-            self.status_var.set("Run 1 + 2 + 3 completed")
-            message = "Run 1 + 2 + 3 completed\n\n"
+            self.status_var.set("Run 1 + 2 + 3 completed" if not stopped else "Run 1 + 2 + 3 stopped — Run 3 analyzed available data")
+            message = ("Run 1 + 2 + 3 completed\n\n" if not stopped else "Run 1 + 2 + 3 stopped\nRun 3 was analyzed using the available Run 2 data.\n\n")
         else:
-            self.status_var.set("Run 1 + 2 completed")
-            message = "Run 1 + 2 completed\n\n"
+            self.status_var.set("Run 1 + 2 completed" if not stopped else "Run 1 + 2 stopped")
+            message = ("Run 1 + 2 completed\n\n" if not stopped else "Run 1 + 2 stopped\n\n")
         self.progress_var.set("100%")
         if self.save_video_var.get():
             message += f"Run 1/2 Video:\n{output_video}\n\n"
