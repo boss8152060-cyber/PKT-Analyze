@@ -2684,9 +2684,12 @@ class Run1App:
     def open_perspective_calibration(self):
         """Open an in-app Tkinter calibration window.
 
-        The user clicks P1 -> P2 -> P3 -> P4 on one road-plane quadrilateral.
-        Coordinates are converted from the displayed image back to original-video
-        pixel coordinates automatically, so the user never needs to type x,y.
+        Features:
+        - Resizable / maximizable calibration window.
+        - Mouse-wheel zoom centred on the cursor.
+        - Horizontal/vertical scrollbars plus middle-mouse panning.
+        - Reset View returns to a fit-to-window view.
+        - P1 -> P2 -> P3 -> P4 remain stored in original video coordinates.
         """
         video_path = str(self.video_var.get() or "").strip()
         if not video_path:
@@ -2716,8 +2719,8 @@ class Run1App:
 
         top = tk.Toplevel(self.root)
         top.title("PK Studio — Perspective Calibration")
-        top.geometry("1280x900")
-        top.minsize(900, 700)
+        top.geometry("1400x900")
+        top.minsize(1000, 700)
         top.transient(self.root)
         top.grab_set()
 
@@ -2727,111 +2730,303 @@ class Run1App:
             "frame_index": default_frame,
             "points": [],
             "photo": None,
-            "scale": 1.0,
-            "offset_x": 0,
-            "offset_y": 0,
+            "zoom": 1.0,              # 1.0 = fit-to-window
+            "display_scale": 1.0,     # actual image scale after fit_scale * zoom
+            "display_origin_x": 0,
+            "display_origin_y": 0,
             "image_w": width,
             "image_h": height,
             "drag_index": None,
+            "pan_last": None,
         }
 
+        # ----------------------------------------------------
+        # Top controls: deliberately arranged into separate rows
+        # so the P4->P1 field can never be covered by the point text
+        # or the Apply/Cancel buttons.
+        # ----------------------------------------------------
         controls = ttk.Frame(top, padding=8)
         controls.pack(fill="x")
-        canvas_frame = ttk.Frame(top, padding=(8, 0, 8, 8))
-        canvas_frame.pack(fill="both", expand=True)
+        controls.columnconfigure(1, weight=1)
+        controls.columnconfigure(3, weight=1)
+        controls.columnconfigure(5, weight=1)
+        controls.columnconfigure(7, weight=1)
 
-        ttk.Label(controls, text="ลำดับจุด: P1 → P2 → P3 → P4 | คลิกบนพื้นถนนที่เป็นพื้นที่เดียวกัน").grid(row=0, column=0, columnspan=6, sticky="w", pady=(0,6))
-        ttk.Label(controls, text="Frame").grid(row=1, column=0, sticky="e", padx=(0,5))
+        ttk.Label(
+            controls,
+            text="ลำดับจุด: P1 → P2 → P3 → P4 | คลิกบนพื้นถนนที่เป็นพื้นที่เดียวกัน"
+        ).grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 6))
+
+        ttk.Label(controls, text="Frame").grid(row=1, column=0, sticky="e", padx=(0, 5))
         frame_var = tk.StringVar(value=str(default_frame + 1))
-        frame_entry = ttk.Entry(controls, textvariable=frame_var, width=10)
-        frame_entry.grid(row=1, column=1, sticky="w")
+        ttk.Entry(controls, textvariable=frame_var, width=9).grid(row=1, column=1, sticky="w")
         ttk.Button(controls, text="Load Frame", command=lambda: load_frame()).grid(row=1, column=2, padx=5)
         ttk.Button(controls, text="Reset Points", command=lambda: reset_points()).grid(row=1, column=3, padx=5)
+
         length_vars = [
             tk.StringVar(value=str(self.run3_perspective_l12_var.get() or "")),
             tk.StringVar(value=str(self.run3_perspective_l23_var.get() or "")),
             tk.StringVar(value=str(self.run3_perspective_l34_var.get() or "")),
             tk.StringVar(value=str(self.run3_perspective_l41_var.get() or "")),
         ]
-        labels = ["Known Length P1→P2 (m)", "Known Length P2→P3 (m)", "Known Length P3→P4 (m)", "Known Length P4→P1 (m)"]
-        for i, (lab, var) in enumerate(zip(labels, length_vars), start=1):
-            col = 4 if i % 2 == 1 else 0
-            val_col = col + 1
-            row = 1 + (i - 1) // 2
-            ttk.Label(controls, text=lab).grid(row=row, column=col, sticky="e", padx=(15,5) if col == 4 else (0,5), pady=(0 if row == 1 else 6,0))
-            ttk.Entry(controls, textvariable=var, width=10).grid(row=row, column=val_col, sticky="w", pady=(0 if row == 1 else 6,0))
+        labels = [
+            "Known Length P1→P2 (m)",
+            "Known Length P2→P3 (m)",
+            "Known Length P3→P4 (m)",
+            "Known Length P4→P1 (m)",
+        ]
 
-        ppm_calc_var = tk.StringVar(value="Calculated PPM: -")
-        ttk.Label(controls, textvariable=ppm_calc_var, foreground="#155a8a").grid(row=3, column=4, columnspan=2, sticky="w", pady=(6,0))
-        ttk.Label(controls, text="เลือก P1→P2→P3→P4 แล้วลากจุดปรับได้ | ระบบคำนวณ PPM จากระยะทั้ง 4 ด้าน", foreground="#555555").grid(row=3, column=0, columnspan=4, sticky="w", pady=(6,0))
+        ttk.Label(controls, text=labels[0]).grid(row=1, column=4, sticky="e", padx=(12, 4))
+        ttk.Entry(controls, textvariable=length_vars[0], width=9).grid(row=1, column=5, sticky="w")
+        ttk.Label(controls, text=labels[1]).grid(row=1, column=6, sticky="e", padx=(12, 4))
+        ttk.Entry(controls, textvariable=length_vars[1], width=9).grid(row=1, column=7, sticky="w")
 
         point_text_var = tk.StringVar(value="ยังไม่ได้เลือกจุด")
-        ttk.Label(controls, textvariable=point_text_var, foreground="#555555").grid(row=2, column=0, columnspan=4, sticky="w", pady=(6,0))
+        ttk.Label(controls, textvariable=point_text_var, foreground="#555555").grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(4, 2)
+        )
+
+        ttk.Label(controls, text=labels[2]).grid(row=2, column=4, sticky="e", padx=(12, 4))
+        ttk.Entry(controls, textvariable=length_vars[2], width=9).grid(row=2, column=5, sticky="w")
+        ttk.Label(controls, text=labels[3]).grid(row=2, column=6, sticky="e", padx=(12, 4))
+        ttk.Entry(controls, textvariable=length_vars[3], width=9).grid(row=2, column=7, sticky="w")
+
+        view_bar = ttk.Frame(controls)
+        view_bar.grid(row=3, column=0, columnspan=4, sticky="w", pady=(5, 0))
+        ttk.Label(view_bar, text="View").pack(side="left", padx=(0, 5))
+        ttk.Button(view_bar, text="− Zoom", width=9, command=lambda: zoom_at(1 / 1.2)).pack(side="left", padx=2)
+        ttk.Button(view_bar, text="+ Zoom", width=9, command=lambda: zoom_at(1.2)).pack(side="left", padx=2)
+        ttk.Button(view_bar, text="↺ Reset View", width=12, command=lambda: reset_view()).pack(side="left", padx=2)
+        ttk.Label(
+            view_bar,
+            text="Wheel = zoom ตามเมาส์ | ล้อกลางลาก = เลื่อนไปมา | Scrollbar = เลื่อนภาพ",
+            foreground="#666666"
+        ).pack(side="left", padx=(10, 0))
+
+        ppm_calc_var = tk.StringVar(value="Calculated PPM: -")
+        ttk.Label(controls, textvariable=ppm_calc_var, foreground="#155a8a").grid(
+            row=3, column=4, columnspan=2, sticky="w", pady=(5, 0)
+        )
+        button_bar = ttk.Frame(controls)
+        button_bar.grid(row=3, column=6, columnspan=2, sticky="e", pady=(5, 0))
+        ttk.Button(button_bar, text="✅ Apply Calibration", command=lambda: apply_calibration()).pack(side="left", padx=3)
+        ttk.Button(button_bar, text="Cancel", command=lambda: cancel_calibration()).pack(side="left", padx=3)
+
+        ttk.Label(
+            controls,
+            text="คลิก P1→P2→P3→P4 แล้วลากจุดปรับได้ | ซูมเพื่อเล็งจุดละเอียดได้ โดยค่าพิกัดยังคงเป็นพิกัดภาพต้นฉบับ",
+            foreground="#555555"
+        ).grid(row=4, column=0, columnspan=8, sticky="w", pady=(4, 0))
+
+        canvas_frame = ttk.Frame(top, padding=(8, 0, 8, 8))
+        canvas_frame.pack(fill="both", expand=True)
+        canvas_frame.rowconfigure(0, weight=1)
+        canvas_frame.columnconfigure(0, weight=1)
 
         canvas = tk.Canvas(canvas_frame, background="#202020", highlightthickness=1)
-        canvas.pack(fill="both", expand=True)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        hbar = ttk.Scrollbar(canvas_frame, orient="horizontal", command=canvas.xview)
+        vbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
+        hbar.grid(row=1, column=0, sticky="ew")
+        vbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(xscrollcommand=hbar.set, yscrollcommand=vbar.set)
+
+        def fit_scale():
+            """Scale needed to fit the full video image inside the current canvas."""
+            cw = max(100, int(canvas.winfo_width()))
+            ch = max(100, int(canvas.winfo_height()))
+            if width <= 0 or height <= 0:
+                return 1.0
+            return max(0.05, min(cw / width, ch / height))
+
+        def current_scale():
+            return max(1e-6, fit_scale() * float(state.get("zoom", 1.0)))
+
+        def update_ppm_and_text():
+            if state["points"]:
+                point_text_var.set(
+                    "  ".join(
+                        f"P{i+1}=({x:.1f},{y:.1f})"
+                        for i, (x, y) in enumerate(state["points"])
+                    )
+                )
+            else:
+                point_text_var.set("ยังไม่ได้เลือกจุด")
+
+            try:
+                vals = []
+                edge_defs = [
+                    (0, 1, length_vars[0]),
+                    (1, 2, length_vars[1]),
+                    (2, 3, length_vars[2]),
+                    (3, 0, length_vars[3]),
+                ]
+                for i, j, var in edge_defs:
+                    if len(state["points"]) <= j:
+                        continue
+                    real_m = float(var.get().strip())
+                    if real_m <= 0:
+                        continue
+                    px = math.hypot(
+                        state["points"][j][0] - state["points"][i][0],
+                        state["points"][j][1] - state["points"][i][1]
+                    )
+                    if px > 0:
+                        vals.append(px / real_m)
+                if vals:
+                    ppm_calc_var.set(
+                        f"Calculated PPM: {sum(vals)/len(vals):.6f} pixel/m | edges={len(vals)}"
+                    )
+                else:
+                    ppm_calc_var.set("Calculated PPM: -")
+            except Exception:
+                ppm_calc_var.set("Calculated PPM: -")
 
         def render():
             img = state["frame"]
             h, w = img.shape[:2]
-            cw = max(100, int(canvas.winfo_width()))
-            ch = max(100, int(canvas.winfo_height()))
-            scale = min(cw / w, ch / h)
-            if scale <= 0:
-                scale = 1.0
-            state["scale"] = scale
+            scale = current_scale()
+            state["display_scale"] = scale
+
             new_w = max(1, int(round(w * scale)))
             new_h = max(1, int(round(h * scale)))
-            resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+            resized = cv2.resize(
+                img,
+                (new_w, new_h),
+                interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+            )
             view = resized.copy()
-            labels = ["P1", "P2", "P3", "P4"]
+            labels_local = ["P1", "P2", "P3", "P4"]
+            point_radius = max(7, int(round(7 * min(2.0, max(1.0, state["zoom"] ** 0.45)))))
+            line_thickness = max(2, int(round(2 * min(2.0, max(1.0, state["zoom"] ** 0.35)))))
             for idx, (px, py) in enumerate(state["points"]):
                 vx = int(round(px * scale))
                 vy = int(round(py * scale))
-                cv2.circle(view, (vx, vy), 7, (0, 255, 255), -1)
-                cv2.putText(view, labels[idx], (vx + 10, vy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2, cv2.LINE_AA)
+                cv2.circle(view, (vx, vy), point_radius, (0, 255, 255), -1)
+                cv2.putText(
+                    view,
+                    labels_local[idx],
+                    (vx + point_radius + 4, vy - point_radius - 3),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    max(0.7, 0.7 * min(1.8, max(1.0, state["zoom"] ** 0.3))),
+                    (0, 255, 255),
+                    max(2, line_thickness),
+                    cv2.LINE_AA
+                )
             if len(state["points"]) >= 2:
                 for i in range(1, len(state["points"])):
-                    a = state["points"][i-1]; b = state["points"][i]
-                    cv2.line(view, (int(a[0]*scale), int(a[1]*scale)), (int(b[0]*scale), int(b[1]*scale)), (0,255,255), 2, cv2.LINE_AA)
+                    a = state["points"][i-1]
+                    b = state["points"][i]
+                    cv2.line(
+                        view,
+                        (int(round(a[0]*scale)), int(round(a[1]*scale))),
+                        (int(round(b[0]*scale)), int(round(b[1]*scale))),
+                        (0, 255, 255), line_thickness, cv2.LINE_AA
+                    )
             if len(state["points"]) == 4:
-                a = state["points"][3]; b = state["points"][0]
-                cv2.line(view, (int(a[0]*scale), int(a[1]*scale)), (int(b[0]*scale), int(b[1]*scale)), (0,255,255), 2, cv2.LINE_AA)
+                a = state["points"][3]
+                b = state["points"][0]
+                cv2.line(
+                    view,
+                    (int(round(a[0]*scale)), int(round(a[1]*scale))),
+                    (int(round(b[0]*scale)), int(round(b[1]*scale))),
+                    (0, 255, 255), line_thickness, cv2.LINE_AA
+                )
 
             ok, buf = cv2.imencode('.png', view)
             if not ok:
                 return
             photo = tk.PhotoImage(data=buf.tobytes())
             state["photo"] = photo
+
+            cw = max(100, int(canvas.winfo_width()))
+            ch = max(100, int(canvas.winfo_height()))
+            scroll_w = max(cw, new_w)
+            scroll_h = max(ch, new_h)
+            origin_x = max(0, (scroll_w - new_w) // 2)
+            origin_y = max(0, (scroll_h - new_h) // 2)
+            state["display_origin_x"] = origin_x
+            state["display_origin_y"] = origin_y
+
+            canvas.configure(scrollregion=(0, 0, scroll_w, scroll_h))
             canvas.delete("all")
-            state["offset_x"] = max(0, (cw - new_w) // 2)
-            state["offset_y"] = max(0, (ch - new_h) // 2)
-            canvas.create_image(state["offset_x"], state["offset_y"], anchor="nw", image=photo)
-            canvas.create_text(10, 10, anchor="nw", text=f"Frame {state['frame_index']+1} | Image {w}×{h}", fill="white", font=("Segoe UI", 10, "bold"))
-            point_text_var.set("  ".join(f"P{i+1}=({x:.1f},{y:.1f})" for i,(x,y) in enumerate(state["points"])) if state["points"] else "ยังไม่ได้เลือกจุด")
-            try:
-                vals = []
-                edge_defs = [
-                    (0,1,length_vars[0]),
-                    (1,2,length_vars[1]),
-                    (2,3,length_vars[2]),
-                    (3,0,length_vars[3]),
-                ]
-                for i,j,var in edge_defs:
-                    if len(state["points"]) <= j:
-                        continue
-                    real_m = float(var.get().strip())
-                    if real_m <= 0:
-                        continue
-                    px = math.hypot(state["points"][j][0]-state["points"][i][0], state["points"][j][1]-state["points"][i][1])
-                    if px > 0:
-                        vals.append(px / real_m)
-                if vals:
-                    ppm_calc_var.set(f"Calculated PPM: {sum(vals)/len(vals):.6f} pixel/m | edges={len(vals)}")
-                else:
-                    ppm_calc_var.set("Calculated PPM: -")
-            except Exception:
-                ppm_calc_var.set("Calculated PPM: -")
+            canvas.create_image(origin_x, origin_y, anchor="nw", image=photo)
+            canvas.create_text(
+                10, 10, anchor="nw",
+                text=(
+                    f"Frame {state['frame_index']+1} | Image {w}×{h} | "
+                    f"Zoom {state['zoom']:.2f}× | Wheel = zoom | Middle-drag = pan"
+                ),
+                fill="white", font=("Segoe UI", 10, "bold")
+            )
+            update_ppm_and_text()
+
+        def event_to_image(event):
+            sx = max(1e-6, state["display_scale"])
+            canvas_x = canvas.canvasx(event.x)
+            canvas_y = canvas.canvasy(event.y)
+            ox = state["display_origin_x"]
+            oy = state["display_origin_y"]
+            x = (canvas_x - ox) / sx
+            y = (canvas_y - oy) / sx
+            return float(x), float(y)
+
+        def _clamp01(value):
+            return max(0.0, min(1.0, float(value)))
+
+        def _set_scroll_after_zoom(image_x, image_y, event_x, event_y):
+            """Keep the image point under the cursor fixed during zoom."""
+            cw = max(100, int(canvas.winfo_width()))
+            ch = max(100, int(canvas.winfo_height()))
+            scale = state["display_scale"]
+            new_w = max(1, int(round(state["image_w"] * scale)))
+            new_h = max(1, int(round(state["image_h"] * scale)))
+            scroll_w = max(cw, new_w)
+            scroll_h = max(ch, new_h)
+            origin_x = max(0, (scroll_w - new_w) // 2)
+            origin_y = max(0, (scroll_h - new_h) // 2)
+            target_x = origin_x + image_x * scale
+            target_y = origin_y + image_y * scale
+            desired_left = target_x - float(event_x)
+            desired_top = target_y - float(event_y)
+            max_left = max(0.0, scroll_w - cw)
+            max_top = max(0.0, scroll_h - ch)
+            if max_left > 0:
+                canvas.xview_moveto(_clamp01(desired_left / max_left))
+            else:
+                canvas.xview_moveto(0.0)
+            if max_top > 0:
+                canvas.yview_moveto(_clamp01(desired_top / max_top))
+            else:
+                canvas.yview_moveto(0.0)
+
+        def zoom_at(multiplier, event=None):
+            old_zoom = float(state["zoom"])
+            new_zoom = max(1.0, min(6.0, old_zoom * float(multiplier)))
+            if abs(new_zoom - old_zoom) < 1e-9:
+                return
+
+            if event is not None:
+                image_x, image_y = event_to_image(event)
+                image_x = max(0.0, min(float(state["image_w"]), image_x))
+                image_y = max(0.0, min(float(state["image_h"]), image_y))
+            else:
+                image_x = state["image_w"] / 2.0
+                image_y = state["image_h"] / 2.0
+                event = type("_CenterEvent", (), {
+                    "x": int(canvas.winfo_width() / 2),
+                    "y": int(canvas.winfo_height() / 2),
+                })()
+
+            state["zoom"] = new_zoom
+            render()
+            _set_scroll_after_zoom(image_x, image_y, event.x, event.y)
+
+        def reset_view():
+            state["zoom"] = 1.0
+            render()
+            canvas.xview_moveto(0.0)
+            canvas.yview_moveto(0.0)
 
         def load_frame():
             try:
@@ -2849,35 +3044,31 @@ class Run1App:
             state["frame"] = new_frame.copy()
             state["frame_index"] = requested
             state["points"] = []
-            render()
+            reset_view()
 
         def reset_points():
             state["points"] = []
+            state["drag_index"] = None
             render()
 
-        def event_to_image(event):
-            sx = state["scale"]
-            ox = state["offset_x"]
-            oy = state["offset_y"]
-            x = (event.x - ox) / sx
-            y = (event.y - oy) / sx
-            return float(x), float(y)
-
-        def on_click(event):
+        def on_left_click(event):
             x, y = event_to_image(event)
             if x < 0 or y < 0 or x > state["image_w"] or y > state["image_h"]:
                 return
             if len(state["points"]) >= 4:
-                candidates = [(i, math.hypot(px-x, py-y)) for i,(px,py) in enumerate(state["points"])]
+                candidates = [
+                    (i, math.hypot(px - x, py - y))
+                    for i, (px, py) in enumerate(state["points"])
+                ]
                 i, d = min(candidates, key=lambda q: q[1])
-                if d <= max(12.0 / max(state["scale"], 1e-6), 20.0):
+                if d <= max(12.0 / max(state["display_scale"], 1e-6), 20.0):
                     state["drag_index"] = i
                     return
             if len(state["points"]) < 4:
                 state["points"].append((x, y))
                 render()
 
-        def on_drag(event):
+        def on_left_drag(event):
             idx = state.get("drag_index")
             if idx is None or idx >= len(state["points"]):
                 return
@@ -2887,12 +3078,50 @@ class Run1App:
             state["points"][idx] = (x, y)
             render()
 
-        def on_release(event):
+        def on_left_release(event):
             state["drag_index"] = None
+
+        def on_pan_start(event):
+            state["pan_last"] = (event.x, event.y)
+            canvas.configure(cursor="fleur")
+
+        def on_pan_drag(event):
+            last = state.get("pan_last")
+            if last is None:
+                return
+            dx = last[0] - event.x
+            dy = last[1] - event.y
+            canvas.xview_scroll(int(dx), "units")
+            canvas.yview_scroll(int(dy), "units")
+            state["pan_last"] = (event.x, event.y)
+
+        def on_pan_release(event):
+            state["pan_last"] = None
+            canvas.configure(cursor="")
+
+        def on_wheel(event):
+            delta = getattr(event, "delta", 0)
+            if delta == 0:
+                return
+            # Positive delta zooms in.  Shift + wheel pans horizontally.
+            if event.state & 0x0001:
+                canvas.xview_scroll(-1 if delta > 0 else 1, "units")
+                return
+            zoom_at(1.2 if delta > 0 else 1 / 1.2, event)
+
+        def on_wheel_linux_in(event):
+            zoom_at(1.2, event)
+
+        def on_wheel_linux_out(event):
+            zoom_at(1 / 1.2, event)
 
         def apply_calibration():
             if len(state["points"]) != 4:
-                messagebox.showerror("Perspective Calibration", "Please click exactly 4 points in order: P1 → P2 → P3 → P4.", parent=top)
+                messagebox.showerror(
+                    "Perspective Calibration",
+                    "Please click exactly 4 points in order: P1 → P2 → P3 → P4.",
+                    parent=top
+                )
                 return
             try:
                 real_lengths = [float(v.get().strip()) for v in length_vars]
@@ -2900,13 +3129,21 @@ class Run1App:
                     raise ValueError
                 l12, l23, l34, l41 = real_lengths
             except Exception:
-                messagebox.showerror("Perspective Calibration", "All four Known Length values must be positive numbers in meters.", parent=top)
+                messagebox.showerror(
+                    "Perspective Calibration",
+                    "All four Known Length values must be positive numbers in meters.",
+                    parent=top
+                )
                 return
 
             pts = np.array(state["points"], dtype=np.float32)
-            area = abs(cv2.contourArea(pts.reshape((-1,1,2))))
+            area = abs(cv2.contourArea(pts.reshape((-1, 1, 2))))
             if area < 100.0:
-                messagebox.showerror("Perspective Calibration", "The 4 selected points are too close together. Select a larger road-plane area.", parent=top)
+                messagebox.showerror(
+                    "Perspective Calibration",
+                    "The 4 selected points are too close together. Select a larger road-plane area.",
+                    parent=top
+                )
                 return
 
             # A four-corner homography needs a fully specified target quadrilateral.
@@ -2917,14 +3154,22 @@ class Run1App:
             length = (l12 + l34) / 2.0
             width_m = (l23 + l41) / 2.0
             src = np.float32(state["points"])
-            dst = np.float32([[0.0,0.0],[length,0.0],[length,width_m],[0.0,width_m]])
+            dst = np.float32([[0.0, 0.0], [length, 0.0], [length, width_m], [0.0, width_m]])
             try:
                 H = cv2.getPerspectiveTransform(src, dst)
             except Exception as exc:
-                messagebox.showerror("Perspective Calibration", f"Could not create perspective transform:\n\n{exc}", parent=top)
+                messagebox.showerror(
+                    "Perspective Calibration",
+                    f"Could not create perspective transform:\n\n{exc}",
+                    parent=top
+                )
                 return
             if not np.isfinite(H).all():
-                messagebox.showerror("Perspective Calibration", "The selected points produced an invalid transformation.", parent=top)
+                messagebox.showerror(
+                    "Perspective Calibration",
+                    "The selected points produced an invalid transformation.",
+                    parent=top
+                )
                 return
 
             self.run3_perspective_p1_var.set(f"{state['points'][0][0]:.3f},{state['points'][0][1]:.3f}")
@@ -2939,24 +3184,33 @@ class Run1App:
             self.run3_perspective_l41_var.set(f"{l41:g}")
             self.run3_perspective_enabled_var.set(True)
 
-            edge_specs = [(0,1,l12),(1,2,l23),(2,3,l34),(3,0,l41)]
+            edge_specs = [(0, 1, l12), (1, 2, l23), (2, 3, l34), (3, 0, l41)]
             edge_ppm = []
-            for i,j,real_m in edge_specs:
-                px = math.hypot(state["points"][j][0]-state["points"][i][0], state["points"][j][1]-state["points"][i][1])
+            for i, j, real_m in edge_specs:
+                px = math.hypot(
+                    state["points"][j][0] - state["points"][i][0],
+                    state["points"][j][1] - state["points"][i][1]
+                )
                 if real_m > 0 and px > 0:
                     edge_ppm.append(px / real_m)
             reference_ppm = (sum(edge_ppm) / len(edge_ppm)) if edge_ppm else 0.0
             if reference_ppm > 0:
                 self.run3_ppm_var.set(f"{reference_ppm:.6f}")
             ppm_calc_var.set(f"PPM = {reference_ppm:.6f} pixel/m | 4-edge mean")
-            self.run3_result_text.set(f"Perspective calibrated: Frame {state['frame_index']+1}, {state['image_w']}×{state['image_h']} | PPM auto-calculated")
+            self.run3_result_text.set(
+                f"Perspective calibrated: Frame {state['frame_index']+1}, "
+                f"{state['image_w']}×{state['image_h']} | PPM auto-calculated"
+            )
 
-            # Save a site-specific calibration JSON beside the selected output when possible.
             try:
                 out_dir = str(self.output_var.get() or "").strip()
                 if out_dir:
                     os.makedirs(out_dir, exist_ok=True)
-                    site = re.sub(r"[^A-Za-z0-9_-]+", "_", self.run3_site_id_var.get().strip() or "Unknown")
+                    site = re.sub(
+                        r"[^A-Za-z0-9_-]+",
+                        "_",
+                        self.run3_site_id_var.get().strip() or "Unknown"
+                    )
                     cal_path = os.path.join(out_dir, f"Site_{site}_Perspective_Calibration.json")
                     payload = {
                         "Site_ID": self.run3_site_id_var.get().strip(),
@@ -2965,8 +3219,10 @@ class Run1App:
                         "frame_number_one_based": state["frame_index"] + 1,
                         "image_width": state["image_w"],
                         "image_height": state["image_h"],
-                        "P1": list(state["points"][0]), "P2": list(state["points"][1]),
-                        "P3": list(state["points"][2]), "P4": list(state["points"][3]),
+                        "P1": list(state["points"][0]),
+                        "P2": list(state["points"][1]),
+                        "P3": list(state["points"][2]),
+                        "P4": list(state["points"][3]),
                         "Known_Length_P1_P2_m": l12,
                         "Known_Length_P2_P3_m": l23,
                         "Known_Length_P3_P4_m": l34,
@@ -2974,30 +3230,27 @@ class Run1App:
                         "Homography_Target_Length_m": length,
                         "Homography_Target_Width_m": width_m,
                         "Reference_PPM_pixel_per_meter": reference_ppm,
-                        "Edge_PPM": {"P1-P2": edge_ppm[0] if len(edge_ppm)>0 else None, "P2-P3": edge_ppm[1] if len(edge_ppm)>1 else None, "P3-P4": edge_ppm[2] if len(edge_ppm)>2 else None, "P4-P1": edge_ppm[3] if len(edge_ppm)>3 else None},
+                        "Edge_PPM": {
+                            "P1-P2": edge_ppm[0] if len(edge_ppm) > 0 else None,
+                            "P2-P3": edge_ppm[1] if len(edge_ppm) > 1 else None,
+                            "P3-P4": edge_ppm[2] if len(edge_ppm) > 2 else None,
+                            "P4-P1": edge_ppm[3] if len(edge_ppm) > 3 else None,
+                        },
                         "point_order": "P1->P2->P3->P4",
                         "calibration_method": "Four-point planar homography with four-side metric inputs",
                     }
                     with open(cal_path, "w", encoding="utf-8") as f:
                         json.dump(payload, f, indent=2, ensure_ascii=False)
-                    self.status_var.set(f"Perspective calibration saved: {os.path.basename(cal_path)}")
+                    self.status_var.set(
+                        f"Perspective calibration saved: {os.path.basename(cal_path)}"
+                    )
             except Exception as exc:
                 self.status_var.set(f"Perspective applied; JSON save skipped: {exc}")
 
             top.grab_release()
             top.destroy()
 
-        def on_resize(event=None):
-            render()
-
-        canvas.bind("<Button-1>", on_click)
-        canvas.bind("<B1-Motion>", on_drag)
-        canvas.bind("<ButtonRelease-1>", on_release)
-        canvas.bind("<Configure>", on_resize)
-        ttk.Button(controls, text="✅ Apply Calibration", command=apply_calibration).grid(row=2, column=2, padx=5, pady=(6,0))
-        ttk.Button(controls, text="Cancel", command=lambda: (cap.release(), top.grab_release(), top.destroy())).grid(row=2, column=3, padx=5, pady=(6,0))
-
-        def on_close():
+        def cancel_calibration():
             try:
                 cap.release()
             finally:
@@ -3006,9 +3259,44 @@ class Run1App:
                 except Exception:
                     pass
                 top.destroy()
-        top.protocol("WM_DELETE_WINDOW", on_close)
 
-        # Initial render after the canvas gets its first size.
+        def on_resize(event=None):
+            # Keep the chosen zoom level; only the fit-to-window base scale changes.
+            render()
+
+        canvas.bind("<Button-1>", on_left_click)
+        canvas.bind("<B1-Motion>", on_left_drag)
+        canvas.bind("<ButtonRelease-1>", on_left_release)
+        canvas.bind("<Button-2>", on_pan_start)
+        canvas.bind("<B2-Motion>", on_pan_drag)
+        canvas.bind("<ButtonRelease-2>", on_pan_release)
+        canvas.bind("<MouseWheel>", on_wheel)
+        canvas.bind("<Shift-MouseWheel>", on_wheel)
+        canvas.bind("<Button-4>", on_wheel_linux_in)
+        canvas.bind("<Button-5>", on_wheel_linux_out)
+        canvas.bind("<Configure>", on_resize)
+        canvas.focus_set()
+
+        def maximize_window():
+            try:
+                current = str(top.state())
+                top.state("normal" if current == "zoomed" else "zoomed")
+            except Exception:
+                try:
+                    top.attributes("-zoomed", True)
+                except Exception:
+                    pass
+
+        ttk.Button(view_bar, text="□ เต็มจอ", width=9, command=maximize_window).pack(side="left", padx=2)
+
+        top.bind("<Control-0>", lambda e: reset_view())
+        top.bind("<Control-plus>", lambda e: zoom_at(1.2))
+        top.bind("<Control-equal>", lambda e: zoom_at(1.2))
+        top.bind("<Control-minus>", lambda e: zoom_at(1 / 1.2))
+
+        top.protocol("WM_DELETE_WINDOW", cancel_calibration)
+
+        # Initial render after the canvas gets its first real size.
         top.after(100, render)
 
     # ========================================================
