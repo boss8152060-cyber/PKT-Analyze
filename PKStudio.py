@@ -383,6 +383,12 @@ DEFAULT_SETTINGS = {
     "show_label_conf": True,
     "show_label_zone": True,
     "show_label_speed": True,
+    "show_bbox": True,
+    "show_prefix_id": False,
+    "show_prefix_class": False,
+    "show_prefix_conf": False,
+    "show_prefix_zone": False,
+    "show_prefix_speed": False,
 }
 
 
@@ -422,6 +428,10 @@ RUN3_DEFAULTS = {
     "lc_longitudinal_window_m": "2.00",     # implementation starter value
     "pet_interaction_distance_m": "3.00",   # implementation starter value
     "pet_threshold_s": "1.00",
+    "speed_approach_zones": [1, 2, 4],
+    "speed_exit_zones": [1, 3, 5],
+    "lc_zones": [2, 4],
+    "pet_zone6": True,
     "gap_movement_13": True,
     "gap_movement_15": True,
     "gap_movement_41": True,
@@ -610,6 +620,12 @@ class Run1App:
         self.show_label_conf_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_label_conf"])
         self.show_label_zone_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_label_zone"])
         self.show_label_speed_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_label_speed"])
+        self.show_bbox_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_bbox"])
+        self.show_prefix_id_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_prefix_id"])
+        self.show_prefix_class_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_prefix_class"])
+        self.show_prefix_conf_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_prefix_conf"])
+        self.show_prefix_zone_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_prefix_zone"])
+        self.show_prefix_speed_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_prefix_speed"])
 
 
         # ========================================================
@@ -633,6 +649,10 @@ class Run1App:
         self.run3_lc_longitudinal_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_longitudinal_window_m"])
         self.run3_pet_interaction_distance_var = tk.StringVar(value=RUN3_DEFAULTS["pet_interaction_distance_m"])
         self.run3_pet_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["pet_threshold_s"])
+        self.run3_speed_approach_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_approach_zones"])) for z in range(1,7)}
+        self.run3_speed_exit_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_exit_zones"])) for z in range(1,7)}
+        self.run3_lc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["lc_zones"])) for z in range(1,7)}
+        self.run3_pet_zone6_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_zone6"])
         self.run3_gap_movement_13_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_13"])
         self.run3_gap_movement_15_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_15"])
         self.run3_gap_movement_41_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_41"])
@@ -920,17 +940,17 @@ class Run1App:
 
         ttk.Checkbutton(frame, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=1, column=0, sticky="w", pady=(2,4))
         ttk.Label(frame, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง", foreground="#666666").grid(row=1, column=1, columnspan=2, sticky="w", pady=(2,4))
-        ttk.Button(frame, text="🎯 Perspective Calibration (คลิก 4 จุด)", command=self.open_perspective_calibration).grid(row=1, column=3, sticky="e", pady=(2,4))
+        ttk.Button(frame, text="🎯 Perspective / PPM Calibration", command=self.open_perspective_calibration).grid(row=1, column=3, sticky="e", pady=(2,4))
 
-        ttk.Label(frame, text="Perspective calibration: P1→P2→P3→P4 รอบพื้นที่สี่เหลี่ยมบนผิวถนน (พิกัดจะกรอกให้อัตโนมัติ)").grid(row=2, column=0, columnspan=4, sticky="w", pady=(2,2))
+        ttk.Label(frame, text="Perspective / PPM Calibration: คลิก P1→P2→P3→P4 แล้วลากจุดปรับตำแหน่งได้ พร้อมกรอกระยะจริง").grid(row=2, column=0, columnspan=4, sticky="w", pady=(2,2))
         ttk.Label(frame, text="P1").grid(row=3, column=0, sticky="e", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_p1_var, width=18).grid(row=3, column=1, sticky="w", pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_p1_var, width=18, state="readonly").grid(row=3, column=1, sticky="w", pady=2)
         ttk.Label(frame, text="P2").grid(row=3, column=2, sticky="e", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_p2_var, width=18).grid(row=3, column=3, sticky="w", pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_p2_var, width=18, state="readonly").grid(row=3, column=3, sticky="w", pady=2)
         ttk.Label(frame, text="P3").grid(row=4, column=0, sticky="e", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_p3_var, width=18).grid(row=4, column=1, sticky="w", pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_p3_var, width=18, state="readonly").grid(row=4, column=1, sticky="w", pady=2)
         ttk.Label(frame, text="P4").grid(row=4, column=2, sticky="e", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_p4_var, width=18).grid(row=4, column=3, sticky="w", pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_p4_var, width=18, state="readonly").grid(row=4, column=3, sticky="w", pady=2)
         ttk.Label(frame, text="Known length (m)").grid(row=5, column=0, sticky="w", padx=4, pady=2)
         ttk.Entry(frame, textvariable=self.run3_perspective_length_var, width=18).grid(row=5, column=1, sticky="w", pady=2)
         ttk.Label(frame, text="Known width (m)").grid(row=5, column=2, sticky="e", padx=4, pady=2)
@@ -943,42 +963,55 @@ class Run1App:
         ttk.Checkbutton(frame, text="Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=7, column=3, sticky="w")
         ttk.Checkbutton(frame, text="PET", variable=self.run3_pet_enabled_var).grid(row=8, column=1, sticky="w")
 
-        ttk.Label(frame, text="Waiting detection speed threshold (km/h)").grid(row=8, column=2, sticky="e", padx=(12, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_waiting_speed_threshold_var, width=18).grid(row=8, column=3, sticky="w", pady=4)
-        ttk.Label(frame, text="Road direction angle (deg) — implementation").grid(row=9, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=9, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="LC longitudinal window (m) — implementation").grid(row=9, column=2, sticky="e", padx=(12, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_lc_longitudinal_window_var, width=18).grid(row=9, column=3, sticky="w", pady=4)
-        ttk.Label(frame, text="PET interaction distance (m) — implementation").grid(row=10, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_pet_interaction_distance_var, width=18).grid(row=10, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="PET threshold (s)").grid(row=10, column=2, sticky="e", padx=(12, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_pet_threshold_var, width=18).grid(row=10, column=3, sticky="w", pady=4)
+        ttk.Label(frame, text="Speed — Approach Zones (Y1)").grid(row=8, column=0, sticky="w", padx=(0,8), pady=2)
+        for i,z in enumerate((1,2,4)):
+            ttk.Checkbutton(frame, text=str(z), variable=self.run3_speed_approach_zone_vars[z]).grid(row=8, column=1+i, sticky="w", padx=(2,8), pady=2)
+        ttk.Label(frame, text="Speed — Exit Zones (Y2)").grid(row=9, column=0, sticky="w", padx=(0,8), pady=2)
+        for i,z in enumerate((1,3,5)):
+            ttk.Checkbutton(frame, text=str(z), variable=self.run3_speed_exit_zone_vars[z]).grid(row=9, column=1+i, sticky="w", padx=(2,8), pady=2)
+        ttk.Label(frame, text="Lateral Clearance Zones").grid(row=10, column=0, sticky="w", padx=(0,8), pady=2)
+        for i,z in enumerate(range(1,7)):
+            ttk.Checkbutton(frame, text=str(z), variable=self.run3_lc_zone_vars[z]).grid(row=10, column=1+(i//3), sticky="w", padx=(2,2), pady=2)
+        ttk.Label(frame, text="Middle / Access Zone (PET)").grid(row=10, column=2, sticky="e", padx=(12,8), pady=2)
+        ttk.Checkbutton(frame, text="6", variable=self.run3_pet_zone6_var).grid(row=10, column=3, sticky="w", padx=(2,2), pady=2)
 
-        ttk.Separator(frame, orient="horizontal").grid(row=11, column=0, columnspan=4, sticky="ew", pady=(8, 6))
-        ttk.Label(frame, text="Gap Acceptance — Subject Movement").grid(row=12, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Checkbutton(frame, text="1 → 3", variable=self.run3_gap_movement_13_var).grid(row=12, column=1, sticky="w")
-        ttk.Checkbutton(frame, text="1 → 5", variable=self.run3_gap_movement_15_var).grid(row=12, column=2, sticky="w")
-        ttk.Checkbutton(frame, text="4 → 1", variable=self.run3_gap_movement_41_var).grid(row=12, column=3, sticky="w")
-        ttk.Label(frame, text="Critical Gap").grid(row=13, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Checkbutton(frame, text="Raff", variable=self.run3_use_raff_var).grid(row=13, column=1, sticky="w")
-        ttk.Checkbutton(frame, text="MLE", variable=self.run3_use_mle_var).grid(row=13, column=2, sticky="w")
+        ttk.Label(frame, text="Waiting detection speed threshold (km/h)").grid(row=11, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_waiting_speed_threshold_var, width=18).grid(row=11, column=1, sticky="w", pady=4)
+        ttk.Label(frame, text="Road direction angle (deg) — implementation").grid(row=11, column=2, sticky="e", padx=(12, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=11, column=3, sticky="w", pady=4)
+        ttk.Label(frame, text="LC longitudinal window (m) — implementation").grid(row=12, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_lc_longitudinal_window_var, width=18).grid(row=12, column=1, sticky="w", pady=4)
+        ttk.Label(frame, text="PET interaction distance (m) — implementation").grid(row=12, column=2, sticky="e", padx=(12, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_pet_interaction_distance_var, width=18).grid(row=12, column=3, sticky="w", pady=4)
+        ttk.Label(frame, text="PET threshold (s)").grid(row=13, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_pet_threshold_var, width=18).grid(row=13, column=1, sticky="w", pady=4)
 
-        ttk.Label(frame, text="Reference Line Mapping (copy/paste): Site_ID|Movement|Line N").grid(row=14, column=0, columnspan=3, sticky="w", pady=(4, 2))
-        ttk.Button(frame, text="Copy Template", command=self.copy_run3_mapping_template).grid(row=14, column=3, sticky="e", pady=(4, 2))
+        ttk.Separator(frame, orient="horizontal").grid(row=14, column=0, columnspan=4, sticky="ew", pady=(8, 6))
+        ttk.Label(frame, text="Gap Acceptance — Subject Movement").grid(row=15, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Checkbutton(frame, text="1 → 3", variable=self.run3_gap_movement_13_var).grid(row=15, column=1, sticky="w")
+        ttk.Checkbutton(frame, text="1 → 5", variable=self.run3_gap_movement_15_var).grid(row=15, column=2, sticky="w")
+        ttk.Checkbutton(frame, text="4 → 1", variable=self.run3_gap_movement_41_var).grid(row=15, column=3, sticky="w")
+        ttk.Label(frame, text="Critical Gap").grid(row=16, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Checkbutton(frame, text="Raff", variable=self.run3_use_raff_var).grid(row=16, column=1, sticky="w")
+        ttk.Checkbutton(frame, text="MLE", variable=self.run3_use_mle_var).grid(row=16, column=2, sticky="w")
+
+        ttk.Label(frame, text="Reference Line Mapping (copy/paste): Site_ID|Movement|Line N").grid(row=17, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Button(frame, text="Copy Template", command=self.copy_run3_mapping_template).grid(row=17, column=3, sticky="e", pady=(4, 2))
         self.run3_reference_text = tk.Text(frame, height=6, width=90, wrap="none")
-        self.run3_reference_text.grid(row=15, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        self.run3_reference_text.grid(row=18, column=0, columnspan=4, sticky="ew", pady=(0, 6))
         self.run3_reference_text.insert("1.0", self.run3_reference_mapping_text)
 
-        ttk.Label(frame, text="Vehicle Widths (m) — source values supplied by researcher").grid(row=16, column=0, columnspan=4, sticky="w", pady=(2, 4))
+        ttk.Label(frame, text="Vehicle Widths (m) — source values supplied by researcher").grid(row=19, column=0, columnspan=4, sticky="w", pady=(2, 4))
         width_pairs = [("Bus", 0), ("Car", 2), ("Motorcycle", 0), ("Pickup", 2), ("Sidecar", 0), ("Truck", 2), ("Van", 0)]
         for idx, (name, pair_col) in enumerate(width_pairs):
-            row = 17 + idx // 2
+            row = 20 + idx // 2
             ttk.Label(frame, text=name).grid(row=row, column=pair_col, sticky="e", padx=(4, 4), pady=2)
             ttk.Entry(frame, textvariable=self.run3_width_vars[name], width=10).grid(row=row, column=pair_col + 1, sticky="w", padx=(0, 8), pady=2)
 
-        ttk.Label(frame, text="Perspective: กดปุ่มด้านบนเพื่อเปิดภาพและคลิก P1→P2→P3→P4; โปรแกรมจะเติมพิกัดให้เอง จากนั้นกรอกระยะจริง Length/Width แล้วกด Apply.", foreground="#666666").grid(row=21, column=0, columnspan=4, sticky="w", pady=(6, 2))
-        ttk.Label(frame, text="Default preset: Site 8 + PPM 57.822. Perspective correction จะเริ่มทำงานเมื่อ Calibration ครบ.", foreground="#666666").grid(row=22, column=0, columnspan=4, sticky="w", pady=(2, 2))
-        ttk.Label(frame, textvariable=self.run3_result_text, foreground="#444444").grid(row=23, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        ttk.Label(frame, text="LC/PET ใช้จุดที่สังเกตจริงและจับคู่เวลาที่ใกล้กัน โดยไม่ interpolation. Gap ใช้ timestamp ของเฟรมที่สังเกตว่าข้ามเส้นจริง.", foreground="#666666").grid(row=27, column=0, columnspan=4, sticky="w", pady=(6, 2))
+        ttk.Label(frame, text="Perspective: กดปุ่มด้านบนเพื่อเปิดภาพและคลิก P1→P2→P3→P4; โปรแกรมจะเติมพิกัดให้เอง จากนั้นกรอกระยะจริง Length/Width แล้วกด Apply.", foreground="#666666").grid(row=28, column=0, columnspan=4, sticky="w", pady=(2, 2))
+        ttk.Label(frame, text="Default: Speed Approach 1,2,4 | Speed Exit 1,3,5 | LC 2,4 | PET Zone 6", foreground="#666666").grid(row=29, column=0, columnspan=4, sticky="w", pady=(2, 2))
+        ttk.Label(frame, textvariable=self.run3_result_text, foreground="#444444").grid(row=30, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
     # ========================================================
     # INTEGRATED ZONE / LINE MEASUREMENT
@@ -1708,28 +1741,36 @@ class Run1App:
         ttk.Checkbutton(frame, text="Conf", variable=self.show_label_conf_var).grid(row=9, column=3, sticky="w", pady=4)
         ttk.Checkbutton(frame, text="Zone", variable=self.show_label_zone_var).grid(row=10, column=1, sticky="w", pady=4)
         ttk.Checkbutton(frame, text="Speed", variable=self.show_label_speed_var).grid(row=10, column=2, sticky="w", pady=4)
+        ttk.Checkbutton(frame, text="กรอบวัตถุ", variable=self.show_bbox_var).grid(row=10, column=3, sticky="w", pady=4)
+
+        ttk.Label(frame, text="แสดงชื่อกำกับแต่ละค่า").grid(row=11, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Checkbutton(frame, text="ID", variable=self.show_prefix_id_var).grid(row=11, column=1, sticky="w", pady=4)
+        ttk.Checkbutton(frame, text="Class", variable=self.show_prefix_class_var).grid(row=11, column=2, sticky="w", pady=4)
+        ttk.Checkbutton(frame, text="Conf", variable=self.show_prefix_conf_var).grid(row=11, column=3, sticky="w", pady=4)
+        ttk.Checkbutton(frame, text="Zone", variable=self.show_prefix_zone_var).grid(row=12, column=1, sticky="w", pady=4)
+        ttk.Checkbutton(frame, text="Speed", variable=self.show_prefix_speed_var).grid(row=12, column=2, sticky="w", pady=4)
 
         ttk.Label(frame, text="ความจาง %").grid(
-            row=11, column=0, sticky="w", padx=(0, 8), pady=4
+            row=13, column=0, sticky="w", padx=(0, 8), pady=4
         )
         ttk.Spinbox(
             frame, from_=0, to=100, increment=5,
             textvariable=self.zone_overlay_opacity_var, width=7
-        ).grid(row=11, column=1, sticky="w", pady=4)
+        ).grid(row=13, column=1, sticky="w", pady=4)
         ttk.Label(
             frame, text="0 = ไม่เห็น | 100 = ชัดสุด", foreground="#666666"
-        ).grid(row=11, column=2, columnspan=2, sticky="w", pady=4)
+        ).grid(row=13, column=2, columnspan=2, sticky="w", pady=4)
 
         ttk.Label(
             frame,
             text="Zone ใช้ Trajectory Position เป็นจุดตัดสิน | ไม่มีพื้นหลังใต้ชื่อ Zone",
             foreground="#666666"
-        ).grid(row=12, column=1, columnspan=3, sticky="w", pady=(0, 2))
+        ).grid(row=14, column=1, columnspan=3, sticky="w", pady=(0, 2))
 
         ttk.Label(
             frame, textvariable=self.measurement_status_var,
             foreground="#666666", anchor="w"
-        ).grid(row=13, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ).grid(row=15, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         self.update_trajectory_position_controls()
 
@@ -2257,6 +2298,12 @@ class Run1App:
             "show_label_conf": self.show_label_conf_var.get(),
             "show_label_zone": self.show_label_zone_var.get(),
             "show_label_speed": self.show_label_speed_var.get(),
+            "show_bbox": self.show_bbox_var.get(),
+            "show_prefix_id": self.show_prefix_id_var.get(),
+            "show_prefix_class": self.show_prefix_class_var.get(),
+            "show_prefix_conf": self.show_prefix_conf_var.get(),
+            "show_prefix_zone": self.show_prefix_zone_var.get(),
+            "show_prefix_speed": self.show_prefix_speed_var.get(),
             "run3": {
                 "site_id": self.run3_site_id_var.get(),
                 "speed_enabled": self.run3_speed_enabled_var.get(),
@@ -2276,6 +2323,10 @@ class Run1App:
                 "lc_longitudinal_window_m": self.run3_lc_longitudinal_window_var.get(),
                 "pet_interaction_distance_m": self.run3_pet_interaction_distance_var.get(),
                 "pet_threshold_s": self.run3_pet_threshold_var.get(),
+                "speed_approach_zones": [z for z,v in self.run3_speed_approach_zone_vars.items() if v.get()],
+                "speed_exit_zones": [z for z,v in self.run3_speed_exit_zone_vars.items() if v.get()],
+                "lc_zones": [z for z,v in self.run3_lc_zone_vars.items() if v.get()],
+                "pet_zone6": self.run3_pet_zone6_var.get(),
                 "gap_movement_13": self.run3_gap_movement_13_var.get(),
                 "gap_movement_15": self.run3_gap_movement_15_var.get(),
                 "gap_movement_41": self.run3_gap_movement_41_var.get(),
@@ -2364,6 +2415,12 @@ class Run1App:
             ("show_label_conf", self.show_label_conf_var),
             ("show_label_zone", self.show_label_zone_var),
             ("show_label_speed", self.show_label_speed_var),
+            ("show_bbox", self.show_bbox_var),
+            ("show_prefix_id", self.show_prefix_id_var),
+            ("show_prefix_class", self.show_prefix_class_var),
+            ("show_prefix_conf", self.show_prefix_conf_var),
+            ("show_prefix_zone", self.show_prefix_zone_var),
+            ("show_prefix_speed", self.show_prefix_speed_var),
         ]
 
         for key, variable in pairs:
@@ -2400,6 +2457,15 @@ class Run1App:
             for key, variable in mapping_pairs:
                 if key in run3:
                     variable.set(run3[key])
+            if "pet_zone6" in run3:
+                self.run3_pet_zone6_var.set(bool(run3.get("pet_zone6")))
+            for z in range(1, 7):
+                if "speed_approach_zones" in run3:
+                    self.run3_speed_approach_zone_vars[z].set(z in set(run3.get("speed_approach_zones", [])))
+                if "speed_exit_zones" in run3:
+                    self.run3_speed_exit_zone_vars[z].set(z in set(run3.get("speed_exit_zones", [])))
+                if "lc_zones" in run3:
+                    self.run3_lc_zone_vars[z].set(z in set(run3.get("lc_zones", [])))
             self.run3_reference_mapping_text = str(run3.get("reference_line_mapping", "") or "")
             if hasattr(self, "run3_reference_text"):
                 self.run3_reference_text.delete("1.0", "end")
@@ -2620,6 +2686,7 @@ class Run1App:
             "offset_y": 0,
             "image_w": width,
             "image_h": height,
+            "drag_index": None,
         }
 
         controls = ttk.Frame(top, padding=8)
@@ -2640,6 +2707,10 @@ class Run1App:
         ttk.Label(controls, text="Known Width P2→P3 (m)").grid(row=2, column=4, sticky="e", padx=(15,5), pady=(6,0))
         width_var = tk.StringVar(value=str(self.run3_perspective_width_var.get() or ""))
         ttk.Entry(controls, textvariable=width_var, width=10).grid(row=2, column=5, sticky="w", pady=(6,0))
+
+        ppm_calc_var = tk.StringVar(value="Calculated PPM: -")
+        ttk.Label(controls, textvariable=ppm_calc_var, foreground="#155a8a").grid(row=3, column=4, columnspan=2, sticky="w", pady=(6,0))
+        ttk.Label(controls, text="เลือก P1→P2→P3→P4 แล้วสามารถลากจุดเพื่อปรับได้ | ระยะจริง P1→P2 จะใช้คำนวณ PPM", foreground="#555555").grid(row=3, column=0, columnspan=4, sticky="w", pady=(6,0))
 
         point_text_var = tk.StringVar(value="ยังไม่ได้เลือกจุด")
         ttk.Label(controls, textvariable=point_text_var, foreground="#555555").grid(row=2, column=0, columnspan=4, sticky="w", pady=(6,0))
@@ -2685,6 +2756,15 @@ class Run1App:
             canvas.create_image(state["offset_x"], state["offset_y"], anchor="nw", image=photo)
             canvas.create_text(10, 10, anchor="nw", text=f"Frame {state['frame_index']+1} | Image {w}×{h}", fill="white", font=("Segoe UI", 10, "bold"))
             point_text_var.set("  ".join(f"P{i+1}=({x:.1f},{y:.1f})" for i,(x,y) in enumerate(state["points"])) if state["points"] else "ยังไม่ได้เลือกจุด")
+            try:
+                known_len = float(length_var.get().strip())
+                if len(state["points"]) >= 2 and known_len > 0:
+                    px_len = math.hypot(state["points"][1][0]-state["points"][0][0], state["points"][1][1]-state["points"][0][1])
+                    ppm_calc_var.set(f"Calculated PPM: {px_len / known_len:.6f} pixel/m")
+                else:
+                    ppm_calc_var.set("Calculated PPM: -")
+            except Exception:
+                ppm_calc_var.set("Calculated PPM: -")
 
         def load_frame():
             try:
@@ -2708,18 +2788,40 @@ class Run1App:
             state["points"] = []
             render()
 
-        def on_click(event):
-            if len(state["points"]) >= 4:
-                return
+        def event_to_image(event):
             sx = state["scale"]
             ox = state["offset_x"]
             oy = state["offset_y"]
             x = (event.x - ox) / sx
             y = (event.y - oy) / sx
+            return float(x), float(y)
+
+        def on_click(event):
+            x, y = event_to_image(event)
             if x < 0 or y < 0 or x > state["image_w"] or y > state["image_h"]:
                 return
-            state["points"].append((float(x), float(y)))
+            if len(state["points"]) >= 4:
+                candidates = [(i, math.hypot(px-x, py-y)) for i,(px,py) in enumerate(state["points"])]
+                i, d = min(candidates, key=lambda q: q[1])
+                if d <= max(12.0 / max(state["scale"], 1e-6), 20.0):
+                    state["drag_index"] = i
+                    return
+            if len(state["points"]) < 4:
+                state["points"].append((x, y))
+                render()
+
+        def on_drag(event):
+            idx = state.get("drag_index")
+            if idx is None or idx >= len(state["points"]):
+                return
+            x, y = event_to_image(event)
+            x = max(0.0, min(float(state["image_w"]), x))
+            y = max(0.0, min(float(state["image_h"]), y))
+            state["points"][idx] = (x, y)
             render()
+
+        def on_release(event):
+            state["drag_index"] = None
 
         def apply_calibration():
             if len(state["points"]) != 4:
@@ -2757,6 +2859,9 @@ class Run1App:
             self.run3_perspective_length_var.set(f"{length:g}")
             self.run3_perspective_width_var.set(f"{width_m:g}")
             self.run3_perspective_enabled_var.set(True)
+            px_len = math.hypot(state["points"][1][0]-state["points"][0][0], state["points"][1][1]-state["points"][0][1])
+            if length > 0 and px_len > 0:
+                self.run3_ppm_var.set(f"{px_len / length:.6f}")
             self.run3_result_text.set(f"Perspective calibrated: Frame {state['frame_index']+1}, {state['image_w']}×{state['image_h']} | P1–P4 saved automatically")
 
             # Save a site-specific calibration JSON beside the selected output when possible.
@@ -2792,6 +2897,8 @@ class Run1App:
             render()
 
         canvas.bind("<Button-1>", on_click)
+        canvas.bind("<B1-Motion>", on_drag)
+        canvas.bind("<ButtonRelease-1>", on_release)
         canvas.bind("<Configure>", on_resize)
         ttk.Button(controls, text="✅ Apply Calibration", command=apply_calibration).grid(row=2, column=2, padx=5, pady=(6,0))
         ttk.Button(controls, text="Cancel", command=lambda: (cap.release(), top.grab_release(), top.destroy())).grid(row=2, column=3, padx=5, pady=(6,0))
@@ -2908,6 +3015,12 @@ class Run1App:
 
         if self.run3_speed_enabled_var.get() or self.run3_lc_enabled_var.get():
             self._run3_float(self.run3_ppm_var.get(), "PPM")
+        if self.run3_speed_enabled_var.get():
+            if not any(v.get() for v in self.run3_speed_approach_zone_vars.values()) and not any(v.get() for v in self.run3_speed_exit_zone_vars.values()):
+                raise ValueError("Select at least one Speed analysis Zone.")
+        if self.run3_lc_enabled_var.get():
+            if not any(v.get() for v in self.run3_lc_zone_vars.values()):
+                raise ValueError("Select at least one Lateral Clearance Zone.")
 
         if self.run3_gap_enabled_var.get():
             if not any([
@@ -4098,13 +4211,14 @@ class Run1App:
                             )
 
                             if show_object:
-                                cv2.rectangle(
-                                    frame,
-                                    (x1, y1),
-                                    (x2, y2),
-                                    (0, 255, 0),
-                                    2
-                                )
+                                if self.show_bbox_var.get():
+                                    cv2.rectangle(
+                                        frame,
+                                        (x1, y1),
+                                        (x2, y2),
+                                        (0, 255, 0),
+                                        2
+                                    )
 
                                 if (
                                     settings["draw_trail"]
@@ -4129,16 +4243,21 @@ class Run1App:
                                     live_speed = zone_track_state.get(track_id, {}).get("live_speed_kmh")
                                     parts = []
                                     if self.show_label_id_var.get():
-                                        parts.append(f"ID {track_id}")
+                                        value = str(track_id)
+                                        parts.append(f"ID {value}" if self.show_prefix_id_var.get() else value)
                                     if self.show_label_class_var.get():
-                                        parts.append(str(class_name))
+                                        value = str(class_id)
+                                        parts.append(f"Class {value}" if self.show_prefix_class_var.get() else value)
                                     if self.show_label_conf_var.get():
-                                        parts.append(f"Conf {confidence:.2f}")
+                                        value = f"{confidence:.2f}"
+                                        parts.append(f"Conf {value}" if self.show_prefix_conf_var.get() else value)
                                     if self.show_label_zone_var.get():
-                                        parts.append(str(confirmed_label))
+                                        zn = re.search(r"(\d+)", str(confirmed_label or ""))
+                                        value = zn.group(1) if zn else "-"
+                                        parts.append(f"Zone {value}" if self.show_prefix_zone_var.get() else value)
                                     if self.show_label_speed_var.get():
-                                        speed_text = f"Speed {live_speed:.1f} km/h" if live_speed is not None else "Speed --.- km/h"
-                                        parts.append(speed_text)
+                                        value = f"{live_speed:.1f}" if live_speed is not None else "-"
+                                        parts.append(f"Speed {value}" if self.show_prefix_speed_var.get() else value)
                                     label = " | ".join(parts)
                                     if label:
                                         label_y = max(y1 - 10, 20)
@@ -4808,7 +4927,14 @@ class Run1App:
 
     @staticmethod
     def _run3_movement_from_sequence(sequence):
+        """Identify the study movement from Zone Sequence.
+
+        Zone 6 is the conflict/search area and is intentionally ignored when
+        identifying the movement endpoints, so sequences such as 1→6→3 still
+        resolve to 1→3. No temporal interpolation is involved here.
+        """
         seq = Run1App._run3_parse_zone_sequence(sequence)
+        seq = [n for n in seq if n != 6]
         supported = {
             (1, 3): "1→3",
             (1, 5): "1→5",
@@ -4866,6 +4992,10 @@ class Run1App:
 
     @staticmethod
     def _run3_line_crossing_time(prev_point, prev_t, curr_point, curr_t, line):
+        """Return the timestamp of an observed sample that first crosses the line.
+        No temporal interpolation is used. The event time is therefore quantized
+        to an actually observed frame, consistent with the requested no-interpolation rule.
+        """
         if not prev_point or not curr_point or len(line) < 2:
             return None
         a, b = line[0], line[1]
@@ -4879,8 +5009,7 @@ class Run1App:
         if s1 == 0:
             return curr_t
         if (s0 < 0 < s1) or (s0 > 0 > s1):
-            u = abs(s0) / (abs(s0) + abs(s1))
-            return prev_t + u * (curr_t - prev_t)
+            return curr_t
         return None
 
     def _run3_load_inputs(self, output_dir, run_name):
@@ -4951,6 +5080,12 @@ class Run1App:
         return tracks, summaries
 
     def _run3_speed(self, tracks, ppm, perspective=None):
+        """Compute speed separately for every user-selected approach/exit Zone.
+        No interpolation is used; only observed trajectory samples are used.
+        """
+        approach_zones = [z for z,v in self.run3_speed_approach_zone_vars.items() if v.get()]
+        exit_zones = [z for z,v in self.run3_speed_exit_zone_vars.items() if v.get()]
+        selected = [(z, "Y1", "Approach") for z in approach_zones] + [(z, "Y2", "Exit") for z in exit_zones]
         results = []
         for tid, rows in tracks.items():
             if not rows:
@@ -4958,8 +5093,7 @@ class Run1App:
             cls = rows[0].get("class_name", "")
             if str(cls).lower() == "person":
                 continue
-            metrics = {}
-            for zone, label in [(2, "Y1"), (4, "Y1"), (3, "Y2"), (5, "Y2")]:
+            for zone, variable, speed_type in selected:
                 zr = [r for r in rows if r.get("_zone_num") == zone and r.get("_point") is not None]
                 if len(zr) < 2:
                     continue
@@ -4972,29 +5106,20 @@ class Run1App:
                 if dt <= 0 or d_m <= 0:
                     continue
                 speed_kmh = d_m / dt * 3.6
-                if label not in metrics:
-                    metrics[label] = {"zone": f"Zone {zone}", "start": zr[0]["_timestamp"], "end": zr[-1]["_timestamp"], "distance": d_m, "speed": speed_kmh}
-            y1 = metrics.get("Y1")
-            y2 = metrics.get("Y2")
-            if not y1 and not y2:
-                continue
-            delta = (y2["speed"]-y1["speed"]) if y1 and y2 else None
-            results.append({
-                "Site_ID": self.run3_site_id_var.get().strip(),
-                "Vehicle_ID": tid, "Vehicle_Class": cls,
-                "Approach_Zone": y1["zone"] if y1 else "", "Exit_Zone": y2["zone"] if y2 else "",
-                "Approach_Start_Time": "" if not y1 else f"{y1['start']:.6f}",
-                "Approach_End_Time": "" if not y1 else f"{y1['end']:.6f}",
-                "Approach_Distance_m": "" if not y1 else f"{y1['distance']:.6f}",
-                "Y1_Approach_Speed": "" if not y1 else f"{y1['speed']:.6f}",
-                "Exit_Start_Time": "" if not y2 else f"{y2['start']:.6f}",
-                "Exit_End_Time": "" if not y2 else f"{y2['end']:.6f}",
-                "Exit_Distance_m": "" if not y2 else f"{y2['distance']:.6f}",
-                "Y2_Exit_Speed": "" if not y2 else f"{y2['speed']:.6f}",
-                "Delta_Speed": "" if delta is None else f"{delta:.6f}",
-                "Calibration_Mode": "Perspective_Homography" if perspective is not None else "PPM_Only",
-                "QC_Flag": "Incomplete_Y1_or_Y2" if (not y1 or not y2) else ("Perspective_Not_Calibrated" if bool(self.run3_perspective_enabled_var.get()) and perspective is None else ""),
-            })
+                results.append({
+                    "Site_ID": self.run3_site_id_var.get().strip(),
+                    "Vehicle_ID": tid,
+                    "Vehicle_Class": cls,
+                    "Speed_Variable": variable,
+                    "Speed_Type": speed_type,
+                    "Zone": str(zone),
+                    "Start_Time": f"{zr[0]['_timestamp']:.6f}",
+                    "End_Time": f"{zr[-1]['_timestamp']:.6f}",
+                    "Distance_m": f"{d_m:.6f}",
+                    "Speed_kmh": f"{speed_kmh:.6f}",
+                    "Calibration_Mode": "Perspective_Homography" if perspective is not None else "PPM_Only",
+                    "QC_Flag": "" if not (self.run3_perspective_enabled_var.get() and perspective is None) else "Perspective_Not_Calibrated",
+                })
         return results
 
     def copy_run3_mapping_template(self):
@@ -5084,7 +5209,13 @@ class Run1App:
                 step_kmh = (math.hypot(r["_point"][0]-prev["_point"][0], r["_point"][1]-prev["_point"][1])) / max(1e-9, 1.0) / dt
                 # step_kmh above is pixel/s only; convert to km/h via PPM below.
                 ppm = float(self.run3_ppm_var.get())
-                step_kmh = (math.hypot(r["_point"][0]-prev["_point"][0], r["_point"][1]-prev["_point"][1]) / ppm) / dt * 3.6
+                persp = self._run3_get_perspective_matrix(silent=True)
+                if persp is not None:
+                    p0 = self._run3_transform_point(prev["_point"], persp); p1 = self._run3_transform_point(r["_point"], persp)
+                    step_m = math.hypot(p1[0]-p0[0], p1[1]-p0[1])
+                else:
+                    step_m = math.hypot(r["_point"][0]-prev["_point"][0], r["_point"][1]-prev["_point"][1]) / ppm
+                step_kmh = step_m / dt * 3.6
                 if step_kmh <= wait_threshold:
                     wr.append(r)
             if not wr:
@@ -5097,7 +5228,13 @@ class Run1App:
                     dt = cur["_timestamp"] - prev["_timestamp"]
                     if dt <= 0:
                         continue
-                    speed = (math.hypot(cur["_point"][0]-prev["_point"][0], cur["_point"][1]-prev["_point"][1]) / float(self.run3_ppm_var.get())) / dt * 3.6
+                    persp = self._run3_get_perspective_matrix(silent=True)
+                    if persp is not None:
+                        p0 = self._run3_transform_point(prev["_point"], persp); p1 = self._run3_transform_point(cur["_point"], persp)
+                        step_m = math.hypot(p1[0]-p0[0], p1[1]-p0[1])
+                    else:
+                        step_m = math.hypot(cur["_point"][0]-prev["_point"][0], cur["_point"][1]-prev["_point"][1]) / float(self.run3_ppm_var.get())
+                    speed = step_m / dt * 3.6
                     if speed > wait_threshold:
                         accepted_time = cur["_timestamp"]
                         break
@@ -5248,7 +5385,8 @@ class Run1App:
             cls_a = self._run3_canonical_class(rows_a[0].get("class_name", "")) if rows_a else ""
             if not rows_a or cls_a != "Motorcycle":
                 continue
-            a_obs = [r for r in rows_a if r.get("_center") is not None and r.get("_zone_num") in (2,4)]
+            selected_lc_zones = {z for z,v in self.run3_lc_zone_vars.items() if v.get()}
+            a_obs = [r for r in rows_a if r.get("_center") is not None and r.get("_zone_num") in selected_lc_zones]
             if not a_obs:
                 continue
             for tid_b, rows_b in tracks.items():
@@ -5257,7 +5395,7 @@ class Run1App:
                 cls_b = self._run3_canonical_class(rows_b[0].get("class_name", ""))
                 if cls_b not in widths:
                     continue
-                b_obs = [r for r in rows_b if r.get("_center") is not None and r.get("_zone_num") in (2,4)]
+                b_obs = [r for r in rows_b if r.get("_center") is not None and r.get("_zone_num") in selected_lc_zones]
                 if not b_obs:
                     continue
                 for r_a in a_obs:
@@ -5334,93 +5472,94 @@ class Run1App:
         return "Merging/Diverging"
 
     def _run3_pet(self, tracks, summaries, ppm, axis_deg, interaction_distance_m, perspective=None):
-        candidates = []
-        diag = {"zone6_tracks": 0, "movement_identified": 0, "pairs_considered": 0, "same_movement_excluded": 0, "interaction_candidates": 0}
-        ids = list(tracks)
-        diag["zone6_tracks"] = sum(1 for tid in ids if any(r.get("_zone_num") == 6 and r.get("_point") is not None for r in tracks[tid]))
-        movement_by_id = {tid: self._run3_movement_from_sequence(summaries.get(tid, {}).get("zone_sequence", "")) if tid in summaries else "" for tid in ids}
-        for i, a_id in enumerate(ids):
+        """PET using observed trajectory samples only.
+        Spatial segment intersection is used to find a candidate interaction point,
+        but event timestamps come only from actual observed frames (nearest observed
+        sample to the interaction point), with no temporal interpolation.
+        """
+        candidates=[]
+        diag={"zone6_tracks":0,"movement_identified":0,"pairs_considered":0,"same_movement_excluded":0,"interaction_candidates":0,"fallback_close_pairs":0,"overlap_intervals":0,"insufficient_samples":0}
+        ids=list(tracks)
+        movement_by_id={tid:self._run3_movement_from_sequence(summaries.get(tid,{}).get("zone_sequence", "")) if tid in summaries else "" for tid in ids}
+        for tid in ids:
+            if any(self.run3_pet_zone6_var.get() and r.get("_zone_num")==6 and r.get("_point") is not None for r in tracks[tid]):
+                diag["zone6_tracks"]+=1
+        def mp(r):
+            return self._run3_transform_point(r["_point"], perspective) if perspective is not None else r["_point"]
+        for i,a_id in enumerate(ids):
             for b_id in ids[i+1:]:
-                a_rows = [r for r in tracks[a_id] if r.get("_zone_num") == 6 and r.get("_point") is not None]
-                b_rows = [r for r in tracks[b_id] if r.get("_zone_num") == 6 and r.get("_point") is not None]
-                if len(a_rows) < 2 or len(b_rows) < 2:
-                    continue
-                ma = movement_by_id.get(a_id, ""); mb = movement_by_id.get(b_id, "")
-                if ma: diag["movement_identified"] += 1
-                if mb: diag["movement_identified"] += 1
-                diag["pairs_considered"] += 1
-                if not ma and not mb:
-                    continue
-                # Exclude simple same-direction movement pairs.
-                if ma and mb and ma == mb:
-                    diag["same_movement_excluded"] += 1
-                    continue
-                best = None
-                for ra0, ra1 in zip(a_rows, a_rows[1:]):
-                    for rb0, rb1 in zip(b_rows, b_rows[1:]):
-                        a0 = self._run3_transform_point(ra0["_point"], perspective) if perspective is not None else ra0["_point"]
-                        a1 = self._run3_transform_point(ra1["_point"], perspective) if perspective is not None else ra1["_point"]
-                        b0 = self._run3_transform_point(rb0["_point"], perspective) if perspective is not None else rb0["_point"]
-                        b1 = self._run3_transform_point(rb1["_point"], perspective) if perspective is not None else rb1["_point"]
-                        hit = self._run3_segment_intersection(a0, a1, b0, b1)
-                        if hit:
-                            ta_frac, tb_frac, ip = hit
-                            ta = ra0["_timestamp"] + ta_frac*(ra1["_timestamp"]-ra0["_timestamp"])
-                            tb = rb0["_timestamp"] + tb_frac*(rb1["_timestamp"]-rb0["_timestamp"])
-                            diag["interaction_candidates"] += 1
-                            best = (ta, tb, ip, self._run3_conflict_type(ma, mb, trajectory_intersects=True))
-                            break
-                    if best:
-                        break
+                a_rows=[r for r in tracks[a_id] if self.run3_pet_zone6_var.get() and r.get("_zone_num")==6 and r.get("_point") is not None]
+                b_rows=[r for r in tracks[b_id] if self.run3_pet_zone6_var.get() and r.get("_zone_num")==6 and r.get("_point") is not None]
+                if not a_rows or not b_rows:
+                    diag["insufficient_samples"]+=1; continue
+                ma=movement_by_id.get(a_id,""); mb=movement_by_id.get(b_id,"")
+                if ma: diag["movement_identified"]+=1
+                if mb: diag["movement_identified"]+=1
+                diag["pairs_considered"]+=1
+                if not ma and not mb: continue
+                if ma and mb and ma==mb:
+                    diag["same_movement_excluded"]+=1; continue
+
+                best=None
+                # Detect spatial intersection of observed trajectory segments.
+                for ra0,ra1 in zip(a_rows,a_rows[1:]):
+                    a0,a1=mp(ra0),mp(ra1)
+                    for rb0,rb1 in zip(b_rows,b_rows[1:]):
+                        b0,b1=mp(rb0),mp(rb1)
+                        hit=self._run3_segment_intersection(a0,a1,b0,b1)
+                        if hit is not None:
+                            _,_,ip=hit
+                            cand_a=min((ra0,ra1), key=lambda r: math.hypot(mp(r)[0]-ip[0], mp(r)[1]-ip[1]))
+                            cand_b=min((rb0,rb1), key=lambda r: math.hypot(mp(r)[0]-ip[0], mp(r)[1]-ip[1]))
+                            score=max(math.hypot(mp(cand_a)[0]-ip[0],mp(cand_a)[1]-ip[1]), math.hypot(mp(cand_b)[0]-ip[0],mp(cand_b)[1]-ip[1]))
+                            if best is None or score<best[0]:
+                                best=(score,cand_a,cand_b,ip,"Crossing")
+                # Fallback: closest observed pair within interaction radius.
                 if best is None:
-                    # Merging/Diverging: closest sampled trajectory points inside Zone 6.
-                    min_pair = None
                     for ra in a_rows:
+                        pa=mp(ra)
                         for rb in b_rows:
-                            if perspective is not None:
-                                pra = self._run3_transform_point(ra["_point"], perspective)
-                                prb = self._run3_transform_point(rb["_point"], perspective)
-                                dm = math.hypot(pra[0]-prb[0], pra[1]-prb[1])
-                            else:
-                                dpx = math.hypot(ra["_point"][0]-rb["_point"][0], ra["_point"][1]-rb["_point"][1])
-                                dm = dpx / ppm
-                            if dm <= interaction_distance_m and (min_pair is None or dm < min_pair[0]):
-                                min_pair = (dm, ra, rb)
-                    if min_pair:
-                        diag["interaction_candidates"] += 1
-                        _, ra, rb = min_pair
-                        best = (ra["_timestamp"], rb["_timestamp"], ((ra["_point"][0]+rb["_point"][0])/2, (ra["_point"][1]+rb["_point"][1])/2), self._run3_conflict_type(ma, mb, trajectory_intersects=False))
-                if best is None:
-                    continue
-                ta, tb, ip, ctype = best
-                if ta <= tb:
-                    first_id, second_id = a_id, b_id
-                    t_first, t_second = ta, tb
+                            pb=mp(rb)
+                            d=math.hypot(pa[0]-pb[0],pa[1]-pb[1])
+                            if d<=interaction_distance_m and (best is None or d<best[0]):
+                                best=(d,ra,rb,((pa[0]+pb[0])/2.0,(pa[1]+pb[1])/2.0),self._run3_conflict_type(ma,mb,False))
+                    if best is not None:
+                        diag["fallback_close_pairs"]+=1
+                if best is None: continue
+                diag["interaction_candidates"]+=1
+                _,ra_min,rb_min,ip,ctype=best
+
+                # Use observed points within the interaction radius of the chosen point.
+                def near_samples(rows):
+                    out=[]
+                    for r in rows:
+                        p=mp(r)
+                        if math.hypot(p[0]-ip[0],p[1]-ip[1])<=interaction_distance_m:
+                            out.append(r)
+                    return sorted(out,key=lambda r:r["_timestamp"])
+                a_near=near_samples(a_rows); b_near=near_samples(b_rows)
+                if not a_near or not b_near: continue
+                a_entry,a_exit=a_near[0]["_timestamp"],a_near[-1]["_timestamp"]
+                b_entry,b_exit=b_near[0]["_timestamp"],b_near[-1]["_timestamp"]
+                if a_exit<=b_entry:
+                    t1,t2=a_exit,b_entry
+                elif b_exit<=a_entry:
+                    t1,t2=b_exit,a_entry
                 else:
-                    first_id, second_id = b_id, a_id
-                    t_first, t_second = tb, ta
-                pet = t_second - t_first
-                if pet <= 0:
-                    continue
+                    diag["overlap_intervals"]+=1; continue
+                pet=t2-t1
+                if pet<=0: continue
                 candidates.append({
-                    "Site_ID": self.run3_site_id_var.get().strip(),
-                    "Interaction_ID": f"{a_id}_{b_id}_{min(ta,tb):.6f}",
-                    "Vehicle_ID_A": a_id,
-                    "Vehicle_Class_A": tracks[a_id][0].get("class_name", ""),
-                    "Movement_A": ma,
-                    "Vehicle_ID_B": b_id,
-                    "Vehicle_Class_B": tracks[b_id][0].get("class_name", ""),
-                    "Movement_B": mb,
-                    "Conflict_Type": ctype,
-                    "Conflict_Zone": "Zone 6",
-                    "Interaction_Start": f"{min(ta,tb):.6f}",
-                    "Interaction_End": f"{max(ta,tb):.6f}",
-                    "T1_Exit_Time": f"{t_first:.6f}",
-                    "T2_Entry_Time": f"{t_second:.6f}",
-                    "Y4_PET": f"{pet:.6f}",
-                    "QC_Flag": "Threshold_At_or_Below" if pet <= float(self.run3_pet_threshold_var.get()) else "",
+                    "Site_ID":self.run3_site_id_var.get().strip(),
+                    "Interaction_ID":f"{a_id}_{b_id}_{min(a_entry,b_entry):.6f}",
+                    "Vehicle_ID_A":a_id,"Vehicle_Class_A":tracks[a_id][0].get("class_name",""),"Movement_A":ma,
+                    "Vehicle_ID_B":b_id,"Vehicle_Class_B":tracks[b_id][0].get("class_name",""),"Movement_B":mb,
+                    "Conflict_Type":ctype,"Conflict_Zone":"Zone 6",
+                    "Interaction_Start":f"{min(a_entry,b_entry):.6f}","Interaction_End":f"{max(a_exit,b_exit):.6f}",
+                    "T1_Exit_Time":f"{t1:.6f}","T2_Entry_Time":f"{t2:.6f}","Y4_PET":f"{pet:.6f}",
+                    "QC_Flag":"Threshold_At_or_Below" if pet<=float(self.run3_pet_threshold_var.get()) else "",
                 })
-        return candidates, diag
+        return candidates,diag
 
     def run3_processing(self, settings, output_dir, run_name):
         self.root.after(0, lambda: self.status_var.set("Run 3 — loading Run 2 results..."))
@@ -5444,6 +5583,7 @@ class Run1App:
                 "zone_summary_rows": len(zone_rows),
                 "tracks_by_zone": {str(z): sum(1 for rows in tracks.values() if any(r.get("_zone_num") == z for r in rows)) for z in range(1,7)},
                 "movement_counts": {m: sum(1 for tid, sm in summaries.items() if self._run3_movement_from_sequence(sm.get("zone_sequence", "")) == m) for m in RUN3_ALL_MOVEMENTS},
+                "selected_zones": {"speed_approach": [z for z in range(1,7) if self.run3_speed_approach_zone_vars[z].get()], "speed_exit": [z for z in range(1,7) if self.run3_speed_exit_zone_vars[z].get()], "lateral_clearance": [z for z in range(1,7) if self.run3_lc_zone_vars[z].get()], "pet": [6] if self.run3_pet_zone6_var.get() else []},
             },
             "diagnostics": {},
         }
@@ -5463,13 +5603,12 @@ class Run1App:
                 ppm = float(self.run3_ppm_var.get())
                 speed_rows = self._run3_speed(tracks, ppm, perspective)
                 fields = [
-                    "Site_ID","Vehicle_ID","Vehicle_Class","Approach_Zone","Exit_Zone",
-                    "Approach_Start_Time","Approach_End_Time","Approach_Distance_m","Y1_Approach_Speed",
-                    "Exit_Start_Time","Exit_End_Time","Exit_Distance_m","Y2_Exit_Speed","Delta_Speed","Calibration_Mode","QC_Flag"
+                    "Site_ID","Vehicle_ID","Vehicle_Class","Speed_Variable","Speed_Type","Zone",
+                    "Start_Time","End_Time","Distance_m","Speed_kmh","Calibration_Mode","QC_Flag"
                 ]
                 path = write_csv("Run_3_Speed.csv", fields, speed_rows)
-                vals_y1 = [float(r["Y1_Approach_Speed"]) for r in speed_rows if r["Y1_Approach_Speed"] not in ("", None)]
-                vals_y2 = [float(r["Y2_Exit_Speed"]) for r in speed_rows if r["Y2_Exit_Speed"] not in ("", None)]
+                vals_y1 = [float(r["Speed_kmh"]) for r in speed_rows if r["Speed_Variable"] == "Y1"]
+                vals_y2 = [float(r["Speed_kmh"]) for r in speed_rows if r["Speed_Variable"] == "Y2"]
                 summary["speed"] = {
                     "Y1_P85": float(np.percentile(vals_y1,85)) if vals_y1 else None,
                     "Y2_P85": float(np.percentile(vals_y2,85)) if vals_y2 else None,
@@ -5524,7 +5663,7 @@ class Run1App:
                     "reference_mapping_rows": len(mapping),
                 }
                 if not mapping:
-                    summary["diagnostics"]["gap_acceptance"] = f"No Reference Line Mapping entered; CSV header only. Actual configured lines={sum(1 for v in self.lines.values() if len(v)==2)}. Enter actual Site_ID|Movement|Line N mappings to calculate X31/Y5/X32."
+                    summary["diagnostics"]["gap_acceptance"] = f"No Reference Line Mapping entered; CSV header only. Actual configured lines={sum(1 for v in self.lines.values() if len(v)==2)}. Enter actual Site_ID|Movement|Line N mappings for subject and conflict movements to calculate X31/Y5/X32."
                 elif gap_rows:
                     summary["diagnostics"]["gap_acceptance"] = "OK"
                 else:
@@ -5545,7 +5684,7 @@ class Run1App:
                 path = write_csv("Run_3_Lateral_Clearance.csv", fields, lc_rows)
                 vals = [float(r["Y3_Lateral_Clearance"]) for r in lc_rows]
                 summary["lateral_clearance"] = {"N": len(vals), "Mean_m": float(np.mean(vals)) if vals else None, "Median_m": float(np.median(vals)) if vals else None, "Minimum_m": float(np.min(vals)) if vals else None, "Maximum_m": float(np.max(vals)) if vals else None}
-                summary["diagnostics"]["lateral_clearance"] = (f"OK; candidate pairs={lc_candidates_seen}; time_tolerance_s={lc_tol:.6f}" if lc_rows else f"No valid pairs. Candidate same-zone time-matched pairs={lc_candidates_seen}; time_tolerance_s={lc_tol:.6f}; check motorcycle class, Zone 2/4 coverage, PPM/perspective, and longitudinal window.")
+                summary["diagnostics"]["lateral_clearance"] = (f"OK; zones={sorted(self.run3_lc_zone_vars[z].get() and z or 0 for z in range(1,7) if self.run3_lc_zone_vars[z].get())}; candidate pairs={lc_candidates_seen}; time_tolerance_s={lc_tol:.6f}" if lc_rows else f"No valid pairs. selected_zones={[z for z in range(1,7) if self.run3_lc_zone_vars[z].get()]}; candidate same-zone time-matched pairs={lc_candidates_seen}; time_tolerance_s={lc_tol:.6f}; check motorcycle class, selected Zone coverage, PPM/perspective, and longitudinal window.")
                 outputs["lateral_clearance"] = path
             except Exception as e:
                 fields = ["Error"]
