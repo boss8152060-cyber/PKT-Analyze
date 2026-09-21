@@ -736,7 +736,7 @@ class Run1App:
 
         ttk.Label(
             header,
-            text="PK Studio V17 - Run 1 + 2 + 3 Research",
+            text="PK Studio V17 - Run 1 + 2 + 3 Research | Class Name Display",
             font=("Segoe UI", 20, "bold")
         ).grid(row=0, column=0)
 
@@ -4350,7 +4350,9 @@ class Run1App:
                                         value = str(track_id)
                                         parts.append(f"ID {value}" if self.show_prefix_id_var.get() else value)
                                     if self.show_label_class_var.get():
-                                        value = str(class_id)
+                                        # Display the human-readable class name, not the numeric class_id.
+                                        # The numeric class_id remains available in Run 2 raw records for audit.
+                                        value = str(class_name).strip() or str(class_id)
                                         parts.append(f"Class {value}" if self.show_prefix_class_var.get() else value)
                                     if self.show_label_conf_var.get():
                                         value = f"{confidence:.2f}"
@@ -5031,11 +5033,10 @@ class Run1App:
 
     @staticmethod
     def _run3_movement_from_sequence(sequence):
-        """Identify the study movement from Zone Sequence.
+        """Identify study movement from a Zone Sequence.
 
-        Zone 6 is the conflict/search area and is intentionally ignored when
-        identifying the movement endpoints, so sequences such as 1→6→3 still
-        resolve to 1→3. No temporal interpolation is involved here.
+        Zone 6 is the conflict/search area and is ignored for endpoint matching,
+        so sequences such as ``1→6→3`` resolve to ``1→3``.
         """
         seq = Run1App._run3_parse_zone_sequence(sequence)
         seq = [n for n in seq if n != 6]
@@ -5050,6 +5051,25 @@ class Run1App:
             if (a, b) in supported:
                 return supported[(a, b)]
         return ""
+
+    @staticmethod
+    def _run3_movement_from_track_rows(rows):
+        """Fallback movement inference directly from observed Run 2 rows.
+
+        This is used when the ID Zone Summary does not contain a usable
+        zone_sequence for a vehicle. It uses only observed Zone labels from
+        Detection Records and never interpolates missing frames.
+        """
+        seq=[]
+        for r in sorted(rows or [], key=lambda x: x.get("_timestamp", 0.0)):
+            z=r.get("_zone_num")
+            if z is None or z not in range(1,7):
+                continue
+            if not seq or seq[-1] != z:
+                seq.append(z)
+        if not seq:
+            return ""
+        return Run1App._run3_movement_from_sequence(" ".join(f"Zone {z}" for z in seq))
 
     @staticmethod
     def _run3_float_safe(value):
@@ -5227,6 +5247,8 @@ class Run1App:
                     "Zone": str(zone),
                     "Start_Time": f"{zr[0]['_timestamp']:.6f}",
                     "End_Time": f"{zr[-1]['_timestamp']:.6f}",
+                    "Start_Frame": str(zr[0].get("frame", "")),
+                    "End_Frame": str(zr[-1].get("frame", "")),
                     "Distance_m": f"{d_m:.6f}",
                     "Speed_kmh": f"{speed_kmh:.6f}",
                     "Calibration_Mode": "Perspective_Homography" if perspective is not None else "PPM_Only",
@@ -5276,8 +5298,11 @@ class Run1App:
         zone_fields = {}
         for zone, (_, _, prefix) in role_map.items():
             zone_fields[zone] = {
+                "timestamp_range": f"{prefix}_Timestamp_Range",
                 "start": f"{prefix}_Start_Time",
                 "end": f"{prefix}_End_Time",
+                "start_frame": f"{prefix}_Start_Frame",
+                "end_frame": f"{prefix}_End_Frame",
                 "distance": f"{prefix}_Distance_m",
                 "speed": f"{prefix}_Speed_kmh",
                 "variable": f"{prefix}_Speed_Variable",
@@ -5312,14 +5337,20 @@ class Run1App:
                 fields = zone_fields[zone]
                 item = by_vehicle_zone.get(tid, {}).get(zone)
                 if item:
+                    row[fields["timestamp_range"]] = f"{item.get('Start_Time','')} → {item.get('End_Time','')}" if item.get("Start_Time") and item.get("End_Time") else ""
                     row[fields["start"]] = item.get("Start_Time", "")
                     row[fields["end"]] = item.get("End_Time", "")
+                    row[fields["start_frame"]] = item.get("Start_Frame", "")
+                    row[fields["end_frame"]] = item.get("End_Frame", "")
                     row[fields["distance"]] = item.get("Distance_m", "")
                     row[fields["speed"]] = item.get("Speed_kmh", "")
                     row[fields["variable"]] = item.get("Speed_Variable", "")
                 else:
+                    row[fields["timestamp_range"]] = ""
                     row[fields["start"]] = ""
                     row[fields["end"]] = ""
+                    row[fields["start_frame"]] = ""
+                    row[fields["end_frame"]] = ""
                     row[fields["distance"]] = ""
                     row[fields["speed"]] = ""
                     row[fields["variable"]] = ""
@@ -5698,7 +5729,12 @@ class Run1App:
         candidates=[]
         diag={"zone6_tracks":0,"movement_identified":0,"pairs_considered":0,"same_movement_excluded":0,"interaction_candidates":0,"fallback_close_pairs":0,"overlap_intervals":0,"insufficient_samples":0}
         ids=list(tracks)
-        movement_by_id={tid:self._run3_movement_from_sequence(summaries.get(tid,{}).get("zone_sequence", "")) if tid in summaries else "" for tid in ids}
+        movement_by_id={}
+        for tid in ids:
+            movement = self._run3_movement_from_sequence(summaries.get(tid,{}).get("zone_sequence", "")) if tid in summaries else ""
+            if not movement:
+                movement = self._run3_movement_from_track_rows(tracks.get(tid, []))
+            movement_by_id[tid] = movement
         for tid in ids:
             if any(self.run3_pet_zone6_var.get() and r.get("_zone_num")==6 and r.get("_point") is not None for r in tracks[tid]):
                 diag["zone6_tracks"]+=1
@@ -5800,7 +5836,7 @@ class Run1App:
                 "id_zone_summary_rows": len(id_rows),
                 "zone_summary_rows": len(zone_rows),
                 "tracks_by_zone": {str(z): sum(1 for rows in tracks.values() if any(r.get("_zone_num") == z for r in rows)) for z in range(1,7)},
-                "movement_counts": {m: sum(1 for tid, sm in summaries.items() if self._run3_movement_from_sequence(sm.get("zone_sequence", "")) == m) for m in RUN3_ALL_MOVEMENTS},
+                "movement_counts": {m: sum(1 for tid, rows in tracks.items() if ((self._run3_movement_from_sequence(summaries.get(tid,{}).get("zone_sequence", "")) or self._run3_movement_from_track_rows(rows)) == m)) for m in RUN3_ALL_MOVEMENTS},
                 "selected_zones": {"speed": [z for z in range(1,7) if self.run3_speed_zone_vars[z].get()], "lateral_clearance": [z for z in range(1,7) if self.run3_lc_zone_vars[z].get()], "pet": [6] if self.run3_pet_zone6_var.get() else []},
             },
             "diagnostics": {},
@@ -5822,7 +5858,7 @@ class Run1App:
                 speed_rows = self._run3_speed(tracks, ppm, perspective)
                 fields = [
                     "Site_ID","Vehicle_ID","Vehicle_Class","Speed_Variable","Speed_Type","Analysis_Role","Zone",
-                    "Start_Time","End_Time","Distance_m","Speed_kmh","Calibration_Mode","QC_Flag"
+                    "Start_Time","End_Time","Start_Frame","End_Frame","Distance_m","Speed_kmh","Calibration_Mode","QC_Flag"
                 ]
                 detail_path = write_csv("Run_3_Speed_Detail.csv", fields, speed_rows)
 
@@ -5831,12 +5867,12 @@ class Run1App:
                 # human-readable form requested by the researcher.
                 vehicle_summary_fields = [
                     "Site_ID","Vehicle_ID","Vehicle_Class","Zone_Sequence",
-                    "Access_Mouth_Zone1_Start_Time","Access_Mouth_Zone1_End_Time","Access_Mouth_Zone1_Distance_m","Access_Mouth_Zone1_Speed_kmh","Access_Mouth_Zone1_Speed_Variable",
-                    "Approach_Zone2_Start_Time","Approach_Zone2_End_Time","Approach_Zone2_Distance_m","Approach_Zone2_Speed_kmh","Approach_Zone2_Speed_Variable",
-                    "Exit_Zone3_Start_Time","Exit_Zone3_End_Time","Exit_Zone3_Distance_m","Exit_Zone3_Speed_kmh","Exit_Zone3_Speed_Variable",
-                    "Approach_Zone4_Start_Time","Approach_Zone4_End_Time","Approach_Zone4_Distance_m","Approach_Zone4_Speed_kmh","Approach_Zone4_Speed_Variable",
-                    "Exit_Zone5_Start_Time","Exit_Zone5_End_Time","Exit_Zone5_Distance_m","Exit_Zone5_Speed_kmh","Exit_Zone5_Speed_Variable",
-                    "Middle_Access_Zone6_Start_Time","Middle_Access_Zone6_End_Time","Middle_Access_Zone6_Distance_m","Middle_Access_Zone6_Speed_kmh","Middle_Access_Zone6_Speed_Variable",
+                    "Access_Mouth_Zone1_Timestamp_Range","Access_Mouth_Zone1_Start_Time","Access_Mouth_Zone1_End_Time","Access_Mouth_Zone1_Start_Frame","Access_Mouth_Zone1_End_Frame","Access_Mouth_Zone1_Distance_m","Access_Mouth_Zone1_Speed_kmh","Access_Mouth_Zone1_Speed_Variable",
+                    "Approach_Zone2_Timestamp_Range","Approach_Zone2_Start_Time","Approach_Zone2_End_Time","Approach_Zone2_Start_Frame","Approach_Zone2_End_Frame","Approach_Zone2_Distance_m","Approach_Zone2_Speed_kmh","Approach_Zone2_Speed_Variable",
+                    "Exit_Zone3_Timestamp_Range","Exit_Zone3_Start_Time","Exit_Zone3_End_Time","Exit_Zone3_Start_Frame","Exit_Zone3_End_Frame","Exit_Zone3_Distance_m","Exit_Zone3_Speed_kmh","Exit_Zone3_Speed_Variable",
+                    "Approach_Zone4_Timestamp_Range","Approach_Zone4_Start_Time","Approach_Zone4_End_Time","Approach_Zone4_Start_Frame","Approach_Zone4_End_Frame","Approach_Zone4_Distance_m","Approach_Zone4_Speed_kmh","Approach_Zone4_Speed_Variable",
+                    "Exit_Zone5_Timestamp_Range","Exit_Zone5_Start_Time","Exit_Zone5_End_Time","Exit_Zone5_Start_Frame","Exit_Zone5_End_Frame","Exit_Zone5_Distance_m","Exit_Zone5_Speed_kmh","Exit_Zone5_Speed_Variable",
+                    "Middle_Access_Zone6_Timestamp_Range","Middle_Access_Zone6_Start_Time","Middle_Access_Zone6_End_Time","Middle_Access_Zone6_Start_Frame","Middle_Access_Zone6_End_Frame","Middle_Access_Zone6_Distance_m","Middle_Access_Zone6_Speed_kmh","Middle_Access_Zone6_Speed_Variable",
                     "Calibration_Mode","QC_Flag"
                 ]
                 vehicle_summary_rows = self._run3_speed_vehicle_summary(speed_rows, tracks)
