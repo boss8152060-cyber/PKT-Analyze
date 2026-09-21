@@ -5528,89 +5528,206 @@ class Run1App:
         return mapping
 
     def _run3_gap(self, tracks, summaries, mapping):
+        """Compute Gap Acceptance from observed Run 2 trajectories.
+
+        The decision logic intentionally uses only observed samples. Waiting is
+        identified from a short temporal baseline rather than one-frame motion,
+        which prevents 1-pixel trajectory jitter from being treated as a vehicle
+        departure. Acceptance is only recognized after waiting and when the
+        observed trajectory leaves the decision zone toward Zone 6. No temporal
+        interpolation or synthetic event time is created.
+        """
         selected = []
-        if self.run3_gap_movement_13_var.get(): selected.append("1→3")
-        if self.run3_gap_movement_15_var.get(): selected.append("1→5")
-        if self.run3_gap_movement_41_var.get(): selected.append("4→1")
+        if self.run3_gap_movement_13_var.get():
+            selected.append("1→3")
+        if self.run3_gap_movement_15_var.get():
+            selected.append("1→5")
+        if self.run3_gap_movement_41_var.get():
+            selected.append("4→1")
         wait_threshold = float(self.run3_waiting_speed_threshold_var.get())
 
-        movement_by_id, _movement_source_by_id = self._run3_build_movement_index(tracks, summaries, mapping)
+        movement_by_id, _movement_source_by_id = self._run3_build_movement_index(
+            tracks, summaries, mapping
+        )
 
-        line_times = defaultdict(list)
+        # Use an observed temporal baseline for the waiting/departure decision.
+        # The window adapts to the actual sampling interval and is capped so it
+        # remains a local decision window. This is an implementation detail, not
+        # a research constant and it does not alter the stored trajectory.
+        all_dts = []
+        for rows in tracks.values():
+            ts = [r.get("_timestamp") for r in rows if r.get("_timestamp") is not None]
+            all_dts.extend(
+                d for a, b in zip(ts, ts[1:])
+                for d in [b - a]
+                if d > 0
+            )
+        median_dt = float(np.median(all_dts)) if all_dts else (1.0 / 30.0)
+        decision_window_s = max(0.15, min(0.25, median_dt * 12.0))
+        minimum_wait_evidence_s = decision_window_s
+
+        def observed_speed_kmh(rows, index):
+            """Speed from two actually observed points separated by the decision window."""
+            if index < 1:
+                return None
+            current = rows[index]
+            ct = current.get("_timestamp")
+            cp = current.get("_point")
+            if ct is None or cp is None:
+                return None
+
+            previous_index = None
+            for j in range(index - 1, -1, -1):
+                pt = rows[j].get("_timestamp")
+                pp = rows[j].get("_point")
+                if pt is None or pp is None:
+                    continue
+                if ct - pt >= decision_window_s:
+                    previous_index = j
+                    break
+            if previous_index is None:
+                return None
+
+            previous = rows[previous_index]
+            dt = ct - previous["_timestamp"]
+            if dt <= 0:
+                return None
+
+            if perspective is not None:
+                p0 = self._run3_transform_point(previous["_point"], perspective)
+                p1 = self._run3_transform_point(cp, perspective)
+                distance_m = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+            else:
+                ppm = float(self.run3_ppm_var.get())
+                if ppm <= 0:
+                    return None
+                distance_m = math.hypot(
+                    cp[0] - previous["_point"][0],
+                    cp[1] - previous["_point"][1],
+                ) / ppm
+            return distance_m / dt * 3.6
+
+        # Build observed reference-line crossing events for every movement that
+        # has a configured line. There is deliberately no fallback to a zone time
+        # here: a gap must be anchored to an actual observed conflict-stream event.
+        reference_times = defaultdict(list)
         for tid, rows in tracks.items():
-            movement = movement_by_id.get(tid, "")
+            movement = movement_by_id.get(str(tid), movement_by_id.get(tid, ""))
             if movement not in RUN3_ALL_MOVEMENTS:
                 continue
-            lname = mapping.get((self.run3_site_id_var.get().strip(), movement))
-            if not lname:
+            lname = mapping.get((self.run3_site_id_var.get().strip(), movement)) if mapping else None
+            line = self.lines.get(lname, []) if lname else []
+            if len(line) != 2:
                 continue
-            line = self.lines.get(lname, [])
+
             prev = None
             prev_t = None
             for r in rows:
                 p = r.get("_point")
                 t = r.get("_timestamp")
-                if p is None:
+                if p is None or t is None:
                     continue
                 if prev is not None:
                     cross_t = self._run3_line_crossing_time(prev, prev_t, p, t, line)
                     if cross_t is not None:
-                        line_times[movement].append((cross_t, tid, r.get("class_name", ""), lname))
+                        reference_times[movement].append(
+                            (cross_t, str(tid), r.get("class_name", ""), lname, "")
+                        )
                 prev, prev_t = p, t
-        for key in list(line_times):
-            line_times[key].sort(key=lambda x: x[0])
+
+        for key in list(reference_times):
+            # A reference line should normally be crossed once per vehicle.
+            # Keep the first observed crossing for each vehicle so repeated
+            # contact with the line cannot create artificial extra gaps.
+            dedup = {}
+            for event in reference_times[key]:
+                vehicle_id = str(event[1])
+                if vehicle_id not in dedup or event[0] < dedup[vehicle_id][0]:
+                    dedup[vehicle_id] = event
+            reference_times[key] = sorted(dedup.values(), key=lambda x: x[0])
 
         rows_out = []
         for tid, rows in tracks.items():
-            movement = movement_by_id.get(tid, "")
+            tid = str(tid)
+            movement = movement_by_id.get(tid, movement_by_id.get(tid, ""))
             if movement not in selected:
                 continue
+
             wait_zone = 1 if movement in ("1→3", "1→5") else 4
-            wr = []
+
+            # ------------------------------------------------------------
+            # 1) Waiting detection
+            # ------------------------------------------------------------
+            # A waiting observation must have a sufficiently long observed
+            # temporal baseline and be inside the movement's decision zone.
+            waiting_observation = None
             for idx, r in enumerate(rows):
                 if r.get("_zone_num") != wait_zone or r.get("_point") is None:
                     continue
-                if idx == 0:
+                speed = observed_speed_kmh(rows, idx)
+                if speed is None:
                     continue
-                prev = rows[idx-1]
-                if prev.get("_point") is None:
-                    continue
-                dt = r["_timestamp"] - prev["_timestamp"]
-                if dt <= 0:
-                    continue
-                step_kmh = (math.hypot(r["_point"][0]-prev["_point"][0], r["_point"][1]-prev["_point"][1])) / max(1e-9, 1.0) / dt
-                # step_kmh above is pixel/s only; convert to km/h via PPM below.
-                ppm = float(self.run3_ppm_var.get())
-                persp = self._run3_get_perspective_matrix(silent=True)
-                if persp is not None:
-                    p0 = self._run3_transform_point(prev["_point"], persp); p1 = self._run3_transform_point(r["_point"], persp)
-                    step_m = math.hypot(p1[0]-p0[0], p1[1]-p0[1])
-                else:
-                    step_m = math.hypot(r["_point"][0]-prev["_point"][0], r["_point"][1]-prev["_point"][1]) / ppm
-                step_kmh = step_m / dt * 3.6
-                if step_kmh <= wait_threshold:
-                    wr.append(r)
-            if not wr:
+                if speed <= wait_threshold:
+                    waiting_observation = r
+                    break
+
+            if waiting_observation is None:
                 continue
-            wait_start = wr[0]["_timestamp"]
+
+            wait_start = waiting_observation["_timestamp"]
+
+            # ------------------------------------------------------------
+            # 2) Acceptance = observed departure from waiting zone to Zone 6
+            # ------------------------------------------------------------
+            # Do NOT accept the first >threshold frame while still inside the
+            # waiting zone. That was the source of the previous false acceptance
+            # caused by one-frame / one-pixel trajectory jitter.
             accepted_time = None
-            for idx in range(1, len(rows)):
-                prev = rows[idx-1]; cur = rows[idx]
-                if prev.get("_zone_num") == wait_zone and cur.get("_point") is not None and prev.get("_point") is not None:
-                    dt = cur["_timestamp"] - prev["_timestamp"]
-                    if dt <= 0:
-                        continue
-                    persp = self._run3_get_perspective_matrix(silent=True)
-                    if persp is not None:
-                        p0 = self._run3_transform_point(prev["_point"], persp); p1 = self._run3_transform_point(cur["_point"], persp)
-                        step_m = math.hypot(p1[0]-p0[0], p1[1]-p0[1])
-                    else:
-                        step_m = math.hypot(cur["_point"][0]-prev["_point"][0], cur["_point"][1]-prev["_point"][1]) / float(self.run3_ppm_var.get())
-                    speed = step_m / dt * 3.6
-                    if speed > wait_threshold:
-                        accepted_time = cur["_timestamp"]
+            acceptance_qc = ""
+            previous_nonempty_zone = None
+            previous_nonempty_time = None
+            for idx, r in enumerate(rows):
+                t = r.get("_timestamp")
+                zone_num = r.get("_zone_num")
+                if t is None:
+                    continue
+
+                if t <= wait_start:
+                    if zone_num is not None:
+                        previous_nonempty_zone = zone_num
+                        previous_nonempty_time = t
+                    continue
+
+                if zone_num == 6 and r.get("_point") is not None:
+                    # Permit a single missing/undefined zone sample between the
+                    # last observed waiting-zone point and the first Zone 6 point,
+                    # but do not interpolate the event time.
+                    close_enough = (
+                        previous_nonempty_zone == wait_zone
+                        and previous_nonempty_time is not None
+                        and t > previous_nonempty_time
+                    )
+                    speed = observed_speed_kmh(rows, idx)
+                    if close_enough and speed is not None and speed > wait_threshold:
+                        accepted_time = t
+                        acceptance_qc = (
+                            "Acceptance_From_WaitZone_to_Zone6"
+                            f";DecisionWindow={decision_window_s:.6f}s"
+                            ";Observed_Frame_No_Interpolation"
+                        )
                         break
-            if accepted_time is None:
+
+                if zone_num is not None:
+                    previous_nonempty_zone = zone_num
+                    previous_nonempty_time = t
+
+            if accepted_time is None or accepted_time <= wait_start:
+                continue
+
+            waiting_time = accepted_time - wait_start
+            if waiting_time < minimum_wait_evidence_s:
+                # A decision must include at least the observed temporal baseline
+                # used to establish waiting; this blocks single-frame artefacts.
                 continue
 
             candidates = []
@@ -5620,11 +5737,11 @@ class Run1App:
                 "1→5": ["2→3", "4→5"],
                 "4→1": ["2→3", "1→5"],
             }.get(movement, [])
-            # The mapping may only contain the subject movements; conflict streams are derived from all IDs.
+
             for cm in conflict_movements:
-                events = line_times.get(cm, [])
+                events = reference_times.get(cm, [])
                 for a, b in zip(events, events[1:]):
-                    if b[0] <= a[0]:
+                    if b[0] <= a[0] or a[1] == b[1]:
                         continue
                     candidates.append({
                         "conflict_movement": cm,
@@ -5635,27 +5752,46 @@ class Run1App:
                         "reference_line": a[3],
                         "gap_start": a[0],
                         "gap_end": b[0],
-                        "gap": b[0]-a[0],
+                        "gap": b[0] - a[0],
+                        "qc_flag": ";".join(v for v in (a[4], b[4]) if v),
                     })
-            active = [c for c in candidates if c["gap_start"] <= accepted_time <= c["gap_end"]]
+
+            active = [
+                c for c in candidates
+                if c["gap_start"] <= accepted_time <= c["gap_end"]
+            ]
             controlling = min(active, key=lambda c: c["gap"]) if active else None
-            prior = [c for c in candidates if wait_start <= c["gap_end"] < accepted_time]
+            prior = [
+                c for c in candidates
+                if wait_start <= c["gap_end"] < accepted_time
+            ]
+
             # Deduplicate identical intervals across repeated candidate generation.
             seen = set()
             prior2 = []
             for c in sorted(prior, key=lambda x: x["gap_end"]):
-                key = (c["conflict_movement"], round(c["gap_start"], 6), round(c["gap_end"], 6))
+                key = (
+                    c["conflict_movement"],
+                    c["conflicting_id_a"],
+                    c["conflicting_id_b"],
+                    round(c["gap_start"], 6),
+                    round(c["gap_end"], 6),
+                )
                 if key not in seen:
-                    seen.add(key); prior2.append(c)
+                    seen.add(key)
+                    prior2.append(c)
+
             decision_id = f"{tid}_{accepted_time:.6f}"
-            waiting_time = accepted_time - wait_start
+            subject_class = rows[0].get("class_name", "")
+
             if prior2:
                 for c in prior2:
+                    qc_parts = [acceptance_qc, c.get("qc_flag", "")]
                     rows_out.append({
                         "Site_ID": self.run3_site_id_var.get().strip(),
                         "Decision_Event_ID": decision_id,
                         "Subject_ID": tid,
-                        "Subject_Class": rows[0].get("class_name", ""),
+                        "Subject_Class": subject_class,
                         "Subject_Movement": movement,
                         "Conflicting_Movement": c["conflict_movement"],
                         "Conflicting_ID_A": c["conflicting_id_a"],
@@ -5668,14 +5804,16 @@ class Run1App:
                         "Gap_Role": "Rejected",
                         "Y5_Gap_Acceptance": 0,
                         "Acceptance_Time": "",
-                        "QC_Flag": "",
+                        "QC_Flag": ";".join(q for q in qc_parts if q),
                     })
+
             if controlling:
+                qc_parts = [acceptance_qc, controlling.get("qc_flag", "")]
                 rows_out.append({
                     "Site_ID": self.run3_site_id_var.get().strip(),
                     "Decision_Event_ID": decision_id,
                     "Subject_ID": tid,
-                    "Subject_Class": rows[0].get("class_name", ""),
+                    "Subject_Class": subject_class,
                     "Subject_Movement": movement,
                     "Conflicting_Movement": controlling["conflict_movement"],
                     "Conflicting_ID_A": controlling["conflicting_id_a"],
@@ -5688,8 +5826,9 @@ class Run1App:
                     "Gap_Role": "Accepted / Controlling",
                     "Y5_Gap_Acceptance": 1,
                     "Acceptance_Time": f"{accepted_time:.6f}",
-                    "QC_Flag": "",
+                    "QC_Flag": ";".join(q for q in qc_parts if q),
                 })
+
         return rows_out
 
     @staticmethod
