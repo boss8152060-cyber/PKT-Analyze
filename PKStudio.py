@@ -5236,22 +5236,28 @@ class Run1App:
 
 
     def _run3_speed_vehicle_summary(self, speed_rows, tracks):
-        """Return one row per vehicle with the observed zone path and zone-level speeds.
+        """Return one row per vehicle with zone sequence and all zone-level audit fields.
 
-        The detailed table remains available separately. This vehicle-level table is
-        intentionally wide so a single Vehicle_ID row shows which zones were visited
-        and the speed calculated in each selected zone.
+        The main Speed CSV is intentionally wide: one Vehicle_ID = one row.
+        For every Zone 1-6 it records the observed zone time window, trajectory
+        distance and calculated speed, so the researcher can audit the result
+        without having to join multiple rows.
+
+        No interpolation is used; the Start/End times and Distance_m come from
+        the observed trajectory samples already present in Run 2.
         """
         role_map = {
-            1: ("", "Access_Mouth"),
-            2: ("Y1", "Approach"),
-            3: ("Y2", "Exit"),
-            4: ("Y1", "Approach"),
-            5: ("Y2", "Exit"),
-            6: ("", "Middle_Access"),
+            1: ("", "Access_Mouth", "Access_Mouth_Zone1"),
+            2: ("Y1", "Approach", "Approach_Zone2"),
+            3: ("Y2", "Exit", "Exit_Zone3"),
+            4: ("Y1", "Approach", "Approach_Zone4"),
+            5: ("Y2", "Exit", "Exit_Zone5"),
+            6: ("", "Middle_Access", "Middle_Access_Zone6"),
         }
 
-        # Index speed rows by vehicle + zone so each vehicle gets one summary row.
+        # Index speed rows by vehicle + zone. There should normally be one
+        # calculated row per vehicle-zone, but keep the last observed row if
+        # duplicate rows ever occur.
         by_vehicle_zone = defaultdict(dict)
         for row in speed_rows:
             tid = str(row.get("Vehicle_ID", ""))
@@ -5261,18 +5267,21 @@ class Run1App:
                 continue
             by_vehicle_zone[tid][zone] = row
 
-        # Preserve vehicle IDs even when a selected zone has insufficient observations
-        # and therefore has no calculated speed.
-        vehicle_ids = sorted(set(str(tid) for tid in tracks.keys()), key=lambda x: (int(x) if x.isdigit() else 10**18, x))
+        vehicle_ids = sorted(
+            set(str(tid) for tid in tracks.keys()),
+            key=lambda x: (int(x) if x.isdigit() else 10**18, x)
+        )
         summary_rows = []
-        speed_columns = {
-            1: "Access_Mouth_Zone1_Speed_kmh",
-            2: "Approach_Zone2_Speed_kmh",
-            3: "Exit_Zone3_Speed_kmh",
-            4: "Approach_Zone4_Speed_kmh",
-            5: "Exit_Zone5_Speed_kmh",
-            6: "Middle_Access_Zone6_Speed_kmh",
-        }
+
+        zone_fields = {}
+        for zone, (_, _, prefix) in role_map.items():
+            zone_fields[zone] = {
+                "start": f"{prefix}_Start_Time",
+                "end": f"{prefix}_End_Time",
+                "distance": f"{prefix}_Distance_m",
+                "speed": f"{prefix}_Speed_kmh",
+                "variable": f"{prefix}_Speed_Variable",
+            }
 
         for tid in vehicle_ids:
             rows = tracks.get(tid, [])
@@ -5296,15 +5305,34 @@ class Run1App:
                 "Vehicle_Class": cls,
                 "Zone_Sequence": "→".join(str(z) for z in actual_zones),
             }
-            for z, col in speed_columns.items():
-                item = by_vehicle_zone.get(tid, {}).get(z)
-                row[col] = item.get("Speed_kmh", "") if item else ""
+
+            # Always include all six zone groups. If the vehicle did not have
+            # a valid speed observation in a zone, the cells remain blank.
+            for zone in range(1, 7):
+                fields = zone_fields[zone]
+                item = by_vehicle_zone.get(tid, {}).get(zone)
+                if item:
+                    row[fields["start"]] = item.get("Start_Time", "")
+                    row[fields["end"]] = item.get("End_Time", "")
+                    row[fields["distance"]] = item.get("Distance_m", "")
+                    row[fields["speed"]] = item.get("Speed_kmh", "")
+                    row[fields["variable"]] = item.get("Speed_Variable", "")
+                else:
+                    row[fields["start"]] = ""
+                    row[fields["end"]] = ""
+                    row[fields["distance"]] = ""
+                    row[fields["speed"]] = ""
+                    row[fields["variable"]] = ""
 
             modes = sorted(set(
-                r.get("Calibration_Mode", "") for r in by_vehicle_zone.get(tid, {}).values() if r.get("Calibration_Mode")
+                r.get("Calibration_Mode", "")
+                for r in by_vehicle_zone.get(tid, {}).values()
+                if r.get("Calibration_Mode")
             ))
             qcs = sorted(set(
-                r.get("QC_Flag", "") for r in by_vehicle_zone.get(tid, {}).values() if r.get("QC_Flag")
+                r.get("QC_Flag", "")
+                for r in by_vehicle_zone.get(tid, {}).values()
+                if r.get("QC_Flag")
             ))
             row["Calibration_Mode"] = ";".join(modes)
             row["QC_Flag"] = ";".join(qcs)
@@ -5803,12 +5831,12 @@ class Run1App:
                 # human-readable form requested by the researcher.
                 vehicle_summary_fields = [
                     "Site_ID","Vehicle_ID","Vehicle_Class","Zone_Sequence",
-                    "Access_Mouth_Zone1_Speed_kmh",
-                    "Approach_Zone2_Speed_kmh",
-                    "Exit_Zone3_Speed_kmh",
-                    "Approach_Zone4_Speed_kmh",
-                    "Exit_Zone5_Speed_kmh",
-                    "Middle_Access_Zone6_Speed_kmh",
+                    "Access_Mouth_Zone1_Start_Time","Access_Mouth_Zone1_End_Time","Access_Mouth_Zone1_Distance_m","Access_Mouth_Zone1_Speed_kmh","Access_Mouth_Zone1_Speed_Variable",
+                    "Approach_Zone2_Start_Time","Approach_Zone2_End_Time","Approach_Zone2_Distance_m","Approach_Zone2_Speed_kmh","Approach_Zone2_Speed_Variable",
+                    "Exit_Zone3_Start_Time","Exit_Zone3_End_Time","Exit_Zone3_Distance_m","Exit_Zone3_Speed_kmh","Exit_Zone3_Speed_Variable",
+                    "Approach_Zone4_Start_Time","Approach_Zone4_End_Time","Approach_Zone4_Distance_m","Approach_Zone4_Speed_kmh","Approach_Zone4_Speed_Variable",
+                    "Exit_Zone5_Start_Time","Exit_Zone5_End_Time","Exit_Zone5_Distance_m","Exit_Zone5_Speed_kmh","Exit_Zone5_Speed_Variable",
+                    "Middle_Access_Zone6_Start_Time","Middle_Access_Zone6_End_Time","Middle_Access_Zone6_Distance_m","Middle_Access_Zone6_Speed_kmh","Middle_Access_Zone6_Speed_Variable",
                     "Calibration_Mode","QC_Flag"
                 ]
                 vehicle_summary_rows = self._run3_speed_vehicle_summary(speed_rows, tracks)
