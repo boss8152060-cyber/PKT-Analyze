@@ -5818,12 +5818,18 @@ class Run1App:
     def _run3_gap(self, tracks, summaries, mapping):
         """Compute Gap Acceptance from observed Run 2 trajectories.
 
-        The decision logic intentionally uses only observed samples. Waiting is
-        identified from a short temporal baseline rather than one-frame motion,
-        which prevents 1-pixel trajectory jitter from being treated as a vehicle
-        departure. Acceptance is only recognized after waiting and when the
-        observed trajectory leaves the decision zone toward Zone 6. No temporal
-        interpolation or synthetic event time is created.
+        The decision event is anchored to an observed movement from the
+        movement's decision zone (Zone 1 or Zone 4) into Zone 6. Waiting time
+        is therefore the observed elapsed time from first arrival in the
+        decision zone to that observed Zone-6 entry; an immediate acceptance
+        can legitimately have a near-zero waiting time.
+
+        Conflict-stream events prefer the configured Reference Line. If the
+        configured line has fewer than two observed crossings, the calculation
+        falls back to the first observed timestamp in the movement's conflict
+        reference Zone. The fallback uses real observed timestamps only and is
+        explicitly marked in QC_Flag; no synthetic or interpolated event time is
+        created.
         """
         selected = []
         if self.run3_gap_movement_13_var.get():
@@ -5832,81 +5838,46 @@ class Run1App:
             selected.append("1→5")
         if self.run3_gap_movement_41_var.get():
             selected.append("4→1")
-        wait_threshold = float(self.run3_waiting_speed_threshold_var.get())
-        # Run 3 calibration is resolved once and shared by Gap Acceptance.
-        # This fixes the previous NameError when Perspective calibration was enabled.
-        perspective = self._run3_get_perspective_matrix(silent=True)
 
+        perspective = self._run3_get_perspective_matrix(silent=True)
         movement_by_id, _movement_source_by_id = self._run3_build_movement_index(
             tracks, summaries, mapping
         )
 
-        # Use an observed temporal baseline for the waiting/departure decision.
-        # The window adapts to the actual sampling interval and is capped so it
-        # remains a local decision window. This is an implementation detail, not
-        # a research constant and it does not alter the stored trajectory.
-        all_dts = []
-        for rows in tracks.values():
-            ts = [r.get("_timestamp") for r in rows if r.get("_timestamp") is not None]
-            all_dts.extend(
-                d for a, b in zip(ts, ts[1:])
-                for d in [b - a]
-                if d > 0
-            )
-        median_dt = float(np.median(all_dts)) if all_dts else (1.0 / 30.0)
-        decision_window_s = max(0.15, min(0.25, median_dt * 12.0))
-        minimum_wait_evidence_s = decision_window_s
+        site_id = self.run3_site_id_var.get().strip()
+        conflict_reference_zone = {
+            "2→3": 2,
+            "4→5": 4,
+            "1→5": 1,
+        }
 
-        def observed_speed_kmh(rows, index):
-            """Speed from two actually observed points separated by the decision window."""
-            if index < 1:
-                return None
-            current = rows[index]
-            ct = current.get("_timestamp")
-            cp = current.get("_point")
-            if ct is None or cp is None:
-                return None
+        diag = {
+            "selected_subject_movements": list(selected),
+            "tracks_total": len(tracks),
+            "movement_identified_tracks": sum(1 for v in movement_by_id.values() if v),
+            "subject_tracks": 0,
+            "subject_decision_events": 0,
+            "subject_without_decision_zone": 0,
+            "subject_without_zone6_after_decision": 0,
+            "conflict_events_by_movement": {},
+            "candidate_intervals_by_movement": {},
+            "reference_line_fallback_movements": [],
+            "configured_mapping_rows": len(mapping or {}),
+        }
 
-            previous_index = None
-            for j in range(index - 1, -1, -1):
-                pt = rows[j].get("_timestamp")
-                pp = rows[j].get("_point")
-                if pt is None or pp is None:
-                    continue
-                if ct - pt >= decision_window_s:
-                    previous_index = j
-                    break
-            if previous_index is None:
-                return None
-
-            previous = rows[previous_index]
-            dt = ct - previous["_timestamp"]
-            if dt <= 0:
-                return None
-
-            if perspective is not None:
-                p0 = self._run3_transform_point(previous["_point"], perspective)
-                p1 = self._run3_transform_point(cp, perspective)
-                distance_m = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
-            else:
-                ppm = float(self.run3_ppm_var.get())
-                if ppm <= 0:
-                    return None
-                distance_m = math.hypot(
-                    cp[0] - previous["_point"][0],
-                    cp[1] - previous["_point"][1],
-                ) / ppm
-            return distance_m / dt * 3.6
-
-        # Build observed reference-line crossing events for every movement that
-        # has a configured line. There is deliberately no fallback to a zone time
-        # here: a gap must be anchored to an actual observed conflict-stream event.
-        reference_times = defaultdict(list)
+        # ------------------------------------------------------------
+        # 1) Build one conflict-stream event per vehicle/movement.
+        # ------------------------------------------------------------
+        # First collect line-based events.  A robust segment intersection is
+        # also checked so a trajectory that jumps across a short line segment
+        # is not missed merely because both samples are on the same line-side.
+        line_events = defaultdict(list)
         for tid, rows in tracks.items():
-            movement = movement_by_id.get(str(tid), movement_by_id.get(tid, ""))
+            tid = str(tid)
+            movement = movement_by_id.get(tid, "")
             if movement not in RUN3_ALL_MOVEMENTS:
                 continue
-            lname = mapping.get((self.run3_site_id_var.get().strip(), movement)) if mapping else None
+            lname = mapping.get((site_id, movement)) if mapping else None
             line = self.lines.get(lname, []) if lname else []
             if len(line) != 2:
                 continue
@@ -5920,109 +5891,126 @@ class Run1App:
                     continue
                 if prev is not None:
                     cross_t = self._run3_line_crossing_time(prev, prev_t, p, t, line)
+                    if cross_t is None:
+                        try:
+                            hit = self._run3_segment_intersection(prev, p, line[0], line[1])
+                        except Exception:
+                            hit = None
+                        if hit is not None:
+                            # Keep the timestamp on an actually observed frame.
+                            cross_t = t
                     if cross_t is not None:
-                        reference_times[movement].append(
-                            (cross_t, str(tid), r.get("class_name", ""), lname, "")
+                        line_events[movement].append(
+                            (cross_t, tid, r.get("class_name", ""), lname, "")
                         )
+                        break
                 prev, prev_t = p, t
 
+        # Deduplicate to one event per conflict vehicle.
+        for key in list(line_events):
+            dedup = {}
+            for event in line_events[key]:
+                tid = str(event[1])
+                if tid not in dedup or event[0] < dedup[tid][0]:
+                    dedup[tid] = event
+            line_events[key] = sorted(dedup.values(), key=lambda x: x[0])
+
+        # For a movement, use line-based events only when the line actually
+        # yielded at least two vehicles. Otherwise use observed conflict-zone
+        # timestamps for that movement so a valid conflict stream is not lost
+        # solely because the drawn line was not crossed by enough detections.
+        reference_times = defaultdict(list)
+        fallback_movements = set()
+        for movement in RUN3_ALL_MOVEMENTS:
+            mapped_line = mapping.get((site_id, movement)) if mapping else None
+            usable_line_events = line_events.get(movement, [])
+
+            if len(usable_line_events) >= 2:
+                reference_times[movement].extend(usable_line_events)
+                continue
+
+            ref_zone = conflict_reference_zone.get(movement)
+            if ref_zone is None:
+                continue
+
+            fallback_movements.add(movement)
+            for tid, rows in tracks.items():
+                tid = str(tid)
+                if movement_by_id.get(tid, "") != movement:
+                    continue
+                candidates = [
+                    r for r in rows
+                    if r.get("_zone_num") == ref_zone
+                    and r.get("_timestamp") is not None
+                    and r.get("_point") is not None
+                ]
+                if not candidates:
+                    continue
+                first = min(candidates, key=lambda r: r["_timestamp"])
+                qc = (
+                    "Gap_Event_From_Observed_Zone_Fallback"
+                    if mapped_line
+                    else "Gap_Event_From_Observed_Zone_No_Line_Mapping"
+                )
+                reference_times[movement].append(
+                    (first["_timestamp"], tid, first.get("class_name", ""),
+                     mapped_line or f"Observed Zone {ref_zone}", qc)
+                )
+
         for key in list(reference_times):
-            # A reference line should normally be crossed once per vehicle.
-            # Keep the first observed crossing for each vehicle so repeated
-            # contact with the line cannot create artificial extra gaps.
             dedup = {}
             for event in reference_times[key]:
-                vehicle_id = str(event[1])
-                if vehicle_id not in dedup or event[0] < dedup[vehicle_id][0]:
-                    dedup[vehicle_id] = event
+                tid = str(event[1])
+                if tid not in dedup or event[0] < dedup[tid][0]:
+                    dedup[tid] = event
             reference_times[key] = sorted(dedup.values(), key=lambda x: x[0])
+            diag["conflict_events_by_movement"][key] = len(reference_times[key])
 
+        diag["reference_line_fallback_movements"] = sorted(fallback_movements)
+
+        # ------------------------------------------------------------
+        # 2) Build subject decision events from observed zone transitions.
+        # ------------------------------------------------------------
         rows_out = []
         for tid, rows in tracks.items():
             tid = str(tid)
-            movement = movement_by_id.get(tid, movement_by_id.get(tid, ""))
+            movement = movement_by_id.get(tid, "")
             if movement not in selected:
                 continue
+            diag["subject_tracks"] += 1
 
             wait_zone = 1 if movement in ("1→3", "1→5") else 4
+            decision_rows = [
+                r for r in rows
+                if r.get("_zone_num") == wait_zone
+                and r.get("_timestamp") is not None
+                and r.get("_point") is not None
+            ]
+            if not decision_rows:
+                diag["subject_without_decision_zone"] += 1
+                continue
 
-            # ------------------------------------------------------------
-            # 1) Waiting detection
-            # ------------------------------------------------------------
-            # A waiting observation must have a sufficiently long observed
-            # temporal baseline and be inside the movement's decision zone.
-            waiting_observation = None
-            for idx, r in enumerate(rows):
-                if r.get("_zone_num") != wait_zone or r.get("_point") is None:
+            # First actual observation in the decision zone is the beginning of
+            # the observed decision period. Acceptance is the first observed
+            # Zone-6 sample after that point. No time interpolation is used.
+            wait_start = min(r["_timestamp"] for r in decision_rows)
+            accepted_time = None
+            for r in rows:
+                t = r.get("_timestamp")
+                if t is None or t <= wait_start:
                     continue
-                speed = observed_speed_kmh(rows, idx)
-                if speed is None:
-                    continue
-                if speed <= wait_threshold:
-                    waiting_observation = r
+                if r.get("_zone_num") == 6 and r.get("_point") is not None:
+                    accepted_time = t
                     break
 
-            if waiting_observation is None:
+            if accepted_time is None:
+                diag["subject_without_zone6_after_decision"] += 1
                 continue
 
-            wait_start = waiting_observation["_timestamp"]
-
-            # ------------------------------------------------------------
-            # 2) Acceptance = observed departure from waiting zone to Zone 6
-            # ------------------------------------------------------------
-            # Do NOT accept the first >threshold frame while still inside the
-            # waiting zone. That was the source of the previous false acceptance
-            # caused by one-frame / one-pixel trajectory jitter.
-            accepted_time = None
-            acceptance_qc = ""
-            previous_nonempty_zone = None
-            previous_nonempty_time = None
-            for idx, r in enumerate(rows):
-                t = r.get("_timestamp")
-                zone_num = r.get("_zone_num")
-                if t is None:
-                    continue
-
-                if t <= wait_start:
-                    if zone_num is not None:
-                        previous_nonempty_zone = zone_num
-                        previous_nonempty_time = t
-                    continue
-
-                if zone_num == 6 and r.get("_point") is not None:
-                    # Permit a single missing/undefined zone sample between the
-                    # last observed waiting-zone point and the first Zone 6 point,
-                    # but do not interpolate the event time.
-                    close_enough = (
-                        previous_nonempty_zone == wait_zone
-                        and previous_nonempty_time is not None
-                        and t > previous_nonempty_time
-                    )
-                    speed = observed_speed_kmh(rows, idx)
-                    if close_enough and speed is not None and speed > wait_threshold:
-                        accepted_time = t
-                        acceptance_qc = (
-                            "Acceptance_From_WaitZone_to_Zone6"
-                            f";DecisionWindow={decision_window_s:.6f}s"
-                            ";Observed_Frame_No_Interpolation"
-                        )
-                        break
-
-                if zone_num is not None:
-                    previous_nonempty_zone = zone_num
-                    previous_nonempty_time = t
-
-            if accepted_time is None or accepted_time <= wait_start:
-                continue
-
-            waiting_time = accepted_time - wait_start
-            if waiting_time < minimum_wait_evidence_s:
-                # A decision must include at least the observed temporal baseline
-                # used to establish waiting; this blocks single-frame artefacts.
-                continue
+            waiting_time = max(0.0, accepted_time - wait_start)
+            diag["subject_decision_events"] += 1
 
             candidates = []
-            # Conflict mapping fixed by the study design for the three subject movements.
             conflict_movements = {
                 "1→3": ["2→3"],
                 "1→5": ["2→3", "4→5"],
@@ -6046,7 +6034,17 @@ class Run1App:
                         "gap": b[0] - a[0],
                         "qc_flag": ";".join(v for v in (a[4], b[4]) if v),
                     })
+                diag["candidate_intervals_by_movement"][cm] = max(
+                    diag["candidate_intervals_by_movement"].get(cm, 0),
+                    sum(
+                        1 for a, b in zip(events, events[1:])
+                        if b[0] > a[0] and a[1] != b[1]
+                    )
+                )
 
+            # The observed acceptance may occur before the first conflict
+            # interval or after the last one. Preserve prior rejected gaps, and
+            # record the controlling gap only when the acceptance lies inside it.
             active = [
                 c for c in candidates
                 if c["gap_start"] <= accepted_time <= c["gap_end"]
@@ -6057,7 +6055,6 @@ class Run1App:
                 if wait_start <= c["gap_end"] < accepted_time
             ]
 
-            # Deduplicate identical intervals across repeated candidate generation.
             seen = set()
             prior2 = []
             for c in sorted(prior, key=lambda x: x["gap_end"]):
@@ -6075,33 +6072,30 @@ class Run1App:
             decision_id = f"{tid}_{accepted_time:.6f}"
             subject_class = rows[0].get("class_name", "")
 
-            if prior2:
-                for c in prior2:
-                    qc_parts = [acceptance_qc, c.get("qc_flag", "")]
-                    rows_out.append({
-                        "Site_ID": self.run3_site_id_var.get().strip(),
-                        "Decision_Event_ID": decision_id,
-                        "Subject_ID": tid,
-                        "Subject_Class": subject_class,
-                        "Subject_Movement": movement,
-                        "Conflicting_Movement": c["conflict_movement"],
-                        "Conflicting_ID_A": c["conflicting_id_a"],
-                        "Conflicting_ID_B": c["conflicting_id_b"],
-                        "Reference_Line": c["reference_line"],
-                        "Gap_Start_Time": f"{c['gap_start']:.6f}",
-                        "Gap_End_Time": f"{c['gap_end']:.6f}",
-                        "X31_Available_Gap": f"{c['gap']:.6f}",
-                        "X32_Waiting_Time": f"{waiting_time:.6f}",
-                        "Gap_Role": "Rejected",
-                        "Y5_Gap_Acceptance": 0,
-                        "Acceptance_Time": "",
-                        "QC_Flag": ";".join(q for q in qc_parts if q),
-                    })
+            for c in prior2:
+                rows_out.append({
+                    "Site_ID": site_id,
+                    "Decision_Event_ID": decision_id,
+                    "Subject_ID": tid,
+                    "Subject_Class": subject_class,
+                    "Subject_Movement": movement,
+                    "Conflicting_Movement": c["conflict_movement"],
+                    "Conflicting_ID_A": c["conflicting_id_a"],
+                    "Conflicting_ID_B": c["conflicting_id_b"],
+                    "Reference_Line": c["reference_line"],
+                    "Gap_Start_Time": f"{c['gap_start']:.6f}",
+                    "Gap_End_Time": f"{c['gap_end']:.6f}",
+                    "X31_Available_Gap": f"{c['gap']:.6f}",
+                    "X32_Waiting_Time": f"{waiting_time:.6f}",
+                    "Gap_Role": "Rejected",
+                    "Y5_Gap_Acceptance": 0,
+                    "Acceptance_Time": "",
+                    "QC_Flag": c["qc_flag"],
+                })
 
             if controlling:
-                qc_parts = [acceptance_qc, controlling.get("qc_flag", "")]
                 rows_out.append({
-                    "Site_ID": self.run3_site_id_var.get().strip(),
+                    "Site_ID": site_id,
                     "Decision_Event_ID": decision_id,
                     "Subject_ID": tid,
                     "Subject_Class": subject_class,
@@ -6117,9 +6111,10 @@ class Run1App:
                     "Gap_Role": "Accepted / Controlling",
                     "Y5_Gap_Acceptance": 1,
                     "Acceptance_Time": f"{accepted_time:.6f}",
-                    "QC_Flag": ";".join(q for q in qc_parts if q),
+                    "QC_Flag": controlling["qc_flag"],
                 })
 
+        self._run3_gap_diag = diag
         return rows_out
 
     @staticmethod
@@ -6497,6 +6492,7 @@ class Run1App:
                         "MLE_mu": "" if mle is None else f"{mle['mu']:.6f}",
                         "MLE_sigma": "" if mle is None else f"{mle['sigma']:.6f}",
                     })
+                gap_diag = getattr(self, "_run3_gap_diag", {})
                 summary["gap_acceptance"] = {
                     "gap_events": len(gap_rows),
                     "decision_events": len(set(r["Decision_Event_ID"] for r in gap_rows)),
@@ -6504,13 +6500,29 @@ class Run1App:
                     "rejected_events": sum(1 for r in gap_rows if r["Y5_Gap_Acceptance"] == 0),
                     "critical_gap": critical,
                     "reference_mapping_rows": len(mapping),
+                    "diagnostic_detail": gap_diag,
                 }
-                if not mapping:
-                    summary["diagnostics"]["gap_acceptance"] = f"No Reference Line Mapping entered; CSV header only. Actual configured lines={sum(1 for v in self.lines.values() if len(v)==2)}. Enter actual Site_ID|Movement|Line N mappings for subject and conflict movements to calculate X31/Y5/X32."
-                elif gap_rows:
-                    summary["diagnostics"]["gap_acceptance"] = "OK"
+                if gap_rows:
+                    fallback = gap_diag.get("reference_line_fallback_movements", [])
+                    subject_events = gap_diag.get("subject_decision_events", 0)
+                    conflict_counts = gap_diag.get("conflict_events_by_movement", {})
+                    summary["diagnostics"]["gap_acceptance"] = (
+                        f"OK; subject_decision_events={subject_events}; "
+                        f"conflict_events={conflict_counts}; "
+                        f"fallback_movements={fallback}"
+                    )
                 else:
-                    summary["diagnostics"]["gap_acceptance"] = "No valid gap-decision events found from Run 2 data under the configured mapping."
+                    summary["diagnostics"]["gap_acceptance"] = (
+                        f"No Gap rows. subject_tracks={gap_diag.get('subject_tracks', 0)}; "
+                        f"decision_events={gap_diag.get('subject_decision_events', 0)}; "
+                        f"without_decision_zone={gap_diag.get('subject_without_decision_zone', 0)}; "
+                        f"without_zone6_after_decision={gap_diag.get('subject_without_zone6_after_decision', 0)}; "
+                        f"conflict_events={gap_diag.get('conflict_events_by_movement', {})}; "
+                        f"candidate_intervals={gap_diag.get('candidate_intervals_by_movement', {})}; "
+                        f"fallback_movements={gap_diag.get('reference_line_fallback_movements', [])}; "
+                        f"mapping_rows={len(mapping)}; "
+                        f"configured_lines={sum(1 for v in self.lines.values() if len(v)==2)}"
+                    )
                 outputs["gap_acceptance"] = path
             except Exception as e:
                 fields = ["Error"]
