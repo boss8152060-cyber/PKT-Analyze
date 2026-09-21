@@ -6384,6 +6384,15 @@ class Run1App:
 
         No temporal interpolation is introduced. Opportunity time is taken from an
         observed subject timestamp inside the conflict-gap interval.
+
+        Main research CSV policy: Gap_Role/Y5 are binary only (Accepted=1,
+        Rejected=0). Post-decision interactions and simultaneous alternative
+        conflicts that are not the controlling gap are omitted from the main
+        Gap Acceptance CSV rather than emitted as a third state.
+
+        This makes the main Gap Acceptance table a decision-only research table;
+        omitted observations remain traceable through the source trajectories and
+        the cross-module event structure, but are not treated as Y5 decisions.
         """
         selected = []
         if self.run3_gap_movement_13_var.get():
@@ -6416,10 +6425,12 @@ class Run1App:
             "candidate_intervals_by_movement": {},
             "reference_line_fallback_movements": [],
             "configured_mapping_rows": len(mapping or {}),
-            "subject_opportunities_total": 0,
+            "candidate_opportunities_total": 0,
+            "binary_gap_output_rows": 0,
             "rejected_opportunities_total": 0,
             "accepted_opportunities_total": 0,
-            "post_decision_observations_total": 0,
+            "post_decision_observations_omitted_from_gap_csv": 0,
+            "simultaneous_alternatives_omitted_from_gap_csv": 0,
             "subjects_without_observed_acceptance": 0,
         }
 
@@ -6593,8 +6604,11 @@ class Run1App:
 
             # For every raw conflict gap, look for an ACTUAL subject observation
             # while that subject is physically inside Decision Zone 1/4/6.
-            # This is the key fix: later gaps (e.g. between conflict IDs 37 and 40)
-            # are retained when the subject is still observed in a Decision Zone.
+            # The acceptance rule is now evaluated from the actual decision time:
+            # if the observed decision timestamp lies inside a conflict gap, that
+            # gap is an acceptance candidate. The first Zone-6 observation remains
+            # the decision anchor, but the old "first overlap must be Zone 6" test
+            # is removed because the first overlap row may still be Zone 1/4.
             opportunities = []
             for cm in conflict_movements:
                 events = reference_times.get(cm, [])
@@ -6613,40 +6627,29 @@ class Run1App:
                     if not overlap_rows:
                         continue
 
-                    first_overlap = min(overlap_rows, key=lambda r: r["_timestamp"])
-                    opportunity_time = first_overlap["_timestamp"]
-                    opportunity_zone = int(first_overlap["_zone_num"])
-                    available_gap = gap_end - opportunity_time
+                    qc_parts = [v for v in (a[4], b[4]) if v]
+
+                    # Priority 1: the actual observed decision time is inside this
+                    # gap. Use that observed timestamp (not the first overlap row)
+                    # so the available gap is the remaining time to gap_end.
+                    contains_decision = (
+                        accepted_time is not None
+                        and gap_start <= accepted_time < gap_end
+                    )
+                    if contains_decision:
+                        opportunity_time = accepted_time
+                        opportunity_zone = 6
+                        available_gap = gap_end - accepted_time
+                    else:
+                        first_overlap = min(overlap_rows, key=lambda r: r["_timestamp"])
+                        opportunity_time = first_overlap["_timestamp"]
+                        opportunity_zone = int(first_overlap["_zone_num"])
+                        available_gap = gap_end - opportunity_time
+
                     if available_gap <= 0:
                         continue
 
-                    qc_parts = [v for v in (a[4], b[4]) if v]
-
-                    is_controlling = (
-                        accepted_time is not None
-                        and gap_start <= accepted_time < gap_end
-                        and opportunity_zone == 6
-                    )
-
-                    if is_controlling:
-                        role = "Accepted (controlling gap)"
-                        y5 = 1
-                        acceptance_time = accepted_time
-                        accepted_flag = 1
-                    elif accepted_time is not None and gap_end <= accepted_time:
-                        role = "Rejected (prior opportunity)"
-                        y5 = 0
-                        acceptance_time = None
-                        accepted_flag = 0
-                    else:
-                        # Retain later interactions without falsely calling them a
-                        # new rejection/acceptance after the subject has already
-                        # entered Zone 6.
-                        role = "Observed after decision"
-                        y5 = ""
-                        acceptance_time = None
-                        accepted_flag = None
-
+                    diag["candidate_opportunities_total"] += 1
                     opportunities.append({
                         "conflict_movement": cm,
                         "conflicting_id_a": a[1],
@@ -6659,9 +6662,10 @@ class Run1App:
                         "gap": available_gap,
                         "opportunity_time": opportunity_time,
                         "decision_zone": opportunity_zone,
-                        "role": role,
-                        "accepted": accepted_flag,
-                        "acceptance_time": acceptance_time,
+                        "contains_decision": bool(contains_decision),
+                        "role": "",
+                        "accepted": None,
+                        "acceptance_time": None,
                         "qc_flag": ";".join(dict.fromkeys(qc_parts)),
                     })
 
@@ -6670,15 +6674,65 @@ class Run1App:
                     valid_pairs
                 )
 
-            # If multiple streams contain the controlling Zone-6 entry, use the
-            # smallest remaining gap exactly as before. Other same-time alternatives
-            # remain traceable as observed interactions rather than being discarded.
-            controlling = [o for o in opportunities if o["accepted"] == 1]
-            controlling = min(controlling, key=lambda o: o["gap"]) if controlling else None
+            # Binary-only research classification:
+            #   * Exactly one controlling opportunity at the observed decision time
+            #     is Accepted (Y5=1). If several conflict streams contain the same
+            #     decision timestamp, the smallest remaining gap is the controlling
+            #     one; simultaneous alternatives are not written to the main Gap CSV.
+            #   * Every eligible opportunity that ends before the decision time is
+            #     Rejected (Y5=0).
+            #   * When no observed Zone-6 decision exists, every eligible opportunity
+            #     observed while the subject is in its Decision Zone is classified as
+            #     Rejected. The QC flag records that no observed acceptance anchor
+            #     was available, so the binary output does not silently imply that
+            #     an unobserved decision definitely occurred.
+            #   * Interactions after the decision are intentionally omitted from the
+            #     main Gap Acceptance CSV; they remain available through the shared
+            #     Event Index / source trajectories for audit.
+            decision_candidates = [o for o in opportunities if o["contains_decision"]]
+            controlling = min(
+                decision_candidates,
+                key=lambda o: (o["gap"], o["conflict_movement"],
+                                str(o["conflicting_id_a"]), str(o["conflicting_id_b"]))
+            ) if decision_candidates else None
+
+            filtered_opportunities = []
+            if controlling is not None:
+                for o in opportunities:
+                    if o is controlling:
+                        o["role"] = "Accepted"
+                        o["accepted"] = 1
+                        o["acceptance_time"] = accepted_time
+                        filtered_opportunities.append(o)
+                    elif o["gap_end"] <= accepted_time:
+                        o["role"] = "Rejected"
+                        o["accepted"] = 0
+                        o["acceptance_time"] = None
+                        filtered_opportunities.append(o)
+                    else:
+                        if o["contains_decision"]:
+                            diag["simultaneous_alternatives_omitted_from_gap_csv"] += 1
+                        else:
+                            diag["post_decision_observations_omitted_from_gap_csv"] += 1
+            else:
+                no_acceptance_qc = "No_Observed_Acceptance_Anchor"
+                for o in opportunities:
+                    o["role"] = "Rejected"
+                    o["accepted"] = 0
+                    o["acceptance_time"] = None
+                    if o["qc_flag"]:
+                        o["qc_flag"] = ";".join(dict.fromkeys(
+                            [x for x in (o["qc_flag"], no_acceptance_qc) if x]
+                        ))
+                    else:
+                        o["qc_flag"] = no_acceptance_qc
+                    filtered_opportunities.append(o)
+
+            opportunities = filtered_opportunities
 
             # The accepted row's ID is the stable anchor for the subject event.
-            # When no observed Zone-6 decision exists, retain an explicit no-decision
-            # event so observed Decision-Zone opportunities are not silently lost.
+            # When no observed Zone-6 decision exists, retain the subject event ID
+            # and classify its eligible opportunities as Rejected with a QC flag.
             if accepted_time is not None:
                 decision_id = f"{tid}_{accepted_time:.6f}"
             else:
@@ -6714,13 +6768,11 @@ class Run1App:
                 seen.add(key)
 
                 opportunity_no += 1
-                diag["subject_opportunities_total"] += 1
+                diag["binary_gap_output_rows"] += 1
                 if o["accepted"] == 0:
                     diag["rejected_opportunities_total"] += 1
                 elif o["accepted"] == 1:
                     diag["accepted_opportunities_total"] += 1
-                else:
-                    diag["post_decision_observations_total"] += 1
 
                 rows_out.append({
                     "Site_ID": site_id,
@@ -7145,19 +7197,33 @@ class Run1App:
                     if str(r["Y5_Gap_Acceptance"]) == "0": rejected_by_driver[key].append(gap)
                     elif str(r["Y5_Gap_Acceptance"]) == "1": accepted_by_driver[key].append(gap)
                 critical = []
-                groups = defaultdict(lambda: {"accepted": [], "rejected": [], "intervals": []})
+                groups = defaultdict(lambda: {"accepted": [], "rejected": [], "intervals": [], "invalid_intervals": 0})
+                invalid_mle_intervals = 0
                 for key in set(rejected_by_driver)|set(accepted_by_driver):
                     acc = accepted_by_driver.get(key, []); rej = rejected_by_driver.get(key, [])
                     if acc and rej:
-                        groups[(key[0], key[1])]["accepted"].append(acc[-1])
-                        groups[(key[0], key[1])]["rejected"].append(max(rej))
-                        groups[(key[0], key[1])]["intervals"].append((max(rej), acc[-1]))
+                        acc_value = float(acc[-1])
+                        rej_value = float(max(rej))
+                        groups[(key[0], key[1])]["accepted"].append(acc_value)
+                        groups[(key[0], key[1])]["rejected"].append(rej_value)
+                        # MLE uses interval-censored pairs only when the observed
+                        # rejected gap is below the observed accepted gap. When the
+                        # data violate that ordering, exclude the interval from MLE
+                        # rather than fabricating an upper bound. Raff still receives
+                        # the observed accepted/rejected values.
+                        if rej_value < acc_value:
+                            groups[(key[0], key[1])]["intervals"].append((rej_value, acc_value))
+                        else:
+                            groups[(key[0], key[1])]["invalid_intervals"] += 1
+                            invalid_mle_intervals += 1
                 for (cls, movement), g in groups.items():
                     cr = self._run3_raff(g["accepted"], g["rejected"]) if self.run3_use_raff_var.get() else None
                     mle = self._run3_mle_driver_intervals(g["intervals"]) if self.run3_use_mle_var.get() else None
                     critical.append({
                         "Site_ID": self.run3_site_id_var.get().strip(), "Vehicle_Class": cls, "Movement": movement,
-                        "Drivers_With_Pairs": len(g["intervals"]),
+                        "Drivers_With_Pairs": len(g["accepted"]),
+                        "Valid_MLE_Intervals": len(g["intervals"]),
+                        "Invalid_MLE_Intervals": g["invalid_intervals"],
                         "Raff_Critical_Gap_s": "" if cr is None else f"{cr:.6f}",
                         "MLE_Critical_Gap_Median_s": "" if mle is None else f"{mle['critical_gap_median']:.6f}",
                         "MLE_mu": "" if mle is None else f"{mle['mu']:.6f}",
@@ -7170,6 +7236,7 @@ class Run1App:
                     "accepted_events": sum(1 for r in gap_rows if r["Y5_Gap_Acceptance"] == 1),
                     "rejected_events": sum(1 for r in gap_rows if r["Y5_Gap_Acceptance"] == 0),
                     "critical_gap": critical,
+                    "invalid_mle_intervals_excluded": invalid_mle_intervals,
                     "reference_mapping_rows": len(mapping),
                     "diagnostic_detail": gap_diag,
                 }
@@ -7178,10 +7245,13 @@ class Run1App:
                     subject_events = gap_diag.get("subject_decision_events", 0)
                     conflict_counts = gap_diag.get("conflict_events_by_movement", {})
                     summary["diagnostics"]["gap_acceptance"] = (
-                        f"OK; subject_decision_events={subject_events}; "
-                        f"opportunities={gap_diag.get('subject_opportunities_total', 0)}; "
-                        f"rejected_opportunities={gap_diag.get('rejected_opportunities_total', 0)}; "
-                        f"accepted_opportunities={gap_diag.get('accepted_opportunities_total', 0)}; "
+                        f"OK; binary_gap_roles_only; subject_decision_events={subject_events}; "
+                        f"candidate_opportunities={gap_diag.get('candidate_opportunities_total', 0)}; "
+                        f"binary_output_rows={gap_diag.get('binary_gap_output_rows', 0)}; "
+                        f"rejected={gap_diag.get('rejected_opportunities_total', 0)}; "
+                        f"accepted={gap_diag.get('accepted_opportunities_total', 0)}; "
+                        f"post_decision_omitted={gap_diag.get('post_decision_observations_omitted_from_gap_csv', 0)}; "
+                        f"simultaneous_alternatives_omitted={gap_diag.get('simultaneous_alternatives_omitted_from_gap_csv', 0)}; "
                         f"zone6_stopped={gap_diag.get('subject_zone6_stopped', 0)}; "
                         f"decision_zone_stopped={gap_diag.get('subject_decision_zone_stopped', 0)}; "
                         f"no_observed_decision_censored={gap_diag.get('subject_no_observed_decision_censored', 0)}; "
@@ -7190,7 +7260,7 @@ class Run1App:
                     )
                 else:
                     summary["diagnostics"]["gap_acceptance"] = (
-                        f"No Gap rows. subject_tracks={gap_diag.get('subject_tracks', 0)}; "
+                        f"No binary Gap rows. subject_tracks={gap_diag.get('subject_tracks', 0)}; "
                         f"decision_events={gap_diag.get('subject_decision_events', 0)}; "
                         f"without_decision_zone={gap_diag.get('subject_without_decision_zone', 0)}; "
                         f"without_zone6_after_decision={gap_diag.get('subject_without_zone6_after_decision', 0)}; "
