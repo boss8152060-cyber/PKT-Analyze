@@ -4894,6 +4894,37 @@ class Run1App:
             det, ids, zone,
         )
 
+    @staticmethod
+    def _run3_canonical_class(value):
+        """Normalize vehicle class labels coming from Run 2 without changing class meaning."""
+        raw = str(value or "").strip().lower()
+        aliases = {
+            "bus": "Bus", "car": "Car", "motorcycle": "Motorcycle",
+            "motorbike": "Motorcycle", "motor cycle": "Motorcycle",
+            "pickup": "Pickup", "pickup truck": "Pickup",
+            "sidecar": "Sidecar", "motorcycle sidecar": "Sidecar",
+            "truck": "Truck", "van": "Van", "person": "person",
+        }
+        return aliases.get(raw, str(value or "").strip())
+
+    @staticmethod
+    def _run3_time_tolerance(tracks):
+        """Use an observed-frame tolerance rather than exact timestamp equality.
+        This does not interpolate positions; it only matches observed samples
+        that are close in time, which is useful when one tracker misses a frame.
+        """
+        intervals = []
+        for rows in tracks.values():
+            ts = [r.get("_timestamp") for r in rows if r.get("_timestamp") is not None]
+            for a,b in zip(ts, ts[1:]):
+                d=b-a
+                if d > 0:
+                    intervals.append(d)
+        if not intervals:
+            return 0.05
+        med=float(np.median(intervals))
+        return max(0.02, min(0.10, med*2.5))
+
     def _run3_build_tracks(self, detection_rows, id_rows):
         tracks = defaultdict(list)
         for row in detection_rows:
@@ -4904,6 +4935,7 @@ class Run1App:
             if ts is None:
                 continue
             row2 = dict(row)
+            row2["class_name"] = self._run3_canonical_class(row2.get("class_name", ""))
             row2["_timestamp"] = ts
             row2["_point"] = self._run3_point_from_row(row2)
             row2["_center"] = self._run3_bbox_center(row2)
@@ -5205,27 +5237,39 @@ class Run1App:
         theta = math.radians(axis_deg)
         road_u = (math.cos(theta), math.sin(theta))
         lat_u = (-math.sin(theta), math.cos(theta))
-        widths = {name: float(self.run3_width_vars[name].get()) for name in RUN3_VEHICLE_CLASSES}
+        widths = {}
+        for name in RUN3_VEHICLE_CLASSES:
+            raw = str(self.run3_width_vars[name].get()).strip()
+            widths[name] = float(raw)
+        tol = self._run3_time_tolerance(tracks)
         out = []
+        candidates_seen = 0
         for tid_a, rows_a in tracks.items():
-            if not rows_a or rows_a[0].get("class_name", "") != "Motorcycle":
+            cls_a = self._run3_canonical_class(rows_a[0].get("class_name", "")) if rows_a else ""
+            if not rows_a or cls_a != "Motorcycle":
                 continue
-            by_time = {round(r["_timestamp"], 6): r for r in rows_a if r.get("_center") is not None and r.get("_zone_num") in (2,4)}
+            a_obs = [r for r in rows_a if r.get("_center") is not None and r.get("_zone_num") in (2,4)]
+            if not a_obs:
+                continue
             for tid_b, rows_b in tracks.items():
                 if tid_b == tid_a or not rows_b:
                     continue
-                cls_b = rows_b[0].get("class_name", "")
+                cls_b = self._run3_canonical_class(rows_b[0].get("class_name", ""))
                 if cls_b not in widths:
                     continue
-                for r_b in rows_b:
-                    if r_b.get("_center") is None or r_b.get("_zone_num") not in (2,4):
+                b_obs = [r for r in rows_b if r.get("_center") is not None and r.get("_zone_num") in (2,4)]
+                if not b_obs:
+                    continue
+                for r_a in a_obs:
+                    # Nearest observed sample in the same zone; no interpolation.
+                    same_zone = [r for r in b_obs if r.get("_zone_num") == r_a.get("_zone_num")]
+                    if not same_zone:
                         continue
-                    key = round(r_b["_timestamp"], 6)
-                    r_a = by_time.get(key)
-                    if not r_a:
+                    r_b = min(same_zone, key=lambda r: abs(r["_timestamp"]-r_a["_timestamp"]))
+                    dt = abs(r_b["_timestamp"]-r_a["_timestamp"])
+                    if dt > tol:
                         continue
-                    if r_a.get("_zone_num") != r_b.get("_zone_num"):
-                        continue
+                    candidates_seen += 1
                     dx = r_b["_center"][0] - r_a["_center"][0]
                     dy = r_b["_center"][1] - r_a["_center"][1]
                     lateral_px = abs(dx * lat_u[0] + dy * lat_u[1])
@@ -5262,7 +5306,7 @@ class Run1App:
                         "Y3_Lateral_Clearance": f"{y3:.6f}",
                         "QC_Flag": ("Negative_Y3" if y3 < 0 else "") + (";Perspective_Homography" if perspective is not None else ""),
                     })
-        return out
+        return out, candidates_seen, tol
 
     @staticmethod
     def _run3_segment_intersection(a0, a1, b0, b1):
@@ -5291,7 +5335,9 @@ class Run1App:
 
     def _run3_pet(self, tracks, summaries, ppm, axis_deg, interaction_distance_m, perspective=None):
         candidates = []
+        diag = {"zone6_tracks": 0, "movement_identified": 0, "pairs_considered": 0, "same_movement_excluded": 0, "interaction_candidates": 0}
         ids = list(tracks)
+        diag["zone6_tracks"] = sum(1 for tid in ids if any(r.get("_zone_num") == 6 and r.get("_point") is not None for r in tracks[tid]))
         movement_by_id = {tid: self._run3_movement_from_sequence(summaries.get(tid, {}).get("zone_sequence", "")) if tid in summaries else "" for tid in ids}
         for i, a_id in enumerate(ids):
             for b_id in ids[i+1:]:
@@ -5300,10 +5346,14 @@ class Run1App:
                 if len(a_rows) < 2 or len(b_rows) < 2:
                     continue
                 ma = movement_by_id.get(a_id, ""); mb = movement_by_id.get(b_id, "")
+                if ma: diag["movement_identified"] += 1
+                if mb: diag["movement_identified"] += 1
+                diag["pairs_considered"] += 1
                 if not ma and not mb:
                     continue
                 # Exclude simple same-direction movement pairs.
                 if ma and mb and ma == mb:
+                    diag["same_movement_excluded"] += 1
                     continue
                 best = None
                 for ra0, ra1 in zip(a_rows, a_rows[1:]):
@@ -5317,6 +5367,7 @@ class Run1App:
                             ta_frac, tb_frac, ip = hit
                             ta = ra0["_timestamp"] + ta_frac*(ra1["_timestamp"]-ra0["_timestamp"])
                             tb = rb0["_timestamp"] + tb_frac*(rb1["_timestamp"]-rb0["_timestamp"])
+                            diag["interaction_candidates"] += 1
                             best = (ta, tb, ip, self._run3_conflict_type(ma, mb, trajectory_intersects=True))
                             break
                     if best:
@@ -5336,6 +5387,7 @@ class Run1App:
                             if dm <= interaction_distance_m and (min_pair is None or dm < min_pair[0]):
                                 min_pair = (dm, ra, rb)
                     if min_pair:
+                        diag["interaction_candidates"] += 1
                         _, ra, rb = min_pair
                         best = (ra["_timestamp"], rb["_timestamp"], ((ra["_point"][0]+rb["_point"][0])/2, (ra["_point"][1]+rb["_point"][1])/2), self._run3_conflict_type(ma, mb, trajectory_intersects=False))
                 if best is None:
@@ -5368,7 +5420,7 @@ class Run1App:
                     "Y4_PET": f"{pet:.6f}",
                     "QC_Flag": "Threshold_At_or_Below" if pet <= float(self.run3_pet_threshold_var.get()) else "",
                 })
-        return candidates
+        return candidates, diag
 
     def run3_processing(self, settings, output_dir, run_name):
         self.root.after(0, lambda: self.status_var.set("Run 3 — loading Run 2 results..."))
@@ -5390,6 +5442,8 @@ class Run1App:
                 "track_ids": len(tracks),
                 "id_zone_summary_rows": len(id_rows),
                 "zone_summary_rows": len(zone_rows),
+                "tracks_by_zone": {str(z): sum(1 for rows in tracks.values() if any(r.get("_zone_num") == z for r in rows)) for z in range(1,7)},
+                "movement_counts": {m: sum(1 for tid, sm in summaries.items() if self._run3_movement_from_sequence(sm.get("zone_sequence", "")) == m) for m in RUN3_ALL_MOVEMENTS},
             },
             "diagnostics": {},
         }
@@ -5470,7 +5524,7 @@ class Run1App:
                     "reference_mapping_rows": len(mapping),
                 }
                 if not mapping:
-                    summary["diagnostics"]["gap_acceptance"] = "No Reference Line Mapping entered; CSV created with header only. Enter actual Site_ID|Movement|Line N mappings to calculate X31/Y5/X32."
+                    summary["diagnostics"]["gap_acceptance"] = f"No Reference Line Mapping entered; CSV header only. Actual configured lines={sum(1 for v in self.lines.values() if len(v)==2)}. Enter actual Site_ID|Movement|Line N mappings to calculate X31/Y5/X32."
                 elif gap_rows:
                     summary["diagnostics"]["gap_acceptance"] = "OK"
                 else:
@@ -5486,12 +5540,12 @@ class Run1App:
         if self.run3_lc_enabled_var.get():
             try:
                 ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); long_window = float(self.run3_lc_longitudinal_window_var.get())
-                lc_rows = self._run3_lateral_clearance(tracks, ppm, axis, long_window, perspective)
+                lc_rows, lc_candidates_seen, lc_tol = self._run3_lateral_clearance(tracks, ppm, axis, long_window, perspective)
                 fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Neighbor_ID","Neighbor_Class","Neighbor_Side","LS_Pixel","PPM","LS_Meter","Wm","Wv","Y3_Lateral_Clearance","QC_Flag"]
                 path = write_csv("Run_3_Lateral_Clearance.csv", fields, lc_rows)
                 vals = [float(r["Y3_Lateral_Clearance"]) for r in lc_rows]
                 summary["lateral_clearance"] = {"N": len(vals), "Mean_m": float(np.mean(vals)) if vals else None, "Median_m": float(np.median(vals)) if vals else None, "Minimum_m": float(np.min(vals)) if vals else None, "Maximum_m": float(np.max(vals)) if vals else None}
-                summary["diagnostics"]["lateral_clearance"] = "OK" if lc_rows else "No valid Motorcycle + neighboring vehicle pairs met the Zone 2/4, same-time and longitudinal-window conditions."
+                summary["diagnostics"]["lateral_clearance"] = (f"OK; candidate pairs={lc_candidates_seen}; time_tolerance_s={lc_tol:.6f}" if lc_rows else f"No valid pairs. Candidate same-zone time-matched pairs={lc_candidates_seen}; time_tolerance_s={lc_tol:.6f}; check motorcycle class, Zone 2/4 coverage, PPM/perspective, and longitudinal window.")
                 outputs["lateral_clearance"] = path
             except Exception as e:
                 fields = ["Error"]
@@ -5503,13 +5557,13 @@ class Run1App:
         if self.run3_pet_enabled_var.get():
             try:
                 ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); interaction = float(self.run3_pet_interaction_distance_var.get())
-                pet_rows = self._run3_pet(tracks, summaries, ppm, axis, interaction, perspective)
+                pet_rows, pet_diag = self._run3_pet(tracks, summaries, ppm, axis, interaction, perspective)
                 fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Y4_PET","QC_Flag"]
                 path = write_csv("Run_3_PET.csv", fields, pet_rows)
                 vals = [float(r["Y4_PET"]) for r in pet_rows]
                 threshold = float(self.run3_pet_threshold_var.get())
                 summary["pet"] = {"Total_Events": len(vals), "Mean_s": float(np.mean(vals)) if vals else None, "Median_s": float(np.median(vals)) if vals else None, "Minimum_s": float(np.min(vals)) if vals else None, "Maximum_s": float(np.max(vals)) if vals else None, "PET_At_or_Below_Threshold": sum(v <= threshold for v in vals)}
-                summary["diagnostics"]["pet"] = "OK" if pet_rows else "No valid Zone 6 interaction events met the trajectory/conflict conditions."
+                summary["diagnostics"]["pet"] = (f"OK; {pet_diag}" if pet_rows else f"No valid PET events; {pet_diag}. Check Zone 6 coverage, Zone Sequence movement labels, and interaction distance." )
                 outputs["pet"] = path
             except Exception as e:
                 fields = ["Error"]
