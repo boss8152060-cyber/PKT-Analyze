@@ -6057,8 +6057,10 @@ class Run1App:
                 "Vehicle_Class": cls,
                 "Movement": movement,
                 "Zone_Sequence": "→".join(str(z) for z in actual_zones),
+                "Zone1_Speed_kmh": value(1, "Speed_kmh"),
                 "Y1_Zone2_Speed_kmh": value(2, "Speed_kmh"),
                 "Y1_Zone4_Speed_kmh": value(4, "Speed_kmh"),
+                "Zone6_Speed_kmh": value(6, "Speed_kmh"),
                 "Y2_Zone3_Speed_kmh": value(3, "Speed_kmh"),
                 "Y2_Zone5_Speed_kmh": value(5, "Speed_kmh"),
                 "Calibration_Mode": ";".join(modes),
@@ -7114,7 +7116,9 @@ class Run1App:
                 # Frame/time/distance audit details are already available in Run 2 Detection Records.
                 vehicle_summary_fields = [
                     "Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone_Sequence",
+                    "Zone1_Speed_kmh",
                     "Y1_Zone2_Speed_kmh","Y1_Zone4_Speed_kmh",
+                    "Zone6_Speed_kmh",
                     "Y2_Zone3_Speed_kmh","Y2_Zone5_Speed_kmh",
                     "Calibration_Mode","QC_Flag"
                 ]
