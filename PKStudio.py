@@ -5631,7 +5631,69 @@ class Run1App:
         summaries = {str(r.get("track_id", "")): r for r in id_rows}
         return tracks, summaries
 
-    def _run3_speed(self, tracks, ppm, perspective=None):
+    def _run3_build_vehicle_event_map(self, tracks, summaries, movement_by_id=None, movement_source_by_id=None):
+        """Build one canonical, read-only vehicle event map for all Run 3 modules.
+
+        The map is derived once from the Run 2 tracks plus the shared Movement resolver.
+        Speed, Lateral Clearance, PET, and Gap therefore reference the same Vehicle_ID,
+        Class, Movement, Movement_Source, and observed zone/timestamp records.
+
+        No ID is invented, merged, or reassigned here. This layer only prevents each
+        module from independently re-identifying the same track and accidentally using
+        different class/movement metadata.
+        """
+        if movement_by_id is None or movement_source_by_id is None:
+            movement_by_id, movement_source_by_id = self._run3_build_movement_index(
+                tracks, summaries, {}
+            )
+
+        event_map = {}
+        for tid, rows in tracks.items():
+            sid = str(tid)
+            ordered = sorted(rows or [], key=lambda r: r.get("_timestamp", 0.0))
+            cls = self._run3_canonical_class(ordered[0].get("class_name", "")) if ordered else ""
+            actual_zones = []
+            zone_windows = {}
+            for r in ordered:
+                z = r.get("_zone_num")
+                if z is None or z not in range(1, 7):
+                    continue
+                if not actual_zones or actual_zones[-1] != z:
+                    actual_zones.append(z)
+                zone_windows.setdefault(z, []).append(r)
+
+            event_map[sid] = {
+                "Vehicle_ID": sid,
+                "Vehicle_Class": cls,
+                "Movement": movement_by_id.get(sid, ""),
+                "Movement_Source": movement_source_by_id.get(sid, ""),
+                "First_Observed_Time": ordered[0].get("_timestamp") if ordered else None,
+                "Last_Observed_Time": ordered[-1].get("_timestamp") if ordered else None,
+                "Zone_Sequence": actual_zones,
+                "Zone_Rows": zone_windows,
+                "Rows": ordered,
+            }
+        return event_map
+
+    @staticmethod
+    def _run3_pet_movement_pair_allowed(movement_a, movement_b):
+        """Return True only for movement pairs defined as conflict streams.
+
+        Pair order is irrelevant. Unknown movement is not guessed and is rejected
+        here so PET does not create unrelated ID pairs from arbitrary Zone-6 proximity.
+        """
+        conflict_pairs = {
+            frozenset(("1→3", "2→3")),
+            frozenset(("1→5", "2→3")),
+            frozenset(("1→5", "4→5")),
+            frozenset(("4→1", "2→3")),
+            frozenset(("4→1", "1→5")),
+        }
+        if not movement_a or not movement_b:
+            return False
+        return frozenset((movement_a, movement_b)) in conflict_pairs
+
+    def _run3_speed(self, tracks, ppm, perspective=None, vehicle_event_map=None):
         """Compute speed separately for every user-selected approach/exit Zone.
         No interpolation is used; only observed trajectory samples are used.
         """
@@ -5646,10 +5708,16 @@ class Run1App:
         }
         selected = [(z, role_map[z][0], role_map[z][1]) for z in selected_zones]
         results = []
+        vehicle_event_map = vehicle_event_map or {}
         for tid, rows in tracks.items():
+            sid = str(tid)
+            event = vehicle_event_map.get(sid, {})
+            rows = event.get("Rows", rows)
             if not rows:
                 continue
-            cls = rows[0].get("class_name", "")
+            cls = event.get("Vehicle_Class", "") or rows[0].get("class_name", "")
+            movement = event.get("Movement", "")
+            movement_source = event.get("Movement_Source", "")
             if str(cls).lower() == "person":
                 continue
             for zone, variable, speed_type in selected:
@@ -5667,8 +5735,10 @@ class Run1App:
                 speed_kmh = d_m / dt * 3.6
                 results.append({
                     "Site_ID": self.run3_site_id_var.get().strip(),
-                    "Vehicle_ID": tid,
+                    "Vehicle_ID": sid,
                     "Vehicle_Class": cls,
+                    "Movement": movement,
+                    "Movement_Source": movement_source,
                     "Speed_Variable": variable,
                     "Speed_Type": speed_type,
                     "Analysis_Role": speed_type,
@@ -5685,7 +5755,7 @@ class Run1App:
         return results
 
 
-    def _run3_speed_vehicle_summary(self, speed_rows, tracks):
+    def _run3_speed_vehicle_summary(self, speed_rows, tracks, vehicle_event_map=None):
         """Return one row per vehicle with zone sequence and all zone-level audit fields.
 
         The main Speed CSV is intentionally wide: one Vehicle_ID = one row.
@@ -5721,6 +5791,7 @@ class Run1App:
             set(str(tid) for tid in tracks.keys()),
             key=lambda x: (int(x) if x.isdigit() else 10**18, x)
         )
+        vehicle_event_map = vehicle_event_map or {}
         summary_rows = []
 
         zone_fields = {}
@@ -5742,7 +5813,10 @@ class Run1App:
             rows = tracks.get(tid, [])
             if not rows:
                 continue
-            cls = str(rows[0].get("class_name", ""))
+            event = vehicle_event_map.get(str(tid), {})
+            cls = str(event.get("Vehicle_Class", "") or rows[0].get("class_name", ""))
+            movement = event.get("Movement", "")
+            movement_source = event.get("Movement_Source", "")
             if cls.lower() == "person":
                 continue
 
@@ -5758,6 +5832,8 @@ class Run1App:
                 "Site_ID": self.run3_site_id_var.get().strip(),
                 "Vehicle_ID": tid,
                 "Vehicle_Class": cls,
+                "Movement": movement,
+                "Movement_Source": movement_source,
                 "Zone_Sequence": "→".join(str(z) for z in actual_zones),
             }
 
@@ -6564,7 +6640,7 @@ class Run1App:
             "negative_log_likelihood": float(res.fun),
         }
 
-    def _run3_lateral_clearance(self, tracks, ppm, axis_deg, long_window_m, perspective=None):
+    def _run3_lateral_clearance(self, tracks, ppm, axis_deg, long_window_m, perspective=None, vehicle_event_map=None):
         theta = math.radians(axis_deg)
         road_u = (math.cos(theta), math.sin(theta))
         lat_u = (-math.sin(theta), math.cos(theta))
@@ -6573,10 +6649,14 @@ class Run1App:
             raw = str(self.run3_width_vars[name].get()).strip()
             widths[name] = float(raw)
         tol = self._run3_time_tolerance(tracks)
+        vehicle_event_map = vehicle_event_map or {}
         out = []
         candidates_seen = 0
         for tid_a, rows_a in tracks.items():
-            cls_a = self._run3_canonical_class(rows_a[0].get("class_name", "")) if rows_a else ""
+            event_a = vehicle_event_map.get(str(tid_a), {})
+            rows_a = event_a.get("Rows", rows_a)
+            cls_a = event_a.get("Vehicle_Class", "") or (self._run3_canonical_class(rows_a[0].get("class_name", "")) if rows_a else "")
+            movement_a = event_a.get("Movement", "")
             if not rows_a or cls_a != "Motorcycle":
                 continue
             selected_lc_zones = {z for z,v in self.run3_lc_zone_vars.items() if v.get()}
@@ -6586,7 +6666,10 @@ class Run1App:
             for tid_b, rows_b in tracks.items():
                 if tid_b == tid_a or not rows_b:
                     continue
-                cls_b = self._run3_canonical_class(rows_b[0].get("class_name", ""))
+                event_b = vehicle_event_map.get(str(tid_b), {})
+                rows_b = event_b.get("Rows", rows_b)
+                cls_b = event_b.get("Vehicle_Class", "") or self._run3_canonical_class(rows_b[0].get("class_name", ""))
+                movement_b = event_b.get("Movement", "")
                 if cls_b not in widths:
                     continue
                 b_obs = [r for r in rows_b if r.get("_center") is not None and r.get("_zone_num") in selected_lc_zones]
@@ -6625,10 +6708,12 @@ class Run1App:
                         "Pair_ID": f"{tid_a}_{tid_b}",
                         "Timestamp": f"{r_a['_timestamp']:.6f}",
                         "Zone": f"Zone {r_a['_zone_num']}",
-                        "Motorcycle_ID": tid_a,
+                        "Motorcycle_ID": str(tid_a),
                         "Motorcycle_Class": "Motorcycle",
-                        "Neighbor_ID": tid_b,
+                        "Motorcycle_Movement": movement_a,
+                        "Neighbor_ID": str(tid_b),
                         "Neighbor_Class": cls_b,
+                        "Neighbor_Movement": movement_b,
                         "Neighbor_Side": side,
                         "LS_Pixel": f"{lateral_px:.6f}",
                         "PPM": f"{ppm:.6f}",
@@ -6665,14 +6750,15 @@ class Run1App:
                 return "Diverging"
         return "Merging/Diverging"
 
-    def _run3_pet(self, tracks, summaries, interaction_distance_m, perspective=None, mapping=None, movement_by_id=None, movement_source_by_id=None):
+    def _run3_pet(self, tracks, summaries, interaction_distance_m, perspective=None, mapping=None, movement_by_id=None, movement_source_by_id=None, vehicle_event_map=None):
         """PET using observed trajectory samples only.
         Spatial segment intersection is used to find a candidate interaction point,
         but event timestamps come only from actual observed frames (nearest observed
         sample to the interaction point), with no temporal interpolation.
         """
         candidates=[]
-        diag={"zone6_tracks":0,"movement_identified":0,"pairs_considered":0,"same_movement_excluded":0,"interaction_candidates":0,"fallback_close_pairs":0,"overlap_intervals":0,"insufficient_samples":0}
+        vehicle_event_map = vehicle_event_map or {}
+        diag={"zone6_tracks":0,"movement_identified":0,"pairs_considered":0,"movement_pair_filtered":0,"same_movement_excluded":0,"interaction_candidates":0,"fallback_close_pairs":0,"overlap_intervals":0,"insufficient_samples":0}
         ids=list(tracks)
         if movement_by_id is None or movement_source_by_id is None:
             movement_by_id, movement_source_by_id = self._run3_build_movement_index(
@@ -6685,17 +6771,22 @@ class Run1App:
             return self._run3_transform_point(r["_point"], perspective) if perspective is not None else r["_point"]
         for i,a_id in enumerate(ids):
             for b_id in ids[i+1:]:
-                a_rows=[r for r in tracks[a_id] if self.run3_pet_zone6_var.get() and r.get("_zone_num")==6 and r.get("_point") is not None]
-                b_rows=[r for r in tracks[b_id] if self.run3_pet_zone6_var.get() and r.get("_zone_num")==6 and r.get("_point") is not None]
+                event_a = vehicle_event_map.get(str(a_id), {})
+                event_b = vehicle_event_map.get(str(b_id), {})
+                a_rows=[r for r in event_a.get("Rows", tracks[a_id]) if self.run3_pet_zone6_var.get() and r.get("_zone_num")==6 and r.get("_point") is not None]
+                b_rows=[r for r in event_b.get("Rows", tracks[b_id]) if self.run3_pet_zone6_var.get() and r.get("_zone_num")==6 and r.get("_point") is not None]
                 if not a_rows or not b_rows:
                     diag["insufficient_samples"]+=1; continue
-                ma=movement_by_id.get(a_id,""); mb=movement_by_id.get(b_id,"")
+                ma=event_a.get("Movement", movement_by_id.get(str(a_id),"")); mb=event_b.get("Movement", movement_by_id.get(str(b_id),""))
                 if ma: diag["movement_identified"]+=1
                 if mb: diag["movement_identified"]+=1
                 diag["pairs_considered"]+=1
                 if not ma and not mb: continue
                 if ma and mb and ma==mb:
                     diag["same_movement_excluded"]+=1; continue
+                if not self._run3_pet_movement_pair_allowed(ma, mb):
+                    diag["movement_pair_filtered"] += 1
+                    continue
 
                 best=None
                 # Detect spatial intersection of observed trajectory segments.
@@ -6749,8 +6840,8 @@ class Run1App:
                 candidates.append({
                     "Site_ID":self.run3_site_id_var.get().strip(),
                     "Interaction_ID":f"{a_id}_{b_id}_{min(a_entry,b_entry):.6f}",
-                    "Vehicle_ID_A":a_id,"Vehicle_Class_A":tracks[a_id][0].get("class_name",""),"Movement_A":ma,
-                    "Vehicle_ID_B":b_id,"Vehicle_Class_B":tracks[b_id][0].get("class_name",""),"Movement_B":mb,
+                    "Vehicle_ID_A":str(a_id),"Vehicle_Class_A":event_a.get("Vehicle_Class", tracks[a_id][0].get("class_name","")),"Movement_A":ma,
+                    "Vehicle_ID_B":str(b_id),"Vehicle_Class_B":event_b.get("Vehicle_Class", tracks[b_id][0].get("class_name","")),"Movement_B":mb,
                     "Conflict_Type":ctype,"Conflict_Zone":"Zone 6",
                     "Interaction_Start":f"{min(a_entry,b_entry):.6f}","Interaction_End":f"{max(a_exit,b_exit):.6f}",
                     "T1_Exit_Time":f"{t1:.6f}","T2_Entry_Time":f"{t2:.6f}","Y4_PET":f"{pet:.6f}",
@@ -6777,6 +6868,8 @@ class Run1App:
         except Exception as exc:
             mapping_parse_error = str(exc)
         movement_by_id, movement_source_by_id = self._run3_build_movement_index(tracks, summaries, mapping)
+        # One canonical vehicle/event map is shared by Speed, LC, and PET. Gap retains its existing subject-centric logic.
+        vehicle_event_map = self._run3_build_vehicle_event_map(tracks, summaries, movement_by_id, movement_source_by_id)
         summary = {
             "site_id": self.run3_site_id_var.get().strip(),
             "inputs": {"detection": det_path, "id_zone_summary": id_path, "zone_summary": zone_path},
@@ -6813,9 +6906,9 @@ class Run1App:
         if self.run3_speed_enabled_var.get():
             try:
                 ppm = float(self.run3_ppm_var.get())
-                speed_rows = self._run3_speed(tracks, ppm, perspective)
+                speed_rows = self._run3_speed(tracks, ppm, perspective, vehicle_event_map)
                 fields = [
-                    "Site_ID","Vehicle_ID","Vehicle_Class","Speed_Variable","Speed_Type","Analysis_Role","Zone",
+                    "Site_ID","Vehicle_ID","Vehicle_Class","Movement","Movement_Source","Speed_Variable","Speed_Type","Analysis_Role","Zone",
                     "Start_Time","End_Time","Start_Frame","End_Frame","Distance_m","Speed_kmh","Calibration_Mode","QC_Flag"
                 ]
                 detail_path = write_csv("Run_3_Speed_Detail.csv", fields, speed_rows)
@@ -6824,7 +6917,7 @@ class Run1App:
                 # Zone sequence and one speed field per Zone. This is the compact
                 # human-readable form requested by the researcher.
                 vehicle_summary_fields = [
-                    "Site_ID","Vehicle_ID","Vehicle_Class","Zone_Sequence",
+                    "Site_ID","Vehicle_ID","Vehicle_Class","Movement","Movement_Source","Zone_Sequence",
                     "Access_Mouth_Zone1_Timestamp_Range","Access_Mouth_Zone1_Start_Frame","Access_Mouth_Zone1_End_Frame","Access_Mouth_Zone1_Distance_m","Access_Mouth_Zone1_Speed_kmh","Access_Mouth_Zone1_Speed_Variable",
                     "Approach_Zone2_Timestamp_Range","Approach_Zone2_Start_Frame","Approach_Zone2_End_Frame","Approach_Zone2_Distance_m","Approach_Zone2_Speed_kmh","Approach_Zone2_Speed_Variable",
                     "Exit_Zone3_Timestamp_Range","Exit_Zone3_Start_Frame","Exit_Zone3_End_Frame","Exit_Zone3_Distance_m","Exit_Zone3_Speed_kmh","Exit_Zone3_Speed_Variable",
@@ -6833,7 +6926,7 @@ class Run1App:
                     "Middle_Access_Zone6_Timestamp_Range","Middle_Access_Zone6_Start_Frame","Middle_Access_Zone6_End_Frame","Middle_Access_Zone6_Distance_m","Middle_Access_Zone6_Speed_kmh","Middle_Access_Zone6_Speed_Variable",
                     "Calibration_Mode","QC_Flag"
                 ]
-                vehicle_summary_rows = self._run3_speed_vehicle_summary(speed_rows, tracks)
+                vehicle_summary_rows = self._run3_speed_vehicle_summary(speed_rows, tracks, vehicle_event_map)
                 path = write_csv("Run_3_Speed.csv", vehicle_summary_fields, vehicle_summary_rows)
 
                 vals_y1 = [float(r["Speed_kmh"]) for r in speed_rows if r["Speed_Variable"] == "Y1"]
@@ -6932,7 +7025,8 @@ class Run1App:
                         f"decision_zone_stopped={gap_diag.get('subject_decision_zone_stopped', 0)}; "
                         f"no_observed_decision_censored={gap_diag.get('subject_no_observed_decision_censored', 0)}; "
                         f"conflict_events={conflict_counts}; "
-                        f"fallback_movements={fallback}"
+                        f"fallback_movements={fallback}; "
+                        f"movement_pair_filtered={pet_diag.get('movement_pair_filtered', 0)}"
                     )
                 else:
                     summary["diagnostics"]["gap_acceptance"] = (
@@ -6957,8 +7051,8 @@ class Run1App:
         if self.run3_lc_enabled_var.get():
             try:
                 ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); long_window = float(self.run3_lc_longitudinal_window_var.get())
-                lc_rows, lc_candidates_seen, lc_tol = self._run3_lateral_clearance(tracks, ppm, axis, long_window, perspective)
-                fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Neighbor_ID","Neighbor_Class","Neighbor_Side","LS_Pixel","PPM","LS_Meter","Wm","Wv","Y3_Lateral_Clearance","QC_Flag"]
+                lc_rows, lc_candidates_seen, lc_tol = self._run3_lateral_clearance(tracks, ppm, axis, long_window, perspective, vehicle_event_map)
+                fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Motorcycle_Movement","Neighbor_ID","Neighbor_Class","Neighbor_Movement","Neighbor_Side","LS_Pixel","PPM","LS_Meter","Wm","Wv","Y3_Lateral_Clearance","QC_Flag"]
                 path = write_csv("Run_3_Lateral_Clearance.csv", fields, lc_rows)
                 vals = [float(r["Y3_Lateral_Clearance"]) for r in lc_rows]
                 summary["lateral_clearance"] = {"N": len(vals), "Mean_m": float(np.mean(vals)) if vals else None, "Median_m": float(np.median(vals)) if vals else None, "Minimum_m": float(np.min(vals)) if vals else None, "Maximum_m": float(np.max(vals)) if vals else None}
@@ -6976,7 +7070,7 @@ class Run1App:
                 interaction = float(self.run3_pet_interaction_distance_var.get())
                 pet_rows, pet_diag = self._run3_pet(
                     tracks, summaries, interaction, perspective, mapping,
-                    movement_by_id, movement_source_by_id
+                    movement_by_id, movement_source_by_id, vehicle_event_map
                 )
                 fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Y4_PET","QC_Flag"]
                 path = write_csv("Run_3_PET.csv", fields, pet_rows)
@@ -6997,6 +7091,7 @@ class Run1App:
             "run2_zone_summary_role": "Audit-only; not duplicated as a Run 3 calculation input",
             "pet_uses_ppm": False,
             "pet_uses_road_direction_angle": False,
+            "common_vehicle_event_map": "Shared Vehicle_ID/Class/Movement/Zone records for Speed, LC, and PET; no ID invention or reassignment",
         }
         summary_path = os.path.join(output_dir, "Run_3_Summary.json")
         summary["outputs"] = outputs
