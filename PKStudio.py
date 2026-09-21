@@ -6062,6 +6062,57 @@ class Run1App:
             mapping[(site, movement)] = lname
         return mapping
 
+    def _run3_event_speed_kmh(self, rows, target_time, ppm, perspective=None):
+        """Estimate local event speed from observed trajectory samples only.
+
+        The target event timestamp itself is never temporally interpolated. The
+        method selects an observed pair of consecutive samples near the event,
+        preferring a pair containing the target sample; if the target is at a
+        zone boundary it may use the nearest valid same-zone pair. The returned
+        value is therefore a local observed speed suitable for event context in
+        Gap/LC/PET CSVs, not a replacement for the research Speed module.
+        """
+        if rows is None or target_time is None:
+            return None
+        try:
+            t_target = float(target_time)
+            clean = [
+                r for r in rows
+                if r.get("_timestamp") is not None
+                and r.get("_point") is not None
+            ]
+            if len(clean) < 2:
+                return None
+            clean = sorted(clean, key=lambda r: float(r["_timestamp"]))
+
+            # First preference: consecutive pair whose time span contains the
+            # observed target timestamp. No interpolation is performed.
+            spanning = []
+            for a, b in zip(clean, clean[1:]):
+                ta = float(a["_timestamp"])
+                tb = float(b["_timestamp"])
+                if ta <= t_target <= tb and tb > ta:
+                    spanning.append((abs(t_target - ta) + abs(tb - t_target), a, b))
+            if spanning:
+                _, a, b = min(spanning, key=lambda x: x[0])
+                return self._run3_gap_observed_speed_kmh(a, b, ppm, perspective)
+
+            # Otherwise use the closest consecutive observed pair by midpoint.
+            nearest = []
+            for a, b in zip(clean, clean[1:]):
+                ta = float(a["_timestamp"])
+                tb = float(b["_timestamp"])
+                if tb <= ta:
+                    continue
+                mid = 0.5 * (ta + tb)
+                nearest.append((abs(t_target - mid), a, b))
+            if not nearest:
+                return None
+            _, a, b = min(nearest, key=lambda x: x[0])
+            return self._run3_gap_observed_speed_kmh(a, b, ppm, perspective)
+        except Exception:
+            return None
+
     def _run3_gap_observed_speed_kmh(self, prev_row, row, ppm, perspective=None):
         """Estimate speed from two observed trajectory samples only.
 
@@ -6884,6 +6935,31 @@ class Run1App:
                     )
                 stage_anchor = float(stage_anchor) if stage_anchor is not None else float(o["opportunity_time"])
 
+                # Event-local speeds are calculated from observed trajectory samples.
+                # Subject speed is evaluated at this row's gap evaluation time.
+                subject_speed = self._run3_event_speed_kmh(
+                    rows, o["opportunity_time"], float(self.run3_ppm_var.get()), self._run3_get_perspective_matrix(silent=True)
+                )
+                # Conflict A/B speeds are evaluated at their own observed reference
+                # event times (gap start / gap end), not at an interpolated timestamp.
+                conflict_rows_a = vehicle_event_map.get(str(o["conflicting_id_a"]), {}).get("Rows", tracks.get(str(o["conflicting_id_a"]), []))
+                conflict_rows_b = vehicle_event_map.get(str(o["conflicting_id_b"]), {}).get("Rows", tracks.get(str(o["conflicting_id_b"]), []))
+                conflict_speed_a = self._run3_event_speed_kmh(
+                    conflict_rows_a, o["gap_start"], float(self.run3_ppm_var.get()), self._run3_get_perspective_matrix(silent=True)
+                )
+                conflict_speed_b = self._run3_event_speed_kmh(
+                    conflict_rows_b, o["gap_end"], float(self.run3_ppm_var.get()), self._run3_get_perspective_matrix(silent=True)
+                )
+                qc_speed_parts = []
+                if subject_speed is None:
+                    qc_speed_parts.append("Subject_Event_Speed_Unavailable")
+                if conflict_speed_a is None:
+                    qc_speed_parts.append("Conflict_A_Event_Speed_Unavailable")
+                if conflict_speed_b is None:
+                    qc_speed_parts.append("Conflict_B_Event_Speed_Unavailable")
+                if qc_speed_parts:
+                    qc = ";".join(dict.fromkeys([x for x in [qc] + qc_speed_parts if x]))
+
                 rows_out.append({
                     "Site_ID": site_id,
                     "Decision_Event_ID": f"{tid}_{o['stage']}_{stage_anchor:.6f}",
@@ -6903,6 +6979,9 @@ class Run1App:
                     "Gap_Start_Time": f"{o['gap_start']:.6f}",
                     "Gap_End_Time": f"{o['gap_end']:.6f}",
                     "X31_Available_Gap": f"{o['gap']:.6f}",
+                    "Subject_Speed_kmh": "" if subject_speed is None else f"{subject_speed:.6f}",
+                    "Conflict_Speed_A_kmh": "" if conflict_speed_a is None else f"{conflict_speed_a:.6f}",
+                    "Conflict_Speed_B_kmh": "" if conflict_speed_b is None else f"{conflict_speed_b:.6f}",
                     "Gap_Role": "Accepted" if o["accepted"] == 1 else "Rejected",
                     "Y5_Gap_Acceptance": int(o["accepted"]),
                     "Decision_Time": f"{o['opportunity_time']:.6f}",
@@ -7025,6 +7104,17 @@ class Run1App:
                     if longitudinal_m > long_window_m:
                         continue
                     y3 = ls_m - (widths["Motorcycle"] + widths[cls_b]) / 2.0
+                    moto_speed = self._run3_event_speed_kmh(rows_a, r_a["_timestamp"], ppm, perspective)
+                    neighbor_speed = self._run3_event_speed_kmh(rows_b, r_b["_timestamp"], ppm, perspective)
+                    qc_parts = []
+                    if y3 < 0:
+                        qc_parts.append("Negative_Y3")
+                    if perspective is not None:
+                        qc_parts.append("Perspective_Homography")
+                    if moto_speed is None:
+                        qc_parts.append("Motorcycle_Event_Speed_Unavailable")
+                    if neighbor_speed is None:
+                        qc_parts.append("Neighbor_Event_Speed_Unavailable")
                     out.append({
                         "Site_ID": self.run3_site_id_var.get().strip(),
                         "Pair_ID": f"{tid_a}_{tid_b}",
@@ -7037,9 +7127,11 @@ class Run1App:
                         "Neighbor_Class": cls_b,
                         "Neighbor_Movement": movement_b,
                         "Neighbor_Side": side,
+                        "Motorcycle_Speed_kmh": "" if moto_speed is None else f"{moto_speed:.6f}",
+                        "Neighbor_Speed_kmh": "" if neighbor_speed is None else f"{neighbor_speed:.6f}",
                         "LS_Meter": f"{ls_m:.6f}",
                         "Y3_Lateral_Clearance": f"{y3:.6f}",
-                        "QC_Flag": ("Negative_Y3" if y3 < 0 else "") + (";Perspective_Homography" if perspective is not None else ""),
+                        "QC_Flag": ";".join(dict.fromkeys(qc_parts)),
                     })
         return out, candidates_seen, tol
 
@@ -7155,6 +7247,17 @@ class Run1App:
                     diag["overlap_intervals"]+=1; continue
                 pet=t2-t1
                 if pet<=0: continue
+                speed_a = self._run3_event_speed_kmh(event_a.get("Rows", tracks[a_id]), t1, float(self.run3_ppm_var.get()), perspective)
+                speed_b = self._run3_event_speed_kmh(event_b.get("Rows", tracks[b_id]), t2, float(self.run3_ppm_var.get()), perspective)
+                qc_items = [x for x in [
+                    "Threshold_At_or_Below" if pet<=float(self.run3_pet_threshold_var.get()) else "",
+                    "Movement_A_Not_Observed" if not ma else "",
+                    "Movement_B_Not_Observed" if not mb else "",
+                    (f"MovementSourceA={movement_source_by_id.get(a_id,'')}") if ma else "",
+                    (f"MovementSourceB={movement_source_by_id.get(b_id,'')}") if mb else "",
+                    "Vehicle_A_Event_Speed_Unavailable" if speed_a is None else "",
+                    "Vehicle_B_Event_Speed_Unavailable" if speed_b is None else "",
+                ] if x]
                 candidates.append({
                     "Site_ID":self.run3_site_id_var.get().strip(),
                     "Interaction_ID":f"{a_id}_{b_id}_{min(a_entry,b_entry):.6f}",
@@ -7162,13 +7265,9 @@ class Run1App:
                     "Vehicle_ID_B":str(b_id),"Vehicle_Class_B":event_b.get("Vehicle_Class", tracks[b_id][0].get("class_name","")),"Movement_B":mb,
                     "Conflict_Type":ctype,"Conflict_Zone":"Zone 6",
                     "T1_Exit_Time":f"{t1:.6f}","T2_Entry_Time":f"{t2:.6f}","Y4_PET":f"{pet:.6f}",
-                    "QC_Flag":";".join([x for x in [
-                        "Threshold_At_or_Below" if pet<=float(self.run3_pet_threshold_var.get()) else "",
-                        "Movement_A_Not_Observed" if not ma else "",
-                        "Movement_B_Not_Observed" if not mb else "",
-                        (f"MovementSourceA={movement_source_by_id.get(a_id,'')}") if ma else "",
-                        (f"MovementSourceB={movement_source_by_id.get(b_id,'')}") if mb else "",
-                    ] if x]),
+                    "Vehicle_A_Speed_kmh":"" if speed_a is None else f"{speed_a:.6f}",
+                    "Vehicle_B_Speed_kmh":"" if speed_b is None else f"{speed_b:.6f}",
+                    "QC_Flag":";".join(dict.fromkeys(qc_items)),
                 })
         return candidates,diag
 
@@ -7295,6 +7394,7 @@ class Run1App:
                     "Conflicting_ID_B","Conflicting_Class_B",
                     "Gap_Start_Time","Gap_End_Time",
                     "X31_Available_Gap",
+                    "Subject_Speed_kmh","Conflict_Speed_A_kmh","Conflict_Speed_B_kmh",
                     "Gap_Role","Y5_Gap_Acceptance","Decision_Time",
                     "QC_Flag"
                 ]
@@ -7400,6 +7500,7 @@ class Run1App:
                 fields = ["Site_ID","Pair_ID","Timestamp","Zone",
                           "Motorcycle_ID","Motorcycle_Class","Motorcycle_Movement",
                           "Neighbor_ID","Neighbor_Class","Neighbor_Movement","Neighbor_Side",
+                          "Motorcycle_Speed_kmh","Neighbor_Speed_kmh",
                           "LS_Meter","Y3_Lateral_Clearance","QC_Flag"]
                 path = write_csv("Run_3_Lateral_Clearance.csv", fields, lc_rows)
                 vals = [float(r["Y3_Lateral_Clearance"]) for r in lc_rows]
@@ -7424,7 +7525,9 @@ class Run1App:
                           "Vehicle_ID_A","Vehicle_Class_A","Movement_A",
                           "Vehicle_ID_B","Vehicle_Class_B","Movement_B",
                           "Conflict_Type","Conflict_Zone",
-                          "T1_Exit_Time","T2_Entry_Time","Y4_PET","QC_Flag"]
+                          "T1_Exit_Time","T2_Entry_Time","Y4_PET",
+                          "Vehicle_A_Speed_kmh","Vehicle_B_Speed_kmh",
+                          "QC_Flag"]
                 path = write_csv("Run_3_PET.csv", fields, pet_rows)
                 vals = [float(r["Y4_PET"]) for r in pet_rows]
                 threshold = float(self.run3_pet_threshold_var.get())
@@ -7463,7 +7566,7 @@ class Run1App:
             "pet_uses_ppm": False,
             "pet_uses_road_direction_angle": False,
             "common_vehicle_event_map": "Shared Vehicle_ID/Class/Movement/Zone records for Speed, LC, PET, and Gap; no ID invention or reassignment",
-            "csv_output_policy": "Four compact analytical CSVs plus one Vehicle Event Map and one cross-module Event Index; raw calculation fields remain in Run 2 source records when not needed in the main outputs",
+            "csv_output_policy": "Four compact analytical CSVs plus one Vehicle Event Map and one cross-module Event Index; raw calculation fields remain in Run 2 source records when not needed in the main outputs; Gap/LC/PET main CSVs include local observed event speeds for contextual interpretation",
         }
         summary_path = os.path.join(output_dir, "Run_3_Summary.json")
         summary["outputs"] = outputs
