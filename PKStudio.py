@@ -5297,10 +5297,12 @@ class Run1App:
 
         zone_fields = {}
         for zone, (_, _, prefix) in role_map.items():
+            # Main Speed CSV keeps the timestamp as one readable overview
+            # field per Zone. Detailed Start_Time/End_Time remain available
+            # in Run_3_Speed_Detail.csv for audit without making the main CSV
+            # excessively wide.
             zone_fields[zone] = {
                 "timestamp_range": f"{prefix}_Timestamp_Range",
-                "start": f"{prefix}_Start_Time",
-                "end": f"{prefix}_End_Time",
                 "start_frame": f"{prefix}_Start_Frame",
                 "end_frame": f"{prefix}_End_Frame",
                 "distance": f"{prefix}_Distance_m",
@@ -5338,8 +5340,6 @@ class Run1App:
                 item = by_vehicle_zone.get(tid, {}).get(zone)
                 if item:
                     row[fields["timestamp_range"]] = f"{item.get('Start_Time','')} → {item.get('End_Time','')}" if item.get("Start_Time") and item.get("End_Time") else ""
-                    row[fields["start"]] = item.get("Start_Time", "")
-                    row[fields["end"]] = item.get("End_Time", "")
                     row[fields["start_frame"]] = item.get("Start_Frame", "")
                     row[fields["end_frame"]] = item.get("End_Frame", "")
                     row[fields["distance"]] = item.get("Distance_m", "")
@@ -5347,8 +5347,6 @@ class Run1App:
                     row[fields["variable"]] = item.get("Speed_Variable", "")
                 else:
                     row[fields["timestamp_range"]] = ""
-                    row[fields["start"]] = ""
-                    row[fields["end"]] = ""
                     row[fields["start_frame"]] = ""
                     row[fields["end_frame"]] = ""
                     row[fields["distance"]] = ""
@@ -5867,12 +5865,12 @@ class Run1App:
                 # human-readable form requested by the researcher.
                 vehicle_summary_fields = [
                     "Site_ID","Vehicle_ID","Vehicle_Class","Zone_Sequence",
-                    "Access_Mouth_Zone1_Timestamp_Range","Access_Mouth_Zone1_Start_Time","Access_Mouth_Zone1_End_Time","Access_Mouth_Zone1_Start_Frame","Access_Mouth_Zone1_End_Frame","Access_Mouth_Zone1_Distance_m","Access_Mouth_Zone1_Speed_kmh","Access_Mouth_Zone1_Speed_Variable",
-                    "Approach_Zone2_Timestamp_Range","Approach_Zone2_Start_Time","Approach_Zone2_End_Time","Approach_Zone2_Start_Frame","Approach_Zone2_End_Frame","Approach_Zone2_Distance_m","Approach_Zone2_Speed_kmh","Approach_Zone2_Speed_Variable",
-                    "Exit_Zone3_Timestamp_Range","Exit_Zone3_Start_Time","Exit_Zone3_End_Time","Exit_Zone3_Start_Frame","Exit_Zone3_End_Frame","Exit_Zone3_Distance_m","Exit_Zone3_Speed_kmh","Exit_Zone3_Speed_Variable",
-                    "Approach_Zone4_Timestamp_Range","Approach_Zone4_Start_Time","Approach_Zone4_End_Time","Approach_Zone4_Start_Frame","Approach_Zone4_End_Frame","Approach_Zone4_Distance_m","Approach_Zone4_Speed_kmh","Approach_Zone4_Speed_Variable",
-                    "Exit_Zone5_Timestamp_Range","Exit_Zone5_Start_Time","Exit_Zone5_End_Time","Exit_Zone5_Start_Frame","Exit_Zone5_End_Frame","Exit_Zone5_Distance_m","Exit_Zone5_Speed_kmh","Exit_Zone5_Speed_Variable",
-                    "Middle_Access_Zone6_Timestamp_Range","Middle_Access_Zone6_Start_Time","Middle_Access_Zone6_End_Time","Middle_Access_Zone6_Start_Frame","Middle_Access_Zone6_End_Frame","Middle_Access_Zone6_Distance_m","Middle_Access_Zone6_Speed_kmh","Middle_Access_Zone6_Speed_Variable",
+                    "Access_Mouth_Zone1_Timestamp_Range","Access_Mouth_Zone1_Start_Frame","Access_Mouth_Zone1_End_Frame","Access_Mouth_Zone1_Distance_m","Access_Mouth_Zone1_Speed_kmh","Access_Mouth_Zone1_Speed_Variable",
+                    "Approach_Zone2_Timestamp_Range","Approach_Zone2_Start_Frame","Approach_Zone2_End_Frame","Approach_Zone2_Distance_m","Approach_Zone2_Speed_kmh","Approach_Zone2_Speed_Variable",
+                    "Exit_Zone3_Timestamp_Range","Exit_Zone3_Start_Frame","Exit_Zone3_End_Frame","Exit_Zone3_Distance_m","Exit_Zone3_Speed_kmh","Exit_Zone3_Speed_Variable",
+                    "Approach_Zone4_Timestamp_Range","Approach_Zone4_Start_Frame","Approach_Zone4_End_Frame","Approach_Zone4_Distance_m","Approach_Zone4_Speed_kmh","Approach_Zone4_Speed_Variable",
+                    "Exit_Zone5_Timestamp_Range","Exit_Zone5_Start_Frame","Exit_Zone5_End_Frame","Exit_Zone5_Distance_m","Exit_Zone5_Speed_kmh","Exit_Zone5_Speed_Variable",
+                    "Middle_Access_Zone6_Timestamp_Range","Middle_Access_Zone6_Start_Frame","Middle_Access_Zone6_End_Frame","Middle_Access_Zone6_Distance_m","Middle_Access_Zone6_Speed_kmh","Middle_Access_Zone6_Speed_Variable",
                     "Calibration_Mode","QC_Flag"
                 ]
                 vehicle_summary_rows = self._run3_speed_vehicle_summary(speed_rows, tracks)
