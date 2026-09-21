@@ -7025,8 +7025,7 @@ class Run1App:
                         f"decision_zone_stopped={gap_diag.get('subject_decision_zone_stopped', 0)}; "
                         f"no_observed_decision_censored={gap_diag.get('subject_no_observed_decision_censored', 0)}; "
                         f"conflict_events={conflict_counts}; "
-                        f"fallback_movements={fallback}; "
-                        f"movement_pair_filtered={pet_diag.get('movement_pair_filtered', 0)}"
+                        f"fallback_movements={fallback}"
                     )
                 else:
                     summary["diagnostics"]["gap_acceptance"] = (
