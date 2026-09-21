@@ -428,8 +428,9 @@ RUN3_DEFAULTS = {
     "lc_longitudinal_window_m": "2.00",     # implementation starter value
     "pet_interaction_distance_m": "3.00",   # implementation starter value
     "pet_threshold_s": "1.00",
-    "speed_approach_zones": [1, 2, 4],
-    "speed_exit_zones": [1, 3, 5],
+    # Speed: user can select any of Zones 1–6. CSV assigns each selected zone
+    # to the research role: Zone 1 = access mouth, 2/4 = approach, 3/5 = exit, 6 = middle/access.
+    "speed_zones": [1, 2, 3, 4, 5, 6],
     "lc_zones": [2, 4],
     "pet_zone6": True,
     "gap_movement_13": True,
@@ -649,8 +650,7 @@ class Run1App:
         self.run3_lc_longitudinal_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_longitudinal_window_m"])
         self.run3_pet_interaction_distance_var = tk.StringVar(value=RUN3_DEFAULTS["pet_interaction_distance_m"])
         self.run3_pet_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["pet_threshold_s"])
-        self.run3_speed_approach_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_approach_zones"])) for z in range(1,7)}
-        self.run3_speed_exit_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_exit_zones"])) for z in range(1,7)}
+        self.run3_speed_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_zones"])) for z in range(1,7)}
         self.run3_lc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["lc_zones"])) for z in range(1,7)}
         self.run3_pet_zone6_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_zone6"])
         self.run3_gap_movement_13_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_13"])
@@ -963,17 +963,16 @@ class Run1App:
         ttk.Checkbutton(frame, text="Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=7, column=3, sticky="w")
         ttk.Checkbutton(frame, text="PET", variable=self.run3_pet_enabled_var).grid(row=8, column=1, sticky="w")
 
-        ttk.Label(frame, text="Speed — Approach Zones (Y1)").grid(row=8, column=0, sticky="w", padx=(0,8), pady=2)
-        for i,z in enumerate((1,2,4)):
-            ttk.Checkbutton(frame, text=str(z), variable=self.run3_speed_approach_zone_vars[z]).grid(row=8, column=1+i, sticky="w", padx=(2,8), pady=2)
-        ttk.Label(frame, text="Speed — Exit Zones (Y2)").grid(row=9, column=0, sticky="w", padx=(0,8), pady=2)
-        for i,z in enumerate((1,3,5)):
-            ttk.Checkbutton(frame, text=str(z), variable=self.run3_speed_exit_zone_vars[z]).grid(row=9, column=1+i, sticky="w", padx=(2,8), pady=2)
-        ttk.Label(frame, text="Lateral Clearance Zones").grid(row=10, column=0, sticky="w", padx=(0,8), pady=2)
+        ttk.Label(frame, text="Speed Analysis Zones (เลือกได้ 1–6)").grid(row=8, column=0, sticky="w", padx=(0,8), pady=2)
         for i,z in enumerate(range(1,7)):
-            ttk.Checkbutton(frame, text=str(z), variable=self.run3_lc_zone_vars[z]).grid(row=10, column=1+(i//3), sticky="w", padx=(2,2), pady=2)
-        ttk.Label(frame, text="Middle / Access Zone (PET)").grid(row=10, column=2, sticky="e", padx=(12,8), pady=2)
-        ttk.Checkbutton(frame, text="6", variable=self.run3_pet_zone6_var).grid(row=10, column=3, sticky="w", padx=(2,2), pady=2)
+            ttk.Checkbutton(frame, text=str(z), variable=self.run3_speed_zone_vars[z]).grid(row=8, column=1+(i%3), sticky="w", padx=(2,8), pady=2)
+
+        ttk.Label(frame, text="Lateral Clearance Zones (เลือกได้ 1–6)").grid(row=9, column=0, sticky="w", padx=(0,8), pady=2)
+        for i,z in enumerate(range(1,7)):
+            ttk.Checkbutton(frame, text=str(z), variable=self.run3_lc_zone_vars[z]).grid(row=9, column=1+(i%3), sticky="w", padx=(2,8), pady=2)
+
+        ttk.Label(frame, text="Middle / Access Zone (PET)").grid(row=10, column=0, sticky="w", padx=(0,8), pady=2)
+        ttk.Checkbutton(frame, text="6", variable=self.run3_pet_zone6_var).grid(row=10, column=1, sticky="w", padx=(2,2), pady=2)
 
         ttk.Label(frame, text="Waiting detection speed threshold (km/h)").grid(row=11, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(frame, textvariable=self.run3_waiting_speed_threshold_var, width=18).grid(row=11, column=1, sticky="w", pady=4)
@@ -1010,7 +1009,7 @@ class Run1App:
 
         ttk.Label(frame, text="LC/PET ใช้จุดที่สังเกตจริงและจับคู่เวลาที่ใกล้กัน โดยไม่ interpolation. Gap ใช้ timestamp ของเฟรมที่สังเกตว่าข้ามเส้นจริง.", foreground="#666666").grid(row=27, column=0, columnspan=4, sticky="w", pady=(6, 2))
         ttk.Label(frame, text="Perspective: กดปุ่มด้านบนเพื่อเปิดภาพและคลิก P1→P2→P3→P4; โปรแกรมจะเติมพิกัดให้เอง จากนั้นกรอกระยะจริง Length/Width แล้วกด Apply.", foreground="#666666").grid(row=28, column=0, columnspan=4, sticky="w", pady=(2, 2))
-        ttk.Label(frame, text="Default: Speed Approach 1,2,4 | Speed Exit 1,3,5 | LC 2,4 | PET Zone 6", foreground="#666666").grid(row=29, column=0, columnspan=4, sticky="w", pady=(2, 2))
+        ttk.Label(frame, text="Speed CSV role: Zone 1 = Access Mouth | Zones 2,4 = Approach | Zones 3,5 = Exit | Zone 6 = Middle / Access", foreground="#666666").grid(row=29, column=0, columnspan=4, sticky="w", pady=(2, 2))
         ttk.Label(frame, textvariable=self.run3_result_text, foreground="#444444").grid(row=30, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
     # ========================================================
@@ -2323,8 +2322,7 @@ class Run1App:
                 "lc_longitudinal_window_m": self.run3_lc_longitudinal_window_var.get(),
                 "pet_interaction_distance_m": self.run3_pet_interaction_distance_var.get(),
                 "pet_threshold_s": self.run3_pet_threshold_var.get(),
-                "speed_approach_zones": [z for z,v in self.run3_speed_approach_zone_vars.items() if v.get()],
-                "speed_exit_zones": [z for z,v in self.run3_speed_exit_zone_vars.items() if v.get()],
+                "speed_zones": [z for z,v in self.run3_speed_zone_vars.items() if v.get()],
                 "lc_zones": [z for z,v in self.run3_lc_zone_vars.items() if v.get()],
                 "pet_zone6": self.run3_pet_zone6_var.get(),
                 "gap_movement_13": self.run3_gap_movement_13_var.get(),
@@ -2459,11 +2457,13 @@ class Run1App:
                     variable.set(run3[key])
             if "pet_zone6" in run3:
                 self.run3_pet_zone6_var.set(bool(run3.get("pet_zone6")))
+            # Speed zone settings: new v14 key, with backward compatibility to v13.
+            speed_zone_values = run3.get("speed_zones")
+            if speed_zone_values is None:
+                legacy = set(run3.get("speed_approach_zones", [])) | set(run3.get("speed_exit_zones", []))
+                speed_zone_values = sorted(legacy)
             for z in range(1, 7):
-                if "speed_approach_zones" in run3:
-                    self.run3_speed_approach_zone_vars[z].set(z in set(run3.get("speed_approach_zones", [])))
-                if "speed_exit_zones" in run3:
-                    self.run3_speed_exit_zone_vars[z].set(z in set(run3.get("speed_exit_zones", [])))
+                self.run3_speed_zone_vars[z].set(z in set(speed_zone_values or []))
                 if "lc_zones" in run3:
                     self.run3_lc_zone_vars[z].set(z in set(run3.get("lc_zones", [])))
             self.run3_reference_mapping_text = str(run3.get("reference_line_mapping", "") or "")
@@ -3016,8 +3016,8 @@ class Run1App:
         if self.run3_speed_enabled_var.get() or self.run3_lc_enabled_var.get():
             self._run3_float(self.run3_ppm_var.get(), "PPM")
         if self.run3_speed_enabled_var.get():
-            if not any(v.get() for v in self.run3_speed_approach_zone_vars.values()) and not any(v.get() for v in self.run3_speed_exit_zone_vars.values()):
-                raise ValueError("Select at least one Speed analysis Zone.")
+            if not any(v.get() for v in self.run3_speed_zone_vars.values()):
+                raise ValueError("Select at least one Speed analysis Zone (1–6).")
         if self.run3_lc_enabled_var.get():
             if not any(v.get() for v in self.run3_lc_zone_vars.values()):
                 raise ValueError("Select at least one Lateral Clearance Zone.")
@@ -5083,9 +5083,16 @@ class Run1App:
         """Compute speed separately for every user-selected approach/exit Zone.
         No interpolation is used; only observed trajectory samples are used.
         """
-        approach_zones = [z for z,v in self.run3_speed_approach_zone_vars.items() if v.get()]
-        exit_zones = [z for z,v in self.run3_speed_exit_zone_vars.items() if v.get()]
-        selected = [(z, "Y1", "Approach") for z in approach_zones] + [(z, "Y2", "Exit") for z in exit_zones]
+        selected_zones = [z for z,v in self.run3_speed_zone_vars.items() if v.get()]
+        role_map = {
+            1: ("", "Access_Mouth"),
+            2: ("Y1", "Approach"),
+            3: ("Y2", "Exit"),
+            4: ("Y1", "Approach"),
+            5: ("Y2", "Exit"),
+            6: ("", "Middle_Access"),
+        }
+        selected = [(z, role_map[z][0], role_map[z][1]) for z in selected_zones]
         results = []
         for tid, rows in tracks.items():
             if not rows:
@@ -5112,6 +5119,7 @@ class Run1App:
                     "Vehicle_Class": cls,
                     "Speed_Variable": variable,
                     "Speed_Type": speed_type,
+                    "Analysis_Role": speed_type,
                     "Zone": str(zone),
                     "Start_Time": f"{zr[0]['_timestamp']:.6f}",
                     "End_Time": f"{zr[-1]['_timestamp']:.6f}",
@@ -5583,7 +5591,7 @@ class Run1App:
                 "zone_summary_rows": len(zone_rows),
                 "tracks_by_zone": {str(z): sum(1 for rows in tracks.values() if any(r.get("_zone_num") == z for r in rows)) for z in range(1,7)},
                 "movement_counts": {m: sum(1 for tid, sm in summaries.items() if self._run3_movement_from_sequence(sm.get("zone_sequence", "")) == m) for m in RUN3_ALL_MOVEMENTS},
-                "selected_zones": {"speed_approach": [z for z in range(1,7) if self.run3_speed_approach_zone_vars[z].get()], "speed_exit": [z for z in range(1,7) if self.run3_speed_exit_zone_vars[z].get()], "lateral_clearance": [z for z in range(1,7) if self.run3_lc_zone_vars[z].get()], "pet": [6] if self.run3_pet_zone6_var.get() else []},
+                "selected_zones": {"speed": [z for z in range(1,7) if self.run3_speed_zone_vars[z].get()], "lateral_clearance": [z for z in range(1,7) if self.run3_lc_zone_vars[z].get()], "pet": [6] if self.run3_pet_zone6_var.get() else []},
             },
             "diagnostics": {},
         }
@@ -5603,7 +5611,7 @@ class Run1App:
                 ppm = float(self.run3_ppm_var.get())
                 speed_rows = self._run3_speed(tracks, ppm, perspective)
                 fields = [
-                    "Site_ID","Vehicle_ID","Vehicle_Class","Speed_Variable","Speed_Type","Zone",
+                    "Site_ID","Vehicle_ID","Vehicle_Class","Speed_Variable","Speed_Type","Analysis_Role","Zone",
                     "Start_Time","End_Time","Distance_m","Speed_kmh","Calibration_Mode","QC_Flag"
                 ]
                 path = write_csv("Run_3_Speed.csv", fields, speed_rows)
@@ -5614,7 +5622,11 @@ class Run1App:
                     "Y2_P85": float(np.percentile(vals_y2,85)) if vals_y2 else None,
                     "Y1_N": len(vals_y1), "Y2_N": len(vals_y2), "rows": len(speed_rows),
                 }
-                summary["diagnostics"]["speed"] = "OK" if speed_rows else "No valid Y1/Y2 observations from Run 2 Zone 2/4/3/5 data."
+                summary["diagnostics"]["speed"] = (
+                    f"OK; selected_zones={[z for z in range(1,7) if self.run3_speed_zone_vars[z].get()]}"
+                    if speed_rows else
+                    f"No valid speed observations from selected zones={[z for z in range(1,7) if self.run3_speed_zone_vars[z].get()]}"
+                )
                 outputs["speed"] = path
             except Exception as e:
                 fields = ["Error"]
