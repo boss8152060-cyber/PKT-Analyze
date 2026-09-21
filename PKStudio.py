@@ -1,8 +1,10 @@
 # ============================================================
-# PK Studio V17 - Run 1 + 2 + 3
+# PK Studio V17 - Run 1 + 2 + 3 V24
 # ============================================================
 #
 # Vehicle Detection + Tracking + Trajectory + Zone/Line Measurement Research
+# PET movement primary source: ID Zone Summary first_zone + last_zone (internal only)
+# PET CSV outputs Movement_A / Movement_B only; first_zone/last_zone are not exported.
 # GUI Version 3 - CUDA Auto Environment
 #
 # IMPORTANT:
@@ -5043,6 +5045,31 @@ class Run1App:
         return nums
 
     @staticmethod
+    def _run3_movement_from_first_last(first_zone, last_zone):
+        """Identify movement directly from Run 2 ID Zone Summary endpoints.
+
+        PET uses the track-level first_zone and last_zone as the primary movement
+        source. Zone 6 is an internal conflict/search area and therefore does not
+        change the movement endpoints. For example, 1 -> 6 -> 5 is still 1->5.
+        """
+        def zone_num(value):
+            if value is None:
+                return None
+            m = re.search(r"([1-6])", str(value))
+            return int(m.group(1)) if m else None
+
+        first = zone_num(first_zone)
+        last = zone_num(last_zone)
+        supported = {
+            (1, 3): "1→3",
+            (1, 5): "1→5",
+            (4, 1): "4→1",
+            (2, 3): "2→3",
+            (4, 5): "4→5",
+        }
+        return supported.get((first, last), "")
+
+    @staticmethod
     def _run3_movement_from_sequence(sequence):
         """Identify an exact movement from observed Zone Sequence.
 
@@ -5785,18 +5812,27 @@ class Run1App:
             movement = ""
             source = ""
             summary_row = summaries.get(tid, {}) if isinstance(summaries, dict) else {}
-            # 1) Preferred: ID Zone Summary zone_sequence.
-            for key in ("zone_sequence", "Zone Sequence", "Zone_Sequence"):
-                movement = self._run3_movement_from_sequence(summary_row.get(key, ""))
-                if movement:
-                    source = "ID_Zone_Summary"
-                    break
-            # 2) Fallback: observed Detection Records.
+            # 1) Primary: track-level first_zone + last_zone from ID Zone Summary.
+            # This is the authoritative movement endpoint logic for PET.
+            movement = self._run3_movement_from_first_last(
+                summary_row.get("first_zone", summary_row.get("First_Zone", "")),
+                summary_row.get("last_zone", summary_row.get("Last_Zone", "")),
+            )
+            if movement:
+                source = "ID_Zone_Summary_FirstLastZone"
+            # 2) Fallback: ID Zone Summary zone_sequence.
+            if not movement:
+                for key in ("zone_sequence", "Zone Sequence", "Zone_Sequence"):
+                    movement = self._run3_movement_from_sequence(summary_row.get(key, ""))
+                    if movement:
+                        source = "ID_Zone_Summary_Sequence"
+                        break
+            # 3) Fallback: observed Detection Records.
             if not movement:
                 movement = self._run3_movement_from_track_rows(tracks.get(tid, []))
                 if movement:
                     source = "Detection_Records_Zones"
-            # 3) Optional fallback: configured Reference Line Mapping.
+            # 4) Optional fallback: configured Reference Line Mapping.
             if not movement:
                 movement = self._run3_movement_from_reference_lines(tracks.get(tid, []), self.run3_site_id_var.get().strip(), mapping or {})
                 if movement:
