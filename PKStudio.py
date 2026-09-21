@@ -5024,22 +5024,34 @@ class Run1App:
 
     @staticmethod
     def _run3_parse_zone_sequence(text):
+        """Parse a zone sequence robustly from Run 2 text.
+
+        Accepts common forms such as:
+          Zone 1 > Zone 6 > Zone 5
+          1>6>5
+          1 → 6 → 5
+          [1, 6, 5]
+        Only zone numbers 1-6 are retained.
+        """
+        raw = str(text or "")
         nums = []
-        for match in re.finditer(r"Zone\s*(\d+)", str(text or ""), flags=re.I):
-            n = int(match.group(1))
+        matches = re.findall(r"(?:Zone\s*)?([1-6])", raw, flags=re.I)
+        for m in matches:
+            n = int(m)
             if not nums or nums[-1] != n:
                 nums.append(n)
         return nums
 
     @staticmethod
     def _run3_movement_from_sequence(sequence):
-        """Identify study movement from a Zone Sequence.
+        """Identify an exact movement from observed Zone Sequence.
 
-        Zone 6 is the conflict/search area and is ignored for endpoint matching,
-        so sequences such as ``1→6→3`` resolve to ``1→3``.
+        Zone 6 is the conflict/search area and is ignored for endpoint matching.
+        Returns an empty string only when the observed information is insufficient
+        to identify one of the defined movements; it never invents a movement.
         """
         seq = Run1App._run3_parse_zone_sequence(sequence)
-        seq = [n for n in seq if n != 6]
+        seq_no6 = [n for n in seq if n != 6]
         supported = {
             (1, 3): "1→3",
             (1, 5): "1→5",
@@ -5047,18 +5059,24 @@ class Run1App:
             (2, 3): "2→3",
             (4, 5): "4→5",
         }
-        for a, b in zip(seq, seq[1:]):
+        # Prefer the earliest supported transition in the observed sequence.
+        for a, b in zip(seq_no6, seq_no6[1:]):
             if (a, b) in supported:
                 return supported[(a, b)]
+        # Also support a compact sequence where only the first and last observed
+        # non-conflict zones are retained.
+        if len(seq_no6) >= 2 and (seq_no6[0], seq_no6[-1]) in supported:
+            return supported[(seq_no6[0], seq_no6[-1])]
         return ""
 
     @staticmethod
     def _run3_movement_from_track_rows(rows):
-        """Fallback movement inference directly from observed Run 2 rows.
+        """Infer movement from the observed Zone labels in Run 2 records.
 
-        This is used when the ID Zone Summary does not contain a usable
-        zone_sequence for a vehicle. It uses only observed Zone labels from
-        Detection Records and never interpolates missing frames.
+        No interpolation is used. If the track contains enough observed zones
+        to identify a defined movement, the exact movement is returned. Otherwise
+        an empty string is returned so the caller can mark the observation as
+        Movement_Not_Observed instead of fabricating a direction.
         """
         seq=[]
         for r in sorted(rows or [], key=lambda x: x.get("_timestamp", 0.0)):
@@ -5070,6 +5088,40 @@ class Run1App:
         if not seq:
             return ""
         return Run1App._run3_movement_from_sequence(" ".join(f"Zone {z}" for z in seq))
+
+    def _run3_movement_from_reference_lines(self, rows, site_id, mapping):
+        """Optional movement inference from observed line crossings.
+
+        This uses only actual trajectory samples and the user's configured
+        Reference Line Mapping. It is a fallback when Zone Sequence alone does
+        not expose both movement endpoints.
+        """
+        if not mapping or not rows:
+            return ""
+        candidates = []
+        ordered = sorted(rows, key=lambda r: r.get("_timestamp", 0.0))
+        prev = None
+        prev_t = None
+        for r in ordered:
+            p = r.get("_point")
+            t = r.get("_timestamp")
+            if p is None or t is None:
+                continue
+            if prev is not None:
+                for (site, movement), lname in mapping.items():
+                    if str(site).strip() != str(site_id).strip():
+                        continue
+                    line = self.lines.get(lname, [])
+                    if len(line) != 2:
+                        continue
+                    if self._run3_line_crossing_time(prev, prev_t, p, t, line) is not None:
+                        candidates.append((movement, t))
+            prev, prev_t = p, t
+        if not candidates:
+            return ""
+        # If exactly one mapped movement is observed, use it.
+        uniq = sorted(set(m for m, _ in candidates))
+        return uniq[0] if len(uniq) == 1 else ""
 
     @staticmethod
     def _run3_float_safe(value):
@@ -5718,7 +5770,7 @@ class Run1App:
                 return "Diverging"
         return "Merging/Diverging"
 
-    def _run3_pet(self, tracks, summaries, ppm, axis_deg, interaction_distance_m, perspective=None):
+    def _run3_pet(self, tracks, summaries, ppm, axis_deg, interaction_distance_m, perspective=None, mapping=None):
         """PET using observed trajectory samples only.
         Spatial segment intersection is used to find a candidate interaction point,
         but event timestamps come only from actual observed frames (nearest observed
@@ -5728,11 +5780,29 @@ class Run1App:
         diag={"zone6_tracks":0,"movement_identified":0,"pairs_considered":0,"same_movement_excluded":0,"interaction_candidates":0,"fallback_close_pairs":0,"overlap_intervals":0,"insufficient_samples":0}
         ids=list(tracks)
         movement_by_id={}
+        movement_source_by_id={}
         for tid in ids:
-            movement = self._run3_movement_from_sequence(summaries.get(tid,{}).get("zone_sequence", "")) if tid in summaries else ""
+            movement = ""
+            source = ""
+            summary_row = summaries.get(tid, {}) if isinstance(summaries, dict) else {}
+            # 1) Preferred: ID Zone Summary zone_sequence.
+            for key in ("zone_sequence", "Zone Sequence", "Zone_Sequence"):
+                movement = self._run3_movement_from_sequence(summary_row.get(key, ""))
+                if movement:
+                    source = "ID_Zone_Summary"
+                    break
+            # 2) Fallback: observed Detection Records.
             if not movement:
                 movement = self._run3_movement_from_track_rows(tracks.get(tid, []))
+                if movement:
+                    source = "Detection_Records_Zones"
+            # 3) Optional fallback: configured Reference Line Mapping.
+            if not movement:
+                movement = self._run3_movement_from_reference_lines(tracks.get(tid, []), self.run3_site_id_var.get().strip(), mapping or {})
+                if movement:
+                    source = "Reference_Line_Crossing"
             movement_by_id[tid] = movement
+            movement_source_by_id[tid] = source
         for tid in ids:
             if any(self.run3_pet_zone6_var.get() and r.get("_zone_num")==6 and r.get("_point") is not None for r in tracks[tid]):
                 diag["zone6_tracks"]+=1
@@ -5809,7 +5879,13 @@ class Run1App:
                     "Conflict_Type":ctype,"Conflict_Zone":"Zone 6",
                     "Interaction_Start":f"{min(a_entry,b_entry):.6f}","Interaction_End":f"{max(a_exit,b_exit):.6f}",
                     "T1_Exit_Time":f"{t1:.6f}","T2_Entry_Time":f"{t2:.6f}","Y4_PET":f"{pet:.6f}",
-                    "QC_Flag":"Threshold_At_or_Below" if pet<=float(self.run3_pet_threshold_var.get()) else "",
+                    "QC_Flag":";".join([x for x in [
+                        "Threshold_At_or_Below" if pet<=float(self.run3_pet_threshold_var.get()) else "",
+                        "Movement_A_Not_Observed" if not ma else "",
+                        "Movement_B_Not_Observed" if not mb else "",
+                        (f"MovementSourceA={movement_source_by_id.get(a_id,'')}") if ma else "",
+                        (f"MovementSourceB={movement_source_by_id.get(b_id,'')}") if mb else "",
+                    ] if x]),
                 })
         return candidates,diag
 
@@ -5972,7 +6048,7 @@ class Run1App:
         if self.run3_pet_enabled_var.get():
             try:
                 ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); interaction = float(self.run3_pet_interaction_distance_var.get())
-                pet_rows, pet_diag = self._run3_pet(tracks, summaries, ppm, axis, interaction, perspective)
+                pet_rows, pet_diag = self._run3_pet(tracks, summaries, ppm, axis, interaction, perspective, mapping)
                 fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Y4_PET","QC_Flag"]
                 path = write_csv("Run_3_PET.csv", fields, pet_rows)
                 vals = [float(r["Y4_PET"]) for r in pet_rows]
