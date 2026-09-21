@@ -423,6 +423,10 @@ RUN3_DEFAULTS = {
     "perspective_p4": "",
     "perspective_length_m": "",
     "perspective_width_m": "",
+    "perspective_l12_m": "",
+    "perspective_l23_m": "",
+    "perspective_l34_m": "",
+    "perspective_l41_m": "",
     "waiting_speed_threshold": "1.00",      # implementation starter value
     "lateral_axis_angle_deg": "0.00",       # implementation starter value; verify per video
     "lc_longitudinal_window_m": "2.00",     # implementation starter value
@@ -645,6 +649,10 @@ class Run1App:
         self.run3_perspective_p4_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p4"])
         self.run3_perspective_length_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_length_m"])
         self.run3_perspective_width_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_width_m"])
+        self.run3_perspective_l12_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_l12_m"])
+        self.run3_perspective_l23_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_l23_m"])
+        self.run3_perspective_l34_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_l34_m"])
+        self.run3_perspective_l41_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_l41_m"])
         self.run3_waiting_speed_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["waiting_speed_threshold"])
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
         self.run3_lc_longitudinal_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_longitudinal_window_m"])
@@ -951,11 +959,15 @@ class Run1App:
         ttk.Entry(frame, textvariable=self.run3_perspective_p3_var, width=18, state="readonly").grid(row=4, column=1, sticky="w", pady=2)
         ttk.Label(frame, text="P4").grid(row=4, column=2, sticky="e", padx=4, pady=2)
         ttk.Entry(frame, textvariable=self.run3_perspective_p4_var, width=18, state="readonly").grid(row=4, column=3, sticky="w", pady=2)
-        ttk.Label(frame, text="Known length (m)").grid(row=5, column=0, sticky="w", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_length_var, width=18).grid(row=5, column=1, sticky="w", pady=2)
-        ttk.Label(frame, text="Known width (m)").grid(row=5, column=2, sticky="e", padx=4, pady=2)
-        ttk.Entry(frame, textvariable=self.run3_perspective_width_var, width=18).grid(row=5, column=3, sticky="w", pady=2)
-        ttk.Label(frame, text="P1..P4 ต้องเรียงรอบพื้นที่เดียวกัน และค่าความยาว/กว้างต้องเป็นระยะจริงบนผิวถนน", foreground="#666666").grid(row=6, column=0, columnspan=4, sticky="w", pady=(0,4))
+        ttk.Label(frame, text="Known Length P1→P2 (m)").grid(row=5, column=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_l12_var, width=18).grid(row=5, column=1, sticky="w", pady=2)
+        ttk.Label(frame, text="Known Length P2→P3 (m)").grid(row=5, column=2, sticky="e", padx=4, pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_l23_var, width=18).grid(row=5, column=3, sticky="w", pady=2)
+        ttk.Label(frame, text="Known Length P3→P4 (m)").grid(row=6, column=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_l34_var, width=18).grid(row=6, column=1, sticky="w", pady=2)
+        ttk.Label(frame, text="Known Length P4→P1 (m)").grid(row=6, column=2, sticky="e", padx=4, pady=2)
+        ttk.Entry(frame, textvariable=self.run3_perspective_l41_var, width=18).grid(row=6, column=3, sticky="w", pady=2)
+        ttk.Label(frame, text="P1→P2→P3→P4 ต้องเรียงรอบพื้นที่เดียวกัน และระยะทั้ง 4 ด้านต้องเป็นระยะจริงบนผิวถนน", foreground="#666666").grid(row=7, column=0, columnspan=4, sticky="w", pady=(0,4))
 
         # Analysis master switches
         frame.columnconfigure(4, weight=1)
@@ -2345,6 +2357,10 @@ class Run1App:
                 "perspective_p4": self.run3_perspective_p4_var.get(),
                 "perspective_length_m": self.run3_perspective_length_var.get(),
                 "perspective_width_m": self.run3_perspective_width_var.get(),
+                "perspective_l12_m": self.run3_perspective_l12_var.get(),
+                "perspective_l23_m": self.run3_perspective_l23_var.get(),
+                "perspective_l34_m": self.run3_perspective_l34_var.get(),
+                "perspective_l41_m": self.run3_perspective_l41_var.get(),
                 "waiting_speed_threshold": self.run3_waiting_speed_threshold_var.get(),
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
                 "lc_longitudinal_window_m": self.run3_lc_longitudinal_window_var.get(),
@@ -2729,16 +2745,23 @@ class Run1App:
         frame_entry.grid(row=1, column=1, sticky="w")
         ttk.Button(controls, text="Load Frame", command=lambda: load_frame()).grid(row=1, column=2, padx=5)
         ttk.Button(controls, text="Reset Points", command=lambda: reset_points()).grid(row=1, column=3, padx=5)
-        ttk.Label(controls, text="Known Length P1→P2 (m)").grid(row=1, column=4, sticky="e", padx=(15,5))
-        length_var = tk.StringVar(value=str(self.run3_perspective_length_var.get() or ""))
-        ttk.Entry(controls, textvariable=length_var, width=10).grid(row=1, column=5, sticky="w")
-        ttk.Label(controls, text="Known Width P2→P3 (m)").grid(row=2, column=4, sticky="e", padx=(15,5), pady=(6,0))
-        width_var = tk.StringVar(value=str(self.run3_perspective_width_var.get() or ""))
-        ttk.Entry(controls, textvariable=width_var, width=10).grid(row=2, column=5, sticky="w", pady=(6,0))
+        length_vars = [
+            tk.StringVar(value=str(self.run3_perspective_l12_var.get() or "")),
+            tk.StringVar(value=str(self.run3_perspective_l23_var.get() or "")),
+            tk.StringVar(value=str(self.run3_perspective_l34_var.get() or "")),
+            tk.StringVar(value=str(self.run3_perspective_l41_var.get() or "")),
+        ]
+        labels = ["Known Length P1→P2 (m)", "Known Length P2→P3 (m)", "Known Length P3→P4 (m)", "Known Length P4→P1 (m)"]
+        for i, (lab, var) in enumerate(zip(labels, length_vars), start=1):
+            col = 4 if i % 2 == 1 else 0
+            val_col = col + 1
+            row = 1 + (i - 1) // 2
+            ttk.Label(controls, text=lab).grid(row=row, column=col, sticky="e", padx=(15,5) if col == 4 else (0,5), pady=(0 if row == 1 else 6,0))
+            ttk.Entry(controls, textvariable=var, width=10).grid(row=row, column=val_col, sticky="w", pady=(0 if row == 1 else 6,0))
 
         ppm_calc_var = tk.StringVar(value="Calculated PPM: -")
         ttk.Label(controls, textvariable=ppm_calc_var, foreground="#155a8a").grid(row=3, column=4, columnspan=2, sticky="w", pady=(6,0))
-        ttk.Label(controls, text="เลือก P1→P2→P3→P4 แล้วสามารถลากจุดเพื่อปรับได้ | ระยะจริง P1→P2 จะใช้คำนวณ PPM", foreground="#555555").grid(row=3, column=0, columnspan=4, sticky="w", pady=(6,0))
+        ttk.Label(controls, text="เลือก P1→P2→P3→P4 แล้วลากจุดปรับได้ | ระบบคำนวณ PPM จากระยะทั้ง 4 ด้าน", foreground="#555555").grid(row=3, column=0, columnspan=4, sticky="w", pady=(6,0))
 
         point_text_var = tk.StringVar(value="ยังไม่ได้เลือกจุด")
         ttk.Label(controls, textvariable=point_text_var, foreground="#555555").grid(row=2, column=0, columnspan=4, sticky="w", pady=(6,0))
@@ -2785,10 +2808,24 @@ class Run1App:
             canvas.create_text(10, 10, anchor="nw", text=f"Frame {state['frame_index']+1} | Image {w}×{h}", fill="white", font=("Segoe UI", 10, "bold"))
             point_text_var.set("  ".join(f"P{i+1}=({x:.1f},{y:.1f})" for i,(x,y) in enumerate(state["points"])) if state["points"] else "ยังไม่ได้เลือกจุด")
             try:
-                known_len = float(length_var.get().strip())
-                if len(state["points"]) >= 2 and known_len > 0:
-                    px_len = math.hypot(state["points"][1][0]-state["points"][0][0], state["points"][1][1]-state["points"][0][1])
-                    ppm_calc_var.set(f"Calculated PPM: {px_len / known_len:.6f} pixel/m")
+                vals = []
+                edge_defs = [
+                    (0,1,length_vars[0]),
+                    (1,2,length_vars[1]),
+                    (2,3,length_vars[2]),
+                    (3,0,length_vars[3]),
+                ]
+                for i,j,var in edge_defs:
+                    if len(state["points"]) <= j:
+                        continue
+                    real_m = float(var.get().strip())
+                    if real_m <= 0:
+                        continue
+                    px = math.hypot(state["points"][j][0]-state["points"][i][0], state["points"][j][1]-state["points"][i][1])
+                    if px > 0:
+                        vals.append(px / real_m)
+                if vals:
+                    ppm_calc_var.set(f"Calculated PPM: {sum(vals)/len(vals):.6f} pixel/m | edges={len(vals)}")
                 else:
                     ppm_calc_var.set("Calculated PPM: -")
             except Exception:
@@ -2856,12 +2893,12 @@ class Run1App:
                 messagebox.showerror("Perspective Calibration", "Please click exactly 4 points in order: P1 → P2 → P3 → P4.", parent=top)
                 return
             try:
-                length = float(length_var.get().strip())
-                width_m = float(width_var.get().strip())
-                if length <= 0 or width_m <= 0:
+                real_lengths = [float(v.get().strip()) for v in length_vars]
+                if any(v <= 0 for v in real_lengths):
                     raise ValueError
+                l12, l23, l34, l41 = real_lengths
             except Exception:
-                messagebox.showerror("Perspective Calibration", "Known Length and Known Width must be positive numbers in meters.", parent=top)
+                messagebox.showerror("Perspective Calibration", "All four Known Length values must be positive numbers in meters.", parent=top)
                 return
 
             pts = np.array(state["points"], dtype=np.float32)
@@ -2869,6 +2906,14 @@ class Run1App:
             if area < 100.0:
                 messagebox.showerror("Perspective Calibration", "The 4 selected points are too close together. Select a larger road-plane area.", parent=top)
                 return
+
+            # A four-corner homography needs a fully specified target quadrilateral.
+            # Four side lengths alone do not uniquely determine that quadrilateral,
+            # so for the rectangular road patch used here we use the mean of opposite
+            # measured sides as the target length/width, while retaining all four
+            # measured sides as calibration/QC inputs.
+            length = (l12 + l34) / 2.0
+            width_m = (l23 + l41) / 2.0
             src = np.float32(state["points"])
             dst = np.float32([[0.0,0.0],[length,0.0],[length,width_m],[0.0,width_m]])
             try:
@@ -2886,11 +2931,23 @@ class Run1App:
             self.run3_perspective_p4_var.set(f"{state['points'][3][0]:.3f},{state['points'][3][1]:.3f}")
             self.run3_perspective_length_var.set(f"{length:g}")
             self.run3_perspective_width_var.set(f"{width_m:g}")
+            self.run3_perspective_l12_var.set(f"{l12:g}")
+            self.run3_perspective_l23_var.set(f"{l23:g}")
+            self.run3_perspective_l34_var.set(f"{l34:g}")
+            self.run3_perspective_l41_var.set(f"{l41:g}")
             self.run3_perspective_enabled_var.set(True)
-            px_len = math.hypot(state["points"][1][0]-state["points"][0][0], state["points"][1][1]-state["points"][0][1])
-            if length > 0 and px_len > 0:
-                self.run3_ppm_var.set(f"{px_len / length:.6f}")
-            self.run3_result_text.set(f"Perspective calibrated: Frame {state['frame_index']+1}, {state['image_w']}×{state['image_h']} | P1–P4 saved automatically")
+
+            edge_specs = [(0,1,l12),(1,2,l23),(2,3,l34),(3,0,l41)]
+            edge_ppm = []
+            for i,j,real_m in edge_specs:
+                px = math.hypot(state["points"][j][0]-state["points"][i][0], state["points"][j][1]-state["points"][i][1])
+                if real_m > 0 and px > 0:
+                    edge_ppm.append(px / real_m)
+            reference_ppm = (sum(edge_ppm) / len(edge_ppm)) if edge_ppm else 0.0
+            if reference_ppm > 0:
+                self.run3_ppm_var.set(f"{reference_ppm:.6f}")
+            ppm_calc_var.set(f"PPM = {reference_ppm:.6f} pixel/m | 4-edge mean")
+            self.run3_result_text.set(f"Perspective calibrated: Frame {state['frame_index']+1}, {state['image_w']}×{state['image_h']} | PPM auto-calculated")
 
             # Save a site-specific calibration JSON beside the selected output when possible.
             try:
@@ -2908,9 +2965,16 @@ class Run1App:
                         "image_height": state["image_h"],
                         "P1": list(state["points"][0]), "P2": list(state["points"][1]),
                         "P3": list(state["points"][2]), "P4": list(state["points"][3]),
-                        "Known_Length_m": length, "Known_Width_m": width_m,
+                        "Known_Length_P1_P2_m": l12,
+                        "Known_Length_P2_P3_m": l23,
+                        "Known_Length_P3_P4_m": l34,
+                        "Known_Length_P4_P1_m": l41,
+                        "Homography_Target_Length_m": length,
+                        "Homography_Target_Width_m": width_m,
+                        "Reference_PPM_pixel_per_meter": reference_ppm,
+                        "Edge_PPM": {"P1-P2": edge_ppm[0] if len(edge_ppm)>0 else None, "P2-P3": edge_ppm[1] if len(edge_ppm)>1 else None, "P3-P4": edge_ppm[2] if len(edge_ppm)>2 else None, "P4-P1": edge_ppm[3] if len(edge_ppm)>3 else None},
                         "point_order": "P1->P2->P3->P4",
-                        "calibration_method": "Four-point planar homography",
+                        "calibration_method": "Four-point planar homography with four-side metric inputs",
                     }
                     with open(cal_path, "w", encoding="utf-8") as f:
                         json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -2978,14 +3042,26 @@ class Run1App:
             p2 = self._run3_parse_xy(self.run3_perspective_p2_var.get(), "P2")
             p3 = self._run3_parse_xy(self.run3_perspective_p3_var.get(), "P3")
             p4 = self._run3_parse_xy(self.run3_perspective_p4_var.get(), "P4")
-            length_m = float(self.run3_perspective_length_var.get())
-            width_m = float(self.run3_perspective_width_var.get())
+            # Prefer the four measured side lengths; target is the mean-opposite-side rectangle.
+            raw4 = [
+                self.run3_perspective_l12_var.get(), self.run3_perspective_l23_var.get(),
+                self.run3_perspective_l34_var.get(), self.run3_perspective_l41_var.get(),
+            ]
+            if all(str(v).strip() for v in raw4):
+                l12, l23, l34, l41 = [float(v) for v in raw4]
+                if any(v <= 0 for v in (l12,l23,l34,l41)):
+                    raise ValueError("Perspective correction: all four side lengths must be > 0")
+                length_m = (l12 + l34) / 2.0
+                width_m = (l23 + l41) / 2.0
+            else:
+                length_m = float(self.run3_perspective_length_var.get())
+                width_m = float(self.run3_perspective_width_var.get())
             if length_m <= 0 or width_m <= 0:
-                raise ValueError("Perspective correction: Known length and width must be > 0")
+                raise ValueError("Perspective correction: calibration lengths must be > 0")
             src = np.float32([p1,p2,p3,p4])
             dst = np.float32([[0,0],[length_m,0],[length_m,width_m],[0,width_m]])
             H = cv2.getPerspectiveTransform(src, dst)
-            return {"H": H, "length_m": length_m, "width_m": width_m, "points": [p1,p2,p3,p4]}
+            return {"H": H, "length_m": length_m, "width_m": width_m, "points": [p1,p2,p3,p4], "four_side_lengths_m": raw4}
         except Exception:
             if silent:
                 return None
