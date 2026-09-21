@@ -5676,6 +5676,132 @@ class Run1App:
         return event_map
 
     @staticmethod
+    def _run3_export_vehicle_event_map(vehicle_event_map, site_id):
+        """Export one master row per tracked Vehicle_ID for Run 3 audit."""
+        rows = []
+        for sid in sorted(
+            (str(k) for k in (vehicle_event_map or {}).keys()),
+            key=lambda x: (int(x) if x.isdigit() else 10**18, x)
+        ):
+            event = (vehicle_event_map or {}).get(sid, {})
+            seq = event.get("Zone_Sequence", []) or []
+            first_time = event.get("First_Observed_Time")
+            last_time = event.get("Last_Observed_Time")
+            duration = ""
+            if first_time is not None and last_time is not None:
+                try:
+                    duration = f"{max(0.0, float(last_time) - float(first_time)):.6f}"
+                except Exception:
+                    duration = ""
+            rows.append({
+                "Site_ID": site_id,
+                "Vehicle_ID": sid,
+                "Vehicle_Class": event.get("Vehicle_Class", ""),
+                "Movement": event.get("Movement", ""),
+                "Movement_Source": event.get("Movement_Source", ""),
+                "First_Zone": f"Zone {seq[0]}" if seq else "",
+                "Last_Zone": f"Zone {seq[-1]}" if seq else "",
+                "Zone_Sequence": "→".join(str(z) for z in seq),
+                "First_Observed_Time": "" if first_time is None else f"{float(first_time):.6f}",
+                "Last_Observed_Time": "" if last_time is None else f"{float(last_time):.6f}",
+                "Track_Duration_s": duration,
+            })
+        return rows
+
+    def _run3_build_event_index(self, site_id, speed_rows=None, gap_rows=None, lc_rows=None, pet_rows=None):
+        """Build one compact cross-module event index.
+
+        This is an audit/traceability table only; it does not alter the calculations.
+        One row points back to one event in one of the four main Run 3 CSVs.
+        """
+        out = []
+
+        for r in speed_rows or []:
+            vid = str(r.get("Vehicle_ID", ""))
+            zone = str(r.get("Zone", ""))
+            out.append({
+                "Site_ID": site_id,
+                "Module": "Speed",
+                "Event_ID": f"SPEED_{vid}_Z{zone}",
+                "Vehicle_ID": vid,
+                "Related_Vehicle_ID": "",
+                "Movement": r.get("Movement", ""),
+                "Zone": f"Zone {zone}" if zone else "",
+                "Start_Time": r.get("Start_Time", ""),
+                "End_Time": r.get("End_Time", ""),
+                "Source_File": "Run_3_Speed.csv",
+                "QC_Flag": r.get("QC_Flag", ""),
+            })
+
+        for r in gap_rows or []:
+            sid = str(r.get("Subject_ID", ""))
+            related = ";".join(x for x in (
+                str(r.get("Conflicting_ID_A", "")).strip(),
+                str(r.get("Conflicting_ID_B", "")).strip(),
+            ) if x)
+            out.append({
+                "Site_ID": site_id,
+                "Module": "Gap",
+                "Event_ID": f"{r.get('Decision_Event_ID','')}_O{r.get('Opportunity_No','')}",
+                "Vehicle_ID": sid,
+                "Related_Vehicle_ID": related,
+                "Movement": r.get("Subject_Movement", ""),
+                "Zone": f"Zone {r.get('Decision_Zone','')}" if r.get("Decision_Zone", "") != "" else "",
+                "Start_Time": r.get("Gap_Start_Time", ""),
+                "End_Time": r.get("Gap_End_Time", ""),
+                "Source_File": "Run_3_Gap_Acceptance.csv",
+                "QC_Flag": r.get("QC_Flag", ""),
+            })
+
+        for r in lc_rows or []:
+            out.append({
+                "Site_ID": site_id,
+                "Module": "Lateral_Clearance",
+                "Event_ID": f"LC_{r.get('Pair_ID','')}_{r.get('Timestamp','')}",
+                "Vehicle_ID": str(r.get("Motorcycle_ID", "")),
+                "Related_Vehicle_ID": str(r.get("Neighbor_ID", "")),
+                "Movement": r.get("Motorcycle_Movement", ""),
+                "Zone": r.get("Zone", ""),
+                "Start_Time": r.get("Timestamp", ""),
+                "End_Time": r.get("Timestamp", ""),
+                "Source_File": "Run_3_Lateral_Clearance.csv",
+                "QC_Flag": r.get("QC_Flag", ""),
+            })
+
+        for r in pet_rows or []:
+            va = str(r.get("Vehicle_ID_A", ""))
+            vb = str(r.get("Vehicle_ID_B", ""))
+            times = []
+            for k in ("T1_Exit_Time", "T2_Entry_Time"):
+                try:
+                    times.append(float(r.get(k, "")))
+                except Exception:
+                    pass
+            start_time = f"{min(times):.6f}" if times else ""
+            end_time = f"{max(times):.6f}" if times else ""
+            out.append({
+                "Site_ID": site_id,
+                "Module": "PET",
+                "Event_ID": str(r.get("Interaction_ID", "")),
+                "Vehicle_ID": va,
+                "Related_Vehicle_ID": vb,
+                "Movement": r.get("Movement_A", ""),
+                "Zone": r.get("Conflict_Zone", ""),
+                "Start_Time": start_time,
+                "End_Time": end_time,
+                "Source_File": "Run_3_PET.csv",
+                "QC_Flag": r.get("QC_Flag", ""),
+            })
+
+        module_order = {"Speed": 1, "Gap": 2, "Lateral_Clearance": 3, "PET": 4}
+        out.sort(key=lambda r: (
+            module_order.get(r.get("Module", ""), 99),
+            float(r["Start_Time"]) if str(r.get("Start_Time", "")).strip() not in ("", "None") else 10**18,
+            str(r.get("Event_ID", ""))
+        ))
+        return out
+
+    @staticmethod
     def _run3_pet_movement_pair_allowed(movement_a, movement_b):
         """Return True only for movement pairs defined as conflict streams.
 
@@ -6643,13 +6769,11 @@ class Run1App:
                     "Conflicting_Class_A": o["conflicting_class_a"],
                     "Conflicting_ID_B": o["conflicting_id_b"],
                     "Conflicting_Class_B": o["conflicting_class_b"],
-                    "Reference_Line": o["reference_line"],
                     "Gap_Start_Time": f"{o['gap_start']:.6f}",
                     "Gap_End_Time": f"{o['gap_end']:.6f}",
                     "X31_Available_Gap": f"{o['gap']:.6f}",
                     "Gap_Role": o["role"],
                     "Y5_Gap_Acceptance": o["accepted"] if o["accepted"] is not None else "",
-                    "Acceptance_Time": "" if o["acceptance_time"] is None else f"{o['acceptance_time']:.6f}",
                     "Decision_Time": "" if accepted_time is None else f"{accepted_time:.6f}",
                     "QC_Flag": o["qc_flag"],
                 })
@@ -6782,11 +6906,7 @@ class Run1App:
                         "Neighbor_Class": cls_b,
                         "Neighbor_Movement": movement_b,
                         "Neighbor_Side": side,
-                        "LS_Pixel": f"{lateral_px:.6f}",
-                        "PPM": f"{ppm:.6f}",
                         "LS_Meter": f"{ls_m:.6f}",
-                        "Wm": f"{widths['Motorcycle']:.6f}",
-                        "Wv": f"{widths[cls_b]:.6f}",
                         "Y3_Lateral_Clearance": f"{y3:.6f}",
                         "QC_Flag": ("Negative_Y3" if y3 < 0 else "") + (";Perspective_Homography" if perspective is not None else ""),
                     })
@@ -6910,7 +7030,6 @@ class Run1App:
                     "Vehicle_ID_A":str(a_id),"Vehicle_Class_A":event_a.get("Vehicle_Class", tracks[a_id][0].get("class_name","")),"Movement_A":ma,
                     "Vehicle_ID_B":str(b_id),"Vehicle_Class_B":event_b.get("Vehicle_Class", tracks[b_id][0].get("class_name","")),"Movement_B":mb,
                     "Conflict_Type":ctype,"Conflict_Zone":"Zone 6",
-                    "Interaction_Start":f"{min(a_entry,b_entry):.6f}","Interaction_End":f"{max(a_exit,b_exit):.6f}",
                     "T1_Exit_Time":f"{t1:.6f}","T2_Entry_Time":f"{t2:.6f}","Y4_PET":f"{pet:.6f}",
                     "QC_Flag":";".join([x for x in [
                         "Threshold_At_or_Below" if pet<=float(self.run3_pet_threshold_var.get()) else "",
@@ -6968,6 +7087,23 @@ class Run1App:
                 w.writeheader()
                 w.writerows(rows)
             return actual
+
+        # Master Vehicle Event Map — one row per Vehicle_ID.
+        vehicle_map_rows = self._run3_export_vehicle_event_map(
+            vehicle_event_map,
+            self.run3_site_id_var.get().strip()
+        )
+        vehicle_map_fields = [
+            "Site_ID","Vehicle_ID","Vehicle_Class","Movement","Movement_Source",
+            "First_Zone","Last_Zone","Zone_Sequence",
+            "First_Observed_Time","Last_Observed_Time","Track_Duration_s"
+        ]
+        vehicle_map_path = write_csv(
+            "Run_3_Vehicle_Event_Map.csv",
+            vehicle_map_fields,
+            vehicle_map_rows
+        )
+        outputs["vehicle_event_map"] = vehicle_map_path
 
         # Speed
         if self.run3_speed_enabled_var.get():
@@ -7146,6 +7282,25 @@ class Run1App:
                 summary["diagnostics"]["pet"] = f"ERROR: {e}"
                 outputs["pet"] = path
 
+        # Cross-module Event Index for traceability; calculations are unchanged.
+        event_index_rows = self._run3_build_event_index(
+            self.run3_site_id_var.get().strip(),
+            speed_rows if self.run3_speed_enabled_var.get() else [],
+            gap_rows if self.run3_gap_enabled_var.get() else [],
+            lc_rows if self.run3_lc_enabled_var.get() else [],
+            pet_rows if self.run3_pet_enabled_var.get() else [],
+        )
+        event_index_fields = [
+            "Site_ID","Module","Event_ID","Vehicle_ID","Related_Vehicle_ID",
+            "Movement","Zone","Start_Time","End_Time","Source_File","QC_Flag"
+        ]
+        event_index_path = write_csv(
+            "Run_3_Event_Index.csv",
+            event_index_fields,
+            event_index_rows
+        )
+        outputs["event_index"] = event_index_path
+
         summary["architecture"] = {
             "movement_resolver": "Common: ID Zone Summary first_zone + last_zone, then shared fallbacks",
             "run3_calculation_inputs": ["Run_2_Detection_Records.csv", "Run_2_ID_Zone_Summary.csv"],
@@ -7153,7 +7308,7 @@ class Run1App:
             "pet_uses_ppm": False,
             "pet_uses_road_direction_angle": False,
             "common_vehicle_event_map": "Shared Vehicle_ID/Class/Movement/Zone records for Speed, LC, PET, and Gap; no ID invention or reassignment",
-            "csv_output_policy": "Four main Run 3 CSVs are kept compact; intermediate audit fields are not duplicated when already recoverable from Run 2 Detection Records and Run 3 Summary",
+            "csv_output_policy": "Four compact analytical CSVs plus one Vehicle Event Map and one cross-module Event Index; raw calculation fields remain in Run 2 source records when not needed in the main outputs",
         }
         summary_path = os.path.join(output_dir, "Run_3_Summary.json")
         summary["outputs"] = outputs
