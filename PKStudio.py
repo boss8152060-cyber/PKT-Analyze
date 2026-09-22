@@ -6063,14 +6063,14 @@ class Run1App:
         return mapping
 
     def _run3_event_speed_kmh(self, rows, target_time, ppm, perspective=None):
-        """Estimate local event speed from observed trajectory samples only.
+        """Estimate local speed at an observed event without temporal interpolation.
 
-        The target event timestamp itself is never temporally interpolated. The
-        method selects an observed pair of consecutive samples near the event,
-        preferring a pair containing the target sample; if the target is at a
-        zone boundary it may use the nearest valid same-zone pair. The returned
-        value is therefore a local observed speed suitable for event context in
-        Gap/LC/PET CSVs, not a replacement for the research Speed module.
+        The target event time is only used to locate the nearest observed sample.
+        Speed is then estimated from a short observed trajectory window around that
+        sample. This is more robust for PET conflict events because a one-frame
+        bounding-box quantisation can otherwise produce an artificial 0 km/h even
+        when the vehicle is visibly moving. If every local observed window has
+        zero displacement, 0 km/h is preserved as a genuine stationary result.
         """
         if rows is None or target_time is None:
             return None
@@ -6085,31 +6085,56 @@ class Run1App:
                 return None
             clean = sorted(clean, key=lambda r: float(r["_timestamp"]))
 
-            # First preference: consecutive pair whose time span contains the
-            # observed target timestamp. No interpolation is performed.
-            spanning = []
-            for a, b in zip(clean, clean[1:]):
-                ta = float(a["_timestamp"])
-                tb = float(b["_timestamp"])
-                if ta <= t_target <= tb and tb > ta:
-                    spanning.append((abs(t_target - ta) + abs(tb - t_target), a, b))
-            if spanning:
-                _, a, b = min(spanning, key=lambda x: x[0])
-                return self._run3_gap_observed_speed_kmh(a, b, ppm, perspective)
+            idx = min(
+                range(len(clean)),
+                key=lambda i: abs(float(clean[i]["_timestamp"]) - t_target),
+            )
 
-            # Otherwise use the closest consecutive observed pair by midpoint.
-            nearest = []
-            for a, b in zip(clean, clean[1:]):
+            # Symmetric observed windows around the nearest event sample.
+            # Prefer the shortest window that contains measurable motion. This
+            # avoids false zero speed from repeated integer bbox centers while
+            # remaining entirely observation-based.
+            candidates = []
+            for radius in (1, 2, 3, 4):
+                left = idx - radius
+                right = idx + radius
+                if left < 0 or right >= len(clean):
+                    continue
+                a = clean[left]
+                b = clean[right]
                 ta = float(a["_timestamp"])
                 tb = float(b["_timestamp"])
                 if tb <= ta:
                     continue
-                mid = 0.5 * (ta + tb)
-                nearest.append((abs(t_target - mid), a, b))
-            if not nearest:
+                try:
+                    pa = self._run3_transform_point(a["_point"], perspective) if perspective is not None else a["_point"]
+                    pb = self._run3_transform_point(b["_point"], perspective) if perspective is not None else b["_point"]
+                    d = math.hypot(float(pb[0]) - float(pa[0]), float(pb[1]) - float(pa[1]))
+                    d_m = d if perspective is not None else d / float(ppm)
+                    speed = d_m / (tb - ta) * 3.6
+                except Exception:
+                    continue
+                candidates.append((radius, abs(float(clean[idx]["_timestamp"]) - t_target), float(speed)))
+
+            # One-sided fallback at track boundaries.
+            if idx > 0:
+                a, b = clean[idx - 1], clean[idx]
+                speed = self._run3_gap_observed_speed_kmh(a, b, ppm, perspective)
+                if speed is not None:
+                    candidates.append((0.5, abs(float(b["_timestamp"]) - t_target), float(speed)))
+            if idx < len(clean) - 1:
+                a, b = clean[idx], clean[idx + 1]
+                speed = self._run3_gap_observed_speed_kmh(a, b, ppm, perspective)
+                if speed is not None:
+                    candidates.append((0.5, abs(float(a["_timestamp"]) - t_target), float(speed)))
+
+            if not candidates:
                 return None
-            _, a, b = min(nearest, key=lambda x: x[0])
-            return self._run3_gap_observed_speed_kmh(a, b, ppm, perspective)
+
+            moving = [c for c in candidates if c[2] > 1e-9]
+            pool = moving if moving else candidates
+            _, _, speed = min(pool, key=lambda c: (c[0], c[1]))
+            return float(speed)
         except Exception:
             return None
 
@@ -6423,7 +6448,7 @@ class Run1App:
             "4→1": (4, 6, 1),
         }.get(movement)
 
-    def _run3_gap(self, tracks, summaries, mapping):
+    def _run3_gap(self, tracks, summaries, mapping, vehicle_event_map=None):
         """Compute two-stage binary Gap Acceptance responses.
 
         Research interpretation for the current study:
@@ -7284,6 +7309,9 @@ class Run1App:
         except Exception as exc:
             mapping_parse_error = str(exc)
         movement_by_id, movement_source_by_id = self._run3_build_movement_index(tracks, summaries, mapping)
+        vehicle_event_map = vehicle_event_map or self._run3_build_vehicle_event_map(
+            tracks, summaries, movement_by_id, movement_source_by_id
+        )
         # One canonical vehicle/event map is shared by Speed, LC, and PET. Gap retains its existing subject-centric logic.
         vehicle_event_map = self._run3_build_vehicle_event_map(tracks, summaries, movement_by_id, movement_source_by_id)
         summary = {
@@ -7382,7 +7410,7 @@ class Run1App:
         # movement filter → Decision Zone (1/4/6) → waiting time → conflict vehicles → gap/X31 → Y5 → QC.
         if self.run3_gap_enabled_var.get():
             try:
-                gap_rows = self._run3_gap(tracks, summaries, mapping)
+                gap_rows = self._run3_gap(tracks, summaries, mapping, vehicle_event_map)
                 fields = [
                     # Organized for direct reading:
                     # decision/subject → opportunity → waiting → conflict vehicles → raw gap → X31/Y5 → QC
