@@ -7309,11 +7309,11 @@ class Run1App:
         except Exception as exc:
             mapping_parse_error = str(exc)
         movement_by_id, movement_source_by_id = self._run3_build_movement_index(tracks, summaries, mapping)
-        vehicle_event_map = vehicle_event_map or self._run3_build_vehicle_event_map(
+        # One canonical vehicle/event map is built once and shared by Speed, Gap, LC, and PET.
+        # The previous version accidentally referenced vehicle_event_map before assignment.
+        vehicle_event_map = self._run3_build_vehicle_event_map(
             tracks, summaries, movement_by_id, movement_source_by_id
         )
-        # One canonical vehicle/event map is shared by Speed, LC, and PET. Gap retains its existing subject-centric logic.
-        vehicle_event_map = self._run3_build_vehicle_event_map(tracks, summaries, movement_by_id, movement_source_by_id)
         summary = {
             "site_id": self.run3_site_id_var.get().strip(),
             "inputs": {"detection": det_path, "id_zone_summary": id_path, "zone_summary": zone_path},
