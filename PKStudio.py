@@ -1,5 +1,10 @@
 # ============================================================
-# PK Studio V17 - Run 1 + 2 + 3 V24
+# PK Studio V17 - Run 1 + 2 + 3 V27
+# V27: 7 safety indicators in 3 domains (thesis Ch.2 / Ch.3)
+#   Distance: Y1 Lateral Clearance, Y2 LDP
+#   Time    : Y3 Gap Acceptance, Y4 TTC, Y5 PET
+#   Speed   : Y6 V50 (Mean, SD), Y7 V85
+#   Zones 1-7 (Zone 7 = second conflict area). No Tk access from worker thread.
 # ============================================================
 #
 # Vehicle Detection + Tracking + Trajectory + Zone/Line Measurement Research
@@ -414,6 +419,8 @@ RUN3_DEFAULTS = {
     "gap_enabled": True,
     "lc_enabled": True,
     "pet_enabled": True,
+    "ttc_enabled": True,
+    "ldp_enabled": True,
     "ppm": "57.822",
     # Optional road-plane perspective calibration. Disabled by default because
     # image points and real dimensions are site/video-specific and were not
@@ -430,16 +437,28 @@ RUN3_DEFAULTS = {
     "perspective_l34_m": "",
     "perspective_l41_m": "",
     "waiting_speed_threshold": "1.00",      # implementation starter value
-    "zone_stop_min_duration_s": "1.00",     # implementation starter value; observed low-speed duration needed to classify a stop
     "lateral_axis_angle_deg": "0.00",       # implementation starter value; verify per video
     "lc_longitudinal_window_m": "2.00",     # implementation starter value
     "pet_interaction_distance_m": "3.00",   # implementation starter value
     "pet_threshold_s": "1.00",
+    # V27 implementation starter values (editable; verify per site):
+    "pet_max_s": "10.0",                    # pairs/events above this are not PET conflicts; blank = no limit
+    "ttc_max_record_s": "3.0",              # record TTC events with TTCmin <= this value
+    "ttc_heading_max_deg": "45",            # same-direction test for rear-end / deviation
+    "ttc_velocity_window_s": "0.50",        # centred window of observed samples for velocity
+    "ttc_min_speed_kmh": "2.0",             # follower must be moving
+    "ldp_lane_width_m": "3.50",             # W in LDP = dY/(W/2)x100 — enter the actual lane width
+    "ldp_reference": "Initial position",    # or "Line N" drawn on the lane centreline
+    "ldp_motorcycle_only": True,
+    "ldp_smoothing_samples": "5",           # rolling median to suppress bbox jitter (1 = off)
     # Speed: user can select any of Zones 1–6. CSV assigns each selected zone
     # to the research role: Zone 1 = access mouth, 2/4 = approach, 3/5 = exit, 6 = middle/access.
-    "speed_zones": [1, 2, 3, 4, 5, 6],
-    "lc_zones": [1, 2, 3, 4, 5, 6],
+    "speed_zones": [1, 2, 3, 4, 5, 6, 7],
+    "lc_zones": [1, 2, 3, 4, 5, 6, 7],
     "pet_zone6": True,
+    "pet_zones": [6, 7],
+    "ttc_zones": [1, 2, 3, 4, 5, 6, 7],
+    "ldp_zones": [2, 3, 4, 5],
     "gap_movement_13": True,
     "gap_movement_15": True,
     "gap_movement_41": True,
@@ -460,6 +479,17 @@ RUN3_DEFAULTS = {
         "Truck": "2.50",
         "Van": "1.90",
     },
+    # V27: vehicle lengths for the TTC clear gap S. Implementation starter
+    # values — replace with the values adopted in Chapter 3.
+    "vehicle_lengths": {
+        "Bus": "12.00",
+        "Car": "4.50",
+        "Motorcycle": "2.00",
+        "Pickup": "5.30",
+        "Sidecar": "2.20",
+        "Truck": "8.00",
+        "Van": "5.00",
+    },
 }
 
 
@@ -467,7 +497,9 @@ RUN3_DEFAULTS = {
 # APPLICATION
 # ============================================================
 
-ZONE_NAMES = [f"Zone {i}" for i in range(1, 7)]
+ZONE_IDS = list(range(1, 8))            # V27: Zone 7 added (second conflict area)
+CONFLICT_ZONE_IDS = (6, 7)              # conflict/search areas — never movement endpoints
+ZONE_NAMES = [f"Zone {i}" for i in ZONE_IDS]
 LINE_NAMES = [f"Line {i}" for i in range(1, 7)]
 
 
@@ -644,6 +676,8 @@ class Run1App:
         self.run3_gap_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_enabled"])
         self.run3_lc_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["lc_enabled"])
         self.run3_pet_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_enabled"])
+        self.run3_ttc_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["ttc_enabled"])
+        self.run3_ldp_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["ldp_enabled"])
         self.run3_ppm_var = tk.StringVar(value=RUN3_DEFAULTS["ppm"])
         self.run3_perspective_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["perspective_enabled"])
         self.run3_perspective_p1_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p1"])
@@ -657,14 +691,25 @@ class Run1App:
         self.run3_perspective_l34_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_l34_m"])
         self.run3_perspective_l41_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_l41_m"])
         self.run3_waiting_speed_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["waiting_speed_threshold"])
-        self.run3_zone_stop_min_duration_var = tk.StringVar(value=RUN3_DEFAULTS["zone_stop_min_duration_s"])
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
         self.run3_lc_longitudinal_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_longitudinal_window_m"])
         self.run3_pet_interaction_distance_var = tk.StringVar(value=RUN3_DEFAULTS["pet_interaction_distance_m"])
         self.run3_pet_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["pet_threshold_s"])
-        self.run3_speed_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_zones"])) for z in range(1,7)}
-        self.run3_lc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["lc_zones"])) for z in range(1,7)}
-        self.run3_pet_zone6_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_zone6"])
+        self.run3_speed_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_zones"])) for z in ZONE_IDS}
+        self.run3_lc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["lc_zones"])) for z in ZONE_IDS}
+        self.run3_pet_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["pet_zones"])) for z in CONFLICT_ZONE_IDS}
+        self.run3_pet_zone6_var = self.run3_pet_zone_vars[6]   # backward-compatible alias
+        self.run3_ttc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["ttc_zones"])) for z in ZONE_IDS}
+        self.run3_ldp_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["ldp_zones"])) for z in ZONE_IDS}
+        self.run3_pet_max_var = tk.StringVar(value=RUN3_DEFAULTS["pet_max_s"])
+        self.run3_ttc_max_record_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_max_record_s"])
+        self.run3_ttc_heading_max_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_heading_max_deg"])
+        self.run3_ttc_velocity_window_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_velocity_window_s"])
+        self.run3_ttc_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_speed_kmh"])
+        self.run3_ldp_lane_width_var = tk.StringVar(value=RUN3_DEFAULTS["ldp_lane_width_m"])
+        self.run3_ldp_reference_var = tk.StringVar(value=RUN3_DEFAULTS["ldp_reference"])
+        self.run3_ldp_motorcycle_only_var = tk.BooleanVar(value=RUN3_DEFAULTS["ldp_motorcycle_only"])
+        self.run3_ldp_smoothing_var = tk.StringVar(value=RUN3_DEFAULTS["ldp_smoothing_samples"])
         self.run3_gap_movement_13_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_13"])
         self.run3_gap_movement_15_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_15"])
         self.run3_gap_movement_41_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_41"])
@@ -675,7 +720,14 @@ class Run1App:
             name: tk.StringVar(value=RUN3_DEFAULTS["vehicle_widths"].get(name, ""))
             for name in RUN3_VEHICLE_CLASSES
         }
+        self.run3_length_vars = {
+            name: tk.StringVar(value=RUN3_DEFAULTS["vehicle_lengths"].get(name, ""))
+            for name in RUN3_VEHICLE_CLASSES
+        }
         self.run3_result_text = tk.StringVar(value="Run 3: not executed")
+        # V27: plain-Python snapshots used by the worker thread.
+        self._rt = None
+        self._run3_cfg = None
         self.run3_last_outputs = {}
         self.run3_last_summary = {}
         self.run3_was_requested = False
@@ -936,202 +988,140 @@ class Run1App:
     # ========================================================
 
     def build_run3_section(self):
-        """Build a compact research-oriented Run 3 UI.
-
-        The visible controls are grouped by research task. Legacy/internal
-        parameters remain in the settings model for backward compatibility but
-        are intentionally not exposed here when they are no longer used by the
-        active calculation path.
-        """
         frame = ttk.LabelFrame(
             self.content,
-            text="RUN 3 — Research Safety Analysis",
+            text="RUN 3 — Safety Performance (7 indicators / 3 domains)",
             padding=10
         )
         frame.grid(row=4, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
-        frame.columnconfigure(0, weight=1)
+        for col in (1, 3):
+            frame.columnconfigure(col, weight=1)
+        gray = "#666666"
+        r = 0
 
-        # ------------------------------------------------------------
-        # A. STUDY / CALIBRATION
-        # ------------------------------------------------------------
-        cal = ttk.LabelFrame(frame, text="A. Study / Calibration", padding=(8, 6))
-        cal.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        cal.columnconfigure(1, weight=1)
-        cal.columnconfigure(3, weight=1)
+        ttk.Label(frame, text="Site_ID").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_site_id_var, width=18).grid(row=r, column=1, sticky="w", pady=4)
+        ttk.Label(frame, text="PPM").grid(row=r, column=2, sticky="e", padx=(12, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_ppm_var, width=18).grid(row=r, column=3, sticky="w", pady=4)
+        r += 1
 
-        ttk.Label(cal, text="Site_ID").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(cal, textvariable=self.run3_site_id_var, width=14).grid(row=0, column=1, sticky="w", pady=3)
+        ttk.Checkbutton(frame, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=r, column=0, sticky="w", pady=(2, 4))
+        ttk.Label(frame, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง (P1→P2 ต้องขนานแนวถนน)", foreground=gray).grid(row=r, column=1, columnspan=2, sticky="w", pady=(2, 4))
+        ttk.Button(frame, text="🎯 Perspective / PPM Calibration", command=self.open_perspective_calibration).grid(row=r, column=3, sticky="e", pady=(2, 4))
+        r += 1
+        for (la, va, lb, vb) in (("P1", self.run3_perspective_p1_var, "P2", self.run3_perspective_p2_var),
+                                 ("P3", self.run3_perspective_p3_var, "P4", self.run3_perspective_p4_var)):
+            ttk.Label(frame, text=la).grid(row=r, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(frame, textvariable=va, width=18, state="readonly").grid(row=r, column=1, sticky="w", pady=2)
+            ttk.Label(frame, text=lb).grid(row=r, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(frame, textvariable=vb, width=18, state="readonly").grid(row=r, column=3, sticky="w", pady=2)
+            r += 1
+        for (la, va, lb, vb) in (("Known Length P1→P2 (m)", self.run3_perspective_l12_var, "Known Length P2→P3 (m)", self.run3_perspective_l23_var),
+                                 ("Known Length P3→P4 (m)", self.run3_perspective_l34_var, "Known Length P4→P1 (m)", self.run3_perspective_l41_var)):
+            ttk.Label(frame, text=la).grid(row=r, column=0, sticky="w", padx=4, pady=2)
+            ttk.Entry(frame, textvariable=va, width=18).grid(row=r, column=1, sticky="w", pady=2)
+            ttk.Label(frame, text=lb).grid(row=r, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(frame, textvariable=vb, width=18).grid(row=r, column=3, sticky="w", pady=2)
+            r += 1
+        ttk.Label(frame, text="Road direction angle (deg) — ใช้เมื่อไม่มี Perspective (มีผลต่อ Y1 และ Y2)").grid(row=r, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Entry(frame, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=r, column=2, sticky="w", pady=4)
+        r += 1
 
-        ttk.Label(cal, text="Calibration").grid(row=0, column=2, sticky="e", padx=(12, 8), pady=3)
-        mode = ttk.Frame(cal)
-        mode.grid(row=0, column=3, sticky="w", pady=3)
-        ttk.Radiobutton(
-            mode, text="PPM only", variable=self.run3_perspective_enabled_var, value=False
-        ).pack(side="left", padx=(0, 12))
-        ttk.Radiobutton(
-            mode, text="Perspective Homography", variable=self.run3_perspective_enabled_var, value=True
-        ).pack(side="left")
+        # ---------------- Indicator switches by domain ----------------
+        sw = ttk.LabelFrame(frame, text="ตัวชี้วัด (Y1–Y7)", padding=(8, 4))
+        sw.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 4)); r += 1
+        ttk.Label(sw, text="ด้านระยะทาง").grid(row=0, column=0, sticky="w", padx=(0, 10))
+        ttk.Checkbutton(sw, text="Y1 Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=0, column=1, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(sw, text="Y2 LDP", variable=self.run3_ldp_enabled_var).grid(row=0, column=2, sticky="w", padx=(0, 12))
+        ttk.Label(sw, text="ด้านเวลา").grid(row=1, column=0, sticky="w", padx=(0, 10))
+        ttk.Checkbutton(sw, text="Y3 Gap Acceptance", variable=self.run3_gap_enabled_var).grid(row=1, column=1, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(sw, text="Y4 TTC", variable=self.run3_ttc_enabled_var).grid(row=1, column=2, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(sw, text="Y5 PET", variable=self.run3_pet_enabled_var).grid(row=1, column=3, sticky="w", padx=(0, 12))
+        ttk.Label(sw, text="ด้านความเร็ว").grid(row=2, column=0, sticky="w", padx=(0, 10))
+        ttk.Checkbutton(sw, text="Y6 V50 (Mean, SD) + Y7 V85", variable=self.run3_speed_enabled_var).grid(row=2, column=1, columnspan=2, sticky="w")
 
-        ttk.Label(cal, text="PPM / fallback PPM").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(cal, textvariable=self.run3_ppm_var, width=14).grid(row=1, column=1, sticky="w", pady=3)
-        ttk.Label(
-            cal,
-            text="ใช้ PPM โดยตรง หรือใช้เป็น fallback เมื่อไม่มี metric transform",
-            foreground="#666666"
-        ).grid(row=1, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=3)
+        def zone_row(title, note, var_map):
+            nonlocal r
+            box = ttk.LabelFrame(frame, text=title, padding=(8, 4))
+            box.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(0, 4)); r += 1
+            if note:
+                ttk.Label(box, text=note, foreground="#555555").grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 3))
+            for i, z in enumerate(sorted(var_map)):
+                ttk.Checkbutton(box, text=f"Zone {z}", variable=var_map[z]).grid(row=1, column=i, sticky="w", padx=(2, 12), pady=2)
+            return box
 
-        ttk.Button(
-            cal, text="🎯 เปิด Perspective / PPM Calibration", command=self.open_perspective_calibration
-        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(5, 3))
-        ttk.Label(
-            cal,
-            text="รายละเอียด P1–P4 และระยะจริงกรอกในหน้าต่าง Calibration โดยเฉพาะ ไม่แสดงซ้ำบนหน้าหลัก",
-            foreground="#666666"
-        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(0, 2))
+        zone_row("Y6/Y7 Speed — Zones", "บทบาทใน CSV: 1=Access_Mouth, 2/4=Approach, 3/5=Exit, 6=Middle_Access, 7=Conflict_Zone7", self.run3_speed_zone_vars)
+        zone_row("Y1 Lateral Clearance — Zones", "ใช้ observation จริงและจับคู่เวลาที่ใกล้กัน — ไม่ทำ interpolation", self.run3_lc_zone_vars)
 
-        # ------------------------------------------------------------
-        # B. ANALYSIS MODULE SWITCHES
-        # ------------------------------------------------------------
-        modules = ttk.LabelFrame(frame, text="B. Analysis Modules", padding=(8, 6))
-        modules.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        ttk.Checkbutton(modules, text="Speed", variable=self.run3_speed_enabled_var).grid(row=0, column=0, sticky="w", padx=(0, 16))
-        ttk.Checkbutton(modules, text="Gap Acceptance", variable=self.run3_gap_enabled_var).grid(row=0, column=1, sticky="w", padx=(0, 16))
-        ttk.Checkbutton(modules, text="Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=0, column=2, sticky="w", padx=(0, 16))
-        ttk.Checkbutton(modules, text="PET", variable=self.run3_pet_enabled_var).grid(row=0, column=3, sticky="w")
+        box = zone_row("Y2 LDP — Zones", "LDP = ΔY / (W/2) × 100 — ΔY วัดจากตำแหน่งเริ่มต้นใน Zone หรือจาก Line ที่วาดเป็นเส้นกึ่งกลางช่องจราจร", self.run3_ldp_zone_vars)
+        ttk.Label(box, text="W ความกว้างช่องจราจร (m)").grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Entry(box, textvariable=self.run3_ldp_lane_width_var, width=8).grid(row=2, column=2, sticky="w", pady=2)
+        ttk.Label(box, text="ΔY อ้างอิง").grid(row=2, column=3, sticky="e", pady=2)
+        ttk.Combobox(box, textvariable=self.run3_ldp_reference_var, state="readonly", width=16,
+                     values=["Initial position"] + LINE_NAMES).grid(row=2, column=4, columnspan=2, sticky="w", pady=2)
+        ttk.Label(box, text="Median smoothing (samples)").grid(row=3, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Entry(box, textvariable=self.run3_ldp_smoothing_var, width=8).grid(row=3, column=2, sticky="w", pady=2)
+        ttk.Checkbutton(box, text="เฉพาะรถจักรยานยนต์", variable=self.run3_ldp_motorcycle_only_var).grid(row=3, column=3, columnspan=3, sticky="w", pady=2)
 
-        # ------------------------------------------------------------
-        # C. SPEED
-        # ------------------------------------------------------------
-        speed = ttk.LabelFrame(frame, text="C. Speed", padding=(8, 6))
-        speed.grid(row=2, column=0, sticky="ew", pady=(0, 6))
-        ttk.Label(
-            speed,
-            text="Analysis Zones — เลือก Zone ที่ต้องการคำนวณความเร็ว (1–6)",
-            foreground="#555555"
-        ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 4))
-        for i, z in enumerate(range(1, 7)):
-            ttk.Checkbutton(
-                speed, text=f"Zone {z}", variable=self.run3_speed_zone_vars[z]
-            ).grid(row=1, column=i, sticky="w", padx=(2, 16), pady=2)
-        ttk.Label(
-            speed,
-            text="CSV: Zone 1 = Access_Mouth | 2,4 = Approach | 3,5 = Exit | 6 = Middle_Access",
-            foreground="#666666"
-        ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(3, 0))
+        box = zone_row("Y4 TTC — Zones (ความขัดแย้งแบบชนท้าย / เลี้ยว-เบี่ยงทิศทางเดียวกัน)", "TTC = S / CS; S = ระยะว่างระหว่างรถ, CS = ความเร็วเข้าใกล้ (Closing speed)", self.run3_ttc_zone_vars)
+        for i, (label, var) in enumerate((("บันทึกเมื่อ TTCmin ≤ (s)", self.run3_ttc_max_record_var),
+                                          ("มุมทิศทางต่างกันไม่เกิน (deg)", self.run3_ttc_heading_max_var),
+                                          ("หน้าต่างคำนวณความเร็ว (s)", self.run3_ttc_velocity_window_var),
+                                          ("ความเร็วรถตามขั้นต่ำ (km/h)", self.run3_ttc_min_speed_var))):
+            ttk.Label(box, text=label).grid(row=2 + i // 2, column=(i % 2) * 4, columnspan=2, sticky="w", pady=2)
+            ttk.Entry(box, textvariable=var, width=8).grid(row=2 + i // 2, column=(i % 2) * 4 + 2, sticky="w", pady=2)
 
-        # ------------------------------------------------------------
-        # D. GAP ACCEPTANCE
-        # ------------------------------------------------------------
-        gap = ttk.LabelFrame(frame, text="D. Gap Acceptance", padding=(8, 6))
-        gap.grid(row=3, column=0, sticky="ew", pady=(0, 6))
-        gap.columnconfigure(1, weight=1)
+        box = zone_row("Y5 PET — Conflict Zones", "PET คำนวณแยกในแต่ละ Conflict Zone (Zone 6 / Zone 7)", self.run3_pet_zone_vars)
+        for i, (label, var) in enumerate((("Interaction distance (m)", self.run3_pet_interaction_distance_var),
+                                          ("PET threshold (s)", self.run3_pet_threshold_var),
+                                          ("PET max (s) — ว่าง = ไม่จำกัด", self.run3_pet_max_var))):
+            ttk.Label(box, text=label).grid(row=2 + i // 2, column=(i % 2) * 4, columnspan=2, sticky="w", pady=2)
+            ttk.Entry(box, textvariable=var, width=8).grid(row=2 + i // 2, column=(i % 2) * 4 + 2, sticky="w", pady=2)
 
-        ttk.Label(gap, text="Subject Movement").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Checkbutton(gap, text="1 → 3", variable=self.run3_gap_movement_13_var).grid(row=0, column=1, sticky="w")
-        ttk.Checkbutton(gap, text="1 → 5", variable=self.run3_gap_movement_15_var).grid(row=0, column=2, sticky="w")
-        ttk.Checkbutton(gap, text="4 → 1", variable=self.run3_gap_movement_41_var).grid(row=0, column=3, sticky="w")
+        ttk.Label(frame, text="LC longitudinal window (m)").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_lc_longitudinal_window_var, width=18).grid(row=r, column=1, sticky="w", pady=4)
+        ttk.Label(frame, text="Waiting speed threshold (km/h)").grid(row=r, column=2, sticky="e", padx=(12, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_waiting_speed_threshold_var, width=18).grid(row=r, column=3, sticky="w", pady=4)
+        r += 1
 
-        ttk.Label(gap, text="Critical Gap Method").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Checkbutton(gap, text="Raff", variable=self.run3_use_raff_var).grid(row=1, column=1, sticky="w")
-        ttk.Checkbutton(gap, text="MLE", variable=self.run3_use_mle_var).grid(row=1, column=2, sticky="w")
-
-        ttk.Label(
-            gap,
-            text="2-stage: Access = เข้า Zone 6; ถ้าพบ Hold ใน Zone 6 ให้เริ่ม Exit stage ใหม่และนับ gap ใหม่ที่ทางออก | Hold rule ภายใน: ≤5 km/h ต่อเนื่อง ≥0.30 s",
-            foreground="#666666"
-        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(3, 4))
-
-        ttk.Label(gap, text="Reference Line Mapping").grid(row=3, column=0, sticky="nw", padx=(0, 8), pady=3)
-        ttk.Button(gap, text="Copy Template", command=self.copy_run3_mapping_template).grid(row=3, column=3, sticky="ne", pady=3)
-        self.run3_reference_text = tk.Text(gap, height=5, wrap="none")
-        self.run3_reference_text.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(0, 3))
+        ttk.Separator(frame, orient="horizontal").grid(row=r, column=0, columnspan=4, sticky="ew", pady=(8, 6)); r += 1
+        ttk.Label(frame, text="Y3 Gap Acceptance — Subject Movement").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Checkbutton(frame, text="1 → 3", variable=self.run3_gap_movement_13_var).grid(row=r, column=1, sticky="w")
+        ttk.Checkbutton(frame, text="1 → 5", variable=self.run3_gap_movement_15_var).grid(row=r, column=2, sticky="w")
+        ttk.Checkbutton(frame, text="4 → 1", variable=self.run3_gap_movement_41_var).grid(row=r, column=3, sticky="w")
+        r += 1
+        ttk.Label(frame, text="Critical Gap").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Checkbutton(frame, text="Raff", variable=self.run3_use_raff_var).grid(row=r, column=1, sticky="w")
+        ttk.Checkbutton(frame, text="MLE", variable=self.run3_use_mle_var).grid(row=r, column=2, sticky="w")
+        r += 1
+        ttk.Label(frame, text="Reference Line Mapping (copy/paste): Site_ID|Movement|Line N").grid(row=r, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Button(frame, text="Copy Template", command=self.copy_run3_mapping_template).grid(row=r, column=3, sticky="e", pady=(4, 2))
+        r += 1
+        self.run3_reference_text = tk.Text(frame, height=6, width=90, wrap="none")
+        self.run3_reference_text.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(0, 6))
         self.run3_reference_text.insert("1.0", self.run3_reference_mapping_text)
-        ttk.Label(
-            gap,
-            text="รูปแบบ: Site_ID|Movement|Line N  — ตัวอย่าง 8|1→3|Line 1",
-            foreground="#666666"
-        ).grid(row=5, column=0, columnspan=4, sticky="w")
+        r += 1
 
-        # ------------------------------------------------------------
-        # E. LATERAL CLEARANCE
-        # ------------------------------------------------------------
-        lc = ttk.LabelFrame(frame, text="E. Lateral Clearance", padding=(8, 6))
-        lc.grid(row=4, column=0, sticky="ew", pady=(0, 6))
-        lc.columnconfigure(1, weight=1)
-        lc.columnconfigure(3, weight=1)
+        ttk.Label(frame, text="Vehicle dimensions (m): Width W (Y1, Y4) / Length L (Y4)").grid(row=r, column=0, columnspan=4, sticky="w", pady=(2, 4))
+        r += 1
+        dims = ttk.Frame(frame)
+        dims.grid(row=r, column=0, columnspan=4, sticky="w"); r += 1
+        ttk.Label(dims, text="Class").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(dims, text="W").grid(row=1, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(dims, text="L").grid(row=2, column=0, sticky="w", padx=(0, 8))
+        for i, name in enumerate(RUN3_VEHICLE_CLASSES, start=1):
+            ttk.Label(dims, text=name).grid(row=0, column=i, sticky="w", padx=4)
+            ttk.Entry(dims, textvariable=self.run3_width_vars[name], width=7).grid(row=1, column=i, sticky="w", padx=4, pady=1)
+            ttk.Entry(dims, textvariable=self.run3_length_vars[name], width=7).grid(row=2, column=i, sticky="w", padx=4, pady=1)
 
-        ttk.Label(lc, text="Analysis Zones").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
-        for i, z in enumerate(range(1, 7)):
-            ttk.Checkbutton(lc, text=f"{z}", variable=self.run3_lc_zone_vars[z]).grid(
-                row=0, column=1 + i, sticky="w", padx=(0, 12), pady=3
-            )
+        ttk.Label(frame, text="ค่า implementation (มุมถนน, window, max, smoothing, L) เป็นค่าเริ่มต้นที่ต้องตรวจสอบกับแต่ละ Site — ไม่ใช่ค่าจากเอกสารอ้างอิง", foreground=gray).grid(row=r, column=0, columnspan=4, sticky="w", pady=(6, 2))
+        r += 1
+        ttk.Label(frame, textvariable=self.run3_result_text, foreground="#444444").grid(row=r, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
-        ttk.Label(lc, text="Road Direction (deg)").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(lc, textvariable=self.run3_lateral_axis_angle_var, width=12).grid(row=1, column=1, sticky="w", pady=3)
-        ttk.Label(lc, text="Longitudinal Window (m)").grid(row=1, column=2, sticky="e", padx=(12, 8), pady=3)
-        ttk.Entry(lc, textvariable=self.run3_lc_longitudinal_window_var, width=12).grid(row=1, column=3, sticky="w", pady=3)
 
-        ttk.Label(lc, text="Vehicle Widths (m)").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(5, 3))
-        width_pairs = [("Bus", 1), ("Car", 3), ("Motorcycle", 5)]
-        for name, col in width_pairs:
-            ttk.Label(lc, text=name).grid(row=2, column=col, sticky="e", padx=(4, 4), pady=(5, 3))
-            ttk.Entry(lc, textvariable=self.run3_width_vars[name], width=9).grid(row=2, column=col + 1, sticky="w", pady=(5, 3))
-        width_pairs2 = [("Pickup", 1), ("Sidecar", 3), ("Truck", 5)]
-        for name, col in width_pairs2:
-            ttk.Label(lc, text=name).grid(row=3, column=col, sticky="e", padx=(4, 4), pady=3)
-            ttk.Entry(lc, textvariable=self.run3_width_vars[name], width=9).grid(row=3, column=col + 1, sticky="w", pady=3)
-        ttk.Label(lc, text="Van").grid(row=4, column=1, sticky="e", padx=(4, 4), pady=3)
-        ttk.Entry(lc, textvariable=self.run3_width_vars["Van"], width=9).grid(row=4, column=2, sticky="w", pady=3)
-        ttk.Label(
-            lc,
-            text="Y3 ใช้ observed observations และไม่ทำ temporal interpolation",
-            foreground="#666666"
-        ).grid(row=5, column=0, columnspan=7, sticky="w", pady=(3, 0))
-
-        # ------------------------------------------------------------
-        # F. PET
-        # ------------------------------------------------------------
-        pet = ttk.LabelFrame(frame, text="F. PET", padding=(8, 6))
-        pet.grid(row=5, column=0, sticky="ew", pady=(0, 6))
-        pet.columnconfigure(1, weight=1)
-        pet.columnconfigure(3, weight=1)
-
-        ttk.Label(pet, text="Conflict Area").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Label(pet, text="Zone 6 (fixed)").grid(row=0, column=1, sticky="w", pady=3)
-        # Zone 6 is now a fixed PET analysis area; retain the legacy variable
-        # only for settings backward compatibility.
-        self.run3_pet_zone6_var.set(True)
-
-        ttk.Label(pet, text="Interaction Distance (m)").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(pet, textvariable=self.run3_pet_interaction_distance_var, width=12).grid(row=1, column=1, sticky="w", pady=3)
-        ttk.Label(pet, text="PET Threshold (s)").grid(row=1, column=2, sticky="e", padx=(12, 8), pady=3)
-        ttk.Entry(pet, textvariable=self.run3_pet_threshold_var, width=12).grid(row=1, column=3, sticky="w", pady=3)
-        ttk.Label(
-            pet,
-            text="PET พิจารณาคู่ movement ตาม conflict pairs ที่กำหนด และใช้เวลาจาก observed trajectory samples",
-            foreground="#666666"
-        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(3, 0))
-
-        # ------------------------------------------------------------
-        # G. RESEARCH OUTPUT / STATUS
-        # ------------------------------------------------------------
-        status = ttk.LabelFrame(frame, text="G. Research Output / Status", padding=(8, 6))
-        status.grid(row=6, column=0, sticky="ew")
-        ttk.Label(
-            status,
-            text="Run 2: Detection Records + ID/Zone Summary + Zone Summary   |   Run 3: Event Map + Event Index + Speed + Gap + LC + PET",
-            foreground="#555555"
-        ).grid(row=0, column=0, sticky="w", pady=2)
-        ttk.Label(
-            status,
-            text="Research processing: ทุก frame | Research CSV: สร้างอัตโนมัติ | Run 3 QC/summary บันทึกไว้ใน Summary.json",
-            foreground="#555555"
-        ).grid(row=1, column=0, sticky="w", pady=2)
-        ttk.Label(
-            status,
-            textvariable=self.run3_result_text,
-            foreground="#444444"
-        ).grid(row=2, column=0, sticky="w", pady=(4, 0))
+    # ========================================================
+    # INTEGRATED ZONE / LINE MEASUREMENT
+    # ========================================================
 
     def update_trajectory_position_controls(self, event=None):
         """Update the trajectory-position controls.
@@ -1275,7 +1265,7 @@ class Run1App:
                     scaled.append(name)
 
         if not loaded:
-            raise ValueError("No valid Zone 1-6 definitions were found in the selected PK Studio file.")
+            raise ValueError("No valid Zone 1-7 definitions were found in the selected PK Studio file.")
 
         # JSON is Zone-only in the current PK Studio format.
         lines = {name: [] for name in LINE_NAMES}
@@ -1355,7 +1345,7 @@ class Run1App:
                 loaded.append(name)
 
         if not loaded:
-            raise ValueError("No Zone 1-6 definitions were found in the PK Studio Python export.")
+            raise ValueError("No Zone 1-7 definitions were found in the PK Studio Python export.")
 
         lines = {name: [] for name in LINE_NAMES}
         raw_lines = getattr(module, "LINES", {})
@@ -1461,13 +1451,44 @@ class Run1App:
         ``Zone 6`` or simply ``6``. Both are blended onto the original frame
         so they remain visually faint without a solid background rectangle.
         """
-        try:
-            opacity = max(0.0, min(1.0, float(self.zone_overlay_opacity_var.get()) / 100.0))
-        except Exception:
-            opacity = 0.45
+        rt = self._rt if (self.running and self._rt) else None
+        if rt is not None:
+            opacity = rt["zone_opacity"]
+            show_boundary = rt["show_zone_boundary"]
+            show_label = rt["show_zone_label"]
+            label_prefix = rt["show_zone_label_prefix"]
+        else:
+            try:
+                opacity = max(0.0, min(1.0, float(self.zone_overlay_opacity_var.get()) / 100.0))
+            except Exception:
+                opacity = 0.45
+            show_boundary = bool(self.show_zone_boundary_var.get())
+            show_label = bool(self.show_zone_label_var.get())
+            label_prefix = bool(self.show_zone_label_prefix_var.get())
 
-        show_boundary = bool(self.show_zone_boundary_var.get())
-        show_label = bool(self.show_zone_label_var.get())
+        # V27: the faint Zone layer is static, so it is rendered once and
+        # only its non-empty pixels are blended on each frame (V26 copied and
+        # blended the full frame every frame).
+        if (show_boundary or show_label) and opacity <= 0.0:
+            show_boundary = show_label = False   # nothing visible to draw
+        if show_boundary or show_label:
+            key = (frame.shape, opacity, show_boundary, show_label, label_prefix,
+                   tuple((z, tuple(map(tuple, self.zones.get(z, [])))) for z in ZONE_NAMES))
+            cache = getattr(self, "_overlay_cache", None)
+            if cache is None or cache[0] != key:
+                layer = np.zeros_like(frame)
+                self._draw_zone_layer(layer, show_boundary, show_label, label_prefix)
+                cover = np.zeros(frame.shape[:2], dtype=np.uint8)
+                self._draw_zone_layer(cover, show_boundary, show_label, label_prefix, mono=True)
+                idx = np.nonzero(cover)
+                alpha = (cover[idx].astype(np.float32) / 255.0 * opacity)[:, None]
+                cache = (key, idx, alpha, layer[idx].astype(np.float32) * opacity)
+                self._overlay_cache = cache
+            _, idx, alpha, colored = cache
+            if len(idx[0]):
+                px = frame[idx].astype(np.float32)
+                frame[idx] = np.clip(px * (1.0 - alpha) + colored, 0, 255).astype(np.uint8)
+            show_boundary = show_label = False   # skip the legacy full-frame path
 
         # Draw only the enabled Zone elements onto a temporary layer, then
         # blend that layer with the original frame. This creates a faint
@@ -1504,7 +1525,7 @@ class Run1App:
                         cy = int(np.mean([p[1] for p in polygon]))
 
                     # Toggle whether the word "Zone" is included.
-                    label = zname if self.show_zone_label_prefix_var.get() else zname.replace("Zone ", "", 1)
+                    label = zname if label_prefix else zname.replace("Zone ", "", 1)
                     font = cv2.FONT_HERSHEY_SIMPLEX
                     font_scale = 0.55
                     thickness = 1
@@ -1534,47 +1555,124 @@ class Run1App:
             mx, my = (p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2
             cv2.putText(frame, lname, (mx, max(20, my - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
 
+    # ========================================================
+    # V27 RUNTIME SNAPSHOT (read once on the main thread)
+    # ========================================================
+
+    _ANCHORS = {
+        "Top": (50.0, 0.0), "Center": (50.0, 50.0), "Bottom": (50.0, 100.0),
+        "Left": (0.0, 50.0), "Right": (100.0, 50.0),
+        "Top Left": (0.0, 0.0), "Top Right": (100.0, 0.0),
+        "Bottom Left": (0.0, 100.0), "Bottom Right": (100.0, 100.0),
+    }
+
+    def _anchor_fraction(self, position, offset_text):
+        try:
+            offset = max(0.0, min(50.0, float(offset_text)))
+        except Exception:
+            offset = 0.0
+        px, py = self._ANCHORS.get(str(position).strip(), self._ANCHORS["Center"])
+        # Move only the coordinates that touch an edge.
+        if px == 0.0:
+            px = offset
+        elif px == 100.0:
+            px = 100.0 - offset
+        if py == 0.0:
+            py = offset
+        elif py == 100.0:
+            py = 100.0 - offset
+        return px / 100.0, py / 100.0
+
+    def _runtime_snapshot(self, settings=None):
+        """Values used for every detection/frame, copied from Tk once."""
+        def b(var):
+            try:
+                return bool(var.get())
+            except Exception:
+                return False
+        try:
+            opacity = max(0.0, min(1.0, float(self.zone_overlay_opacity_var.get()) / 100.0))
+        except Exception:
+            opacity = 0.45
+        try:
+            live_ppm = float(self.run3_ppm_var.get())
+        except Exception:
+            live_ppm = 0.0
+        rt = {
+            "anchor": self._anchor_fraction(self.trajectory_position_var.get(), self.trajectory_offset_var.get()),
+            "zone_opacity": opacity,
+            "show_zone_boundary": b(self.show_zone_boundary_var),
+            "show_zone_label": b(self.show_zone_label_var),
+            "show_zone_label_prefix": b(self.show_zone_label_prefix_var),
+            "show_bbox": b(self.show_bbox_var),
+            "live_ppm": live_ppm,
+        }
+        for name in ("id", "class", "conf", "zone", "speed"):
+            rt[f"show_label_{name}"] = b(getattr(self, f"show_label_{name}_var"))
+            rt[f"show_prefix_{name}"] = b(getattr(self, f"show_prefix_{name}_var"))
+        return rt
+
     def get_zone_reference_point(self, x1, y1, x2, y2):
         """Return the selected Trajectory Position inside the bounding box.
 
         Nine anchors are supported: Top, Center, Bottom, Left, Right,
         Top Left, Top Right, Bottom Left, Bottom Right.
         Offset (%) moves the anchor inward from the selected edge(s).
+        V27: during a run the anchor comes from the start-of-run snapshot.
         """
-        position = self.trajectory_position_var.get().strip()
-        try:
-            offset = max(0.0, min(50.0, float(self.trajectory_offset_var.get())))
-        except Exception:
-            offset = 0.0
-
-        anchors = {
-            "Top": (50.0, 0.0),
-            "Center": (50.0, 50.0),
-            "Bottom": (50.0, 100.0),
-            "Left": (0.0, 50.0),
-            "Right": (100.0, 50.0),
-            "Top Left": (0.0, 0.0),
-            "Top Right": (100.0, 0.0),
-            "Bottom Left": (0.0, 100.0),
-            "Bottom Right": (100.0, 100.0),
-        }
-        px, py = anchors.get(position, anchors["Center"])
-
-        # Move only the coordinates that touch an edge.
-        if px == 0.0:
-            px = offset
-        elif px == 100.0:
-            px = 100.0 - offset
-
-        if py == 0.0:
-            py = offset
-        elif py == 100.0:
-            py = 100.0 - offset
-
+        rt = self._rt if (self.running and self._rt) else None
+        if rt is not None:
+            fx, fy = rt["anchor"]
+        else:
+            fx, fy = self._anchor_fraction(self.trajectory_position_var.get(), self.trajectory_offset_var.get())
         return (
-            int(round(x1 + (x2 - x1) * px / 100.0)),
-            int(round(y1 + (y2 - y1) * py / 100.0)),
+            int(round(x1 + (x2 - x1) * fx)),
+            int(round(y1 + (y2 - y1) * fy)),
         )
+
+    def _zone_polygons(self):
+        """Cached int32 polygons for Zone assignment (built once per geometry)."""
+        key = (id(self.zones),) + tuple((z, id(self.zones.get(z)), len(self.zones.get(z, []))) for z in ZONE_NAMES)
+        cache = getattr(self, "_zone_poly_cache", None)
+        if cache is None or cache[0] != key:
+            polys = [
+                (z, np.array(self.zones[z], dtype=np.int32))
+                for z in ZONE_NAMES if len(self.zones.get(z, [])) >= 3
+            ]
+            cache = (key, polys)
+            self._zone_poly_cache = cache
+        return cache[1]
+
+    def _draw_zone_layer(self, layer, show_boundary, show_label, label_prefix, mono=False):
+        """Draw Zone boundaries/labels once onto a static layer."""
+        for zname in ZONE_NAMES:
+            polygon = self.zones.get(zname, [])
+            if len(polygon) < 3:
+                continue
+            pts = np.array(polygon, dtype=np.int32).reshape((-1, 1, 2))
+            meta = getattr(self, "zone_meta", {}).get(zname, {})
+            if mono:
+                color = 255
+            else:
+                try:
+                    color = tuple(int(max(0, min(255, v))) for v in meta.get("color_bgr", [0, 200, 0])[:3])
+                    if len(color) != 3:
+                        color = (0, 200, 0)
+                except Exception:
+                    color = (0, 200, 0)
+            if show_boundary:
+                cv2.polylines(layer, [pts], True, color, 1, cv2.LINE_AA)
+            if show_label and meta.get("show_label", True):
+                moments = cv2.moments(pts)
+                if abs(moments.get("m00", 0.0)) > 1e-6:
+                    cx = int(moments["m10"] / moments["m00"]); cy = int(moments["m01"] / moments["m00"])
+                else:
+                    cx = int(np.mean([p[0] for p in polygon])); cy = int(np.mean([p[1] for p in polygon]))
+                label = zname if label_prefix else zname.replace("Zone ", "", 1)
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                (tw, th), _ = cv2.getTextSize(label, font, 0.55, 1)
+                cv2.putText(layer, label, (max(5, cx - tw // 2), max(th + 5, cy + th // 2)),
+                            font, 0.55, color, 1, cv2.LINE_AA)
 
 
     def get_zone_from_trajectory_point(self, point):
@@ -1586,10 +1684,9 @@ class Run1App:
         """
         if point is None:
             return None
-        px, py = point
-        for zname in ZONE_NAMES:
-            polygon = self.zones.get(zname, [])
-            if len(polygon) >= 3 and self.point_in_zone(px, py, polygon):
+        pt = (float(point[0]), float(point[1]))
+        for zname, poly in self._zone_polygons():
+            if cv2.pointPolygonTest(poly, pt, False) >= 0:
                 return zname
         return None
 
@@ -1974,29 +2071,96 @@ class Run1App:
             2
         )
 
-        ttk.Label(frame, text="Device").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Label(
+            frame,
+            text="Device"
+        ).grid(
+            row=0,
+            column=0,
+            sticky="w",
+            pady=4
+        )
+
         ttk.Combobox(
             frame,
             textvariable=self.device_var,
-            values=["Auto", "CPU", "GPU 0"],
+            values=[
+                "Auto",
+                "CPU",
+                "GPU 0"
+            ],
             state="readonly",
             width=18
-        ).grid(row=0, column=1, sticky="w")
+        ).grid(
+            row=0,
+            column=1,
+            sticky="w"
+        )
 
-        ttk.Label(frame, text="Precision").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Label(
+            frame,
+            text="Precision"
+        ).grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=4
+        )
+
         ttk.Combobox(
             frame,
             textvariable=self.precision_var,
-            values=["Auto", "FP16", "FP32"],
+            values=[
+                "Auto",
+                "FP16",
+                "FP32"
+            ],
             state="readonly",
             width=18
-        ).grid(row=1, column=1, sticky="w")
+        ).grid(
+            row=1,
+            column=1,
+            sticky="w"
+        )
 
-        ttk.Separator(frame, orient="horizontal").grid(row=2, column=0, columnspan=2, sticky="ew", pady=(7, 6))
-        ttk.Label(frame, text="Research Processing", font=("Segoe UI", 10, "bold")).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 4))
-        ttk.Label(frame, text="Frame processing: Every frame").grid(row=4, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Label(frame, text="Frame Skip: ซ่อนใน Research UI และถูกบังคับเป็น Every frame เมื่อ Research Mode ทำงาน", foreground="#666666").grid(row=5, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Label(frame, text="GPU 0 = NVIDIA GeForce GTX 1650").grid(row=6, column=0, columnspan=2, sticky="w", pady=(7, 0))
+        ttk.Label(
+            frame,
+            text="Frame Skip"
+        ).grid(
+            row=2,
+            column=0,
+            sticky="w",
+            pady=4
+        )
+
+        ttk.Combobox(
+            frame,
+            textvariable=self.frame_skip_var,
+            values=[
+                "NO - Process every frame",
+                "1 - Process every 2nd frame",
+                "2 - Process every 3rd frame",
+                "3 - Process every 4th frame",
+                "4 - Process every 5th frame"
+            ],
+            state="readonly",
+            width=28
+        ).grid(
+            row=2,
+            column=1,
+            sticky="w"
+        )
+
+        ttk.Label(
+            frame,
+            text="GPU 0 = NVIDIA GeForce GTX 1650"
+        ).grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(8, 0)
+        )
 
     # ========================================================
     # BYTETRACK
@@ -2058,17 +2222,50 @@ class Run1App:
             3
         )
 
-        ttk.Checkbutton(frame, text="Show Preview", variable=self.show_preview_var).grid(row=0, column=0, sticky="w", pady=3)
-        ttk.Checkbutton(frame, text="Show Trajectory", variable=self.draw_trail_var).grid(row=1, column=0, sticky="w", pady=3)
-        ttk.Label(frame, text="Trail Length").grid(row=1, column=1, sticky="e", padx=(15, 5))
-        ttk.Spinbox(frame, from_=1, to=300, textvariable=self.trail_length_var, width=8).grid(row=1, column=2, sticky="w")
-        ttk.Checkbutton(frame, text="Save Video", variable=self.save_video_var).grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Checkbutton(
+            frame,
+            text="Show Preview",
+            variable=self.show_preview_var
+        ).grid(row=0, column=0, sticky="w", pady=3)
 
-        ttk.Separator(frame, orient="horizontal").grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 6))
-        ttk.Label(frame, text="Research CSV: Automatic", font=("Segoe UI", 9, "bold")).grid(row=4, column=0, sticky="w", pady=2)
-        ttk.Label(frame, text="เมื่อ Research Mode ทำงาน CSV ถูกบันทึกอัตโนมัติ — ไม่ต้องตั้งค่า Save CSV ซ้ำ", foreground="#666666").grid(row=5, column=0, columnspan=3, sticky="w", pady=2)
-        ttk.Label(frame, text="Trajectory ใช้จุดเดียวกับ Trajectory Position ด้านบน", foreground="#666666").grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 2))
-        ttk.Label(frame, text="กรอบและข้อมูล ID แสดงเฉพาะเมื่อจุด Trajectory อยู่ใน Zone", foreground="#666666").grid(row=7, column=0, columnspan=3, sticky="w")
+        ttk.Checkbutton(
+            frame,
+            text="Show Trajectory",
+            variable=self.draw_trail_var
+        ).grid(row=1, column=0, sticky="w", pady=3)
+
+        ttk.Label(frame, text="Trail Length").grid(
+            row=1, column=1, sticky="e", padx=(15, 5)
+        )
+        ttk.Spinbox(
+            frame, from_=1, to=300, textvariable=self.trail_length_var, width=8
+        ).grid(row=1, column=2, sticky="w")
+
+        ttk.Checkbutton(
+            frame,
+            text="Save Video",
+            variable=self.save_video_var
+        ).grid(row=2, column=0, sticky="w", pady=3)
+
+        ttk.Checkbutton(
+            frame,
+            text="Save CSV",
+            variable=self.save_csv_var
+        ).grid(row=2, column=1, sticky="w", pady=3)
+
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=3, column=0, columnspan=3, sticky="ew", pady=(8, 6)
+        )
+        ttk.Label(
+            frame,
+            text="Trajectory ใช้จุดเดียวกับ Trajectory Position ด้านบน",
+            foreground="#666666"
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 2))
+        ttk.Label(
+            frame,
+            text="กรอบและข้อมูล ID แสดงเฉพาะเมื่อจุด Trajectory อยู่ใน Zone",
+            foreground="#666666"
+        ).grid(row=5, column=0, columnspan=3, sticky="w")
 
     # ========================================================
     # INFORMATION
@@ -2326,6 +2523,8 @@ class Run1App:
                 "gap_enabled": self.run3_gap_enabled_var.get(),
                 "lc_enabled": self.run3_lc_enabled_var.get(),
                 "pet_enabled": self.run3_pet_enabled_var.get(),
+                "ttc_enabled": self.run3_ttc_enabled_var.get(),
+                "ldp_enabled": self.run3_ldp_enabled_var.get(),
                 "ppm": self.run3_ppm_var.get(),
                 "perspective_enabled": self.run3_perspective_enabled_var.get(),
                 "perspective_p1": self.run3_perspective_p1_var.get(),
@@ -2339,7 +2538,6 @@ class Run1App:
                 "perspective_l34_m": self.run3_perspective_l34_var.get(),
                 "perspective_l41_m": self.run3_perspective_l41_var.get(),
                 "waiting_speed_threshold": self.run3_waiting_speed_threshold_var.get(),
-                "zone_stop_min_duration_s": self.run3_zone_stop_min_duration_var.get(),
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
                 "lc_longitudinal_window_m": self.run3_lc_longitudinal_window_var.get(),
                 "pet_interaction_distance_m": self.run3_pet_interaction_distance_var.get(),
@@ -2347,6 +2545,19 @@ class Run1App:
                 "speed_zones": [z for z,v in self.run3_speed_zone_vars.items() if v.get()],
                 "lc_zones": [z for z,v in self.run3_lc_zone_vars.items() if v.get()],
                 "pet_zone6": self.run3_pet_zone6_var.get(),
+                "pet_zones": [z for z, v in self.run3_pet_zone_vars.items() if v.get()],
+                "ttc_zones": [z for z, v in self.run3_ttc_zone_vars.items() if v.get()],
+                "ldp_zones": [z for z, v in self.run3_ldp_zone_vars.items() if v.get()],
+                "pet_max_s": self.run3_pet_max_var.get(),
+                "ttc_max_record_s": self.run3_ttc_max_record_var.get(),
+                "ttc_heading_max_deg": self.run3_ttc_heading_max_var.get(),
+                "ttc_velocity_window_s": self.run3_ttc_velocity_window_var.get(),
+                "ttc_min_speed_kmh": self.run3_ttc_min_speed_var.get(),
+                "ldp_lane_width_m": self.run3_ldp_lane_width_var.get(),
+                "ldp_reference": self.run3_ldp_reference_var.get(),
+                "ldp_motorcycle_only": self.run3_ldp_motorcycle_only_var.get(),
+                "ldp_smoothing_samples": self.run3_ldp_smoothing_var.get(),
+                "vehicle_lengths": {name: var.get() for name, var in self.run3_length_vars.items()},
                 "gap_movement_13": self.run3_gap_movement_13_var.get(),
                 "gap_movement_15": self.run3_gap_movement_15_var.get(),
                 "gap_movement_41": self.run3_gap_movement_41_var.get(),
@@ -2455,6 +2666,8 @@ class Run1App:
                 ("gap_enabled", self.run3_gap_enabled_var),
                 ("lc_enabled", self.run3_lc_enabled_var),
                 ("pet_enabled", self.run3_pet_enabled_var),
+                ("ttc_enabled", self.run3_ttc_enabled_var),
+                ("ldp_enabled", self.run3_ldp_enabled_var),
                 ("ppm", self.run3_ppm_var),
                 ("perspective_enabled", self.run3_perspective_enabled_var),
                 ("perspective_p1", self.run3_perspective_p1_var),
@@ -2463,8 +2676,20 @@ class Run1App:
                 ("perspective_p4", self.run3_perspective_p4_var),
                 ("perspective_length_m", self.run3_perspective_length_var),
                 ("perspective_width_m", self.run3_perspective_width_var),
+                ("perspective_l12_m", self.run3_perspective_l12_var),
+                ("perspective_l23_m", self.run3_perspective_l23_var),
+                ("perspective_l34_m", self.run3_perspective_l34_var),
+                ("perspective_l41_m", self.run3_perspective_l41_var),
+                ("pet_max_s", self.run3_pet_max_var),
+                ("ttc_max_record_s", self.run3_ttc_max_record_var),
+                ("ttc_heading_max_deg", self.run3_ttc_heading_max_var),
+                ("ttc_velocity_window_s", self.run3_ttc_velocity_window_var),
+                ("ttc_min_speed_kmh", self.run3_ttc_min_speed_var),
+                ("ldp_lane_width_m", self.run3_ldp_lane_width_var),
+                ("ldp_reference", self.run3_ldp_reference_var),
+                ("ldp_motorcycle_only", self.run3_ldp_motorcycle_only_var),
+                ("ldp_smoothing_samples", self.run3_ldp_smoothing_var),
                 ("waiting_speed_threshold", self.run3_waiting_speed_threshold_var),
-                ("zone_stop_min_duration_s", self.run3_zone_stop_min_duration_var),
                 ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
                 ("lc_longitudinal_window_m", self.run3_lc_longitudinal_window_var),
                 ("pet_interaction_distance_m", self.run3_pet_interaction_distance_var),
@@ -2478,14 +2703,26 @@ class Run1App:
             for key, variable in mapping_pairs:
                 if key in run3:
                     variable.set(run3[key])
-            # PET conflict area is fixed to Zone 6 in the current research UI.
-            self.run3_pet_zone6_var.set(True)
+            if "pet_zones" in run3:
+                for z, var in self.run3_pet_zone_vars.items():
+                    var.set(z in set(run3.get("pet_zones") or []))
+            elif "pet_zone6" in run3:
+                self.run3_pet_zone6_var.set(bool(run3.get("pet_zone6")))
+            for key, var_map in (("ttc_zones", self.run3_ttc_zone_vars), ("ldp_zones", self.run3_ldp_zone_vars)):
+                if key in run3:
+                    for z, var in var_map.items():
+                        var.set(z in set(run3.get(key) or []))
+            lengths = run3.get("vehicle_lengths", {})
+            if isinstance(lengths, dict):
+                for name, var in self.run3_length_vars.items():
+                    if name in lengths:
+                        var.set(lengths[name])
             # Speed zone settings: new v14 key, with backward compatibility to v13.
             speed_zone_values = run3.get("speed_zones")
             if speed_zone_values is None:
                 legacy = set(run3.get("speed_approach_zones", [])) | set(run3.get("speed_exit_zones", []))
                 speed_zone_values = sorted(legacy)
-            for z in range(1, 7):
+            for z in ZONE_IDS:
                 self.run3_speed_zone_vars[z].set(z in set(speed_zone_values or []))
                 if "lc_zones" in run3:
                     self.run3_lc_zone_vars[z].set(z in set(run3.get("lc_zones", [])))
@@ -2661,12 +2898,9 @@ class Run1App:
     def open_perspective_calibration(self):
         """Open an in-app Tkinter calibration window.
 
-        Features:
-        - Resizable / maximizable calibration window.
-        - Mouse-wheel zoom centred on the cursor.
-        - Horizontal/vertical scrollbars plus middle-mouse panning.
-        - Reset View returns to a fit-to-window view.
-        - P1 -> P2 -> P3 -> P4 remain stored in original video coordinates.
+        The user clicks P1 -> P2 -> P3 -> P4 on one road-plane quadrilateral.
+        Coordinates are converted from the displayed image back to original-video
+        pixel coordinates automatically, so the user never needs to type x,y.
         """
         video_path = str(self.video_var.get() or "").strip()
         if not video_path:
@@ -2696,8 +2930,8 @@ class Run1App:
 
         top = tk.Toplevel(self.root)
         top.title("PK Studio — Perspective Calibration")
-        top.geometry("1400x900")
-        top.minsize(1000, 700)
+        top.geometry("1280x900")
+        top.minsize(900, 700)
         top.transient(self.root)
         top.grab_set()
 
@@ -2707,303 +2941,111 @@ class Run1App:
             "frame_index": default_frame,
             "points": [],
             "photo": None,
-            "zoom": 1.0,              # 1.0 = fit-to-window
-            "display_scale": 1.0,     # actual image scale after fit_scale * zoom
-            "display_origin_x": 0,
-            "display_origin_y": 0,
+            "scale": 1.0,
+            "offset_x": 0,
+            "offset_y": 0,
             "image_w": width,
             "image_h": height,
             "drag_index": None,
-            "pan_last": None,
         }
 
-        # ----------------------------------------------------
-        # Top controls: deliberately arranged into separate rows
-        # so the P4->P1 field can never be covered by the point text
-        # or the Apply/Cancel buttons.
-        # ----------------------------------------------------
         controls = ttk.Frame(top, padding=8)
         controls.pack(fill="x")
-        controls.columnconfigure(1, weight=1)
-        controls.columnconfigure(3, weight=1)
-        controls.columnconfigure(5, weight=1)
-        controls.columnconfigure(7, weight=1)
+        canvas_frame = ttk.Frame(top, padding=(8, 0, 8, 8))
+        canvas_frame.pack(fill="both", expand=True)
 
-        ttk.Label(
-            controls,
-            text="ลำดับจุด: P1 → P2 → P3 → P4 | คลิกบนพื้นถนนที่เป็นพื้นที่เดียวกัน"
-        ).grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 6))
-
-        ttk.Label(controls, text="Frame").grid(row=1, column=0, sticky="e", padx=(0, 5))
+        ttk.Label(controls, text="ลำดับจุด: P1 → P2 → P3 → P4 | คลิกบนพื้นถนนที่เป็นพื้นที่เดียวกัน").grid(row=0, column=0, columnspan=6, sticky="w", pady=(0,6))
+        ttk.Label(controls, text="Frame").grid(row=1, column=0, sticky="e", padx=(0,5))
         frame_var = tk.StringVar(value=str(default_frame + 1))
-        ttk.Entry(controls, textvariable=frame_var, width=9).grid(row=1, column=1, sticky="w")
+        frame_entry = ttk.Entry(controls, textvariable=frame_var, width=10)
+        frame_entry.grid(row=1, column=1, sticky="w")
         ttk.Button(controls, text="Load Frame", command=lambda: load_frame()).grid(row=1, column=2, padx=5)
         ttk.Button(controls, text="Reset Points", command=lambda: reset_points()).grid(row=1, column=3, padx=5)
-
         length_vars = [
             tk.StringVar(value=str(self.run3_perspective_l12_var.get() or "")),
             tk.StringVar(value=str(self.run3_perspective_l23_var.get() or "")),
             tk.StringVar(value=str(self.run3_perspective_l34_var.get() or "")),
             tk.StringVar(value=str(self.run3_perspective_l41_var.get() or "")),
         ]
-        labels = [
-            "Known Length P1→P2 (m)",
-            "Known Length P2→P3 (m)",
-            "Known Length P3→P4 (m)",
-            "Known Length P4→P1 (m)",
-        ]
-
-        ttk.Label(controls, text=labels[0]).grid(row=1, column=4, sticky="e", padx=(12, 4))
-        ttk.Entry(controls, textvariable=length_vars[0], width=9).grid(row=1, column=5, sticky="w")
-        ttk.Label(controls, text=labels[1]).grid(row=1, column=6, sticky="e", padx=(12, 4))
-        ttk.Entry(controls, textvariable=length_vars[1], width=9).grid(row=1, column=7, sticky="w")
-
-        point_text_var = tk.StringVar(value="ยังไม่ได้เลือกจุด")
-        ttk.Label(controls, textvariable=point_text_var, foreground="#555555").grid(
-            row=2, column=0, columnspan=4, sticky="w", pady=(4, 2)
-        )
-
-        ttk.Label(controls, text=labels[2]).grid(row=2, column=4, sticky="e", padx=(12, 4))
-        ttk.Entry(controls, textvariable=length_vars[2], width=9).grid(row=2, column=5, sticky="w")
-        ttk.Label(controls, text=labels[3]).grid(row=2, column=6, sticky="e", padx=(12, 4))
-        ttk.Entry(controls, textvariable=length_vars[3], width=9).grid(row=2, column=7, sticky="w")
-
-        view_bar = ttk.Frame(controls)
-        view_bar.grid(row=3, column=0, columnspan=4, sticky="w", pady=(5, 0))
-        ttk.Label(view_bar, text="View").pack(side="left", padx=(0, 5))
-        ttk.Button(view_bar, text="− Zoom", width=9, command=lambda: zoom_at(1 / 1.2)).pack(side="left", padx=2)
-        ttk.Button(view_bar, text="+ Zoom", width=9, command=lambda: zoom_at(1.2)).pack(side="left", padx=2)
-        ttk.Button(view_bar, text="↺ Reset View", width=12, command=lambda: reset_view()).pack(side="left", padx=2)
-        ttk.Label(
-            view_bar,
-            text="Wheel = zoom ตามเมาส์ | ล้อกลางลาก = เลื่อนไปมา | Scrollbar = เลื่อนภาพ",
-            foreground="#666666"
-        ).pack(side="left", padx=(10, 0))
+        labels = ["Known Length P1→P2 (m)", "Known Length P2→P3 (m)", "Known Length P3→P4 (m)", "Known Length P4→P1 (m)"]
+        for i, (lab, var) in enumerate(zip(labels, length_vars), start=1):
+            col = 4 if i % 2 == 1 else 0
+            val_col = col + 1
+            row = 1 + (i - 1) // 2
+            ttk.Label(controls, text=lab).grid(row=row, column=col, sticky="e", padx=(15,5) if col == 4 else (0,5), pady=(0 if row == 1 else 6,0))
+            ttk.Entry(controls, textvariable=var, width=10).grid(row=row, column=val_col, sticky="w", pady=(0 if row == 1 else 6,0))
 
         ppm_calc_var = tk.StringVar(value="Calculated PPM: -")
-        ttk.Label(controls, textvariable=ppm_calc_var, foreground="#155a8a").grid(
-            row=3, column=4, columnspan=2, sticky="w", pady=(5, 0)
-        )
-        button_bar = ttk.Frame(controls)
-        button_bar.grid(row=3, column=6, columnspan=2, sticky="e", pady=(5, 0))
-        ttk.Button(button_bar, text="✅ Apply Calibration", command=lambda: apply_calibration()).pack(side="left", padx=3)
-        ttk.Button(button_bar, text="Cancel", command=lambda: cancel_calibration()).pack(side="left", padx=3)
+        ttk.Label(controls, textvariable=ppm_calc_var, foreground="#155a8a").grid(row=3, column=4, columnspan=2, sticky="w", pady=(6,0))
+        ttk.Label(controls, text="เลือก P1→P2→P3→P4 แล้วลากจุดปรับได้ | ระบบคำนวณ PPM จากระยะทั้ง 4 ด้าน", foreground="#555555").grid(row=3, column=0, columnspan=4, sticky="w", pady=(6,0))
 
-        ttk.Label(
-            controls,
-            text="คลิก P1→P2→P3→P4 แล้วลากจุดปรับได้ | ซูมเพื่อเล็งจุดละเอียดได้ โดยค่าพิกัดยังคงเป็นพิกัดภาพต้นฉบับ",
-            foreground="#555555"
-        ).grid(row=4, column=0, columnspan=8, sticky="w", pady=(4, 0))
-
-        canvas_frame = ttk.Frame(top, padding=(8, 0, 8, 8))
-        canvas_frame.pack(fill="both", expand=True)
-        canvas_frame.rowconfigure(0, weight=1)
-        canvas_frame.columnconfigure(0, weight=1)
+        point_text_var = tk.StringVar(value="ยังไม่ได้เลือกจุด")
+        ttk.Label(controls, textvariable=point_text_var, foreground="#555555").grid(row=2, column=0, columnspan=4, sticky="w", pady=(6,0))
 
         canvas = tk.Canvas(canvas_frame, background="#202020", highlightthickness=1)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        hbar = ttk.Scrollbar(canvas_frame, orient="horizontal", command=canvas.xview)
-        vbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
-        hbar.grid(row=1, column=0, sticky="ew")
-        vbar.grid(row=0, column=1, sticky="ns")
-        canvas.configure(xscrollcommand=hbar.set, yscrollcommand=vbar.set)
-
-        def fit_scale():
-            """Scale needed to fit the full video image inside the current canvas."""
-            cw = max(100, int(canvas.winfo_width()))
-            ch = max(100, int(canvas.winfo_height()))
-            if width <= 0 or height <= 0:
-                return 1.0
-            return max(0.05, min(cw / width, ch / height))
-
-        def current_scale():
-            return max(1e-6, fit_scale() * float(state.get("zoom", 1.0)))
-
-        def update_ppm_and_text():
-            if state["points"]:
-                point_text_var.set(
-                    "  ".join(
-                        f"P{i+1}=({x:.1f},{y:.1f})"
-                        for i, (x, y) in enumerate(state["points"])
-                    )
-                )
-            else:
-                point_text_var.set("ยังไม่ได้เลือกจุด")
-
-            try:
-                vals = []
-                edge_defs = [
-                    (0, 1, length_vars[0]),
-                    (1, 2, length_vars[1]),
-                    (2, 3, length_vars[2]),
-                    (3, 0, length_vars[3]),
-                ]
-                for i, j, var in edge_defs:
-                    if len(state["points"]) <= j:
-                        continue
-                    real_m = float(var.get().strip())
-                    if real_m <= 0:
-                        continue
-                    px = math.hypot(
-                        state["points"][j][0] - state["points"][i][0],
-                        state["points"][j][1] - state["points"][i][1]
-                    )
-                    if px > 0:
-                        vals.append(px / real_m)
-                if vals:
-                    ppm_calc_var.set(
-                        f"Calculated PPM: {sum(vals)/len(vals):.6f} pixel/m | edges={len(vals)}"
-                    )
-                else:
-                    ppm_calc_var.set("Calculated PPM: -")
-            except Exception:
-                ppm_calc_var.set("Calculated PPM: -")
+        canvas.pack(fill="both", expand=True)
 
         def render():
             img = state["frame"]
             h, w = img.shape[:2]
-            scale = current_scale()
-            state["display_scale"] = scale
-
+            cw = max(100, int(canvas.winfo_width()))
+            ch = max(100, int(canvas.winfo_height()))
+            scale = min(cw / w, ch / h)
+            if scale <= 0:
+                scale = 1.0
+            state["scale"] = scale
             new_w = max(1, int(round(w * scale)))
             new_h = max(1, int(round(h * scale)))
-            resized = cv2.resize(
-                img,
-                (new_w, new_h),
-                interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
-            )
+            resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
             view = resized.copy()
-            labels_local = ["P1", "P2", "P3", "P4"]
-            point_radius = max(7, int(round(7 * min(2.0, max(1.0, state["zoom"] ** 0.45)))))
-            line_thickness = max(2, int(round(2 * min(2.0, max(1.0, state["zoom"] ** 0.35)))))
+            labels = ["P1", "P2", "P3", "P4"]
             for idx, (px, py) in enumerate(state["points"]):
                 vx = int(round(px * scale))
                 vy = int(round(py * scale))
-                cv2.circle(view, (vx, vy), point_radius, (0, 255, 255), -1)
-                cv2.putText(
-                    view,
-                    labels_local[idx],
-                    (vx + point_radius + 4, vy - point_radius - 3),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    max(0.7, 0.7 * min(1.8, max(1.0, state["zoom"] ** 0.3))),
-                    (0, 255, 255),
-                    max(2, line_thickness),
-                    cv2.LINE_AA
-                )
+                cv2.circle(view, (vx, vy), 7, (0, 255, 255), -1)
+                cv2.putText(view, labels[idx], (vx + 10, vy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2, cv2.LINE_AA)
             if len(state["points"]) >= 2:
                 for i in range(1, len(state["points"])):
-                    a = state["points"][i-1]
-                    b = state["points"][i]
-                    cv2.line(
-                        view,
-                        (int(round(a[0]*scale)), int(round(a[1]*scale))),
-                        (int(round(b[0]*scale)), int(round(b[1]*scale))),
-                        (0, 255, 255), line_thickness, cv2.LINE_AA
-                    )
+                    a = state["points"][i-1]; b = state["points"][i]
+                    cv2.line(view, (int(a[0]*scale), int(a[1]*scale)), (int(b[0]*scale), int(b[1]*scale)), (0,255,255), 2, cv2.LINE_AA)
             if len(state["points"]) == 4:
-                a = state["points"][3]
-                b = state["points"][0]
-                cv2.line(
-                    view,
-                    (int(round(a[0]*scale)), int(round(a[1]*scale))),
-                    (int(round(b[0]*scale)), int(round(b[1]*scale))),
-                    (0, 255, 255), line_thickness, cv2.LINE_AA
-                )
+                a = state["points"][3]; b = state["points"][0]
+                cv2.line(view, (int(a[0]*scale), int(a[1]*scale)), (int(b[0]*scale), int(b[1]*scale)), (0,255,255), 2, cv2.LINE_AA)
 
             ok, buf = cv2.imencode('.png', view)
             if not ok:
                 return
             photo = tk.PhotoImage(data=buf.tobytes())
             state["photo"] = photo
-
-            cw = max(100, int(canvas.winfo_width()))
-            ch = max(100, int(canvas.winfo_height()))
-            scroll_w = max(cw, new_w)
-            scroll_h = max(ch, new_h)
-            origin_x = max(0, (scroll_w - new_w) // 2)
-            origin_y = max(0, (scroll_h - new_h) // 2)
-            state["display_origin_x"] = origin_x
-            state["display_origin_y"] = origin_y
-
-            canvas.configure(scrollregion=(0, 0, scroll_w, scroll_h))
             canvas.delete("all")
-            canvas.create_image(origin_x, origin_y, anchor="nw", image=photo)
-            canvas.create_text(
-                10, 10, anchor="nw",
-                text=(
-                    f"Frame {state['frame_index']+1} | Image {w}×{h} | "
-                    f"Zoom {state['zoom']:.2f}× | Wheel = zoom | Middle-drag = pan"
-                ),
-                fill="white", font=("Segoe UI", 10, "bold")
-            )
-            update_ppm_and_text()
-
-        def event_to_image(event):
-            sx = max(1e-6, state["display_scale"])
-            canvas_x = canvas.canvasx(event.x)
-            canvas_y = canvas.canvasy(event.y)
-            ox = state["display_origin_x"]
-            oy = state["display_origin_y"]
-            x = (canvas_x - ox) / sx
-            y = (canvas_y - oy) / sx
-            return float(x), float(y)
-
-        def _clamp01(value):
-            return max(0.0, min(1.0, float(value)))
-
-        def _set_scroll_after_zoom(image_x, image_y, event_x, event_y):
-            """Keep the image point under the cursor fixed during zoom."""
-            cw = max(100, int(canvas.winfo_width()))
-            ch = max(100, int(canvas.winfo_height()))
-            scale = state["display_scale"]
-            new_w = max(1, int(round(state["image_w"] * scale)))
-            new_h = max(1, int(round(state["image_h"] * scale)))
-            scroll_w = max(cw, new_w)
-            scroll_h = max(ch, new_h)
-            origin_x = max(0, (scroll_w - new_w) // 2)
-            origin_y = max(0, (scroll_h - new_h) // 2)
-            target_x = origin_x + image_x * scale
-            target_y = origin_y + image_y * scale
-            desired_left = target_x - float(event_x)
-            desired_top = target_y - float(event_y)
-            max_left = max(0.0, scroll_w - cw)
-            max_top = max(0.0, scroll_h - ch)
-            if max_left > 0:
-                canvas.xview_moveto(_clamp01(desired_left / max_left))
-            else:
-                canvas.xview_moveto(0.0)
-            if max_top > 0:
-                canvas.yview_moveto(_clamp01(desired_top / max_top))
-            else:
-                canvas.yview_moveto(0.0)
-
-        def zoom_at(multiplier, event=None):
-            old_zoom = float(state["zoom"])
-            new_zoom = max(1.0, min(6.0, old_zoom * float(multiplier)))
-            if abs(new_zoom - old_zoom) < 1e-9:
-                return
-
-            if event is not None:
-                image_x, image_y = event_to_image(event)
-                image_x = max(0.0, min(float(state["image_w"]), image_x))
-                image_y = max(0.0, min(float(state["image_h"]), image_y))
-            else:
-                image_x = state["image_w"] / 2.0
-                image_y = state["image_h"] / 2.0
-                event = type("_CenterEvent", (), {
-                    "x": int(canvas.winfo_width() / 2),
-                    "y": int(canvas.winfo_height() / 2),
-                })()
-
-            state["zoom"] = new_zoom
-            render()
-            _set_scroll_after_zoom(image_x, image_y, event.x, event.y)
-
-        def reset_view():
-            state["zoom"] = 1.0
-            render()
-            canvas.xview_moveto(0.0)
-            canvas.yview_moveto(0.0)
+            state["offset_x"] = max(0, (cw - new_w) // 2)
+            state["offset_y"] = max(0, (ch - new_h) // 2)
+            canvas.create_image(state["offset_x"], state["offset_y"], anchor="nw", image=photo)
+            canvas.create_text(10, 10, anchor="nw", text=f"Frame {state['frame_index']+1} | Image {w}×{h}", fill="white", font=("Segoe UI", 10, "bold"))
+            point_text_var.set("  ".join(f"P{i+1}=({x:.1f},{y:.1f})" for i,(x,y) in enumerate(state["points"])) if state["points"] else "ยังไม่ได้เลือกจุด")
+            try:
+                vals = []
+                edge_defs = [
+                    (0,1,length_vars[0]),
+                    (1,2,length_vars[1]),
+                    (2,3,length_vars[2]),
+                    (3,0,length_vars[3]),
+                ]
+                for i,j,var in edge_defs:
+                    if len(state["points"]) <= j:
+                        continue
+                    real_m = float(var.get().strip())
+                    if real_m <= 0:
+                        continue
+                    px = math.hypot(state["points"][j][0]-state["points"][i][0], state["points"][j][1]-state["points"][i][1])
+                    if px > 0:
+                        vals.append(px / real_m)
+                if vals:
+                    ppm_calc_var.set(f"Calculated PPM: {sum(vals)/len(vals):.6f} pixel/m | edges={len(vals)}")
+                else:
+                    ppm_calc_var.set("Calculated PPM: -")
+            except Exception:
+                ppm_calc_var.set("Calculated PPM: -")
 
         def load_frame():
             try:
@@ -3021,31 +3063,35 @@ class Run1App:
             state["frame"] = new_frame.copy()
             state["frame_index"] = requested
             state["points"] = []
-            reset_view()
+            render()
 
         def reset_points():
             state["points"] = []
-            state["drag_index"] = None
             render()
 
-        def on_left_click(event):
+        def event_to_image(event):
+            sx = state["scale"]
+            ox = state["offset_x"]
+            oy = state["offset_y"]
+            x = (event.x - ox) / sx
+            y = (event.y - oy) / sx
+            return float(x), float(y)
+
+        def on_click(event):
             x, y = event_to_image(event)
             if x < 0 or y < 0 or x > state["image_w"] or y > state["image_h"]:
                 return
             if len(state["points"]) >= 4:
-                candidates = [
-                    (i, math.hypot(px - x, py - y))
-                    for i, (px, py) in enumerate(state["points"])
-                ]
+                candidates = [(i, math.hypot(px-x, py-y)) for i,(px,py) in enumerate(state["points"])]
                 i, d = min(candidates, key=lambda q: q[1])
-                if d <= max(12.0 / max(state["display_scale"], 1e-6), 20.0):
+                if d <= max(12.0 / max(state["scale"], 1e-6), 20.0):
                     state["drag_index"] = i
                     return
             if len(state["points"]) < 4:
                 state["points"].append((x, y))
                 render()
 
-        def on_left_drag(event):
+        def on_drag(event):
             idx = state.get("drag_index")
             if idx is None or idx >= len(state["points"]):
                 return
@@ -3055,50 +3101,12 @@ class Run1App:
             state["points"][idx] = (x, y)
             render()
 
-        def on_left_release(event):
+        def on_release(event):
             state["drag_index"] = None
-
-        def on_pan_start(event):
-            state["pan_last"] = (event.x, event.y)
-            canvas.configure(cursor="fleur")
-
-        def on_pan_drag(event):
-            last = state.get("pan_last")
-            if last is None:
-                return
-            dx = last[0] - event.x
-            dy = last[1] - event.y
-            canvas.xview_scroll(int(dx), "units")
-            canvas.yview_scroll(int(dy), "units")
-            state["pan_last"] = (event.x, event.y)
-
-        def on_pan_release(event):
-            state["pan_last"] = None
-            canvas.configure(cursor="")
-
-        def on_wheel(event):
-            delta = getattr(event, "delta", 0)
-            if delta == 0:
-                return
-            # Positive delta zooms in.  Shift + wheel pans horizontally.
-            if event.state & 0x0001:
-                canvas.xview_scroll(-1 if delta > 0 else 1, "units")
-                return
-            zoom_at(1.2 if delta > 0 else 1 / 1.2, event)
-
-        def on_wheel_linux_in(event):
-            zoom_at(1.2, event)
-
-        def on_wheel_linux_out(event):
-            zoom_at(1 / 1.2, event)
 
         def apply_calibration():
             if len(state["points"]) != 4:
-                messagebox.showerror(
-                    "Perspective Calibration",
-                    "Please click exactly 4 points in order: P1 → P2 → P3 → P4.",
-                    parent=top
-                )
+                messagebox.showerror("Perspective Calibration", "Please click exactly 4 points in order: P1 → P2 → P3 → P4.", parent=top)
                 return
             try:
                 real_lengths = [float(v.get().strip()) for v in length_vars]
@@ -3106,21 +3114,13 @@ class Run1App:
                     raise ValueError
                 l12, l23, l34, l41 = real_lengths
             except Exception:
-                messagebox.showerror(
-                    "Perspective Calibration",
-                    "All four Known Length values must be positive numbers in meters.",
-                    parent=top
-                )
+                messagebox.showerror("Perspective Calibration", "All four Known Length values must be positive numbers in meters.", parent=top)
                 return
 
             pts = np.array(state["points"], dtype=np.float32)
-            area = abs(cv2.contourArea(pts.reshape((-1, 1, 2))))
+            area = abs(cv2.contourArea(pts.reshape((-1,1,2))))
             if area < 100.0:
-                messagebox.showerror(
-                    "Perspective Calibration",
-                    "The 4 selected points are too close together. Select a larger road-plane area.",
-                    parent=top
-                )
+                messagebox.showerror("Perspective Calibration", "The 4 selected points are too close together. Select a larger road-plane area.", parent=top)
                 return
 
             # A four-corner homography needs a fully specified target quadrilateral.
@@ -3131,22 +3131,14 @@ class Run1App:
             length = (l12 + l34) / 2.0
             width_m = (l23 + l41) / 2.0
             src = np.float32(state["points"])
-            dst = np.float32([[0.0, 0.0], [length, 0.0], [length, width_m], [0.0, width_m]])
+            dst = np.float32([[0.0,0.0],[length,0.0],[length,width_m],[0.0,width_m]])
             try:
                 H = cv2.getPerspectiveTransform(src, dst)
             except Exception as exc:
-                messagebox.showerror(
-                    "Perspective Calibration",
-                    f"Could not create perspective transform:\n\n{exc}",
-                    parent=top
-                )
+                messagebox.showerror("Perspective Calibration", f"Could not create perspective transform:\n\n{exc}", parent=top)
                 return
             if not np.isfinite(H).all():
-                messagebox.showerror(
-                    "Perspective Calibration",
-                    "The selected points produced an invalid transformation.",
-                    parent=top
-                )
+                messagebox.showerror("Perspective Calibration", "The selected points produced an invalid transformation.", parent=top)
                 return
 
             self.run3_perspective_p1_var.set(f"{state['points'][0][0]:.3f},{state['points'][0][1]:.3f}")
@@ -3161,33 +3153,24 @@ class Run1App:
             self.run3_perspective_l41_var.set(f"{l41:g}")
             self.run3_perspective_enabled_var.set(True)
 
-            edge_specs = [(0, 1, l12), (1, 2, l23), (2, 3, l34), (3, 0, l41)]
+            edge_specs = [(0,1,l12),(1,2,l23),(2,3,l34),(3,0,l41)]
             edge_ppm = []
-            for i, j, real_m in edge_specs:
-                px = math.hypot(
-                    state["points"][j][0] - state["points"][i][0],
-                    state["points"][j][1] - state["points"][i][1]
-                )
+            for i,j,real_m in edge_specs:
+                px = math.hypot(state["points"][j][0]-state["points"][i][0], state["points"][j][1]-state["points"][i][1])
                 if real_m > 0 and px > 0:
                     edge_ppm.append(px / real_m)
             reference_ppm = (sum(edge_ppm) / len(edge_ppm)) if edge_ppm else 0.0
             if reference_ppm > 0:
                 self.run3_ppm_var.set(f"{reference_ppm:.6f}")
             ppm_calc_var.set(f"PPM = {reference_ppm:.6f} pixel/m | 4-edge mean")
-            self.run3_result_text.set(
-                f"Perspective calibrated: Frame {state['frame_index']+1}, "
-                f"{state['image_w']}×{state['image_h']} | PPM auto-calculated"
-            )
+            self.run3_result_text.set(f"Perspective calibrated: Frame {state['frame_index']+1}, {state['image_w']}×{state['image_h']} | PPM auto-calculated")
 
+            # Save a site-specific calibration JSON beside the selected output when possible.
             try:
                 out_dir = str(self.output_var.get() or "").strip()
                 if out_dir:
                     os.makedirs(out_dir, exist_ok=True)
-                    site = re.sub(
-                        r"[^A-Za-z0-9_-]+",
-                        "_",
-                        self.run3_site_id_var.get().strip() or "Unknown"
-                    )
+                    site = re.sub(r"[^A-Za-z0-9_-]+", "_", self.run3_site_id_var.get().strip() or "Unknown")
                     cal_path = os.path.join(out_dir, f"Site_{site}_Perspective_Calibration.json")
                     payload = {
                         "Site_ID": self.run3_site_id_var.get().strip(),
@@ -3196,10 +3179,8 @@ class Run1App:
                         "frame_number_one_based": state["frame_index"] + 1,
                         "image_width": state["image_w"],
                         "image_height": state["image_h"],
-                        "P1": list(state["points"][0]),
-                        "P2": list(state["points"][1]),
-                        "P3": list(state["points"][2]),
-                        "P4": list(state["points"][3]),
+                        "P1": list(state["points"][0]), "P2": list(state["points"][1]),
+                        "P3": list(state["points"][2]), "P4": list(state["points"][3]),
                         "Known_Length_P1_P2_m": l12,
                         "Known_Length_P2_P3_m": l23,
                         "Known_Length_P3_P4_m": l34,
@@ -3207,27 +3188,30 @@ class Run1App:
                         "Homography_Target_Length_m": length,
                         "Homography_Target_Width_m": width_m,
                         "Reference_PPM_pixel_per_meter": reference_ppm,
-                        "Edge_PPM": {
-                            "P1-P2": edge_ppm[0] if len(edge_ppm) > 0 else None,
-                            "P2-P3": edge_ppm[1] if len(edge_ppm) > 1 else None,
-                            "P3-P4": edge_ppm[2] if len(edge_ppm) > 2 else None,
-                            "P4-P1": edge_ppm[3] if len(edge_ppm) > 3 else None,
-                        },
+                        "Edge_PPM": {"P1-P2": edge_ppm[0] if len(edge_ppm)>0 else None, "P2-P3": edge_ppm[1] if len(edge_ppm)>1 else None, "P3-P4": edge_ppm[2] if len(edge_ppm)>2 else None, "P4-P1": edge_ppm[3] if len(edge_ppm)>3 else None},
                         "point_order": "P1->P2->P3->P4",
                         "calibration_method": "Four-point planar homography with four-side metric inputs",
                     }
                     with open(cal_path, "w", encoding="utf-8") as f:
                         json.dump(payload, f, indent=2, ensure_ascii=False)
-                    self.status_var.set(
-                        f"Perspective calibration saved: {os.path.basename(cal_path)}"
-                    )
+                    self.status_var.set(f"Perspective calibration saved: {os.path.basename(cal_path)}")
             except Exception as exc:
                 self.status_var.set(f"Perspective applied; JSON save skipped: {exc}")
 
             top.grab_release()
             top.destroy()
 
-        def cancel_calibration():
+        def on_resize(event=None):
+            render()
+
+        canvas.bind("<Button-1>", on_click)
+        canvas.bind("<B1-Motion>", on_drag)
+        canvas.bind("<ButtonRelease-1>", on_release)
+        canvas.bind("<Configure>", on_resize)
+        ttk.Button(controls, text="✅ Apply Calibration", command=apply_calibration).grid(row=2, column=2, padx=5, pady=(6,0))
+        ttk.Button(controls, text="Cancel", command=lambda: (cap.release(), top.grab_release(), top.destroy())).grid(row=2, column=3, padx=5, pady=(6,0))
+
+        def on_close():
             try:
                 cap.release()
             finally:
@@ -3236,44 +3220,9 @@ class Run1App:
                 except Exception:
                     pass
                 top.destroy()
+        top.protocol("WM_DELETE_WINDOW", on_close)
 
-        def on_resize(event=None):
-            # Keep the chosen zoom level; only the fit-to-window base scale changes.
-            render()
-
-        canvas.bind("<Button-1>", on_left_click)
-        canvas.bind("<B1-Motion>", on_left_drag)
-        canvas.bind("<ButtonRelease-1>", on_left_release)
-        canvas.bind("<Button-2>", on_pan_start)
-        canvas.bind("<B2-Motion>", on_pan_drag)
-        canvas.bind("<ButtonRelease-2>", on_pan_release)
-        canvas.bind("<MouseWheel>", on_wheel)
-        canvas.bind("<Shift-MouseWheel>", on_wheel)
-        canvas.bind("<Button-4>", on_wheel_linux_in)
-        canvas.bind("<Button-5>", on_wheel_linux_out)
-        canvas.bind("<Configure>", on_resize)
-        canvas.focus_set()
-
-        def maximize_window():
-            try:
-                current = str(top.state())
-                top.state("normal" if current == "zoomed" else "zoomed")
-            except Exception:
-                try:
-                    top.attributes("-zoomed", True)
-                except Exception:
-                    pass
-
-        ttk.Button(view_bar, text="□ เต็มจอ", width=9, command=maximize_window).pack(side="left", padx=2)
-
-        top.bind("<Control-0>", lambda e: reset_view())
-        top.bind("<Control-plus>", lambda e: zoom_at(1.2))
-        top.bind("<Control-equal>", lambda e: zoom_at(1.2))
-        top.bind("<Control-minus>", lambda e: zoom_at(1 / 1.2))
-
-        top.protocol("WM_DELETE_WINDOW", cancel_calibration)
-
-        # Initial render after the canvas gets its first real size.
+        # Initial render after the canvas gets its first size.
         top.after(100, render)
 
     # ========================================================
@@ -3369,13 +3318,9 @@ class Run1App:
             return open(fallback, "w", newline="", encoding="utf-8-sig"), fallback
 
     def validate_run3_settings(self):
-        enabled = any([
-            self.run3_speed_enabled_var.get(),
-            self.run3_gap_enabled_var.get(),
-            self.run3_lc_enabled_var.get(),
-            self.run3_pet_enabled_var.get(),
-        ])
-        if not enabled:
+        keys = ("speed", "gap", "lc", "pet", "ttc", "ldp")
+        enabled = {k: bool(getattr(self, f"run3_{k}_enabled_var").get()) for k in keys}
+        if not any(enabled.values()):
             return True
 
         if not self.run3_site_id_var.get().strip():
@@ -3384,41 +3329,59 @@ class Run1App:
         if self.run3_perspective_enabled_var.get():
             self._run3_get_perspective_matrix(silent=False)
 
-        if self.run3_speed_enabled_var.get() or self.run3_lc_enabled_var.get():
-            self._run3_float(self.run3_ppm_var.get(), "PPM")
-        if self.run3_speed_enabled_var.get():
-            if not any(v.get() for v in self.run3_speed_zone_vars.values()):
-                raise ValueError("Select at least one Speed analysis Zone (1–6).")
-        if self.run3_lc_enabled_var.get():
-            if not any(v.get() for v in self.run3_lc_zone_vars.values()):
-                raise ValueError("Select at least one Lateral Clearance Zone.")
+        # Every Run 3 indicator now uses metric coordinates.
+        self._run3_float(self.run3_ppm_var.get(), "PPM")
+        self._run3_float(self.run3_lateral_axis_angle_var.get(), "road direction angle (deg)", positive=False)
 
-        if self.run3_gap_enabled_var.get():
+        def need_zone(var_map, label):
+            if not any(v.get() for v in var_map.values()):
+                raise ValueError(f"Select at least one Zone for {label}.")
+
+        if enabled["speed"]:
+            need_zone(self.run3_speed_zone_vars, "Y6/Y7 Speed")
+        if enabled["lc"]:
+            need_zone(self.run3_lc_zone_vars, "Y1 Lateral Clearance")
+            self._run3_float(self.run3_lc_longitudinal_window_var.get(), "LC longitudinal window (m)")
+        if enabled["lc"] or enabled["ttc"]:
+            for name in RUN3_VEHICLE_CLASSES:
+                self._run3_float(self.run3_width_vars[name].get(), f"vehicle width for {name}")
+        if enabled["ttc"]:
+            need_zone(self.run3_ttc_zone_vars, "Y4 TTC")
+            for name in RUN3_VEHICLE_CLASSES:
+                self._run3_float(self.run3_length_vars[name].get(), f"vehicle length for {name}")
+            self._run3_float(self.run3_ttc_max_record_var.get(), "TTC record limit (s)")
+            self._run3_float(self.run3_ttc_heading_max_var.get(), "TTC heading limit (deg)")
+            self._run3_float(self.run3_ttc_velocity_window_var.get(), "TTC velocity window (s)")
+            self._run3_float(self.run3_ttc_min_speed_var.get(), "TTC minimum follower speed (km/h)", positive=False)
+        if enabled["ldp"]:
+            need_zone(self.run3_ldp_zone_vars, "Y2 LDP")
+            self._run3_float(self.run3_ldp_lane_width_var.get(), "LDP lane width W (m)")
+            self._run3_float(self.run3_ldp_smoothing_var.get(), "LDP smoothing samples")
+            ref = self.run3_ldp_reference_var.get().strip()
+            if ref in LINE_NAMES and len(self.lines.get(ref, [])) != 2:
+                raise ValueError(f"LDP reference {ref} is selected but that Line is not loaded.")
+        if enabled["pet"]:
+            need_zone(self.run3_pet_zone_vars, "Y5 PET (Zone 6 / Zone 7)")
+            self._run3_float(self.run3_pet_interaction_distance_var.get(), "PET interaction distance (m)")
+            self._run3_float(self.run3_pet_threshold_var.get(), "PET threshold (s)")
+            if str(self.run3_pet_max_var.get()).strip():
+                self._run3_float(self.run3_pet_max_var.get(), "PET max (s)")
+        if enabled["gap"]:
             if not any([
                 self.run3_gap_movement_13_var.get(),
                 self.run3_gap_movement_15_var.get(),
                 self.run3_gap_movement_41_var.get(),
             ]):
                 raise ValueError("Select at least one Gap Acceptance subject movement.")
+            self._run3_float(self.run3_waiting_speed_threshold_var.get(), "waiting detection speed threshold (km/h)")
             if not (self.run3_use_raff_var.get() or self.run3_use_mle_var.get()):
                 raise ValueError("Select at least one Critical Gap method.")
-            mapping_text = self.run3_reference_text.get("1.0", "end-1c").strip() if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text.strip()
-            # Gap Acceptance can be enabled without a mapping so that the other
-            # Run 3 analyses still execute. Missing mapping is reported in the
-            # Run 3 Summary rather than blocking the whole Run 3 pass.
-            self.run3_reference_mapping_text = mapping_text
-
-        if self.run3_lc_enabled_var.get():
-            self._run3_float(self.run3_lateral_axis_angle_var.get(), "road direction angle (deg)", positive=False)
-            self._run3_float(self.run3_lc_longitudinal_window_var.get(), "LC longitudinal window (m)")
-            for name in RUN3_VEHICLE_CLASSES:
-                self._run3_float(self.run3_width_vars[name].get(), f"vehicle width for {name}")
-
-        if self.run3_pet_enabled_var.get():
-            self._run3_float(self.run3_pet_interaction_distance_var.get(), "PET interaction distance (m)")
-            self._run3_float(self.run3_pet_threshold_var.get(), "PET threshold (s)")
-
+            self.run3_reference_mapping_text = (
+                self.run3_reference_text.get("1.0", "end-1c").strip()
+                if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text.strip()
+            )
         return True
+
 
     # ========================================================
     # DEVICE
@@ -3574,6 +3537,13 @@ class Run1App:
 
         settings = self.get_settings()
 
+        # V27: read Tk variables once here (main thread). The worker thread
+        # uses only these snapshots — faster and thread-safe.
+        self._rt = self._runtime_snapshot(settings)
+        self._run3_cfg = self._run3_snapshot_config()
+        self._zone_poly_cache = None
+        self._overlay_cache = None
+
         self.running = True
 
         self.stop_event.clear()
@@ -3706,7 +3676,8 @@ class Run1App:
                 settings["run_name"]
             )
 
-            self._run3_live_perspective = self._run3_get_perspective_matrix(silent=True)
+            rt = self._rt or {}
+            self._run3_live_perspective = (self._run3_cfg or {}).get("perspective")
 
             # =========================================================
             # CSV OUTPUTS — ONLY 3 MAIN CSV FILES
@@ -4062,6 +4033,8 @@ class Run1App:
                 print("Trajectory Offset  :", self.trajectory_offset_var.get(), "%")
 
             window_name = "PK Studio - Run 1"
+            # V27: drawing is only needed when frames are shown or saved.
+            render_needed = bool(show_preview) or writer is not None
 
             if show_preview:
 
@@ -4077,6 +4050,7 @@ class Run1App:
                 )
 
             trails = {}
+            zones_available_run = any(len(self.zones.get(z, [])) >= 3 for z in ZONE_NAMES)
 
             frame_index = 0
             processed_frames = 0
@@ -4120,6 +4094,17 @@ class Run1App:
                 if self.stop_event.is_set():
                     break
 
+                # V27: skipped frames are only grabbed (not decoded) when
+                # nothing has to be drawn/saved for them.
+                if frame_skip > 1 and not render_needed and (frame_index % frame_skip) != 0:
+                    if not cap.grab():
+                        input_finished = True
+                        break
+                    frame_index += 1
+                    if frame_index % 50 == 0:
+                        self.update_ui(progress=f"{frame_index}/{total_frames}")
+                    continue
+
                 success, frame = cap.read()
 
                 if not success:
@@ -4130,7 +4115,7 @@ class Run1App:
 
                 # Draw Zone overlay BEFORE detections/tracks so bounding boxes and
                 # trajectory lines are rendered on top of the translucent Zone.
-                if measurement_enabled:
+                if measurement_enabled and render_needed:
                     self.draw_measurement_overlay(
                         frame, frame_index, fps, zone_track_state, line_track_state,
                         zone_entry_count, line_cross_count
@@ -4437,10 +4422,7 @@ class Run1App:
                                     # only to make the displayed speed less noisy.
                                     # Y1/Y2 research values are still calculated later
                                     # by Run 3 and are not changed by this display value.
-                                    try:
-                                        live_ppm = float(self.run3_ppm_var.get())
-                                    except Exception:
-                                        live_ppm = 0.0
+                                    live_ppm = rt.get("live_ppm", 0.0)
                                     hist = zstate.get("live_speed_history", [])
                                     hist.append((frame_index / fps, point[0], point[1]))
                                     if len(hist) > 6:
@@ -4572,16 +4554,14 @@ class Run1App:
                             if measurement_enabled and track_id >= 0:
                                 confirmed_label = zone_track_state.get(track_id, {}).get("confirmed_zone")
 
-                            zones_available = any(
-                                len(self.zones.get(z, [])) >= 3 for z in ZONE_NAMES
-                            )
+                            zones_available = zones_available_run
                             show_object = (
                                 not zones_available
                                 or confirmed_label is not None
                             )
 
-                            if show_object:
-                                if self.show_bbox_var.get():
+                            if show_object and render_needed:
+                                if rt.get("show_bbox", True):
                                     cv2.rectangle(
                                         frame,
                                         (x1, y1),
@@ -4612,24 +4592,24 @@ class Run1App:
                                     # calculated by Run 3 from the stored trajectory.
                                     live_speed = zone_track_state.get(track_id, {}).get("live_speed_kmh")
                                     parts = []
-                                    if self.show_label_id_var.get():
+                                    if rt.get("show_label_id", True):
                                         value = str(track_id)
-                                        parts.append(f"ID {value}" if self.show_prefix_id_var.get() else value)
-                                    if self.show_label_class_var.get():
+                                        parts.append(f"ID {value}" if rt.get("show_prefix_id", False) else value)
+                                    if rt.get("show_label_class", True):
                                         # Display the human-readable class name, not the numeric class_id.
                                         # The numeric class_id remains available in Run 2 raw records for audit.
                                         value = str(class_name).strip() or str(class_id)
-                                        parts.append(f"Class {value}" if self.show_prefix_class_var.get() else value)
-                                    if self.show_label_conf_var.get():
+                                        parts.append(f"Class {value}" if rt.get("show_prefix_class", False) else value)
+                                    if rt.get("show_label_conf", True):
                                         value = f"{confidence:.2f}"
-                                        parts.append(f"Conf {value}" if self.show_prefix_conf_var.get() else value)
-                                    if self.show_label_zone_var.get():
+                                        parts.append(f"Conf {value}" if rt.get("show_prefix_conf", False) else value)
+                                    if rt.get("show_label_zone", True):
                                         zn = re.search(r"(\d+)", str(confirmed_label or ""))
                                         value = zn.group(1) if zn else "-"
-                                        parts.append(f"Zone {value}" if self.show_prefix_zone_var.get() else value)
-                                    if self.show_label_speed_var.get():
+                                        parts.append(f"Zone {value}" if rt.get("show_prefix_zone", False) else value)
+                                    if rt.get("show_label_speed", True):
                                         value = f"{live_speed:.1f}" if live_speed is not None else "-"
-                                        parts.append(f"Speed {value}" if self.show_prefix_speed_var.get() else value)
+                                        parts.append(f"Speed {value}" if rt.get("show_prefix_speed", False) else value)
                                     label = " | ".join(parts)
                                     if label:
                                         label_y = max(y1 - 10, 20)
@@ -4730,7 +4710,7 @@ class Run1App:
 
                 y_pos = 30
 
-                for line in info_lines:
+                for line in (info_lines if render_needed else ()):
 
                     text_size, _ = cv2.getTextSize(
                         line,
@@ -5185,12 +5165,10 @@ class Run1App:
             # ------------------------------------------------------------
             self.run3_last_outputs = {}
             self.run3_last_summary = {}
-            self.run3_was_requested = any([
-                self.run3_speed_enabled_var.get(),
-                self.run3_gap_enabled_var.get(),
-                self.run3_lc_enabled_var.get(),
-                self.run3_pet_enabled_var.get(),
-            ])
+            cfg = self._run3_cfg or {}
+            self.run3_was_requested = any(
+                cfg.get(k + "_enabled") for k in ("speed", "gap", "lc", "pet", "ttc", "ldp")
+            )
             # Run 3 is a post-processing step that uses the completed/partial
             # Run 2 CSVs. It must still execute when the user presses STOP,
             # because Run 1 + Run 2 finalize and close their files first.
@@ -5297,11 +5275,11 @@ class Run1App:
           1>6>5
           1 → 6 → 5
           [1, 6, 5]
-        Only zone numbers 1-6 are retained.
+        Only zone numbers 1-7 are retained.
         """
         raw = str(text or "")
         nums = []
-        matches = re.findall(r"(?:Zone\s*)?([1-6])", raw, flags=re.I)
+        matches = re.findall(r"(?:Zone\s*)?([1-7])", raw, flags=re.I)
         for m in matches:
             n = int(m)
             if not nums or nums[-1] != n:
@@ -5319,7 +5297,7 @@ class Run1App:
         def zone_num(value):
             if value is None:
                 return None
-            m = re.search(r"([1-6])", str(value))
+            m = re.search(r"([1-7])", str(value))
             return int(m.group(1)) if m else None
 
         first = zone_num(first_zone)
@@ -5342,7 +5320,7 @@ class Run1App:
         to identify one of the defined movements; it never invents a movement.
         """
         seq = Run1App._run3_parse_zone_sequence(sequence)
-        seq_no6 = [n for n in seq if n != 6]
+        seq_no6 = [n for n in seq if n not in CONFLICT_ZONE_IDS]
         supported = {
             (1, 3): "1→3",
             (1, 5): "1→5",
@@ -5372,7 +5350,7 @@ class Run1App:
         seq=[]
         for r in sorted(rows or [], key=lambda x: x.get("_timestamp", 0.0)):
             z=r.get("_zone_num")
-            if z is None or z not in range(1,7):
+            if z is None or z not in ZONE_IDS:
                 continue
             if not seq or seq[-1] != z:
                 seq.append(z)
@@ -5380,7 +5358,7 @@ class Run1App:
             return ""
         return Run1App._run3_movement_from_sequence(" ".join(f"Zone {z}" for z in seq))
 
-    def _run3_build_movement_index(self, tracks, summaries, mapping=None):
+    def _run3_build_movement_index(self, tracks, summaries, mapping=None, site_id=None):
         """Build one canonical Movement index shared by Gap Acceptance and PET.
 
         Primary source: Run 2 ID Zone Summary first_zone + last_zone.
@@ -5415,9 +5393,9 @@ class Run1App:
                     source = "Detection_Records_Zones"
 
             if not movement and mapping:
-                movement = self._run3_movement_from_reference_lines(
-                    rows, self.run3_site_id_var.get().strip(), mapping
-                )
+                if site_id is None:
+                    site_id = (self._run3_cfg or {}).get("site_id", "")
+                movement = self._run3_movement_from_reference_lines(rows, site_id, mapping)
                 if movement:
                     source = "Reference_Line_Crossing"
 
@@ -5597,442 +5575,311 @@ class Run1App:
         summaries = {str(r.get("track_id", "")): r for r in id_rows}
         return tracks, summaries
 
-    def _run3_build_vehicle_event_map(self, tracks, summaries, movement_by_id=None, movement_source_by_id=None):
-        """Build one canonical, read-only vehicle event map for all Run 3 modules.
+    # ========================================================
+    # RUN 3 — CONFIGURATION SNAPSHOT (MAIN THREAD ONLY)
+    # ========================================================
+    # V27: Every Run 3 Tk variable is read ONCE on the main thread when START
+    # is pressed. The worker thread then uses this plain dict only. Calling
+    # tk.Variable.get() from the worker thread is not thread-safe and each
+    # call is marshalled to the Tk main loop; in V26 several .get() calls sat
+    # inside nested per-row / per-pair loops (PET, Gap, LC), which was the
+    # main reason Run 3 became very slow on long videos.
 
-        The map is derived once from the Run 2 tracks plus the shared Movement resolver.
-        Speed, Lateral Clearance, PET, and Gap therefore reference the same Vehicle_ID,
-        Class, Movement, Movement_Source, and observed zone/timestamp records.
+    def _run3_snapshot_config(self):
+        def num(var, default=None):
+            try:
+                text = str(var.get()).strip()
+                return float(text) if text else default
+            except Exception:
+                return default
 
-        No ID is invented, merged, or reassigned here. This layer only prevents each
-        module from independently re-identifying the same track and accidentally using
-        different class/movement metadata.
-        """
-        if movement_by_id is None or movement_source_by_id is None:
-            movement_by_id, movement_source_by_id = self._run3_build_movement_index(
-                tracks, summaries, {}
-            )
+        def zones_of(var_map):
+            return {z for z, v in var_map.items() if bool(v.get())}
 
-        event_map = {}
-        for tid, rows in tracks.items():
-            sid = str(tid)
-            ordered = sorted(rows or [], key=lambda r: r.get("_timestamp", 0.0))
-            cls = self._run3_canonical_class(ordered[0].get("class_name", "")) if ordered else ""
-            actual_zones = []
-            zone_windows = {}
-            for r in ordered:
-                z = r.get("_zone_num")
-                if z is None or z not in range(1, 7):
-                    continue
-                if not actual_zones or actual_zones[-1] != z:
-                    actual_zones.append(z)
-                zone_windows.setdefault(z, []).append(r)
+        ppm = num(self.run3_ppm_var, 0.0) or 0.0
+        gap_movements = []
+        if self.run3_gap_movement_13_var.get(): gap_movements.append("1→3")
+        if self.run3_gap_movement_15_var.get(): gap_movements.append("1→5")
+        if self.run3_gap_movement_41_var.get(): gap_movements.append("4→1")
+        mapping_text = (
+            self.run3_reference_text.get("1.0", "end-1c")
+            if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
+        )
+        pet_max = num(self.run3_pet_max_var, None)
+        return {
+            "site_id": self.run3_site_id_var.get().strip(),
+            "speed_enabled": bool(self.run3_speed_enabled_var.get()),
+            "gap_enabled": bool(self.run3_gap_enabled_var.get()),
+            "lc_enabled": bool(self.run3_lc_enabled_var.get()),
+            "pet_enabled": bool(self.run3_pet_enabled_var.get()),
+            "ttc_enabled": bool(self.run3_ttc_enabled_var.get()),
+            "ldp_enabled": bool(self.run3_ldp_enabled_var.get()),
+            "ppm": ppm,
+            "perspective_enabled": bool(self.run3_perspective_enabled_var.get()),
+            "perspective": self._run3_get_perspective_matrix(silent=True),
+            "axis_deg": num(self.run3_lateral_axis_angle_var, 0.0) or 0.0,
+            "speed_zones": zones_of(self.run3_speed_zone_vars),
+            "lc_zones": zones_of(self.run3_lc_zone_vars),
+            "pet_zones": zones_of(self.run3_pet_zone_vars),
+            "ttc_zones": zones_of(self.run3_ttc_zone_vars),
+            "ldp_zones": zones_of(self.run3_ldp_zone_vars),
+            "waiting_threshold": num(self.run3_waiting_speed_threshold_var, 1.0),
+            "lc_window": num(self.run3_lc_longitudinal_window_var, 2.0),
+            "pet_interaction": num(self.run3_pet_interaction_distance_var, 3.0),
+            "pet_threshold": num(self.run3_pet_threshold_var, 1.0),
+            "pet_max_s": pet_max if (pet_max is not None and pet_max > 0) else None,
+            "ttc_max_record_s": num(self.run3_ttc_max_record_var, 3.0),
+            "ttc_heading_max_deg": num(self.run3_ttc_heading_max_var, 45.0),
+            "ttc_velocity_window_s": num(self.run3_ttc_velocity_window_var, 0.5),
+            "ttc_min_speed_kmh": num(self.run3_ttc_min_speed_var, 2.0),
+            "ldp_lane_width_m": num(self.run3_ldp_lane_width_var, None),
+            "ldp_reference": str(self.run3_ldp_reference_var.get()).strip() or "Initial position",
+            "ldp_motorcycle_only": bool(self.run3_ldp_motorcycle_only_var.get()),
+            "ldp_smoothing_samples": int(num(self.run3_ldp_smoothing_var, 5) or 1),
+            "gap_movements": gap_movements,
+            "use_raff": bool(self.run3_use_raff_var.get()),
+            "use_mle": bool(self.run3_use_mle_var.get()),
+            "mapping_text": mapping_text,
+            "widths": {n: num(v, None) for n, v in self.run3_width_vars.items()},
+            "lengths": {n: num(v, None) for n, v in self.run3_length_vars.items()},
+        }
 
-            event_map[sid] = {
-                "Vehicle_ID": sid,
-                "Vehicle_Class": cls,
-                "Movement": movement_by_id.get(sid, ""),
-                "Movement_Source": movement_source_by_id.get(sid, ""),
-                "First_Observed_Time": ordered[0].get("_timestamp") if ordered else None,
-                "Last_Observed_Time": ordered[-1].get("_timestamp") if ordered else None,
-                "Zone_Sequence": actual_zones,
-                "Zone_Rows": zone_windows,
-                "Rows": ordered,
-            }
-        return event_map
+    # ========================================================
+    # RUN 3 — SHARED HELPERS
+    # ========================================================
+
+    RUN3_ZONE_ROLES = {
+        1: ("Access_Mouth", "Access_Mouth_Zone1"),
+        2: ("Approach", "Approach_Zone2"),
+        3: ("Exit", "Exit_Zone3"),
+        4: ("Approach", "Approach_Zone4"),
+        5: ("Exit", "Exit_Zone5"),
+        6: ("Middle_Access", "Middle_Access_Zone6"),
+        7: ("Conflict_Zone7", "Conflict_Zone7"),
+    }
 
     @staticmethod
-    def _run3_export_vehicle_event_map(vehicle_event_map, site_id):
-        """Export one master row per tracked Vehicle_ID for Run 3 audit."""
-        rows = []
-        for sid in sorted(
-            (str(k) for k in (vehicle_event_map or {}).keys()),
-            key=lambda x: (int(x) if x.isdigit() else 10**18, x)
-        ):
-            event = (vehicle_event_map or {}).get(sid, {})
-            seq = event.get("Zone_Sequence", []) or []
-            first_time = event.get("First_Observed_Time")
-            last_time = event.get("Last_Observed_Time")
-            duration = ""
-            if first_time is not None and last_time is not None:
-                try:
-                    duration = f"{max(0.0, float(last_time) - float(first_time)):.6f}"
-                except Exception:
-                    duration = ""
-            rows.append({
-                "Site_ID": site_id,
-                "Vehicle_ID": sid,
-                "Vehicle_Class": event.get("Vehicle_Class", ""),
-                "Movement": event.get("Movement", ""),
-                "Movement_Source": event.get("Movement_Source", ""),
-                "First_Zone": f"Zone {seq[0]}" if seq else "",
-                "Last_Zone": f"Zone {seq[-1]}" if seq else "",
-                "Zone_Sequence": "→".join(str(z) for z in seq),
-                "First_Observed_Time": "" if first_time is None else f"{float(first_time):.6f}",
-                "Last_Observed_Time": "" if last_time is None else f"{float(last_time):.6f}",
-                "Track_Duration_s": duration,
-            })
-        return rows
-
-    def _run3_build_event_index(self, site_id, speed_rows=None, gap_rows=None, lc_rows=None, pet_rows=None):
-        """Build one compact cross-module event index.
-
-        This is an audit/traceability table only; it does not alter the calculations.
-        One row points back to one event in one of the four main Run 3 CSVs.
-        """
-        out = []
-
-        for r in speed_rows or []:
-            vid = str(r.get("Vehicle_ID", ""))
-            zone = str(r.get("Zone", ""))
-            out.append({
-                "Site_ID": site_id,
-                "Module": "Speed",
-                "Event_ID": f"SPEED_{vid}_Z{zone}",
-                "Vehicle_ID": vid,
-                "Related_Vehicle_ID": "",
-                "Movement": r.get("Movement", ""),
-                "Zone": f"Zone {zone}" if zone else "",
-                "Start_Time": r.get("Start_Time", ""),
-                "End_Time": r.get("End_Time", ""),
-                "Source_File": "Run_3_Speed.csv",
-                "QC_Flag": r.get("QC_Flag", ""),
-            })
-
-        for r in gap_rows or []:
-            sid = str(r.get("Subject_ID", ""))
-            related = ";".join(x for x in (
-                str(r.get("Conflicting_ID_A", "")).strip(),
-                str(r.get("Conflicting_ID_B", "")).strip(),
-            ) if x)
-            out.append({
-                "Site_ID": site_id,
-                "Module": "Gap",
-                "Event_ID": f"{r.get('Decision_Event_ID','')}_O{r.get('Opportunity_No','')}",
-                "Vehicle_ID": sid,
-                "Related_Vehicle_ID": related,
-                "Movement": r.get("Subject_Movement", ""),
-                "Zone": f"Zone {r.get('Decision_Zone','')}" if r.get("Decision_Zone", "") != "" else "",
-                "Start_Time": r.get("Gap_Start_Time", ""),
-                "End_Time": r.get("Gap_End_Time", ""),
-                "Source_File": "Run_3_Gap_Acceptance.csv",
-                "QC_Flag": r.get("QC_Flag", ""),
-            })
-
-        for r in lc_rows or []:
-            out.append({
-                "Site_ID": site_id,
-                "Module": "Lateral_Clearance",
-                "Event_ID": f"LC_{r.get('Pair_ID','')}_{r.get('Timestamp','')}",
-                "Vehicle_ID": str(r.get("Motorcycle_ID", "")),
-                "Related_Vehicle_ID": str(r.get("Neighbor_ID", "")),
-                "Movement": r.get("Motorcycle_Movement", ""),
-                "Zone": r.get("Zone", ""),
-                "Start_Time": r.get("Timestamp", ""),
-                "End_Time": r.get("Timestamp", ""),
-                "Source_File": "Run_3_Lateral_Clearance.csv",
-                "QC_Flag": r.get("QC_Flag", ""),
-            })
-
-        for r in pet_rows or []:
-            va = str(r.get("Vehicle_ID_A", ""))
-            vb = str(r.get("Vehicle_ID_B", ""))
-            times = []
-            for k in ("T1_Exit_Time", "T2_Entry_Time"):
-                try:
-                    times.append(float(r.get(k, "")))
-                except Exception:
-                    pass
-            start_time = f"{min(times):.6f}" if times else ""
-            end_time = f"{max(times):.6f}" if times else ""
-            out.append({
-                "Site_ID": site_id,
-                "Module": "PET",
-                "Event_ID": str(r.get("Interaction_ID", "")),
-                "Vehicle_ID": va,
-                "Related_Vehicle_ID": vb,
-                "Movement": r.get("Movement_A", ""),
-                "Zone": r.get("Conflict_Zone", ""),
-                "Start_Time": start_time,
-                "End_Time": end_time,
-                "Source_File": "Run_3_PET.csv",
-                "QC_Flag": r.get("QC_Flag", ""),
-            })
-
-        module_order = {"Speed": 1, "Gap": 2, "Lateral_Clearance": 3, "PET": 4}
-        out.sort(key=lambda r: (
-            module_order.get(r.get("Module", ""), 99),
-            float(r["Start_Time"]) if str(r.get("Start_Time", "")).strip() not in ("", "None") else 10**18,
-            str(r.get("Event_ID", ""))
-        ))
-        return out
+    def _run3_calibration_mode(c):
+        return "Perspective_Homography" if c["perspective"] is not None else "PPM_Only"
 
     @staticmethod
-    def _run3_pet_movement_pair_allowed(movement_a, movement_b):
-        """Return True only for movement pairs defined as conflict streams.
+    def _run3_qc_calibration(c):
+        return "Perspective_Not_Calibrated" if (c["perspective_enabled"] and c["perspective"] is None) else ""
 
-        Pair order is irrelevant. Unknown movement is not guessed and is rejected
-        here so PET does not create unrelated ID pairs from arbitrary Zone-6 proximity.
-        """
-        conflict_pairs = {
-            frozenset(("1→3", "2→3")),
-            frozenset(("1→5", "2→3")),
-            frozenset(("1→5", "4→5")),
-            frozenset(("4→1", "2→3")),
-            frozenset(("4→1", "1→5")),
-        }
-        if not movement_a or not movement_b:
-            return False
-        return frozenset((movement_a, movement_b)) in conflict_pairs
+    def _run3_to_metric(self, pts, c):
+        """Pixel points (N x 2) -> road-aligned metric points (N x 2).
 
-    def _run3_speed(self, tracks, ppm, perspective=None, vehicle_event_map=None):
-        """Compute speed separately for every user-selected approach/exit Zone.
-        No interpolation is used; only observed trajectory samples are used.
+        Column 0 = longitudinal (along the road), column 1 = lateral.
+        Perspective: x axis follows P1->P2, y axis follows P2->P3.
+        PPM only: pixel / PPM rotated by the road-direction angle.
+        Distances are rotation-invariant, so Speed and PET are unaffected by
+        the rotation; only the lateral indicators (LC, LDP) use the axes.
         """
-        selected_zones = [z for z,v in self.run3_speed_zone_vars.items() if v.get()]
-        role_map = {
-            1: ("", "Access_Mouth"),
-            2: ("Y1", "Approach"),
-            3: ("Y2", "Exit"),
-            4: ("Y1", "Approach"),
-            5: ("Y2", "Exit"),
-            6: ("", "Middle_Access"),
+        pts = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+        if len(pts) == 0:
+            return pts
+        persp = c["perspective"]
+        if persp is not None:
+            mapped = cv2.perspectiveTransform(pts.reshape(-1, 1, 2).astype(np.float32), persp["H"])
+            return mapped.reshape(-1, 2).astype(np.float64)
+        m = pts / c["ppm"]
+        th = math.radians(c["axis_deg"])
+        road_u = np.array([math.cos(th), math.sin(th)])
+        lat_u = np.array([-math.sin(th), math.cos(th)])
+        return np.stack([m @ road_u, m @ lat_u], axis=1)
+
+    def _run3_attach_metric(self, tracks, c):
+        """Transform every observed point ONCE (batch) instead of per use."""
+        rows_all = [r for rows in tracks.values() for r in rows]
+        for src, dst in (("_point", "_m"), ("_center", "_mc")):
+            idx = [i for i, r in enumerate(rows_all) if r.get(src) is not None]
+            if not idx:
+                continue
+            mapped = self._run3_to_metric([rows_all[i][src] for i in idx], c)
+            for j, i in enumerate(idx):
+                rows_all[i][dst] = (float(mapped[j, 0]), float(mapped[j, 1]))
+
+    @staticmethod
+    def _run3_stats(values):
+        a = np.asarray([v for v in values if v is not None], dtype=float)
+        if a.size == 0:
+            return {"N": 0, "Mean": None, "SD": None, "Median": None, "Min": None, "Max": None, "P50": None, "P85": None}
+        return {
+            "N": int(a.size),
+            "Mean": float(np.mean(a)),
+            "SD": float(np.std(a, ddof=1)) if a.size > 1 else None,
+            "Median": float(np.median(a)),
+            "Min": float(np.min(a)),
+            "Max": float(np.max(a)),
+            "P50": float(np.percentile(a, 50)),
+            "P85": float(np.percentile(a, 85)),
         }
-        selected = [(z, role_map[z][0], role_map[z][1]) for z in selected_zones]
+
+    @staticmethod
+    def _fmt(v, nd=6):
+        return "" if v is None else f"{v:.{nd}f}"
+
+    # ---------------- Risk-level tables (Chapter 2) ----------------
+    # TTC: Kronprasert et al. (2021); PET / LDP: กรมทางหลวง (2569).
+    # Each table is applied per dimension; the rule for combining the two
+    # dimensions (index + speed) is NOT stated in the sources, so both levels
+    # are exported separately and no combined level is invented here.
+
+    @staticmethod
+    def _level_ttc(ttc):
+        if ttc < 1.0: return "High"
+        if ttc <= 1.5: return "Moderate"
+        if ttc <= 2.0: return "Low"
+        return "None"
+
+    @staticmethod
+    def _level_ttc_speed(speed_kmh, vehicle_class):
+        mc = str(vehicle_class) in ("Motorcycle", "Sidecar")
+        hi, mid, lo = (50.0, 30.0, 15.0) if mc else (70.0, 50.0, 25.0)
+        if speed_kmh > hi: return "High"
+        if speed_kmh >= mid: return "Moderate"
+        if speed_kmh >= lo: return "Low"
+        return "None"
+
+    @staticmethod
+    def _level_pet(pet):
+        if pet < 1.0: return "High"
+        if pet <= 2.0: return "Moderate"
+        if pet <= 3.0: return "Low"
+        return "None"
+
+    @staticmethod
+    def _level_ldp(ldp):
+        if ldp >= 80.0: return "High"
+        if ldp >= 50.0: return "Moderate"
+        if ldp >= 30.0: return "Low"
+        return "None"
+
+    @staticmethod
+    def _level_ldp_speed(speed_kmh):
+        if speed_kmh >= 80.0: return "High"
+        if speed_kmh >= 50.0: return "Moderate"
+        if speed_kmh >= 30.0: return "Low"
+        return "None"
+
+    # ========================================================
+    # SPEED — Y6 (V50 / Mean / SD) and Y7 (V85)
+    # ========================================================
+
+    def _run3_speed(self, tracks, c):
+        """Per-vehicle, per-zone space-mean speed from observed samples only."""
+        selected = sorted(c["speed_zones"])
+        mode = self._run3_calibration_mode(c)
+        qc = self._run3_qc_calibration(c)
         results = []
-        vehicle_event_map = vehicle_event_map or {}
         for tid, rows in tracks.items():
-            sid = str(tid)
-            event = vehicle_event_map.get(sid, {})
-            rows = event.get("Rows", rows)
             if not rows:
                 continue
-            cls = event.get("Vehicle_Class", "") or rows[0].get("class_name", "")
-            movement = event.get("Movement", "")
-            movement_source = event.get("Movement_Source", "")
+            cls = rows[0].get("class_name", "")
             if str(cls).lower() == "person":
                 continue
-            for zone, variable, speed_type in selected:
-                zr = [r for r in rows if r.get("_zone_num") == zone and r.get("_point") is not None]
+            by_zone = defaultdict(list)
+            for r in rows:
+                z = r.get("_zone_num")
+                if z in c["speed_zones"] and r.get("_m") is not None:
+                    by_zone[z].append(r)
+            for zone in selected:
+                zr = by_zone.get(zone, [])
                 if len(zr) < 2:
                     continue
-                if perspective is not None:
-                    pts_m = [self._run3_transform_point(r["_point"], perspective) for r in zr]
-                    d_m = self._run3_metric_segment_distance_sum(pts_m)
-                else:
-                    d_m = self._run3_segment_distance_sum([r["_point"] for r in zr]) / ppm
+                d_m = self._run3_segment_distance_sum([r["_m"] for r in zr])
                 dt = zr[-1]["_timestamp"] - zr[0]["_timestamp"]
                 if dt <= 0 or d_m <= 0:
                     continue
-                speed_kmh = d_m / dt * 3.6
+                role = self.RUN3_ZONE_ROLES.get(zone, (f"Zone{zone}", f"Zone{zone}"))[0]
                 results.append({
-                    "Site_ID": self.run3_site_id_var.get().strip(),
-                    "Vehicle_ID": sid,
+                    "Site_ID": c["site_id"],
+                    "Vehicle_ID": tid,
                     "Vehicle_Class": cls,
-                    "Movement": movement,
-                    "Movement_Source": movement_source,
-                    "Speed_Variable": variable,
-                    "Speed_Type": speed_type,
-                    "Analysis_Role": speed_type,
+                    "Speed_Type": role,
                     "Zone": str(zone),
                     "Start_Time": f"{zr[0]['_timestamp']:.6f}",
                     "End_Time": f"{zr[-1]['_timestamp']:.6f}",
                     "Start_Frame": str(zr[0].get("frame", "")),
                     "End_Frame": str(zr[-1].get("frame", "")),
                     "Distance_m": f"{d_m:.6f}",
-                    "Speed_kmh": f"{speed_kmh:.6f}",
-                    "Calibration_Mode": "Perspective_Homography" if perspective is not None else "PPM_Only",
-                    "QC_Flag": "" if not (self.run3_perspective_enabled_var.get() and perspective is None) else "Perspective_Not_Calibrated",
+                    "Speed_kmh": f"{d_m / dt * 3.6:.6f}",
+                    "Calibration_Mode": mode,
+                    "QC_Flag": qc,
                 })
         return results
 
-
-    def _run3_speed_vehicle_summary(self, speed_rows, tracks, vehicle_event_map=None):
-        """Return one row per vehicle with zone sequence and all zone-level audit fields.
-
-        The main Speed CSV is intentionally wide: one Vehicle_ID = one row.
-        For every Zone 1-6 it records the observed zone time window, trajectory
-        distance and calculated speed, so the researcher can audit the result
-        without having to join multiple rows.
-
-        No interpolation is used; the Start/End times and Distance_m come from
-        the observed trajectory samples already present in Run 2.
-        """
-        role_map = {
-            1: ("", "Access_Mouth", "Access_Mouth_Zone1"),
-            2: ("Y1", "Approach", "Approach_Zone2"),
-            3: ("Y2", "Exit", "Exit_Zone3"),
-            4: ("Y1", "Approach", "Approach_Zone4"),
-            5: ("Y2", "Exit", "Exit_Zone5"),
-            6: ("", "Middle_Access", "Middle_Access_Zone6"),
-        }
-
-        # Index speed rows by vehicle + zone. There should normally be one
-        # calculated row per vehicle-zone, but keep the last observed row if
-        # duplicate rows ever occur.
+    def _run3_speed_vehicle_summary(self, speed_rows, tracks, c):
+        """One row per Vehicle_ID with every Zone 1-7 speed field (audit view)."""
         by_vehicle_zone = defaultdict(dict)
         for row in speed_rows:
-            tid = str(row.get("Vehicle_ID", ""))
             try:
-                zone = int(row.get("Zone", ""))
+                by_vehicle_zone[str(row["Vehicle_ID"])][int(row["Zone"])] = row
             except Exception:
                 continue
-            by_vehicle_zone[tid][zone] = row
-
         vehicle_ids = sorted(
             set(str(tid) for tid in tracks.keys()),
             key=lambda x: (int(x) if x.isdigit() else 10**18, x)
         )
-        vehicle_event_map = vehicle_event_map or {}
-        summary_rows = []
-
-        zone_fields = {}
-        for zone, (_, _, prefix) in role_map.items():
-            # Main Speed CSV keeps the timestamp as one readable overview
-            # field per Zone. Detailed Start_Time/End_Time remain available
-            # in Run_3_Speed_Detail.csv for audit without making the main CSV
-            # excessively wide.
-            zone_fields[zone] = {
-                "timestamp_range": f"{prefix}_Timestamp_Range",
-                "start_frame": f"{prefix}_Start_Frame",
-                "end_frame": f"{prefix}_End_Frame",
-                "distance": f"{prefix}_Distance_m",
-                "speed": f"{prefix}_Speed_kmh",
-                "variable": f"{prefix}_Speed_Variable",
-            }
-
+        out = []
         for tid in vehicle_ids:
             rows = tracks.get(tid, [])
             if not rows:
                 continue
-            event = vehicle_event_map.get(str(tid), {})
-            cls = str(event.get("Vehicle_Class", "") or rows[0].get("class_name", ""))
-            movement = event.get("Movement", "")
-            movement_source = event.get("Movement_Source", "")
+            cls = str(rows[0].get("class_name", ""))
             if cls.lower() == "person":
                 continue
-
-            actual_zones = []
-            for r in sorted(rows, key=lambda x: x.get("_timestamp", 0.0)):
+            seq = []
+            for r in rows:
                 z = r.get("_zone_num")
-                if z is None or z not in range(1, 7):
-                    continue
-                if not actual_zones or actual_zones[-1] != z:
-                    actual_zones.append(z)
-
-            row = {
-                "Site_ID": self.run3_site_id_var.get().strip(),
-                "Vehicle_ID": tid,
-                "Vehicle_Class": cls,
-                "Movement": movement,
-                "Movement_Source": movement_source,
-                "Zone_Sequence": "→".join(str(z) for z in actual_zones),
-            }
-
-            # Always include all six zone groups. If the vehicle did not have
-            # a valid speed observation in a zone, the cells remain blank.
-            for zone in range(1, 7):
-                fields = zone_fields[zone]
+                if z in ZONE_IDS and (not seq or seq[-1] != z):
+                    seq.append(z)
+            row = {"Site_ID": c["site_id"], "Vehicle_ID": tid, "Vehicle_Class": cls,
+                   "Zone_Sequence": "→".join(str(z) for z in seq)}
+            for zone in ZONE_IDS:
+                prefix = self.RUN3_ZONE_ROLES[zone][1]
                 item = by_vehicle_zone.get(tid, {}).get(zone)
-                if item:
-                    row[fields["timestamp_range"]] = f"{item.get('Start_Time','')} → {item.get('End_Time','')}" if item.get("Start_Time") and item.get("End_Time") else ""
-                    row[fields["start_frame"]] = item.get("Start_Frame", "")
-                    row[fields["end_frame"]] = item.get("End_Frame", "")
-                    row[fields["distance"]] = item.get("Distance_m", "")
-                    row[fields["speed"]] = item.get("Speed_kmh", "")
-                    row[fields["variable"]] = item.get("Speed_Variable", "")
-                else:
-                    row[fields["timestamp_range"]] = ""
-                    row[fields["start_frame"]] = ""
-                    row[fields["end_frame"]] = ""
-                    row[fields["distance"]] = ""
-                    row[fields["speed"]] = ""
-                    row[fields["variable"]] = ""
+                row[f"{prefix}_Timestamp_Range"] = f"{item['Start_Time']} → {item['End_Time']}" if item else ""
+                row[f"{prefix}_Start_Frame"] = item["Start_Frame"] if item else ""
+                row[f"{prefix}_End_Frame"] = item["End_Frame"] if item else ""
+                row[f"{prefix}_Distance_m"] = item["Distance_m"] if item else ""
+                row[f"{prefix}_Speed_kmh"] = item["Speed_kmh"] if item else ""
+            items = by_vehicle_zone.get(tid, {}).values()
+            row["Calibration_Mode"] = ";".join(sorted({r["Calibration_Mode"] for r in items if r.get("Calibration_Mode")}))
+            row["QC_Flag"] = ";".join(sorted({r["QC_Flag"] for r in items if r.get("QC_Flag")}))
+            out.append(row)
+        return out
 
-            modes = sorted(set(
-                r.get("Calibration_Mode", "")
-                for r in by_vehicle_zone.get(tid, {}).values()
-                if r.get("Calibration_Mode")
-            ))
-            qcs = sorted(set(
-                r.get("QC_Flag", "")
-                for r in by_vehicle_zone.get(tid, {}).values()
-                if r.get("QC_Flag")
-            ))
-            row["Calibration_Mode"] = ";".join(modes)
-            row["QC_Flag"] = ";".join(qcs)
-            summary_rows.append(row)
+    def _run3_speed_vehicle_summary_fields(self):
+        fields = ["Site_ID", "Vehicle_ID", "Vehicle_Class", "Zone_Sequence"]
+        for zone in ZONE_IDS:
+            p = self.RUN3_ZONE_ROLES[zone][1]
+            fields += [f"{p}_Timestamp_Range", f"{p}_Start_Frame", f"{p}_End_Frame", f"{p}_Distance_m", f"{p}_Speed_kmh"]
+        return fields + ["Calibration_Mode", "QC_Flag"]
 
-        return summary_rows
-
-    def _run3_speed_compact_summary(self, speed_rows, tracks, vehicle_event_map=None):
-        """Compact, human-readable Speed CSV: one row per Vehicle_ID.
-
-        Keeps only research-facing outputs (Y1/Y2) plus the vehicle identity,
-        movement/zone sequence and calibration/QC fields. Detailed frame/time
-        information remains in Run 2 Detection Records and is not duplicated.
-        """
-        vehicle_event_map = vehicle_event_map or {}
-        by_vehicle_zone = defaultdict(dict)
-        for row in speed_rows or []:
-            tid = str(row.get("Vehicle_ID", ""))
-            try:
-                zone = int(row.get("Zone", ""))
-            except Exception:
-                continue
-            by_vehicle_zone[tid][zone] = row
-
-        rows_out = []
-        vehicle_ids = sorted(
-            (str(tid) for tid in tracks.keys()),
-            key=lambda x: (int(x) if x.isdigit() else 10**18, x)
-        )
-        for tid in vehicle_ids:
-            raw_rows = tracks.get(tid, [])
-            if not raw_rows:
-                continue
-            event = vehicle_event_map.get(tid, {})
-            cls = str(event.get("Vehicle_Class", "") or raw_rows[0].get("class_name", ""))
-            if cls.lower() == "person":
-                continue
-            movement = event.get("Movement", "")
-            actual_zones = list(event.get("Zone_Sequence", []))
-            if not actual_zones:
-                for r in sorted(raw_rows, key=lambda x: x.get("_timestamp", 0.0)):
-                    z = r.get("_zone_num")
-                    if z in range(1, 7) and (not actual_zones or actual_zones[-1] != z):
-                        actual_zones.append(z)
-
-            def value(zone, field):
-                item = by_vehicle_zone.get(tid, {}).get(zone)
-                return item.get(field, "") if item else ""
-
-            modes = sorted(set(
-                r.get("Calibration_Mode", "")
-                for r in by_vehicle_zone.get(tid, {}).values()
-                if r.get("Calibration_Mode")
-            ))
-            qcs = sorted(set(
-                r.get("QC_Flag", "")
-                for r in by_vehicle_zone.get(tid, {}).values()
-                if r.get("QC_Flag")
-            ))
-            rows_out.append({
-                "Site_ID": self.run3_site_id_var.get().strip(),
-                "Vehicle_ID": tid,
-                "Vehicle_Class": cls,
-                "Movement": movement,
-                "Zone_Sequence": "→".join(str(z) for z in actual_zones),
-                "Zone1_Speed_kmh": value(1, "Speed_kmh"),
-                "Y1_Zone2_Speed_kmh": value(2, "Speed_kmh"),
-                "Y1_Zone4_Speed_kmh": value(4, "Speed_kmh"),
-                "Zone6_Speed_kmh": value(6, "Speed_kmh"),
-                "Y2_Zone3_Speed_kmh": value(3, "Speed_kmh"),
-                "Y2_Zone5_Speed_kmh": value(5, "Speed_kmh"),
-                "Calibration_Mode": ";".join(modes),
-                "QC_Flag": ";".join(qcs),
+    def _run3_speed_statistics(self, speed_rows, c):
+        """Y6 = V50 (with Mean and SD) and Y7 = V85, per Speed_Type x class."""
+        groups = defaultdict(list)
+        for r in speed_rows:
+            v = float(r["Speed_kmh"])
+            groups[(r["Speed_Type"], "All")].append(v)
+            groups[(r["Speed_Type"], r["Vehicle_Class"])].append(v)
+        role_order = ["Approach", "Exit", "Access_Mouth", "Middle_Access", "Conflict_Zone7"]
+        out = []
+        for (role, cls) in sorted(groups, key=lambda k: (role_order.index(k[0]) if k[0] in role_order else 99, k[1] != "All", k[1])):
+            s = self._run3_stats(groups[(role, cls)])
+            out.append({
+                "Site_ID": c["site_id"], "Speed_Type": role, "Vehicle_Class": cls, "N": s["N"],
+                "Mean_kmh": self._fmt(s["Mean"], 3), "SD_kmh": self._fmt(s["SD"], 3),
+                "Y6_V50_kmh": self._fmt(s["P50"], 3), "Y7_V85_kmh": self._fmt(s["P85"], 3),
+                "V85_minus_V50_kmh": self._fmt(None if s["N"] == 0 else s["P85"] - s["P50"], 3),
+                "Min_kmh": self._fmt(s["Min"], 3), "Max_kmh": self._fmt(s["Max"], 3),
             })
-        return rows_out
+        return out
+
+    # ========================================================
+    # REFERENCE LINE MAPPING
+    # ========================================================
 
     def copy_run3_mapping_template(self):
         text = self.run3_reference_text.get("1.0", "end-1c") if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
@@ -6044,8 +5891,9 @@ class Run1App:
         except Exception as e:
             self.status_var.set(f"Copy failed: {e}")
 
-    def _run3_parse_reference_mapping(self):
-        text = self.run3_reference_text.get("1.0", "end-1c") if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
+    def _run3_parse_reference_mapping(self, text=None):
+        if text is None:
+            text = self.run3_reference_text.get("1.0", "end-1c") if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
         mapping = {}
         for raw in str(text).splitlines():
             line = raw.strip()
@@ -6062,958 +5910,128 @@ class Run1App:
             mapping[(site, movement)] = lname
         return mapping
 
-    def _run3_event_speed_kmh(self, rows, target_time, ppm, perspective=None):
-        """Estimate local speed at an observed event without temporal interpolation.
-
-        The target event time is only used to locate the nearest observed sample.
-        Speed is then estimated from a short observed trajectory window around that
-        sample. This is more robust for PET conflict events because a one-frame
-        bounding-box quantisation can otherwise produce an artificial 0 km/h even
-        when the vehicle is visibly moving. If every local observed window has
-        zero displacement, 0 km/h is preserved as a genuine stationary result.
-        """
-        if rows is None or target_time is None:
-            return None
-        try:
-            t_target = float(target_time)
-            clean = [
-                r for r in rows
-                if r.get("_timestamp") is not None
-                and r.get("_point") is not None
-            ]
-            if len(clean) < 2:
-                return None
-            clean = sorted(clean, key=lambda r: float(r["_timestamp"]))
-
-            idx = min(
-                range(len(clean)),
-                key=lambda i: abs(float(clean[i]["_timestamp"]) - t_target),
-            )
-
-            # Symmetric observed windows around the nearest event sample.
-            # Prefer the shortest window that contains measurable motion. This
-            # avoids false zero speed from repeated integer bbox centers while
-            # remaining entirely observation-based.
-            candidates = []
-            for radius in (1, 2, 3, 4):
-                left = idx - radius
-                right = idx + radius
-                if left < 0 or right >= len(clean):
-                    continue
-                a = clean[left]
-                b = clean[right]
-                ta = float(a["_timestamp"])
-                tb = float(b["_timestamp"])
-                if tb <= ta:
-                    continue
-                try:
-                    pa = self._run3_transform_point(a["_point"], perspective) if perspective is not None else a["_point"]
-                    pb = self._run3_transform_point(b["_point"], perspective) if perspective is not None else b["_point"]
-                    d = math.hypot(float(pb[0]) - float(pa[0]), float(pb[1]) - float(pa[1]))
-                    d_m = d if perspective is not None else d / float(ppm)
-                    speed = d_m / (tb - ta) * 3.6
-                except Exception:
-                    continue
-                candidates.append((radius, abs(float(clean[idx]["_timestamp"]) - t_target), float(speed)))
-
-            # One-sided fallback at track boundaries.
-            if idx > 0:
-                a, b = clean[idx - 1], clean[idx]
-                speed = self._run3_gap_observed_speed_kmh(a, b, ppm, perspective)
-                if speed is not None:
-                    candidates.append((0.5, abs(float(b["_timestamp"]) - t_target), float(speed)))
-            if idx < len(clean) - 1:
-                a, b = clean[idx], clean[idx + 1]
-                speed = self._run3_gap_observed_speed_kmh(a, b, ppm, perspective)
-                if speed is not None:
-                    candidates.append((0.5, abs(float(a["_timestamp"]) - t_target), float(speed)))
-
-            if not candidates:
-                return None
-
-            moving = [c for c in candidates if c[2] > 1e-9]
-            pool = moving if moving else candidates
-            _, _, speed = min(pool, key=lambda c: (c[0], c[1]))
-            return float(speed)
-        except Exception:
-            return None
-
-    def _run3_gap_observed_speed_kmh(self, prev_row, row, ppm, perspective=None):
-        """Estimate speed from two observed trajectory samples only.
-
-        No interpolation is used. When a road-plane homography is available,
-        metric distance is measured on the transformed road plane; otherwise
-        PPM is used. This helper is used only for stop-state classification in
-        Gap Acceptance and does not replace the research Y1/Y2 speed outputs.
-        """
-        if not prev_row or not row:
-            return None
-        t0 = prev_row.get("_timestamp")
-        t1 = row.get("_timestamp")
-        p0 = prev_row.get("_point")
-        p1 = row.get("_point")
-        if t0 is None or t1 is None or p0 is None or p1 is None:
-            return None
-        dt = float(t1) - float(t0)
-        if dt <= 0:
-            return None
-        try:
-            if perspective is not None:
-                q0 = self._run3_transform_point(p0, perspective)
-                q1 = self._run3_transform_point(p1, perspective)
-                d_m = self._run3_segment_distance_sum([q0, q1])
-            else:
-                if not ppm or float(ppm) <= 0:
-                    return None
-                d_m = self._run3_segment_distance_sum([p0, p1]) / float(ppm)
-            return float(d_m / dt * 3.6)
-        except Exception:
-            return None
-
-    def _run3_gap_zone_stop_state(self, rows, zone_num, start_time, speed_threshold,
-                                  min_duration_s, ppm, perspective=None):
-        """Classify a stop using consecutive observed samples within one zone.
-
-        The scan preserves actual zone continuity. Once the vehicle leaves the
-        target zone, a new stop run must start after re-entry. No interpolation is
-        used. A low-speed run reaching the last observed sample is explicitly
-        censored at that sample; no unobserved stop-end time is made.
-        """
-        rows_sorted = sorted(
-            [r for r in rows if r.get("_timestamp") is not None and r.get("_point") is not None],
-            key=lambda r: float(r["_timestamp"]),
-        )
-        threshold = max(0.0, float(speed_threshold))
-        min_duration = max(0.0, float(min_duration_s))
-        target_rows = [
-            r for r in rows_sorted
-            if float(r["_timestamp"]) >= float(start_time) and r.get("_zone_num") == zone_num
-        ]
-        if len(target_rows) < 2:
-            return {
-                "state": "Not_Classified",
-                "stop_detected": False,
-                "stop_start": None,
-                "stop_end": None,
-                "stop_duration": 0.0,
-                "qc_flag": "Stop_State_Not_Classified_Insufficient_Observed_Samples",
-            }
-
-        best = None
-        prev_same_zone = None
-        low_run_start = None
-        speed_observations = 0
-
-        for idx, row in enumerate(rows_sorted):
-            t = float(row["_timestamp"])
-            if t < float(start_time):
-                continue
-
-            if row.get("_zone_num") != zone_num:
-                # Leaving the target zone breaks continuity of any stop run.
-                prev_same_zone = None
-                low_run_start = None
-                continue
-
-            if prev_same_zone is None:
-                prev_same_zone = row
-                continue
-
-            speed = self._run3_gap_observed_speed_kmh(prev_same_zone, row, ppm, perspective)
-            if speed is None:
-                low_run_start = None
-                prev_same_zone = row
-                continue
-            speed_observations += 1
-
-            if speed <= threshold:
-                if low_run_start is None:
-                    low_run_start = float(prev_same_zone["_timestamp"])
-                duration = max(0.0, t - low_run_start)
-                if duration >= min_duration:
-                    candidate = (duration, low_run_start, t, idx)
-                    if best is None or candidate[0] > best[0]:
-                        best = candidate
-            else:
-                low_run_start = None
-
-            prev_same_zone = row
-
-        if speed_observations == 0:
-            return {
-                "state": "Not_Classified",
-                "stop_detected": False,
-                "stop_start": None,
-                "stop_end": None,
-                "stop_duration": 0.0,
-                "qc_flag": "Stop_State_Not_Classified_No_Metric_Speed",
-            }
-
-        if best is None:
-            return {
-                "state": "Moving_or_Not_Stopped",
-                "stop_detected": False,
-                "stop_start": None,
-                "stop_end": None,
-                "stop_duration": 0.0,
-                "qc_flag": "",
-            }
-
-        duration, stop_start, stop_end, stop_end_idx = best
-        stop_end_censored = (stop_end_idx == len(rows_sorted) - 1)
-        qc = ""
-        stop_end_value = stop_end
-        if stop_end_censored:
-            if zone_num == 6:
-                qc = "Zone6_Stop_End_Censored_At_Last_Observed_Sample"
-            else:
-                qc = "Decision_Zone_Stop_End_Censored_At_Last_Observed_Sample"
-            stop_end_value = None
-
-        return {
-            "state": "Stopped",
-            "stop_detected": True,
-            "stop_start": stop_start,
-            "stop_end": stop_end_value,
-            "stop_duration": float(duration),
-            "qc_flag": qc,
-        }
-
-    def _run3_gap_zone6_decision_state(self, rows, entry_time, speed_threshold,
-                                       min_duration_s, ppm, perspective=None):
-        """Determine whether a subject waits again in Zone 6 after entering it.
-
-        Research rule implemented here:
-          * Zone 6 entry does NOT automatically finish the subject's waiting clock.
-          * If the subject remains stopped in Zone 6 for at least min_duration_s,
-            its individual waiting/decision clock continues while it is stopped.
-          * The observed decision time is the first subsequent observed sample
-            after that confirmed stop in which the vehicle resumes movement or
-            leaves Zone 6.
-          * If the stop continues to the last observed sample, the event is
-            right-censored: the observed waiting duration is retained, but no
-            fabricated Y5=1/0 decision is created.
-
-        This is per-track state handling, so other vehicles continue to be
-        processed normally while one vehicle is stopped.
-        """
-        rows_sorted = sorted(
-            [r for r in rows if r.get("_timestamp") is not None and r.get("_point") is not None],
-            key=lambda r: float(r["_timestamp"]),
-        )
-        entry_time = float(entry_time)
-        threshold = max(0.0, float(speed_threshold))
-        min_duration = max(0.0, float(min_duration_s))
-        after = [r for r in rows_sorted if float(r["_timestamp"]) >= entry_time and float(r["_timestamp"]) > entry_time - 1e-9]
-        if not after:
-            return {
-                "state": "Not_Classified",
-                "decision_time": None,
-                "stop_start": None,
-                "stop_end": None,
-                "stop_duration": 0.0,
-                "observed_end_time": entry_time,
-                "waiting_extension_s": 0.0,
-                "qc_flag": "Zone6_Decision_Not_Classified_No_Observed_Samples",
-            }
-
-        # We need a confirmed stop run in Zone 6, then the first observed sample
-        # after that run to mark movement/resumption. No interpolation is used.
-        prev_zone6 = None
-        low_start = None
-        candidate_stop_start = None
-        candidate_stop_end = None
-        candidate_duration = 0.0
-
-        for i, row in enumerate(after):
-            t = float(row["_timestamp"])
-            zone = row.get("_zone_num")
-            if zone != 6:
-                if candidate_stop_start is not None and candidate_stop_end is None:
-                    # We have a confirmed stop and the next observed record is
-                    # outside Zone 6. Treat that observed timestamp as resumption.
-                    return {
-                        "state": "Stopped_then_Resumed",
-                        "decision_time": t,
-                        "stop_start": candidate_stop_start,
-                        "stop_end": t,
-                        "stop_duration": max(0.0, t - candidate_stop_start),
-                        "observed_end_time": t,
-                        "waiting_extension_s": max(0.0, t - entry_time),
-                        "qc_flag": "Zone6_Stop_Then_Observed_Resumption",
-                    }
-                prev_zone6 = None
-                low_start = None
-                continue
-
-            if candidate_stop_start is not None and candidate_stop_end is None and prev_zone6 is not None:
-                speed = self._run3_gap_observed_speed_kmh(prev_zone6, row, ppm, perspective)
-                if speed is not None:
-                    if speed <= threshold:
-                        duration = max(0.0, t - candidate_stop_start)
-                        candidate_duration = duration
-                        if duration >= min_duration:
-                            # Keep scanning for the first observed resumed sample.
-                            pass
-                    else:
-                        if candidate_duration >= min_duration:
-                            return {
-                                "state": "Stopped_then_Resumed",
-                                "decision_time": t,
-                                "stop_start": candidate_stop_start,
-                                "stop_end": t,
-                                "stop_duration": max(0.0, t - candidate_stop_start),
-                                "observed_end_time": t,
-                                "waiting_extension_s": max(0.0, t - entry_time),
-                                "qc_flag": "Zone6_Stop_Then_Observed_Resumption",
-                            }
-                        candidate_stop_start = None
-                        candidate_duration = 0.0
-                        low_start = None
-
-            if prev_zone6 is None:
-                prev_zone6 = row
-                continue
-
-            speed = self._run3_gap_observed_speed_kmh(prev_zone6, row, ppm, perspective)
-            if speed is None:
-                prev_zone6 = row
-                continue
-
-            if speed <= threshold:
-                if low_start is None:
-                    low_start = float(prev_zone6["_timestamp"])
-                duration = max(0.0, t - low_start)
-                if duration >= min_duration and candidate_stop_start is None:
-                    candidate_stop_start = low_start
-                    candidate_duration = duration
-            else:
-                if candidate_stop_start is not None and candidate_duration >= min_duration:
-                    return {
-                        "state": "Stopped_then_Resumed",
-                        "decision_time": t,
-                        "stop_start": candidate_stop_start,
-                        "stop_end": t,
-                        "stop_duration": max(0.0, t - candidate_stop_start),
-                        "observed_end_time": t,
-                        "waiting_extension_s": max(0.0, t - entry_time),
-                        "qc_flag": "Zone6_Stop_Then_Observed_Resumption",
-                    }
-                low_start = None
-                candidate_stop_start = None
-                candidate_duration = 0.0
-
-            prev_zone6 = row
-
-        # Track ended while still stopped in Zone 6. Preserve observed duration,
-        # but do not invent a later decision time.
-        if candidate_stop_start is not None and candidate_duration >= min_duration:
-            last_t = float(after[-1]["_timestamp"])
-            return {
-                "state": "Stopped_Censored",
-                "decision_time": None,
-                "stop_start": candidate_stop_start,
-                "stop_end": None,
-                "stop_duration": max(0.0, last_t - candidate_stop_start),
-                "observed_end_time": last_t,
-                "waiting_extension_s": max(0.0, last_t - entry_time),
-                "qc_flag": "Zone6_Stop_End_Censored_At_Last_Observed_Sample",
-            }
-
-        # No confirmed second waiting period in Zone 6: entry remains the observed
-        # decision time. This is the normal moving-through-Zone-6 case.
-        return {
-            "state": "Entered_Zone6_And_Continued",
-            "decision_time": entry_time,
-            "stop_start": None,
-            "stop_end": None,
-            "stop_duration": 0.0,
-            "observed_end_time": float(after[-1]["_timestamp"]),
-            "waiting_extension_s": 0.0,
-            "qc_flag": "",
-        }
+    # ========================================================
+    # GAP ACCEPTANCE — Y3
+    # ========================================================
 
     @staticmethod
-    def _run3_gap_expected_path(movement):
-        """Return the movement-specific observed zone progression used by Gap Response.
+    def _run3_step_speed_kmh(prev, cur):
+        if prev.get("_m") is None or cur.get("_m") is None:
+            return None
+        dt = cur["_timestamp"] - prev["_timestamp"]
+        if dt <= 0:
+            return None
+        return math.hypot(cur["_m"][0] - prev["_m"][0], cur["_m"][1] - prev["_m"][1]) / dt * 3.6
 
-        The path is intentionally fixed by the research movement definition:
-          1→3 : Zone 1 -> Zone 6 -> Zone 3
-          1→5 : Zone 1 -> Zone 6 -> Zone 5
-          4→1 : Zone 4 -> Zone 6 -> Zone 1
-        """
-        return {
-            "1→3": (1, 6, 3),
-            "1→5": (1, 6, 5),
-            "4→1": (4, 6, 1),
-        }.get(movement)
+    def _run3_gap(self, tracks, c, mapping, movement_by_id):
+        selected = c["gap_movements"]
+        wait_threshold = c["waiting_threshold"]
+        site = c["site_id"]
 
-    def _run3_gap(self, tracks, summaries, mapping, vehicle_event_map=None):
-        """Compute two-stage binary Gap Acceptance responses.
-
-        Research interpretation for the current study:
-
-          Stage 1 — Access:
-            * Subject movements: 1→3, 1→5, 4→1.
-            * The subject waits in Zone 1/4 and then enters Zone 6.
-            * If the subject enters Zone 6 while a conflict gap is open and there
-              is NO confirmed Zone-6 hold/stop, that gap is Accepted (Y5=1).
-            * Gaps that close before Zone-6 entry are Rejected (Y5=0).
-            * If the subject enters Zone 6 but then has a confirmed hold/stop
-              in Zone 6, the Stage-1 gap is Rejected. The subject then starts a
-              NEW Stage-2 search after observed resumption.
-
-          Stage 2 — Exit / continuation after a Zone-6 hold:
-            * Start only after an observed Zone-6 hold/stop and subsequent
-              observed resumption.
-            * The subject waits in/around the decision area until it reaches its
-              movement-specific target zone (Zone 3, 5, or 1).
-            * Only NEW conflict gaps that start at or after the resumption time
-              are eligible. The previous gap is not reused.
-            * Gaps that close before target-zone entry are Rejected.
-            * The gap that contains the observed target-zone entry is Accepted.
-
-        This removes the previous Progress Test entirely. Every eligible gap
-        opportunity is binary Accepted/Rejected; there is no third state and no
-        first-Zone-6 cutoff that drops later interactions. Post-stage interactions
-        that do not constitute an eligible decision opportunity are not written as
-        separate Gap Acceptance rows.
-
-        Zone-6 hold/stop is an internal operational rule (not a UI parameter):
-          speed <= 5.0 km/h continuously for >= 0.30 s on observed samples.
-        No temporal interpolation is used.
-        """
-        selected = []
-        if self.run3_gap_movement_13_var.get():
-            selected.append("1→3")
-        if self.run3_gap_movement_15_var.get():
-            selected.append("1→5")
-        if self.run3_gap_movement_41_var.get():
-            selected.append("4→1")
-
-        movement_by_id, _movement_source_by_id = self._run3_build_movement_index(
-            tracks, summaries, mapping
-        )
-        site_id = self.run3_site_id_var.get().strip()
-        try:
-            ppm = float(self.run3_ppm_var.get())
-        except Exception:
-            ppm = 0.0
-        perspective = self._run3_get_perspective_matrix(silent=True)
-
-        # Internal research operational definition for Zone-6 hold/stop.
-        zone6_hold_speed_threshold_kmh = 5.0
-        zone6_hold_min_duration_s = 0.30
-
-        conflict_reference_zone = {
-            "2→3": 2,
-            "4→5": 4,
-            "1→5": 1,
-        }
-
-        diag = {
-            "selected_subject_movements": list(selected),
-            "tracks_total": len(tracks),
-            "movement_identified_tracks": sum(1 for v in movement_by_id.values() if v),
-            "subject_tracks": 0,
-            "subject_stage1_events": 0,
-            "subject_stage2_events": 0,
-            "subject_without_decision_zone": 0,
-            "subject_without_zone6_entry": 0,
-            "subject_zone6_hold_events": 0,
-            "subject_zone6_hold_resumed": 0,
-            "subject_zone6_hold_censored": 0,
-            "subject_without_stage2_target_entry": 0,
-            "conflict_events_by_movement": {},
-            "candidate_intervals_by_movement": {},
-            "reference_line_fallback_movements": [],
-            "configured_mapping_rows": len(mapping or {}),
-            "candidate_opportunities_total": 0,
-            "binary_gap_output_rows": 0,
-            "rejected_opportunities_total": 0,
-            "accepted_opportunities_total": 0,
-            "stage1_accepted_total": 0,
-            "stage1_rejected_total": 0,
-            "stage2_accepted_total": 0,
-            "stage2_rejected_total": 0,
-            "response_rule": "Stage1: Zone6 entry while gap open and no confirmed Zone6 hold = Accepted; confirmed hold = Rejected. Stage2: after hold/resume, new gap containing target-zone entry = Accepted; prior new gaps = Rejected.",
-            "zone6_hold_speed_threshold_kmh": zone6_hold_speed_threshold_kmh,
-            "zone6_hold_min_duration_s": zone6_hold_min_duration_s,
-            "progress_test_used": False,
-        }
-
-        # ------------------------------------------------------------
-        # 1) Build observed conflict event streams.
-        # ------------------------------------------------------------
-        line_events = defaultdict(list)
+        line_times = defaultdict(list)
         for tid, rows in tracks.items():
-            tid = str(tid)
             movement = movement_by_id.get(tid, "")
             if movement not in RUN3_ALL_MOVEMENTS:
                 continue
-            lname = mapping.get((site_id, movement)) if mapping else None
-            line = self.lines.get(lname, []) if lname else []
-            if len(line) != 2:
+            lname = mapping.get((site, movement))
+            if not lname:
                 continue
-            prev = None
-            prev_t = None
+            line = self.lines.get(lname, [])
+            prev = prev_t = None
             for r in rows:
-                p = r.get("_point")
-                t = r.get("_timestamp")
-                if p is None or t is None:
+                p = r.get("_point"); t = r.get("_timestamp")
+                if p is None:
                     continue
                 if prev is not None:
                     cross_t = self._run3_line_crossing_time(prev, prev_t, p, t, line)
-                    if cross_t is None:
-                        try:
-                            hit = self._run3_segment_intersection(prev, p, line[0], line[1])
-                        except Exception:
-                            hit = None
-                        if hit is not None:
-                            cross_t = t
                     if cross_t is not None:
-                        line_events[movement].append(
-                            (float(cross_t), tid, r.get("class_name", ""), lname, "")
-                        )
-                        break
+                        line_times[movement].append((cross_t, tid, r.get("class_name", ""), lname))
                 prev, prev_t = p, t
+        for key in line_times:
+            line_times[key].sort(key=lambda x: x[0])
 
-        for key in list(line_events):
-            dedup = {}
-            for event in line_events[key]:
-                tid = str(event[1])
-                if tid not in dedup or float(event[0]) < float(dedup[tid][0]):
-                    dedup[tid] = event
-            line_events[key] = sorted(dedup.values(), key=lambda x: float(x[0]))
-
-        reference_times = defaultdict(list)
-        fallback_movements = set()
-        for movement in RUN3_ALL_MOVEMENTS:
-            mapped_line = mapping.get((site_id, movement)) if mapping else None
-            usable_line_events = line_events.get(movement, [])
-            if len(usable_line_events) >= 2:
-                reference_times[movement].extend(usable_line_events)
-                continue
-            ref_zone = conflict_reference_zone.get(movement)
-            if ref_zone is None:
-                continue
-            fallback_movements.add(movement)
-            for tid, rows in tracks.items():
-                tid = str(tid)
-                if movement_by_id.get(tid, "") != movement:
-                    continue
-                candidates = [
-                    r for r in rows
-                    if r.get("_zone_num") == ref_zone
-                    and r.get("_timestamp") is not None
-                    and r.get("_point") is not None
+        # Conflict-stream gaps are identical for every subject -> build once.
+        conflict_map = {"1→3": ["2→3"], "1→5": ["2→3", "4→5"], "4→1": ["2→3", "1→5"]}
+        gap_cache = {}
+        def gaps_for(cm):
+            if cm not in gap_cache:
+                events = line_times.get(cm, [])
+                gap_cache[cm] = [
+                    {"conflict_movement": cm, "conflicting_id_a": a[1], "conflicting_class_a": a[2],
+                     "conflicting_id_b": b[1], "conflicting_class_b": b[2], "reference_line": a[3],
+                     "gap_start": a[0], "gap_end": b[0], "gap": b[0] - a[0]}
+                    for a, b in zip(events, events[1:]) if b[0] > a[0]
                 ]
-                if not candidates:
-                    continue
-                first = min(candidates, key=lambda r: float(r["_timestamp"]))
-                qc = (
-                    "Gap_Event_From_Observed_Zone_Fallback"
-                    if mapped_line
-                    else "Gap_Event_From_Observed_Zone_No_Line_Mapping"
-                )
-                reference_times[movement].append(
-                    (
-                        float(first["_timestamp"]), tid,
-                        first.get("class_name", ""),
-                        mapped_line or f"Observed Zone {ref_zone}", qc,
-                    )
-                )
+            return gap_cache[cm]
 
-        for key in list(reference_times):
-            dedup = {}
-            for event in reference_times[key]:
-                tid = str(event[1])
-                if tid not in dedup or float(event[0]) < float(dedup[tid][0]):
-                    dedup[tid] = event
-            reference_times[key] = sorted(dedup.values(), key=lambda x: float(x[0]))
-            diag["conflict_events_by_movement"][key] = len(reference_times[key])
-        diag["reference_line_fallback_movements"] = sorted(fallback_movements)
-
-        # Pre-build gap intervals for fast subject-specific stage evaluation.
-        gap_intervals_by_movement = defaultdict(list)
-        for cm, events in reference_times.items():
-            valid_pairs = 0
-            for a, b in zip(events, events[1:]):
-                gap_start = float(a[0])
-                gap_end = float(b[0])
-                if gap_end <= gap_start or str(a[1]) == str(b[1]):
-                    continue
-                valid_pairs += 1
-                gap_intervals_by_movement[cm].append({
-                    "conflict_movement": cm,
-                    "conflicting_id_a": str(a[1]),
-                    "conflicting_class_a": a[2],
-                    "conflicting_id_b": str(b[1]),
-                    "conflicting_class_b": b[2],
-                    "reference_line": a[3],
-                    "gap_start": gap_start,
-                    "gap_end": gap_end,
-                    "qc_flag": ";".join(dict.fromkeys([v for v in (a[4], b[4]) if v])),
-                })
-            diag["candidate_intervals_by_movement"][cm] = valid_pairs
-
-        # ------------------------------------------------------------
-        # 2) Subject-specific Stage 1 / Stage 2 decisions.
-        # ------------------------------------------------------------
         rows_out = []
-        for tid, raw_rows in tracks.items():
-            tid = str(tid)
+        for tid, rows in tracks.items():
             movement = movement_by_id.get(tid, "")
             if movement not in selected:
                 continue
-            diag["subject_tracks"] += 1
+            wait_zone = 1 if movement in ("1→3", "1→5") else 4
 
-            path = self._run3_gap_expected_path(movement)
-            if not path:
-                continue
-            wait_zone, middle_zone, target_zone = path
-            rows = [
-                r for r in raw_rows
-                if r.get("_timestamp") is not None and r.get("_point") is not None
-            ]
-            rows = sorted(rows, key=lambda r: float(r["_timestamp"]))
-            decision_rows = [
-                r for r in rows
-                if r.get("_zone_num") in {wait_zone, middle_zone}
-            ]
-            if not decision_rows:
-                diag["subject_without_decision_zone"] += 1
-                continue
-
-            wait_rows = [r for r in decision_rows if r.get("_zone_num") == wait_zone]
-            wait_start = min((float(r["_timestamp"]) for r in wait_rows), default=None)
-            if wait_start is None:
-                # A track may begin directly in Zone 6. Use its first Zone-6
-                # observation as the observed access anchor.
-                zone6_rows = [r for r in decision_rows if r.get("_zone_num") == middle_zone]
-                wait_start = min((float(r["_timestamp"]) for r in zone6_rows), default=None)
-
-            if wait_start is None:
-                diag["subject_without_decision_zone"] += 1
-                continue
-
-            zone6_rows_after_wait = [
-                r for r in rows
-                if float(r["_timestamp"]) >= float(wait_start)
-                and r.get("_zone_num") == middle_zone
-            ]
-            if not zone6_rows_after_wait:
-                diag["subject_without_zone6_entry"] += 1
-                continue
-            zone6_entry_time = float(zone6_rows_after_wait[0]["_timestamp"])
-
-            # Stage-1 decision opportunities: only gaps that close on/before the
-            # first Zone-6 entry are prior rejections; the gap containing entry is
-            # the candidate access gap.
-            conflict_movements = {
-                "1→3": ["2→3"],
-                "1→5": ["2→3", "4→5"],
-                "4→1": ["2→3", "1→5"],
-            }.get(movement, [])
-
-            stage_rows = []
-            for cm in conflict_movements:
-                for gap in gap_intervals_by_movement.get(cm, []):
-                    gs = gap["gap_start"]; ge = gap["gap_end"]
-                    # Ignore gaps that are fully before the subject entered the
-                    # waiting zone or begin after the Stage-1 decision.
-                    if ge <= wait_start:
-                        continue
-                    if gs > zone6_entry_time:
-                        continue
-                    overlap_rows = [
-                        r for r in decision_rows
-                        if float(r["_timestamp"]) >= max(gs, wait_start)
-                        and float(r["_timestamp"]) < min(ge, zone6_entry_time + 1e-12)
-                    ]
-                    if not overlap_rows:
-                        continue
-
-                    contains_entry = gs <= zone6_entry_time < ge
-                    if contains_entry:
-                        eval_time = zone6_entry_time
-                    else:
-                        eval_time = float(min(overlap_rows, key=lambda r: float(r["_timestamp"]))["_timestamp"])
-                    available_gap = ge - eval_time
-                    if available_gap <= 0:
-                        continue
-                    stage_rows.append({
-                        **gap,
-                        "stage": "Access",
-                        "gap": available_gap,
-                        "opportunity_time": eval_time,
-                        "decision_zone": int(next(
-                            (r.get("_zone_num") for r in sorted(overlap_rows, key=lambda r: float(r["_timestamp"]))),
-                            wait_zone,
-                        )),
-                        "contains_anchor": contains_entry,
-                    })
-
-            # Determine whether the subject held/stopped in Zone 6.
-            target_entry_time = None
-            hold_state = self._run3_gap_zone6_decision_state(
-                rows,
-                zone6_entry_time,
-                zone6_hold_speed_threshold_kmh,
-                zone6_hold_min_duration_s,
-                ppm,
-                perspective,
-            )
-            confirmed_hold = hold_state.get("state") in {"Stopped_then_Resumed", "Stopped_Censored"}
-            if confirmed_hold:
-                diag["subject_zone6_hold_events"] += 1
-
-            if not confirmed_hold:
-                # No confirmed Zone-6 hold: first Zone-6 entry is the Access
-                # acceptance anchor. Choose the smallest remaining gap if several
-                # conflict streams contain the same entry time.
-                decision_candidates = [o for o in stage_rows if o["contains_anchor"]]
-                controlling = min(
-                    decision_candidates,
-                    key=lambda o: (
-                        o["gap"], o["conflict_movement"],
-                        o["conflicting_id_a"], o["conflicting_id_b"],
-                    )
-                ) if decision_candidates else None
-                for o in stage_rows:
-                    if controlling is o:
-                        o["accepted"] = 1
-                        o["basis"] = "Zone6_Entry_No_Confirmed_Hold"
-                    elif o["gap_end"] <= zone6_entry_time:
-                        o["accepted"] = 0
-                        o["basis"] = "Gap_Closed_Before_Zone6_Entry"
-                    else:
-                        # Alternative simultaneous streams are not separate
-                        # decisions; omit them from the main output.
-                        o["accepted"] = None
-                        o["basis"] = "Simultaneous_Alternative_Omitted"
-
-                stage_rows = [o for o in stage_rows if o["accepted"] is not None]
-                diag["subject_stage1_events"] += int(bool(stage_rows))
-                diag["stage1_accepted_total"] += sum(1 for o in stage_rows if o["accepted"] == 1)
-                diag["stage1_rejected_total"] += sum(1 for o in stage_rows if o["accepted"] == 0)
-
-            else:
-                # Zone-6 hold/stop means the Access gap that contained the first
-                # Zone-6 entry is a rejected opportunity. Thereafter Stage 2 starts
-                # ONLY after an observed resumption, and only NEW conflict gaps are
-                # considered, preventing reuse of the pre-hold gap.
-                decision_candidates = [o for o in stage_rows if o["contains_anchor"]]
-                controlling_access = min(
-                    decision_candidates,
-                    key=lambda o: (
-                        o["gap"], o["conflict_movement"],
-                        o["conflicting_id_a"], o["conflicting_id_b"],
-                    )
-                ) if decision_candidates else None
-                for o in stage_rows:
-                    if controlling_access is o:
-                        o["accepted"] = 0
-                        o["basis"] = "Zone6_Entry_Followed_By_Confirmed_Hold"
-                    elif o["gap_end"] <= zone6_entry_time:
-                        o["accepted"] = 0
-                        o["basis"] = "Gap_Closed_Before_Zone6_Entry"
-                    else:
-                        o["accepted"] = None
-                        o["basis"] = "Simultaneous_Alternative_Omitted"
-                stage_rows = [o for o in stage_rows if o["accepted"] is not None]
-                diag["subject_stage1_events"] += int(bool(stage_rows))
-                diag["stage1_accepted_total"] += 0
-                diag["stage1_rejected_total"] += sum(1 for o in stage_rows if o["accepted"] == 0)
-
-                resume_time = hold_state.get("decision_time")
-                if resume_time is None:
-                    diag["subject_zone6_hold_censored"] += 1
-                    diag["subject_without_stage2_target_entry"] += 1
-                else:
-                    diag["subject_zone6_hold_resumed"] += 1
-                    resume_time = float(resume_time)
-                    target_rows = [
-                        r for r in rows
-                        if float(r["_timestamp"]) > resume_time
-                        and r.get("_zone_num") == target_zone
-                    ]
-                    target_entry_time = (
-                        float(min(target_rows, key=lambda r: float(r["_timestamp"]))["_timestamp"])
-                        if target_rows else None
-                    )
-
-                    stage2_rows = []
-                    for cm in conflict_movements:
-                        for gap in gap_intervals_by_movement.get(cm, []):
-                            gs = gap["gap_start"]; ge = gap["gap_end"]
-                            # Stage 2 only uses NEW gaps beginning after resume.
-                            if gs < resume_time:
-                                continue
-                            if target_entry_time is not None and gs > target_entry_time:
-                                continue
-                            overlap_end = target_entry_time if target_entry_time is not None else float(rows[-1]["_timestamp"])
-                            overlap_rows = [
-                                r for r in rows
-                                if r.get("_zone_num") in {middle_zone, wait_zone}
-                                and float(r["_timestamp"]) >= gs
-                                and float(r["_timestamp"]) < min(ge, overlap_end + 1e-12)
-                            ]
-                            if target_entry_time is not None:
-                                target_overlap = gs <= target_entry_time < ge
-                            else:
-                                target_overlap = False
-                            if not overlap_rows and not target_overlap:
-                                continue
-                            eval_time = target_entry_time if target_overlap else float(min(overlap_rows, key=lambda r: float(r["_timestamp"]))["_timestamp"])
-                            available_gap = ge - eval_time
-                            if available_gap <= 0:
-                                continue
-                            stage2_rows.append({
-                                **gap,
-                                "stage": "Exit",
-                                "gap": available_gap,
-                                "opportunity_time": eval_time,
-                                "decision_zone": int(target_zone if target_overlap else next(
-                                    (r.get("_zone_num") for r in sorted(overlap_rows, key=lambda r: float(r["_timestamp"]))),
-                                    middle_zone,
-                                )),
-                                "contains_anchor": target_overlap,
-                            })
-
-                    decision_candidates = [o for o in stage2_rows if o["contains_anchor"]]
-                    controlling_exit = min(
-                        decision_candidates,
-                        key=lambda o: (
-                            o["gap"], o["conflict_movement"],
-                            o["conflicting_id_a"], o["conflicting_id_b"],
-                        )
-                    ) if decision_candidates else None
-
-                    for o in stage2_rows:
-                        if controlling_exit is o:
-                            o["accepted"] = 1
-                            o["basis"] = "Target_Zone_Entry_After_Zone6_Hold"
-                        elif target_entry_time is not None and o["gap_end"] <= target_entry_time:
-                            o["accepted"] = 0
-                            o["basis"] = "New_Gap_Closed_Before_Target_Zone"
-                        elif target_entry_time is None:
-                            o["accepted"] = 0
-                            o["basis"] = "No_Observed_Target_Zone_Entry"
-                        else:
-                            o["accepted"] = None
-                            o["basis"] = "Post_Target_Not_A_Decision"
-
-                    stage2_rows = [o for o in stage2_rows if o["accepted"] is not None]
-                    if target_entry_time is not None or stage2_rows:
-                        diag["subject_stage2_events"] += int(bool(stage2_rows))
-                    if target_entry_time is None:
-                        diag["subject_without_stage2_target_entry"] += 1
-                    diag["stage2_accepted_total"] += sum(1 for o in stage2_rows if o["accepted"] == 1)
-                    diag["stage2_rejected_total"] += sum(1 for o in stage2_rows if o["accepted"] == 0)
-                    stage_rows.extend(stage2_rows)
-
-            # Deterministic order and de-duplication by actual conflict interval + stage.
-            ordered = sorted(
-                stage_rows,
-                key=lambda o: (
-                    o["stage"], o["opportunity_time"],
-                    -int(o["accepted"]), o["conflict_movement"],
-                    str(o["conflicting_id_a"]), str(o["conflicting_id_b"]),
-                )
-            )
-            seen = set()
-            opportunity_no = 0
-            subject_class = rows[0].get("class_name", "") if rows else ""
-            for o in ordered:
-                key = (
-                    o["stage"], o["conflict_movement"], o["conflicting_id_a"],
-                    o["conflicting_id_b"], round(o["gap_start"], 6), round(o["gap_end"], 6),
-                )
-                if key in seen:
+            # Waiting start = first observed step inside the waiting zone whose
+            # speed is at or below the waiting threshold.
+            wait_idx = None
+            for idx in range(1, len(rows)):
+                cur = rows[idx]
+                if cur.get("_zone_num") != wait_zone:
                     continue
-                seen.add(key)
-                opportunity_no += 1
-                diag["candidate_opportunities_total"] += 1
-                diag["binary_gap_output_rows"] += 1
-                if o["accepted"] == 1:
-                    diag["accepted_opportunities_total"] += 1
-                else:
-                    diag["rejected_opportunities_total"] += 1
+                sp = self._run3_step_speed_kmh(rows[idx - 1], cur)
+                if sp is not None and sp <= wait_threshold:
+                    wait_idx = idx
+                    break
+            if wait_idx is None:
+                continue
+            wait_start = rows[wait_idx]["_timestamp"]
 
-                qc_parts = [o.get("qc_flag", ""), o.get("basis", "")]
-                if confirmed_hold:
-                    qc_parts.append(f"Zone6_Hold_Threshold_{zone6_hold_speed_threshold_kmh:.1f}kmh_{zone6_hold_min_duration_s:.2f}s")
-                    if hold_state.get("qc_flag"):
-                        qc_parts.append(hold_state["qc_flag"])
-                qc = ";".join(dict.fromkeys([x for x in qc_parts if x]))
+            # V27 FIX: acceptance must be searched AFTER the waiting start.
+            # V26 searched from the first frame, so a vehicle that entered the
+            # waiting zone while still moving got an acceptance time earlier
+            # than its waiting start (negative waiting time, no rejected gaps).
+            accepted_time = None
+            for idx in range(wait_idx + 1, len(rows)):
+                prev = rows[idx - 1]; cur = rows[idx]
+                if prev.get("_zone_num") != wait_zone:
+                    continue
+                sp = self._run3_step_speed_kmh(prev, cur)
+                if sp is not None and sp > wait_threshold:
+                    accepted_time = cur["_timestamp"]
+                    break
+            if accepted_time is None:
+                continue
 
-                if o["stage"] == "Access":
-                    stage_anchor = zone6_entry_time
-                else:
-                    # Exit-stage decision anchor is the observed target-zone entry;
-                    # if no target entry exists, use the observed Zone-6 resumption.
-                    stage_anchor = (
-                        target_entry_time
-                        if target_entry_time is not None
-                        else hold_state.get("decision_time")
-                    )
-                stage_anchor = float(stage_anchor) if stage_anchor is not None else float(o["opportunity_time"])
+            candidates = []
+            for cm in conflict_map.get(movement, []):
+                candidates.extend(gaps_for(cm))
+            active = [g for g in candidates if g["gap_start"] <= accepted_time <= g["gap_end"]]
+            controlling = min(active, key=lambda g: g["gap"]) if active else None
+            seen = set(); prior = []
+            for g in sorted((g for g in candidates if wait_start <= g["gap_end"] < accepted_time), key=lambda x: x["gap_end"]):
+                key = (g["conflict_movement"], round(g["gap_start"], 6), round(g["gap_end"], 6))
+                if key not in seen:
+                    seen.add(key); prior.append(g)
+            decision_id = f"{tid}_{accepted_time:.6f}"
+            waiting_time = accepted_time - wait_start
+            subject_class = rows[0].get("class_name", "")
 
-                # Event-local speeds are calculated from observed trajectory samples.
-                # Subject speed is evaluated at this row's gap evaluation time.
-                subject_speed = self._run3_event_speed_kmh(
-                    rows, o["opportunity_time"], float(self.run3_ppm_var.get()), self._run3_get_perspective_matrix(silent=True)
-                )
-                # Conflict A/B speeds are evaluated at their own observed reference
-                # event times (gap start / gap end), not at an interpolated timestamp.
-                conflict_rows_a = vehicle_event_map.get(str(o["conflicting_id_a"]), {}).get("Rows", tracks.get(str(o["conflicting_id_a"]), []))
-                conflict_rows_b = vehicle_event_map.get(str(o["conflicting_id_b"]), {}).get("Rows", tracks.get(str(o["conflicting_id_b"]), []))
-                conflict_speed_a = self._run3_event_speed_kmh(
-                    conflict_rows_a, o["gap_start"], float(self.run3_ppm_var.get()), self._run3_get_perspective_matrix(silent=True)
-                )
-                conflict_speed_b = self._run3_event_speed_kmh(
-                    conflict_rows_b, o["gap_end"], float(self.run3_ppm_var.get()), self._run3_get_perspective_matrix(silent=True)
-                )
-                qc_speed_parts = []
-                if subject_speed is None:
-                    qc_speed_parts.append("Subject_Event_Speed_Unavailable")
-                if conflict_speed_a is None:
-                    qc_speed_parts.append("Conflict_A_Event_Speed_Unavailable")
-                if conflict_speed_b is None:
-                    qc_speed_parts.append("Conflict_B_Event_Speed_Unavailable")
-                if qc_speed_parts:
-                    qc = ";".join(dict.fromkeys([x for x in [qc] + qc_speed_parts if x]))
-
-                rows_out.append({
-                    "Site_ID": site_id,
-                    "Decision_Event_ID": f"{tid}_{o['stage']}_{stage_anchor:.6f}",
-                    "Opportunity_No": opportunity_no,
-                    "Subject_ID": tid,
-                    "Subject_Class": subject_class,
-                    "Subject_Movement": movement,
-                    "Decision_Stage": o["stage"],
-                    "Decision_Zone": o["decision_zone"],
-                    "Gap_Evaluation_Time": f"{o['opportunity_time']:.6f}",
-                    "X32_Waiting_Time": "" if wait_start is None else f"{max(0.0, o['opportunity_time'] - wait_start):.6f}",
-                    "Conflicting_Movement": o["conflict_movement"],
-                    "Conflicting_ID_A": o["conflicting_id_a"],
-                    "Conflicting_Class_A": o["conflicting_class_a"],
-                    "Conflicting_ID_B": o["conflicting_id_b"],
-                    "Conflicting_Class_B": o["conflicting_class_b"],
-                    "Gap_Start_Time": f"{o['gap_start']:.6f}",
-                    "Gap_End_Time": f"{o['gap_end']:.6f}",
-                    "X31_Available_Gap": f"{o['gap']:.6f}",
-                    "Subject_Speed_kmh": "" if subject_speed is None else f"{subject_speed:.6f}",
-                    "Conflict_Speed_A_kmh": "" if conflict_speed_a is None else f"{conflict_speed_a:.6f}",
-                    "Conflict_Speed_B_kmh": "" if conflict_speed_b is None else f"{conflict_speed_b:.6f}",
-                    "Gap_Role": "Accepted" if o["accepted"] == 1 else "Rejected",
-                    "Y5_Gap_Acceptance": int(o["accepted"]),
-                    "Decision_Time": f"{o['opportunity_time']:.6f}",
-                    "QC_Flag": qc,
-                })
-
-        self._run3_gap_diag = diag
+            def make(g, role, accepted):
+                return {
+                    "Site_ID": site, "Decision_Event_ID": decision_id, "Subject_ID": tid,
+                    "Subject_Class": subject_class, "Subject_Movement": movement,
+                    "Conflicting_Movement": g["conflict_movement"],
+                    "Conflicting_ID_A": g["conflicting_id_a"], "Conflicting_ID_B": g["conflicting_id_b"],
+                    "Reference_Line": g["reference_line"],
+                    "Gap_Start_Time": f"{g['gap_start']:.6f}", "Gap_End_Time": f"{g['gap_end']:.6f}",
+                    "X31_Available_Gap": f"{g['gap']:.6f}", "X32_Waiting_Time": f"{waiting_time:.6f}",
+                    "Gap_Role": role, "Y3_Gap_Acceptance": 1 if accepted else 0,
+                    "Acceptance_Time": f"{accepted_time:.6f}" if accepted else "", "QC_Flag": "",
+                }
+            for g in prior:
+                rows_out.append(make(g, "Rejected", False))
+            if controlling:
+                rows_out.append(make(controlling, "Accepted / Controlling", True))
         return rows_out
 
     @staticmethod
@@ -7023,11 +6041,10 @@ class Run1App:
         candidates = sorted(set([float(v) for v in accepted + rejected if v is not None and v > 0]))
         if not candidates:
             return None
+        acc = np.asarray(accepted, dtype=float); rej = np.asarray(rejected, dtype=float)
         best = None
         for g in candidates:
-            fa = np.mean([v >= g for v in accepted])
-            fr = np.mean([v <= g for v in rejected])
-            diff = abs(fa - fr)
+            diff = abs(np.mean(acc >= g) - np.mean(rej <= g))
             if best is None or diff < best[0]:
                 best = (diff, g)
         return float(best[1]) if best else None
@@ -7043,133 +6060,134 @@ class Run1App:
             return None
         lowers = np.array([max(1e-6, r) for r, a in intervals], dtype=float)
         uppers = np.array([max(r + 1e-6, a) for r, a in intervals], dtype=float)
-        logs_l = np.log(lowers)
-        logs_u = np.log(uppers)
+        logs_l = np.log(lowers); logs_u = np.log(uppers)
         mu0 = float(np.median((logs_l + logs_u) / 2.0))
         sigma0 = float(max(0.25, np.std((logs_l + logs_u) / 2.0)))
         def nll(x):
             mu, log_sigma = x
             sigma = math.exp(log_sigma)
-            z_u = (logs_u - mu) / sigma
-            z_l = (logs_l - mu) / sigma
-            probs = ndtr(z_u) - ndtr(z_l)
-            probs = np.clip(probs, 1e-15, None)
-            return float(-np.sum(np.log(probs)))
+            probs = ndtr((logs_u - mu) / sigma) - ndtr((logs_l - mu) / sigma)
+            return float(-np.sum(np.log(np.clip(probs, 1e-15, None))))
         res = minimize(nll, x0=np.array([mu0, math.log(sigma0)]), method="Nelder-Mead")
         if not res.success:
             return None
         mu, log_sigma = res.x
-        return {
-            "mu": float(mu),
-            "sigma": float(math.exp(log_sigma)),
-            "critical_gap_median": float(math.exp(mu)),
-            "negative_log_likelihood": float(res.fun),
-        }
+        return {"mu": float(mu), "sigma": float(math.exp(log_sigma)),
+                "critical_gap_median": float(math.exp(mu)), "negative_log_likelihood": float(res.fun)}
 
-    def _run3_lateral_clearance(self, tracks, ppm, axis_deg, long_window_m, perspective=None, vehicle_event_map=None):
-        theta = math.radians(axis_deg)
-        road_u = (math.cos(theta), math.sin(theta))
-        lat_u = (-math.sin(theta), math.cos(theta))
-        widths = {}
-        for name in RUN3_VEHICLE_CLASSES:
-            raw = str(self.run3_width_vars[name].get()).strip()
-            widths[name] = float(raw)
+    # ========================================================
+    # LATERAL CLEARANCE — Y1
+    # ========================================================
+
+    def _run3_lateral_clearance(self, tracks, c):
+        """Same definition as V26; neighbours are found through a time index
+        (bisect) instead of scanning every track pair and every sample."""
+        import bisect
+        ppm = c["ppm"]; long_window = c["lc_window"]; zones = c["lc_zones"]
+        perspective = c["perspective"]
+        theta = math.radians(c["axis_deg"])
+        road_u = (math.cos(theta), math.sin(theta)); lat_u = (-math.sin(theta), math.cos(theta))
+        widths = {k: v for k, v in c["widths"].items() if v is not None}
         tol = self._run3_time_tolerance(tracks)
-        vehicle_event_map = vehicle_event_map or {}
-        out = []
-        candidates_seen = 0
-        for tid_a, rows_a in tracks.items():
-            event_a = vehicle_event_map.get(str(tid_a), {})
-            rows_a = event_a.get("Rows", rows_a)
-            cls_a = event_a.get("Vehicle_Class", "") or (self._run3_canonical_class(rows_a[0].get("class_name", "")) if rows_a else "")
-            movement_a = event_a.get("Movement", "")
-            if not rows_a or cls_a != "Motorcycle":
+        order = {tid: i for i, tid in enumerate(tracks)}
+
+        # zone -> tid -> (timestamps, rows) ; zone -> sorted list of (start, end, tid)
+        obs = defaultdict(dict); spans = defaultdict(list)
+        classes = {}
+        for tid, rows in tracks.items():
+            if not rows:
                 continue
-            selected_lc_zones = {z for z,v in self.run3_lc_zone_vars.items() if v.get()}
-            a_obs = [r for r in rows_a if r.get("_center") is not None and r.get("_zone_num") in selected_lc_zones]
+            cls = self._run3_canonical_class(rows[0].get("class_name", ""))
+            classes[tid] = cls
+            per_zone = defaultdict(list)
+            for r in rows:
+                if r.get("_center") is not None and r.get("_zone_num") in zones:
+                    per_zone[r["_zone_num"]].append(r)
+            for z, lst in per_zone.items():
+                obs[z][tid] = ([r["_timestamp"] for r in lst], lst)
+                spans[z].append((lst[0]["_timestamp"], lst[-1]["_timestamp"], tid))
+        for z in spans:
+            spans[z].sort()
+        span_starts = {z: [s[0] for s in spans[z]] for z in spans}
+
+        out = []; candidates_seen = 0
+        for tid_a, rows_a in tracks.items():
+            if classes.get(tid_a) != "Motorcycle":
+                continue
+            a_obs = [r for r in rows_a if r.get("_center") is not None and r.get("_zone_num") in zones]
             if not a_obs:
                 continue
-            for tid_b, rows_b in tracks.items():
-                if tid_b == tid_a or not rows_b:
-                    continue
-                event_b = vehicle_event_map.get(str(tid_b), {})
-                rows_b = event_b.get("Rows", rows_b)
-                cls_b = event_b.get("Vehicle_Class", "") or self._run3_canonical_class(rows_b[0].get("class_name", ""))
-                movement_b = event_b.get("Movement", "")
-                if cls_b not in widths:
-                    continue
-                b_obs = [r for r in rows_b if r.get("_center") is not None and r.get("_zone_num") in selected_lc_zones]
-                if not b_obs:
-                    continue
-                for r_a in a_obs:
-                    # Nearest observed sample in the same zone; no interpolation.
-                    same_zone = [r for r in b_obs if r.get("_zone_num") == r_a.get("_zone_num")]
-                    if not same_zone:
+            # neighbours per zone whose time span overlaps A's span in that zone
+            neighbours = {}
+            for z in {r["_zone_num"] for r in a_obs}:
+                a_ts = obs[z][tid_a][0]
+                hi = bisect.bisect_right(span_starts[z], a_ts[-1] + tol)
+                neighbours[z] = sorted(
+                    [tid_b for (s, e, tid_b) in spans[z][:hi]
+                     if e >= a_ts[0] - tol and tid_b != tid_a and classes.get(tid_b) in widths],
+                    key=lambda t: order[t]
+                )
+            pair_rows = defaultdict(list)
+            for r_a in a_obs:
+                z = r_a["_zone_num"]; ta = r_a["_timestamp"]
+                for tid_b in neighbours[z]:
+                    ts_b, rows_b = obs[z][tid_b]
+                    k = bisect.bisect_left(ts_b, ta)
+                    best = None
+                    for j in (k - 1, k):
+                        if 0 <= j < len(ts_b):
+                            d = abs(ts_b[j] - ta)
+                            if best is None or d < best[0]:
+                                best = (d, j)
+                    if best is None or best[0] > tol:
                         continue
-                    r_b = min(same_zone, key=lambda r: abs(r["_timestamp"]-r_a["_timestamp"]))
-                    dt = abs(r_b["_timestamp"]-r_a["_timestamp"])
-                    if dt > tol:
-                        continue
+                    r_b = rows_b[best[1]]
                     candidates_seen += 1
+                    cls_b = classes[tid_b]
                     dx = r_b["_center"][0] - r_a["_center"][0]
                     dy = r_b["_center"][1] - r_a["_center"][1]
                     lateral_px = abs(dx * lat_u[0] + dy * lat_u[1])
-                    longitudinal_px = abs(dx * road_u[0] + dy * road_u[1])
                     if perspective is not None:
-                        pa = self._run3_transform_point(r_a["_center"], perspective)
-                        pb = self._run3_transform_point(r_b["_center"], perspective)
-                        signed_lateral_m = pb[1] - pa[1]
-                        longitudinal_m = abs(pb[0] - pa[0])
-                        ls_m = abs(signed_lateral_m)
-                        side = "Left" if signed_lateral_m > 0 else "Right"
+                        signed_lat = r_b["_mc"][1] - r_a["_mc"][1]
+                        longitudinal_m = abs(r_b["_mc"][0] - r_a["_mc"][0])
+                        ls_m = abs(signed_lat)
+                        side = "Left" if signed_lat > 0 else "Right"
                     else:
-                        longitudinal_m = longitudinal_px / ppm
+                        longitudinal_m = abs(dx * road_u[0] + dy * road_u[1]) / ppm
                         ls_m = lateral_px / ppm
                         side = "Left" if (dx * lat_u[0] + dy * lat_u[1]) > 0 else "Right"
-                    if longitudinal_m > long_window_m:
+                    if longitudinal_m > long_window:
                         continue
-                    y3 = ls_m - (widths["Motorcycle"] + widths[cls_b]) / 2.0
-                    moto_speed = self._run3_event_speed_kmh(rows_a, r_a["_timestamp"], ppm, perspective)
-                    neighbor_speed = self._run3_event_speed_kmh(rows_b, r_b["_timestamp"], ppm, perspective)
-                    qc_parts = []
-                    if y3 < 0:
-                        qc_parts.append("Negative_Y3")
-                    if perspective is not None:
-                        qc_parts.append("Perspective_Homography")
-                    if moto_speed is None:
-                        qc_parts.append("Motorcycle_Event_Speed_Unavailable")
-                    if neighbor_speed is None:
-                        qc_parts.append("Neighbor_Event_Speed_Unavailable")
-                    out.append({
-                        "Site_ID": self.run3_site_id_var.get().strip(),
-                        "Pair_ID": f"{tid_a}_{tid_b}",
-                        "Timestamp": f"{r_a['_timestamp']:.6f}",
-                        "Zone": f"Zone {r_a['_zone_num']}",
-                        "Motorcycle_ID": str(tid_a),
-                        "Motorcycle_Class": "Motorcycle",
-                        "Motorcycle_Movement": movement_a,
-                        "Neighbor_ID": str(tid_b),
-                        "Neighbor_Class": cls_b,
-                        "Neighbor_Movement": movement_b,
-                        "Neighbor_Side": side,
-                        "Motorcycle_Speed_kmh": "" if moto_speed is None else f"{moto_speed:.6f}",
-                        "Neighbor_Speed_kmh": "" if neighbor_speed is None else f"{neighbor_speed:.6f}",
-                        "LS_Meter": f"{ls_m:.6f}",
-                        "Y3_Lateral_Clearance": f"{y3:.6f}",
-                        "QC_Flag": ";".join(dict.fromkeys(qc_parts)),
+                    y1 = ls_m - (widths["Motorcycle"] + widths[cls_b]) / 2.0
+                    pair_rows[tid_b].append({
+                        "Site_ID": c["site_id"], "Pair_ID": f"{tid_a}_{tid_b}",
+                        "Timestamp": f"{ta:.6f}", "Zone": f"Zone {z}",
+                        "Motorcycle_ID": tid_a, "Motorcycle_Class": "Motorcycle",
+                        "Neighbor_ID": tid_b, "Neighbor_Class": cls_b, "Neighbor_Side": side,
+                        "LS_Pixel": f"{lateral_px:.6f}", "PPM": f"{ppm:.6f}", "LS_Meter": f"{ls_m:.6f}",
+                        "Wm": f"{widths['Motorcycle']:.6f}", "Wv": f"{widths[cls_b]:.6f}",
+                        "Y1_Lateral_Clearance": f"{y1:.6f}",
+                        "QC_Flag": ("Negative_Y1" if y1 < 0 else "") + (";Perspective_Homography" if perspective is not None else ""),
                     })
+            # keep V26 output order: by neighbour, then by A's sample order
+            for tid_b in sorted(pair_rows, key=lambda t: order[t]):
+                out.extend(pair_rows[tid_b])
         return out, candidates_seen, tol
+
+    # ========================================================
+    # PET — Y5 (Zone 6 and/or Zone 7)
+    # ========================================================
 
     @staticmethod
     def _run3_segment_intersection(a0, a1, b0, b1):
-        x1,y1=a0; x2,y2=a1; x3,y3=b0; x4,y4=b1
-        den=(x1-x2)*(y3-y4)-(y1-y2)*(x3-x4)
+        x1, y1 = a0; x2, y2 = a1; x3, y3 = b0; x4, y4 = b1
+        den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
         if abs(den) < 1e-9:
             return None
-        t=((x1-x3)*(y3-y4)-(y1-y3)*(x3-x4))/den
-        u=-((x1-x2)*(y1-y3)-(y1-y2)*(x1-x3))/den
+        t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
+        u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / den
         if 0 <= t <= 1 and 0 <= u <= 1:
-            return t, u, (x1+t*(x2-x1), y1+t*(y2-y1))
+            return t, u, (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
         return None
 
     @staticmethod
@@ -7185,432 +6203,568 @@ class Run1App:
                 return "Diverging"
         return "Merging/Diverging"
 
-    def _run3_pet(self, tracks, summaries, interaction_distance_m, perspective=None, mapping=None, movement_by_id=None, movement_source_by_id=None, vehicle_event_map=None):
-        """PET using observed trajectory samples only.
-        Spatial segment intersection is used to find a candidate interaction point,
-        but event timestamps come only from actual observed frames (nearest observed
-        sample to the interaction point), with no temporal interpolation.
+    @staticmethod
+    def _run3_best_intersection(A, B):
+        """Vectorised version of the V26 double loop over segment pairs.
+        Returns (score, ia, ib, ip) choosing the same pair V26 chose."""
+        if len(A) < 2 or len(B) < 2:
+            return None
+        a0 = A[:-1, None, :]; a1 = A[1:, None, :]
+        b0 = B[None, :-1, :]; b1 = B[None, 1:, :]
+        x1, y1 = a0[..., 0], a0[..., 1]; x2, y2 = a1[..., 0], a1[..., 1]
+        x3, y3 = b0[..., 0], b0[..., 1]; x4, y4 = b1[..., 0], b1[..., 1]
+        den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+        ok = np.abs(den) >= 1e-9
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
+            u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / den
+        hit = ok & (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1)
+        if not hit.any():
+            return None
+        with np.errstate(invalid="ignore"):
+            ipx = x1 + t * (x2 - x1); ipy = y1 + t * (y2 - y1)
+        da0 = np.hypot(x1 - ipx, y1 - ipy); da1 = np.hypot(x2 - ipx, y2 - ipy)
+        db0 = np.hypot(x3 - ipx, y3 - ipy); db1 = np.hypot(x4 - ipx, y4 - ipy)
+        score = np.maximum(np.minimum(da0, da1), np.minimum(db0, db1))
+        score = np.where(hit, score, np.inf)
+        flat = int(np.argmin(score))
+        i, j = np.unravel_index(flat, score.shape)
+        ia = i if da0[i, j] <= da1[i, j] else i + 1
+        ib = j if db0[i, j] <= db1[i, j] else j + 1
+        return float(score[i, j]), int(ia), int(ib), (float(ipx[i, j]), float(ipy[i, j]))
+
+    def _run3_pet(self, tracks, c, movement_by_id, movement_source_by_id):
+        """PET per conflict zone. Timestamps come only from observed frames.
+
+        V27 changes: (1) distances use metric coordinates in BOTH calibration
+        modes (V26 compared pixel distances with the metre interaction radius
+        when perspective was off); (2) Zone 7 supported; (3) pairs whose zone
+        time windows are further apart than PET max are skipped (PET can
+        never be smaller than that gap, so no valid event is lost);
+        (4) segment intersection is vectorised.
         """
-        candidates=[]
-        vehicle_event_map = vehicle_event_map or {}
-        diag={"zone6_tracks":0,"movement_identified":0,"pairs_considered":0,"movement_pair_filtered":0,"same_movement_excluded":0,"interaction_candidates":0,"fallback_close_pairs":0,"overlap_intervals":0,"insufficient_samples":0}
-        ids=list(tracks)
-        if movement_by_id is None or movement_source_by_id is None:
-            movement_by_id, movement_source_by_id = self._run3_build_movement_index(
-                tracks, summaries, mapping or {}
-            )
-        for tid in ids:
-            if any(r.get("_zone_num") == 6 and r.get("_point") is not None for r in tracks[tid]):
-                diag["zone6_tracks"]+=1
-        def mp(r):
-            return self._run3_transform_point(r["_point"], perspective) if perspective is not None else r["_point"]
-        for i,a_id in enumerate(ids):
-            for b_id in ids[i+1:]:
-                event_a = vehicle_event_map.get(str(a_id), {})
-                event_b = vehicle_event_map.get(str(b_id), {})
-                a_rows=[r for r in event_a.get("Rows", tracks[a_id]) if r.get("_zone_num") == 6 and r.get("_point") is not None]
-                b_rows=[r for r in event_b.get("Rows", tracks[b_id]) if r.get("_zone_num") == 6 and r.get("_point") is not None]
-                if not a_rows or not b_rows:
-                    diag["insufficient_samples"]+=1; continue
-                ma=event_a.get("Movement", movement_by_id.get(str(a_id),"")); mb=event_b.get("Movement", movement_by_id.get(str(b_id),""))
-                if ma: diag["movement_identified"]+=1
-                if mb: diag["movement_identified"]+=1
-                diag["pairs_considered"]+=1
-                if not ma and not mb: continue
-                if ma and mb and ma==mb:
-                    diag["same_movement_excluded"]+=1; continue
-                if not self._run3_pet_movement_pair_allowed(ma, mb):
-                    diag["movement_pair_filtered"] += 1
-                    continue
-
-                best=None
-                # Detect spatial intersection of observed trajectory segments.
-                for ra0,ra1 in zip(a_rows,a_rows[1:]):
-                    a0,a1=mp(ra0),mp(ra1)
-                    for rb0,rb1 in zip(b_rows,b_rows[1:]):
-                        b0,b1=mp(rb0),mp(rb1)
-                        hit=self._run3_segment_intersection(a0,a1,b0,b1)
-                        if hit is not None:
-                            _,_,ip=hit
-                            cand_a=min((ra0,ra1), key=lambda r: math.hypot(mp(r)[0]-ip[0], mp(r)[1]-ip[1]))
-                            cand_b=min((rb0,rb1), key=lambda r: math.hypot(mp(r)[0]-ip[0], mp(r)[1]-ip[1]))
-                            score=max(math.hypot(mp(cand_a)[0]-ip[0],mp(cand_a)[1]-ip[1]), math.hypot(mp(cand_b)[0]-ip[0],mp(cand_b)[1]-ip[1]))
-                            if best is None or score<best[0]:
-                                best=(score,cand_a,cand_b,ip,"Crossing")
-                # Fallback: closest observed pair within interaction radius.
-                if best is None:
-                    for ra in a_rows:
-                        pa=mp(ra)
-                        for rb in b_rows:
-                            pb=mp(rb)
-                            d=math.hypot(pa[0]-pb[0],pa[1]-pb[1])
-                            if d<=interaction_distance_m and (best is None or d<best[0]):
-                                best=(d,ra,rb,((pa[0]+pb[0])/2.0,(pa[1]+pb[1])/2.0),self._run3_conflict_type(ma,mb,False))
+        radius = c["pet_interaction"]; pet_max = c["pet_max_s"]; threshold = c["pet_threshold"]
+        ids = list(tracks)
+        diag = {"zone_tracks": {}, "pairs_with_both_in_zone": 0, "pairs_skipped_time_window": 0,
+                "same_movement_excluded": 0, "no_movement_both": 0, "interaction_candidates": 0,
+                "fallback_close_pairs": 0, "overlap_intervals": 0, "above_pet_max": 0,
+                "tracks_with_movement": sum(1 for t in ids if movement_by_id.get(t))}
+        out = []
+        for zone in sorted(c["pet_zones"]):
+            zrows = {}
+            for tid in ids:
+                lst = [r for r in tracks[tid] if r.get("_zone_num") == zone and r.get("_m") is not None]
+                if lst:
+                    zrows[tid] = (lst, np.array([r["_m"] for r in lst], dtype=float),
+                                  np.array([r["_timestamp"] for r in lst], dtype=float))
+            diag["zone_tracks"][f"Zone {zone}"] = len(zrows)
+            zids = [t for t in ids if t in zrows]
+            for i, a_id in enumerate(zids):
+                a_rows, A, At = zrows[a_id]
+                for b_id in zids[i + 1:]:
+                    b_rows, B, Bt = zrows[b_id]
+                    diag["pairs_with_both_in_zone"] += 1
+                    if pet_max is not None:
+                        window_gap = max(At[0], Bt[0]) - min(At[-1], Bt[-1])
+                        if window_gap > pet_max:
+                            diag["pairs_skipped_time_window"] += 1
+                            continue
+                    ma = movement_by_id.get(a_id, ""); mb = movement_by_id.get(b_id, "")
+                    if not ma and not mb:
+                        diag["no_movement_both"] += 1
+                        continue
+                    if ma and mb and ma == mb:
+                        diag["same_movement_excluded"] += 1
+                        continue
+                    best = self._run3_best_intersection(A, B)
                     if best is not None:
-                        diag["fallback_close_pairs"]+=1
-                if best is None: continue
-                diag["interaction_candidates"]+=1
-                _,ra_min,rb_min,ip,ctype=best
+                        ip = best[3]; ctype = "Crossing"
+                    else:
+                        d = np.hypot(A[:, None, 0] - B[None, :, 0], A[:, None, 1] - B[None, :, 1])
+                        flat = int(np.argmin(d))
+                        ia, ib = np.unravel_index(flat, d.shape)
+                        if d[ia, ib] > radius:
+                            continue
+                        ip = ((A[ia, 0] + B[ib, 0]) / 2.0, (A[ia, 1] + B[ib, 1]) / 2.0)
+                        ctype = self._run3_conflict_type(ma, mb, False)
+                        diag["fallback_close_pairs"] += 1
+                    diag["interaction_candidates"] += 1
+                    a_near = At[np.hypot(A[:, 0] - ip[0], A[:, 1] - ip[1]) <= radius]
+                    b_near = Bt[np.hypot(B[:, 0] - ip[0], B[:, 1] - ip[1]) <= radius]
+                    if a_near.size == 0 or b_near.size == 0:
+                        continue
+                    a_entry, a_exit = float(a_near.min()), float(a_near.max())
+                    b_entry, b_exit = float(b_near.min()), float(b_near.max())
+                    if a_exit <= b_entry:
+                        t1, t2 = a_exit, b_entry
+                    elif b_exit <= a_entry:
+                        t1, t2 = b_exit, a_entry
+                    else:
+                        diag["overlap_intervals"] += 1
+                        continue
+                    pet = t2 - t1
+                    if pet <= 0:
+                        continue
+                    if pet_max is not None and pet > pet_max:
+                        diag["above_pet_max"] += 1
+                        continue
+                    out.append({
+                        "Site_ID": c["site_id"],
+                        "Interaction_ID": f"{a_id}_{b_id}_Z{zone}_{min(a_entry, b_entry):.6f}",
+                        "Vehicle_ID_A": a_id, "Vehicle_Class_A": a_rows[0].get("class_name", ""), "Movement_A": ma,
+                        "Vehicle_ID_B": b_id, "Vehicle_Class_B": b_rows[0].get("class_name", ""), "Movement_B": mb,
+                        "Conflict_Type": ctype, "Conflict_Zone": f"Zone {zone}",
+                        "Interaction_Start": f"{min(a_entry, b_entry):.6f}", "Interaction_End": f"{max(a_exit, b_exit):.6f}",
+                        "T1_Exit_Time": f"{t1:.6f}", "T2_Entry_Time": f"{t2:.6f}", "Y5_PET": f"{pet:.6f}",
+                        "PET_Risk_Level": self._level_pet(pet),
+                        "QC_Flag": ";".join(x for x in [
+                            "Threshold_At_or_Below" if pet <= threshold else "",
+                            "Movement_A_Not_Observed" if not ma else "",
+                            "Movement_B_Not_Observed" if not mb else "",
+                            f"MovementSourceA={movement_source_by_id.get(a_id, '')}" if ma else "",
+                            f"MovementSourceB={movement_source_by_id.get(b_id, '')}" if mb else "",
+                        ] if x),
+                    })
+        return out, diag
 
-                # Use observed points within the interaction radius of the chosen point.
-                def near_samples(rows):
-                    out=[]
-                    for r in rows:
-                        p=mp(r)
-                        if math.hypot(p[0]-ip[0],p[1]-ip[1])<=interaction_distance_m:
-                            out.append(r)
-                    return sorted(out,key=lambda r:r["_timestamp"])
-                a_near=near_samples(a_rows); b_near=near_samples(b_rows)
-                if not a_near or not b_near: continue
-                a_entry,a_exit=a_near[0]["_timestamp"],a_near[-1]["_timestamp"]
-                b_entry,b_exit=b_near[0]["_timestamp"],b_near[-1]["_timestamp"]
-                if a_exit<=b_entry:
-                    t1,t2=a_exit,b_entry
-                elif b_exit<=a_entry:
-                    t1,t2=b_exit,a_entry
+    # ========================================================
+    # TTC — Y4 (rear-end / same-direction following conflicts)
+    # ========================================================
+
+    def _run3_ttc(self, tracks, c, movement_by_id):
+        """TTC = S / CS for same-direction pairs (rear-end, turning/deviation).
+
+        S  = clear longitudinal gap between follower and leader (m)
+             = centre spacing along the follower heading - (L_f + L_l) / 2
+        CS = closing speed along the follower heading (m/s) = v_f - v_l
+        Collision course requires: leader ahead, lateral offset within
+        (W_f + W_l) / 2, closing speed > 0, heading difference <= limit
+        (a stopped leader is always a valid obstacle).
+        Velocities come from a short centred window of observed samples
+        (no interpolation). One row per follower-leader event = TTCmin.
+        Crossing conflicts are evaluated by PET, as defined in Chapter 2.
+        """
+        zones = c["ttc_zones"]
+        win = max(1e-3, c["ttc_velocity_window_s"]) / 2.0
+        vmin = c["ttc_min_speed_kmh"] / 3.6
+        cos_max = math.cos(math.radians(c["ttc_heading_max_deg"]))
+        ttc_max = c["ttc_max_record_s"]
+        widths = c["widths"]; lengths = c["lengths"]
+        diag = {"frames_with_pairs": 0, "pairs_evaluated": 0, "candidates": 0,
+                "skipped_overlap_boxes": 0, "missing_dimension_class": set()}
+
+        per_frame = defaultdict(list)
+        for tid, rows in tracks.items():
+            if not rows:
+                continue
+            cls = self._run3_canonical_class(rows[0].get("class_name", ""))
+            if cls not in widths or widths.get(cls) is None or lengths.get(cls) is None:
+                if str(cls).lower() != "person":
+                    diag["missing_dimension_class"].add(cls)
+                continue
+            valid = [r for r in rows if r.get("_m") is not None]
+            if len(valid) < 2:
+                continue
+            t = np.array([r["_timestamp"] for r in valid]); m = np.array([r["_m"] for r in valid])
+            lo = np.searchsorted(t, t - win, side="left")
+            hi = np.searchsorted(t, t + win, side="right") - 1
+            for k, r in enumerate(valid):
+                if r.get("_zone_num") not in zones:
+                    continue
+                a, b = lo[k], hi[k]
+                if b <= a or t[b] <= t[a]:
+                    continue
+                v = (m[b] - m[a]) / (t[b] - t[a])
+                try:
+                    fr = int(float(r.get("frame", "")))
+                except Exception:
+                    fr = int(round(r["_timestamp"] * 1000))
+                per_frame[fr].append((tid, cls, r["_timestamp"], m[k], v, r["_zone_num"]))
+
+        cand = defaultdict(list)
+        for fr, items in per_frame.items():
+            n = len(items)
+            if n < 2:
+                continue
+            diag["frames_with_pairs"] += 1
+            P = np.array([it[3] for it in items]); V = np.array([it[4] for it in items])
+            W = np.array([widths[it[1]] for it in items]); L = np.array([lengths[it[1]] for it in items])
+            spd = np.hypot(V[:, 0], V[:, 1])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                H = V / spd[:, None]
+            D = P[None, :, :] - P[:, None, :]                         # i -> j
+            d_long = D[..., 0] * H[:, None, 0] + D[..., 1] * H[:, None, 1]
+            d_lat = np.abs(D[..., 0] * H[:, None, 1] - D[..., 1] * H[:, None, 0])
+            v_lead = V[None, :, 0] * H[:, None, 0] + V[None, :, 1] * H[:, None, 1]
+            closing = spd[:, None] - v_lead
+            cosang = H[:, None, 0] * H[None, :, 0] + H[:, None, 1] * H[None, :, 1]
+            same_dir = (spd[None, :] < vmin) | (cosang >= cos_max)
+            S = d_long - (L[:, None] + L[None, :]) / 2.0
+            base = ((spd[:, None] >= vmin) & (d_long > 0) & (d_lat <= (W[:, None] + W[None, :]) / 2.0)
+                    & same_dir & (closing > 0))
+            np.fill_diagonal(base, False)
+            diag["pairs_evaluated"] += int(n * (n - 1))
+            diag["skipped_overlap_boxes"] += int(np.sum(base & (S <= 0)))
+            with np.errstate(divide="ignore", invalid="ignore"):
+                TTC = S / closing
+            ok = base & (S > 0) & (TTC <= ttc_max)
+            for i, j in zip(*np.nonzero(ok)):
+                fi = items[i]; lj = items[j]
+                cand[(fi[0], lj[0])].append((fi[2], fr, float(TTC[i, j]), float(S[i, j]),
+                                             float(closing[i, j]), float(spd[i]), float(spd[j]), fi[5], fi[1], lj[1]))
+                diag["candidates"] += 1
+
+        out = []
+        event_gap = 1.0
+        for (f_id, l_id), lst in cand.items():
+            lst.sort(key=lambda x: x[0])
+            events = [[lst[0]]]
+            for item in lst[1:]:
+                if item[0] - events[-1][-1][0] > event_gap:
+                    events.append([item])
                 else:
-                    diag["overlap_intervals"]+=1; continue
-                pet=t2-t1
-                if pet<=0: continue
-                speed_a = self._run3_event_speed_kmh(event_a.get("Rows", tracks[a_id]), t1, float(self.run3_ppm_var.get()), perspective)
-                speed_b = self._run3_event_speed_kmh(event_b.get("Rows", tracks[b_id]), t2, float(self.run3_ppm_var.get()), perspective)
-                qc_items = [x for x in [
-                    "Threshold_At_or_Below" if pet<=float(self.run3_pet_threshold_var.get()) else "",
-                    "Movement_A_Not_Observed" if not ma else "",
-                    "Movement_B_Not_Observed" if not mb else "",
-                    (f"MovementSourceA={movement_source_by_id.get(a_id,'')}") if ma else "",
-                    (f"MovementSourceB={movement_source_by_id.get(b_id,'')}") if mb else "",
-                    "Vehicle_A_Event_Speed_Unavailable" if speed_a is None else "",
-                    "Vehicle_B_Event_Speed_Unavailable" if speed_b is None else "",
-                ] if x]
-                candidates.append({
-                    "Site_ID":self.run3_site_id_var.get().strip(),
-                    "Interaction_ID":f"{a_id}_{b_id}_{min(a_entry,b_entry):.6f}",
-                    "Vehicle_ID_A":str(a_id),"Vehicle_Class_A":event_a.get("Vehicle_Class", tracks[a_id][0].get("class_name","")),"Movement_A":ma,
-                    "Vehicle_ID_B":str(b_id),"Vehicle_Class_B":event_b.get("Vehicle_Class", tracks[b_id][0].get("class_name","")),"Movement_B":mb,
-                    "Conflict_Type":ctype,"Conflict_Zone":"Zone 6",
-                    "T1_Exit_Time":f"{t1:.6f}","T2_Entry_Time":f"{t2:.6f}","Y4_PET":f"{pet:.6f}",
-                    "Vehicle_A_Speed_kmh":"" if speed_a is None else f"{speed_a:.6f}",
-                    "Vehicle_B_Speed_kmh":"" if speed_b is None else f"{speed_b:.6f}",
-                    "QC_Flag":";".join(dict.fromkeys(qc_items)),
+                    events[-1].append(item)
+            for ev in events:
+                best = min(ev, key=lambda x: x[2])
+                ts, fr, ttc, s_m, cs, vf, vl, zone, cls_f, cls_l = best
+                vf_kmh = vf * 3.6
+                out.append({
+                    "Site_ID": c["site_id"],
+                    "Event_ID": f"{f_id}_{l_id}_{ev[0][0]:.6f}",
+                    "Follower_ID": f_id, "Follower_Class": cls_f, "Movement_Follower": movement_by_id.get(f_id, ""),
+                    "Leader_ID": l_id, "Leader_Class": cls_l, "Movement_Leader": movement_by_id.get(l_id, ""),
+                    "Zone": f"Zone {zone}", "Event_Start": f"{ev[0][0]:.6f}", "Event_End": f"{ev[-1][0]:.6f}",
+                    "Event_Frames": len(ev), "TTCmin_Time": f"{ts:.6f}", "TTCmin_Frame": fr,
+                    "S_Conflict_Distance_m": f"{s_m:.6f}", "CS_Closing_Speed_kmh": f"{cs * 3.6:.6f}",
+                    "Follower_Speed_kmh": f"{vf_kmh:.6f}", "Leader_Speed_kmh": f"{vl * 3.6:.6f}",
+                    "Y4_TTC_s": f"{ttc:.6f}",
+                    "TTC_Level": self._level_ttc(ttc),
+                    "Speed_Level": self._level_ttc_speed(vf_kmh, cls_f),
+                    "QC_Flag": ";".join(x for x in [
+                        "Single_Frame_Event" if len(ev) == 1 else "",
+                        "Leader_Stationary" if vl < vmin else "",
+                        self._run3_qc_calibration(c),
+                    ] if x),
                 })
-        return candidates,diag
+        out.sort(key=lambda r: float(r["TTCmin_Time"]))
+        diag["missing_dimension_class"] = sorted(diag["missing_dimension_class"])
+        return out, diag
+
+    # ========================================================
+    # LDP — Y2 (Lane / Lateral Deviation Position)
+    # ========================================================
+
+    @staticmethod
+    def _rolling_median(values, k):
+        if k <= 1 or len(values) < 3:
+            return np.asarray(values, dtype=float)
+        k = int(k) if int(k) % 2 == 1 else int(k) + 1
+        h = k // 2
+        a = np.asarray(values, dtype=float)
+        return np.array([np.median(a[max(0, i - h): i + h + 1]) for i in range(len(a))])
+
+    def _run3_ldp(self, tracks, c):
+        """LDP = ΔY / (W/2) x 100 (กรมทางหลวง, 2569).
+
+        ΔY: maximum lateral deviation inside the zone, measured either from
+        the vehicle's initial lateral position in that zone ("Initial
+        position", as in the DOH worked example) or from a Line N drawn on
+        the lane centreline. W: lane width entered by the researcher.
+        """
+        W = c["ldp_lane_width_m"]
+        ref = c["ldp_reference"]
+        k = c["ldp_smoothing_samples"]
+        mode = self._run3_calibration_mode(c)
+        centre = None
+        if ref in LINE_NAMES:
+            line = self.lines.get(ref, [])
+            if len(line) != 2:
+                raise ValueError(f"LDP reference {ref} is not drawn/loaded.")
+            centre = self._run3_to_metric(line, c)
+        out = []
+        for tid, rows in tracks.items():
+            if not rows:
+                continue
+            cls = self._run3_canonical_class(rows[0].get("class_name", ""))
+            if cls.lower() == "person":
+                continue
+            if c["ldp_motorcycle_only"] and cls != "Motorcycle":
+                continue
+            by_zone = defaultdict(list)
+            for r in rows:
+                if r.get("_zone_num") in c["ldp_zones"] and r.get("_m") is not None:
+                    by_zone[r["_zone_num"]].append(r)
+            for zone in sorted(by_zone):
+                zr = by_zone[zone]
+                if len(zr) < 3:
+                    continue
+                M = np.array([r["_m"] for r in zr])
+                if centre is None:
+                    lat = self._rolling_median(M[:, 1], k)
+                    base = float(lat[0])
+                    dev = np.abs(lat - base)
+                else:
+                    p0, p1 = centre[0], centre[1]
+                    dvec = p1 - p0; nrm = math.hypot(dvec[0], dvec[1])
+                    signed = ((M[:, 0] - p0[0]) * dvec[1] - (M[:, 1] - p0[1]) * dvec[0]) / nrm
+                    lat = self._rolling_median(signed, k)
+                    base = 0.0
+                    dev = np.abs(lat)
+                dy = float(np.max(dev))
+                ldp = dy / (W / 2.0) * 100.0
+                dt = zr[-1]["_timestamp"] - zr[0]["_timestamp"]
+                dist = self._run3_segment_distance_sum([r["_m"] for r in zr])
+                speed = dist / dt * 3.6 if dt > 0 else None
+                out.append({
+                    "Site_ID": c["site_id"], "Vehicle_ID": tid, "Vehicle_Class": cls, "Zone": f"Zone {zone}",
+                    "Start_Time": f"{zr[0]['_timestamp']:.6f}", "End_Time": f"{zr[-1]['_timestamp']:.6f}",
+                    "Samples": len(zr), "Reference": ref, "Lane_Width_m": f"{W:.3f}",
+                    "Reference_Lateral_m": f"{base:.6f}", "Delta_Y_m": f"{dy:.6f}",
+                    "Y2_LDP_percent": f"{ldp:.3f}",
+                    "Mean_Speed_kmh": self._fmt(speed, 3),
+                    "LDP_Level": self._level_ldp(ldp),
+                    "Speed_Level": self._level_ldp_speed(speed) if speed is not None else "",
+                    "Calibration_Mode": mode,
+                    "QC_Flag": ";".join(x for x in [
+                        "LDP_Above_100_Check_Lane_Width_or_Tracking" if ldp > 100 else "",
+                        "Road_Angle_Default_0_Check" if (c["perspective"] is None and abs(c["axis_deg"]) < 1e-9) else "",
+                        self._run3_qc_calibration(c),
+                    ] if x),
+                })
+        return out
+
+    # ========================================================
+    # RUN 3 — ORCHESTRATION
+    # ========================================================
 
     def run3_processing(self, settings, output_dir, run_name):
-        self.root.after(0, lambda: self.status_var.set("Run 3 — loading Run 2 results..."))
+        c = getattr(self, "_run3_cfg", None) or self._run3_snapshot_config()
+        t_start = time.time()
+        timings = {}
+
+        def status(text):
+            self.root.after(0, lambda t=text: self.status_var.set(t))
+
+        status("Run 3 — loading Run 2 results...")
         detection_rows, id_rows, zone_rows, det_path, id_path, zone_path = self._run3_load_inputs(output_dir, run_name)
         tracks, summaries = self._run3_build_tracks(detection_rows, id_rows)
+        self._run3_attach_metric(tracks, c)
         outputs = {}
-        perspective = self._run3_get_perspective_matrix(silent=True)
-        mapping = {}
-        mapping_parse_error = ""
+        mapping = {}; mapping_parse_error = ""
         try:
-            mapping = self._run3_parse_reference_mapping()
+            mapping = self._run3_parse_reference_mapping(c["mapping_text"])
         except Exception as exc:
             mapping_parse_error = str(exc)
-        movement_by_id, movement_source_by_id = self._run3_build_movement_index(tracks, summaries, mapping)
-        # One canonical vehicle/event map is built once and shared by Speed, Gap, LC, and PET.
-        # The previous version accidentally referenced vehicle_event_map before assignment.
-        vehicle_event_map = self._run3_build_vehicle_event_map(
-            tracks, summaries, movement_by_id, movement_source_by_id
-        )
+        movement_by_id, movement_source_by_id = self._run3_build_movement_index(tracks, summaries, mapping, c["site_id"])
+        tracks_by_zone = defaultdict(int)
+        for rows in tracks.values():
+            for z in {r.get("_zone_num") for r in rows}:
+                if z in ZONE_IDS:
+                    tracks_by_zone[str(z)] += 1
         summary = {
-            "site_id": self.run3_site_id_var.get().strip(),
+            "program_version": "PK Studio V27",
+            "site_id": c["site_id"],
             "inputs": {"detection": det_path, "id_zone_summary": id_path, "zone_summary": zone_path},
-            "calibration": {
-                "mode": "Perspective_Homography" if perspective is not None else "PPM_Only",
-                "ppm": float(self.run3_ppm_var.get()),
-                "perspective_enabled": bool(self.run3_perspective_enabled_var.get()),
-                "perspective_configured": perspective is not None,
-            },
+            "calibration": {"mode": self._run3_calibration_mode(c), "ppm": c["ppm"],
+                            "perspective_enabled": c["perspective_enabled"],
+                            "perspective_configured": c["perspective"] is not None,
+                            "road_direction_angle_deg": c["axis_deg"]},
             "source_counts": {
-                "detection_records": len(detection_rows),
-                "track_ids": len(tracks),
-                "id_zone_summary_rows": len(id_rows),
-                "tracks_by_zone": {str(z): sum(1 for rows in tracks.values() if any(r.get("_zone_num") == z for r in rows)) for z in range(1,7)},
-                "movement_counts": {m: sum(1 for tid in tracks if movement_by_id.get(str(tid), "") == m) for m in RUN3_ALL_MOVEMENTS},
-                "movement_sources": dict(sorted((str(k), v) for k, v in movement_source_by_id.items() if v)),
-                "selected_zones": {"speed": [z for z in range(1,7) if self.run3_speed_zone_vars[z].get()], "lateral_clearance": [z for z in range(1,7) if self.run3_lc_zone_vars[z].get()], "pet": [6] if self.run3_pet_enabled_var.get() else []},
+                "detection_records": len(detection_rows), "track_ids": len(tracks),
+                "id_zone_summary_rows": len(id_rows), "tracks_by_zone": dict(tracks_by_zone),
+                "movement_counts": {m: sum(1 for t in tracks if movement_by_id.get(str(t), "") == m) for m in RUN3_ALL_MOVEMENTS},
+                "selected_zones": {k: sorted(c[k + "_zones"]) for k in ("speed", "lc", "pet", "ttc", "ldp")},
             },
             "diagnostics": {},
+            "indicators": {},
         }
         if mapping_parse_error:
             summary["diagnostics"]["reference_mapping"] = f"Invalid Reference Line Mapping: {mapping_parse_error}"
+        indicator_rows = []
 
         def write_csv(filename, fields, rows):
-            desired = os.path.join(output_dir, filename)
-            csv_file, actual = self._run3_open_csv_safe(desired)
+            csv_file, actual = self._run3_open_csv_safe(os.path.join(output_dir, filename))
             with csv_file as f:
-                w = csv.DictWriter(f, fieldnames=fields)
+                w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
                 w.writeheader()
                 w.writerows(rows)
             return actual
 
-        # Master Vehicle Event Map — one row per Vehicle_ID.
-        vehicle_map_rows = self._run3_export_vehicle_event_map(
-            vehicle_event_map,
-            self.run3_site_id_var.get().strip()
-        )
-        vehicle_map_fields = [
-            "Site_ID","Vehicle_ID","Vehicle_Class","Movement","Movement_Source",
-            "First_Zone","Last_Zone","Zone_Sequence",
-            "First_Observed_Time","Last_Observed_Time","Track_Duration_s"
-        ]
-        vehicle_map_path = write_csv(
-            "Run_3_Vehicle_Event_Map.csv",
-            vehicle_map_fields,
-            vehicle_map_rows
-        )
-        outputs["vehicle_event_map"] = vehicle_map_path
+        def indicator(code, name, domain, unit, group, values, note=""):
+            s = self._run3_stats(values)
+            indicator_rows.append({
+                "Site_ID": c["site_id"], "Code": code, "Indicator": name, "Domain": domain, "Unit": unit,
+                "Group": group, "N": s["N"], "Mean": self._fmt(s["Mean"], 4), "SD": self._fmt(s["SD"], 4),
+                "Median": self._fmt(s["Median"], 4), "Min": self._fmt(s["Min"], 4), "Max": self._fmt(s["Max"], 4),
+                "P85": self._fmt(s["P85"], 4), "Note": note,
+            })
+            return s
 
-        # Speed
-        if self.run3_speed_enabled_var.get():
+        def run_step(key, filename, func):
+            if not c.get(key + "_enabled"):
+                return
+            t0 = time.time()
             try:
-                ppm = float(self.run3_ppm_var.get())
-                speed_rows = self._run3_speed(tracks, ppm, perspective, vehicle_event_map)
-                # Main Speed CSV: one row per Vehicle_ID and only research-facing Y1/Y2 outputs.
-                # Frame/time/distance audit details are already available in Run 2 Detection Records.
-                vehicle_summary_fields = [
-                    "Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone_Sequence",
-                    "Zone1_Speed_kmh",
-                    "Y1_Zone2_Speed_kmh","Y1_Zone4_Speed_kmh",
-                    "Zone6_Speed_kmh",
-                    "Y2_Zone3_Speed_kmh","Y2_Zone5_Speed_kmh",
-                    "Calibration_Mode","QC_Flag"
-                ]
-                vehicle_summary_rows = self._run3_speed_compact_summary(speed_rows, tracks, vehicle_event_map)
-                path = write_csv("Run_3_Speed.csv", vehicle_summary_fields, vehicle_summary_rows)
-
-                vals_y1 = [float(r["Speed_kmh"]) for r in speed_rows if r["Speed_Variable"] == "Y1"]
-                vals_y2 = [float(r["Speed_kmh"]) for r in speed_rows if r["Speed_Variable"] == "Y2"]
-                summary["speed"] = {
-                    "Y1_P85": float(np.percentile(vals_y1,85)) if vals_y1 else None,
-                    "Y2_P85": float(np.percentile(vals_y2,85)) if vals_y2 else None,
-                    "Y1_N": len(vals_y1), "Y2_N": len(vals_y2),
-                    "vehicle_rows": len(vehicle_summary_rows),
-                    "detail_rows": len(speed_rows),
-                }
-                summary["diagnostics"]["speed"] = (
-                    f"OK; vehicle_rows={len(vehicle_summary_rows)}; selected_zones={[z for z in range(1,7) if self.run3_speed_zone_vars[z].get()]}"
-                    if speed_rows else
-                    f"No valid speed observations from selected zones={[z for z in range(1,7) if self.run3_speed_zone_vars[z].get()]}"
-                )
-                outputs["speed"] = path
+                func()
             except Exception as e:
-                fields = ["Error"]
-                path = write_csv("Run_3_Speed.csv", fields, [{"Error": str(e)}])
-                summary["diagnostics"]["speed"] = f"ERROR: {e}"
-                outputs["speed"] = path
+                outputs[key] = write_csv(filename, ["Error"], [{"Error": str(e)}])
+                summary["diagnostics"][key] = f"ERROR: {e}"
+            timings[key] = round(time.time() - t0, 3)
 
-        # Gap Acceptance (two-stage binary: Access / Exit)
-        # Keep the variable defined even when _run3_gap fails; this prevents a
-        # secondary UnboundLocalError from masking the original diagnostic.
-        gap_rows = []
-        # CSV column order is intentionally grouped for human readability:
-        # movement filter → Decision Zone (1/4/6) → waiting time → conflict vehicles → gap/X31 → Y5 → QC.
-        if self.run3_gap_enabled_var.get():
-            try:
-                gap_rows = self._run3_gap(tracks, summaries, mapping, vehicle_event_map)
-                fields = [
-                    # Organized for direct reading:
-                    # decision/subject → opportunity → waiting → conflict vehicles → raw gap → X31/Y5 → QC
-                    "Site_ID","Decision_Event_ID","Opportunity_No",
-                    "Subject_ID","Subject_Class","Subject_Movement","Decision_Stage","Decision_Zone",
-                    "Gap_Evaluation_Time","X32_Waiting_Time",
-                    "Conflicting_Movement",
-                    "Conflicting_ID_A","Conflicting_Class_A",
-                    "Conflicting_ID_B","Conflicting_Class_B",
-                    "Gap_Start_Time","Gap_End_Time",
-                    "X31_Available_Gap",
-                    "Subject_Speed_kmh","Conflict_Speed_A_kmh","Conflict_Speed_B_kmh",
-                    "Gap_Role","Y5_Gap_Acceptance","Decision_Time",
-                    "QC_Flag"
-                ]
-                path = write_csv("Run_3_Gap_Acceptance.csv", fields, gap_rows)
-                rejected_by_driver = defaultdict(list); accepted_by_driver = defaultdict(list)
-                for r in gap_rows:
-                    if r.get("X31_Available_Gap", "") in ("", None) or r.get("Y5_Gap_Acceptance", "") in ("", None):
-                        continue
-                    key = (r["Subject_Class"], r["Subject_Movement"], r.get("Decision_Stage", "Access"), r["Subject_ID"])
-                    gap = float(r["X31_Available_Gap"])
-                    if str(r["Y5_Gap_Acceptance"]) == "0":
-                        rejected_by_driver[key].append(gap)
-                    elif str(r["Y5_Gap_Acceptance"]) == "1":
-                        accepted_by_driver[key].append(gap)
-                critical = []
-                groups = defaultdict(lambda: {"accepted": [], "rejected": [], "intervals": [], "invalid_intervals": 0})
-                invalid_mle_intervals = 0
-                for key in set(rejected_by_driver) | set(accepted_by_driver):
-                    acc = accepted_by_driver.get(key, []); rej = rejected_by_driver.get(key, [])
-                    if acc and rej:
-                        acc_value = float(acc[-1])
-                        rej_value = float(max(rej))
-                        group_key = (key[0], key[1], key[2])
-                        groups[group_key]["accepted"].append(acc_value)
-                        groups[group_key]["rejected"].append(rej_value)
-                        if rej_value < acc_value:
-                            groups[group_key]["intervals"].append((rej_value, acc_value))
-                        else:
-                            groups[group_key]["invalid_intervals"] += 1
-                            invalid_mle_intervals += 1
-                for (cls, movement, stage), g in groups.items():
-                    cr = self._run3_raff(g["accepted"], g["rejected"]) if self.run3_use_raff_var.get() else None
-                    mle = self._run3_mle_driver_intervals(g["intervals"]) if self.run3_use_mle_var.get() else None
-                    critical.append({
-                        "Site_ID": self.run3_site_id_var.get().strip(), "Vehicle_Class": cls, "Movement": movement,
-                        "Decision_Stage": stage,
-                        "Drivers_With_Pairs": len(g["accepted"]),
-                        "Valid_MLE_Intervals": len(g["intervals"]),
-                        "Invalid_MLE_Intervals": g["invalid_intervals"],
-                        "Raff_Critical_Gap_s": "" if cr is None else f"{cr:.6f}",
-                        "MLE_Critical_Gap_Median_s": "" if mle is None else f"{mle['critical_gap_median']:.6f}",
-                        "MLE_mu": "" if mle is None else f"{mle['mu']:.6f}",
-                        "MLE_sigma": "" if mle is None else f"{mle['sigma']:.6f}",
-                    })
-                gap_diag = getattr(self, "_run3_gap_diag", {})
-                summary["gap_acceptance"] = {
-                    "gap_events": len(gap_rows),
-                    "decision_events": len(set(r["Decision_Event_ID"] for r in gap_rows)),
-                    "accepted_events": sum(1 for r in gap_rows if r["Y5_Gap_Acceptance"] == 1),
-                    "rejected_events": sum(1 for r in gap_rows if r["Y5_Gap_Acceptance"] == 0),
-                    "stage1_access_accepted": sum(1 for r in gap_rows if r.get("Decision_Stage") == "Access" and r["Y5_Gap_Acceptance"] == 1),
-                    "stage1_access_rejected": sum(1 for r in gap_rows if r.get("Decision_Stage") == "Access" and r["Y5_Gap_Acceptance"] == 0),
-                    "stage2_exit_accepted": sum(1 for r in gap_rows if r.get("Decision_Stage") == "Exit" and r["Y5_Gap_Acceptance"] == 1),
-                    "stage2_exit_rejected": sum(1 for r in gap_rows if r.get("Decision_Stage") == "Exit" and r["Y5_Gap_Acceptance"] == 0),
-                    "critical_gap": critical,
-                    "invalid_mle_intervals_excluded": invalid_mle_intervals,
-                    "reference_mapping_rows": len(mapping),
-                    "diagnostic_detail": gap_diag,
-                }
-                if gap_rows:
-                    fallback = gap_diag.get("reference_line_fallback_movements", [])
-                    subject_events = gap_diag.get("subject_decision_events", 0)
-                    conflict_counts = gap_diag.get("conflict_events_by_movement", {})
-                    summary["diagnostics"]["gap_acceptance"] = (
-                        f"OK; binary_two_stage; stage1_access_acc={gap_diag.get('stage1_accepted_total', 0)}; "
-                        f"stage1_access_rej={gap_diag.get('stage1_rejected_total', 0)}; "
-                        f"stage2_exit_acc={gap_diag.get('stage2_accepted_total', 0)}; "
-                        f"stage2_exit_rej={gap_diag.get('stage2_rejected_total', 0)}; "
-                        f"output_rows={gap_diag.get('binary_gap_output_rows', 0)}; "
-                        f"zone6_hold_events={gap_diag.get('subject_zone6_hold_events', 0)}; "
-                        f"zone6_hold_resumed={gap_diag.get('subject_zone6_hold_resumed', 0)}; "
-                        f"zone6_hold_censored={gap_diag.get('subject_zone6_hold_censored', 0)}; "
-                        f"conflict_events={conflict_counts}; "
-                        f"fallback_movements={fallback}"
-                    )
-                else:
-                    summary["diagnostics"]["gap_acceptance"] = (
-                        f"No binary Gap rows. subject_tracks={gap_diag.get('subject_tracks', 0)}; "
-                        f"stage1_access_acc={gap_diag.get('stage1_accepted_total', 0)}; "
-                        f"stage1_access_rej={gap_diag.get('stage1_rejected_total', 0)}; "
-                        f"stage2_exit_acc={gap_diag.get('stage2_accepted_total', 0)}; "
-                        f"stage2_exit_rej={gap_diag.get('stage2_rejected_total', 0)}; "
-                        f"without_decision_zone={gap_diag.get('subject_without_decision_zone', 0)}; "
-                        f"without_zone6_entry={gap_diag.get('subject_without_zone6_entry', 0)}; "
-                        f"conflict_events={gap_diag.get('conflict_events_by_movement', {})}; "
-                        f"candidate_intervals={gap_diag.get('candidate_intervals_by_movement', {})}; "
-                        f"fallback_movements={gap_diag.get('reference_line_fallback_movements', [])}; "
-                        f"mapping_rows={len(mapping)}; "
-                        f"configured_lines={sum(1 for v in self.lines.values() if len(v)==2)}"
-                    )
-                outputs["gap_acceptance"] = path
-            except Exception as e:
-                fields = ["Error"]
-                path = write_csv("Run_3_Gap_Acceptance.csv", fields, [{"Error": str(e)}])
-                summary["diagnostics"]["gap_acceptance"] = f"ERROR: {e}"
-                outputs["gap_acceptance"] = path
+        # ---------------- Y1 Lateral Clearance (distance) ----------------
+        def do_lc():
+            status("Run 3 — Y1 Lateral Clearance...")
+            rows, seen, tol = self._run3_lateral_clearance(tracks, c)
+            fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Neighbor_ID","Neighbor_Class","Neighbor_Side","LS_Pixel","PPM","LS_Meter","Wm","Wv","Y1_Lateral_Clearance","QC_Flag"]
+            outputs["lateral_clearance"] = write_csv("Run_3_Y1_Lateral_Clearance.csv", fields, rows)
+            s = indicator("Y1", "Lateral Clearance", "Distance", "m", "All", [float(r["Y1_Lateral_Clearance"]) for r in rows])
+            summary["indicators"]["Y1_Lateral_Clearance"] = s
+            summary["diagnostics"]["lc"] = f"rows={len(rows)}; time-matched candidates={seen}; time_tolerance_s={tol:.6f}"
+        run_step("lc", "Run_3_Y1_Lateral_Clearance.csv", do_lc)
 
-        # Lateral Clearance
-        if self.run3_lc_enabled_var.get():
-            try:
-                ppm = float(self.run3_ppm_var.get()); axis = float(self.run3_lateral_axis_angle_var.get()); long_window = float(self.run3_lc_longitudinal_window_var.get())
-                lc_rows, lc_candidates_seen, lc_tol = self._run3_lateral_clearance(tracks, ppm, axis, long_window, perspective, vehicle_event_map)
-                fields = ["Site_ID","Pair_ID","Timestamp","Zone",
-                          "Motorcycle_ID","Motorcycle_Class","Motorcycle_Movement",
-                          "Neighbor_ID","Neighbor_Class","Neighbor_Movement","Neighbor_Side",
-                          "Motorcycle_Speed_kmh","Neighbor_Speed_kmh",
-                          "LS_Meter","Y3_Lateral_Clearance","QC_Flag"]
-                path = write_csv("Run_3_Lateral_Clearance.csv", fields, lc_rows)
-                vals = [float(r["Y3_Lateral_Clearance"]) for r in lc_rows]
-                summary["lateral_clearance"] = {"N": len(vals), "Mean_m": float(np.mean(vals)) if vals else None, "Median_m": float(np.median(vals)) if vals else None, "Minimum_m": float(np.min(vals)) if vals else None, "Maximum_m": float(np.max(vals)) if vals else None}
-                summary["diagnostics"]["lateral_clearance"] = (f"OK; zones={sorted(self.run3_lc_zone_vars[z].get() and z or 0 for z in range(1,7) if self.run3_lc_zone_vars[z].get())}; candidate pairs={lc_candidates_seen}; time_tolerance_s={lc_tol:.6f}" if lc_rows else f"No valid pairs. selected_zones={[z for z in range(1,7) if self.run3_lc_zone_vars[z].get()]}; candidate same-zone time-matched pairs={lc_candidates_seen}; time_tolerance_s={lc_tol:.6f}; check motorcycle class, selected Zone coverage, PPM/perspective, and longitudinal window.")
-                outputs["lateral_clearance"] = path
-            except Exception as e:
-                fields = ["Error"]
-                path = write_csv("Run_3_Lateral_Clearance.csv", fields, [{"Error": str(e)}])
-                summary["diagnostics"]["lateral_clearance"] = f"ERROR: {e}"
-                outputs["lateral_clearance"] = path
+        # ---------------- Y2 LDP (distance) ----------------
+        def do_ldp():
+            status("Run 3 — Y2 LDP...")
+            rows = self._run3_ldp(tracks, c)
+            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Zone","Start_Time","End_Time","Samples","Reference","Lane_Width_m","Reference_Lateral_m","Delta_Y_m","Y2_LDP_percent","Mean_Speed_kmh","LDP_Level","Speed_Level","Calibration_Mode","QC_Flag"]
+            outputs["ldp"] = write_csv("Run_3_Y2_LDP.csv", fields, rows)
+            vals = [float(r["Y2_LDP_percent"]) for r in rows]
+            s = indicator("Y2", "Lane/Lateral Deviation Position (LDP)", "Distance", "%", "All", vals,
+                          f"reference={c['ldp_reference']}; W={c['ldp_lane_width_m']} m")
+            s["Level_Counts"] = {lv: sum(1 for r in rows if r["LDP_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
+            summary["indicators"]["Y2_LDP"] = s
+            summary["diagnostics"]["ldp"] = f"rows={len(rows)}; zones={sorted(c['ldp_zones'])}; motorcycle_only={c['ldp_motorcycle_only']}"
+        run_step("ldp", "Run_3_Y2_LDP.csv", do_ldp)
 
-        # PET
-        if self.run3_pet_enabled_var.get():
-            try:
-                interaction = float(self.run3_pet_interaction_distance_var.get())
-                pet_rows, pet_diag = self._run3_pet(
-                    tracks, summaries, interaction, perspective, mapping,
-                    movement_by_id, movement_source_by_id, vehicle_event_map
-                )
-                fields = ["Site_ID","Interaction_ID",
-                          "Vehicle_ID_A","Vehicle_Class_A","Movement_A",
-                          "Vehicle_ID_B","Vehicle_Class_B","Movement_B",
-                          "Conflict_Type","Conflict_Zone",
-                          "T1_Exit_Time","T2_Entry_Time","Y4_PET",
-                          "Vehicle_A_Speed_kmh","Vehicle_B_Speed_kmh",
-                          "QC_Flag"]
-                path = write_csv("Run_3_PET.csv", fields, pet_rows)
-                vals = [float(r["Y4_PET"]) for r in pet_rows]
-                threshold = float(self.run3_pet_threshold_var.get())
-                summary["pet"] = {"Total_Events": len(vals), "Mean_s": float(np.mean(vals)) if vals else None, "Median_s": float(np.median(vals)) if vals else None, "Minimum_s": float(np.min(vals)) if vals else None, "Maximum_s": float(np.max(vals)) if vals else None, "PET_At_or_Below_Threshold": sum(v <= threshold for v in vals)}
-                summary["diagnostics"]["pet"] = (f"OK; {pet_diag}" if pet_rows else f"No valid PET events; {pet_diag}. Check Zone 6 coverage, Zone Sequence movement labels, and interaction distance." )
-                outputs["pet"] = path
-            except Exception as e:
-                fields = ["Error"]
-                path = write_csv("Run_3_PET.csv", fields, [{"Error": str(e)}])
-                summary["diagnostics"]["pet"] = f"ERROR: {e}"
-                outputs["pet"] = path
+        # ---------------- Y3 Gap Acceptance (time) ----------------
+        def do_gap():
+            status("Run 3 — Y3 Gap Acceptance...")
+            gap_rows = self._run3_gap(tracks, c, mapping, movement_by_id)
+            fields = ["Site_ID","Decision_Event_ID","Subject_ID","Subject_Class","Subject_Movement","Conflicting_Movement","Conflicting_ID_A","Conflicting_ID_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","X32_Waiting_Time","Gap_Role","Y3_Gap_Acceptance","Acceptance_Time","QC_Flag"]
+            outputs["gap_acceptance"] = write_csv("Run_3_Y3_Gap_Acceptance.csv", fields, gap_rows)
+            rejected = defaultdict(list); accepted = defaultdict(list)
+            for r in gap_rows:
+                key = (r["Subject_Class"], r["Subject_Movement"], r["Subject_ID"])
+                (accepted if r["Y3_Gap_Acceptance"] == 1 else rejected)[key].append(float(r["X31_Available_Gap"]))
+            groups = defaultdict(lambda: {"accepted": [], "rejected": [], "intervals": []})
+            for key in set(rejected) | set(accepted):
+                acc = accepted.get(key, []); rej = rejected.get(key, [])
+                if acc and rej:
+                    g = groups[(key[0], key[1])]
+                    g["accepted"].append(acc[-1]); g["rejected"].append(max(rej))
+                    g["intervals"].append((max(rej), acc[-1]))
+            critical = []
+            for (cls, movement), g in sorted(groups.items()):
+                cr = self._run3_raff(g["accepted"], g["rejected"]) if c["use_raff"] else None
+                mle = self._run3_mle_driver_intervals(g["intervals"]) if c["use_mle"] else None
+                critical.append({
+                    "Site_ID": c["site_id"], "Vehicle_Class": cls, "Movement": movement,
+                    "Drivers_With_Pairs": len(g["intervals"]),
+                    "Raff_Critical_Gap_s": self._fmt(cr), "MLE_Critical_Gap_Median_s": self._fmt(mle["critical_gap_median"] if mle else None),
+                    "MLE_mu": self._fmt(mle["mu"] if mle else None), "MLE_sigma": self._fmt(mle["sigma"] if mle else None),
+                })
+            if critical:
+                outputs["critical_gap"] = write_csv("Run_3_Y3_Critical_Gap.csv", list(critical[0].keys()), critical)
+            acc_vals = [float(r["X31_Available_Gap"]) for r in gap_rows if r["Y3_Gap_Acceptance"] == 1]
+            rej_vals = [float(r["X31_Available_Gap"]) for r in gap_rows if r["Y3_Gap_Acceptance"] == 0]
+            indicator("Y3", "Gap Acceptance — accepted gaps", "Time", "s", "Accepted", acc_vals)
+            indicator("Y3", "Gap Acceptance — rejected gaps", "Time", "s", "Rejected", rej_vals)
+            summary["indicators"]["Y3_Gap_Acceptance"] = {
+                "gap_rows": len(gap_rows),
+                "decision_events": len({r["Decision_Event_ID"] for r in gap_rows}),
+                "accepted_events": len(acc_vals), "rejected_events": len(rej_vals),
+                "critical_gap": critical, "reference_mapping_rows": len(mapping),
+            }
+            if not mapping:
+                summary["diagnostics"]["gap"] = "No Reference Line Mapping entered; CSV header only. Enter Site_ID|Movement|Line N for subject and conflict movements."
+            else:
+                summary["diagnostics"]["gap"] = "OK" if gap_rows else "No valid gap-decision events under the configured mapping."
+        run_step("gap", "Run_3_Y3_Gap_Acceptance.csv", do_gap)
 
-        # Cross-module Event Index for traceability; calculations are unchanged.
-        event_index_rows = self._run3_build_event_index(
-            self.run3_site_id_var.get().strip(),
-            speed_rows if self.run3_speed_enabled_var.get() else [],
-            gap_rows if self.run3_gap_enabled_var.get() else [],
-            lc_rows if self.run3_lc_enabled_var.get() else [],
-            pet_rows if self.run3_pet_enabled_var.get() else [],
-        )
-        event_index_fields = [
-            "Site_ID","Module","Event_ID","Vehicle_ID","Related_Vehicle_ID",
-            "Movement","Zone","Start_Time","End_Time","Source_File","QC_Flag"
-        ]
-        event_index_path = write_csv(
-            "Run_3_Event_Index.csv",
-            event_index_fields,
-            event_index_rows
-        )
-        outputs["event_index"] = event_index_path
+        # ---------------- Y4 TTC (time) ----------------
+        def do_ttc():
+            status("Run 3 — Y4 TTC...")
+            rows, diag = self._run3_ttc(tracks, c, movement_by_id)
+            fields = ["Site_ID","Event_ID","Follower_ID","Follower_Class","Movement_Follower","Leader_ID","Leader_Class","Movement_Leader","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","S_Conflict_Distance_m","CS_Closing_Speed_kmh","Follower_Speed_kmh","Leader_Speed_kmh","Y4_TTC_s","TTC_Level","Speed_Level","QC_Flag"]
+            outputs["ttc"] = write_csv("Run_3_Y4_TTC.csv", fields, rows)
+            vals = [float(r["Y4_TTC_s"]) for r in rows]
+            s = indicator("Y4", "Time-to-Collision (TTCmin per event)", "Time", "s", "All", vals,
+                          f"events with TTCmin <= {c['ttc_max_record_s']} s")
+            s["Level_Counts"] = {lv: sum(1 for r in rows if r["TTC_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
+            summary["indicators"]["Y4_TTC"] = s
+            summary["diagnostics"]["ttc"] = diag
+        run_step("ttc", "Run_3_Y4_TTC.csv", do_ttc)
+
+        # ---------------- Y5 PET (time) ----------------
+        def do_pet():
+            status("Run 3 — Y5 PET...")
+            rows, diag = self._run3_pet(tracks, c, movement_by_id, movement_source_by_id)
+            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Y5_PET","PET_Risk_Level","QC_Flag"]
+            outputs["pet"] = write_csv("Run_3_Y5_PET.csv", fields, rows)
+            vals = [float(r["Y5_PET"]) for r in rows]
+            s = indicator("Y5", "Post-Encroachment Time", "Time", "s", "All", vals)
+            s["At_or_Below_Threshold"] = sum(v <= c["pet_threshold"] for v in vals)
+            s["Level_Counts"] = {lv: sum(1 for r in rows if r["PET_Risk_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
+            for z in sorted(c["pet_zones"]):
+                indicator("Y5", "Post-Encroachment Time", "Time", "s", f"Zone {z}",
+                          [float(r["Y5_PET"]) for r in rows if r["Conflict_Zone"] == f"Zone {z}"])
+            summary["indicators"]["Y5_PET"] = s
+            summary["diagnostics"]["pet"] = diag
+        run_step("pet", "Run_3_Y5_PET.csv", do_pet)
+
+        # ---------------- Y6 V50 / Y7 V85 (speed) ----------------
+        def do_speed():
+            status("Run 3 — Y6/Y7 Speed...")
+            speed_rows = self._run3_speed(tracks, c)
+            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Speed_Type","Zone","Start_Time","End_Time","Start_Frame","End_Frame","Distance_m","Speed_kmh","Calibration_Mode","QC_Flag"]
+            outputs["speed_detail"] = write_csv("Run_3_Speed_Detail.csv", fields, speed_rows)
+            vs = self._run3_speed_vehicle_summary(speed_rows, tracks, c)
+            outputs["speed"] = write_csv("Run_3_Speed.csv", self._run3_speed_vehicle_summary_fields(), vs)
+            stats = self._run3_speed_statistics(speed_rows, c)
+            outputs["speed_statistics"] = write_csv("Run_3_Y6_Y7_Speed_Statistics.csv",
+                ["Site_ID","Speed_Type","Vehicle_Class","N","Mean_kmh","SD_kmh","Y6_V50_kmh","Y7_V85_kmh","V85_minus_V50_kmh","Min_kmh","Max_kmh"], stats)
+            by_role = defaultdict(list)
+            for r in speed_rows:
+                by_role[r["Speed_Type"]].append(float(r["Speed_kmh"]))
+            spd = {}
+            for role in ("Approach", "Exit", "Access_Mouth", "Middle_Access", "Conflict_Zone7"):
+                if role in by_role:
+                    # One row per group: Median column = Y6 (V50), P85 column = Y7 (V85)
+                    s = indicator("Y6/Y7", "Speed: V50 = Median, V85 = P85 (Mean, SD)", "Speed", "km/h", role, by_role[role])
+                    spd[role] = {"N": s["N"], "Mean": s["Mean"], "SD": s["SD"], "Y6_V50": s["P50"], "Y7_V85": s["P85"]}
+            summary["indicators"]["Y6_Y7_Speed"] = spd
+            summary["diagnostics"]["speed"] = f"vehicle_rows={len(vs)}; detail_rows={len(speed_rows)}; zones={sorted(c['speed_zones'])}"
+        run_step("speed", "Run_3_Speed.csv", do_speed)
+
+        if indicator_rows:
+            outputs["indicator_summary"] = write_csv(
+                "Run_3_Indicator_Summary.csv",
+                ["Site_ID","Code","Indicator","Domain","Unit","Group","N","Mean","SD","Median","Min","Max","P85","Note"],
+                indicator_rows)
 
         summary["architecture"] = {
-            "movement_resolver": "Common: ID Zone Summary first_zone + last_zone, then shared fallbacks",
-            "run3_calculation_inputs": ["Run_2_Detection_Records.csv", "Run_2_ID_Zone_Summary.csv"],
-            "run2_zone_summary_role": "Audit-only; not duplicated as a Run 3 calculation input",
-            "pet_uses_ppm": False,
-            "pet_uses_road_direction_angle": False,
-            "common_vehicle_event_map": "Shared Vehicle_ID/Class/Movement/Zone records for Speed, LC, PET, and Gap; no ID invention or reassignment",
-            "csv_output_policy": "Four compact analytical CSVs plus one Vehicle Event Map and one cross-module Event Index; raw calculation fields remain in Run 2 source records when not needed in the main outputs; Gap/LC/PET main CSVs include local observed event speeds for contextual interpretation",
+            "indicator_codes": "Y1 LC, Y2 LDP, Y3 Gap Acceptance, Y4 TTC, Y5 PET, Y6 V50, Y7 V85",
+            "domains": {"Distance": ["Y1", "Y2"], "Time": ["Y3", "Y4", "Y5"], "Speed": ["Y6", "Y7"]},
+            "movement_resolver": "Common: ID Zone Summary first_zone + last_zone, then shared fallbacks (Zones 6/7 ignored as endpoints)",
+            "metric_coordinates": "Computed once per sample (batch); perspective or PPM + road angle",
+            "risk_levels": "Exported per dimension; combination rule not defined in sources",
         }
-        summary_path = os.path.join(output_dir, "Run_3_Summary.json")
+        summary["timings_s"] = dict(timings, total=round(time.time() - t_start, 3))
         summary["outputs"] = outputs
+        summary_path = os.path.join(output_dir, "Run_3_Summary.json")
         with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=4, ensure_ascii=False)
+            json.dump(self._json_safe(summary), f, indent=4, ensure_ascii=False)
         outputs["summary"] = summary_path
         self.run3_last_outputs = outputs
-        counts = []
-        for key in ("speed", "gap_acceptance", "lateral_clearance", "pet"):
-            p = outputs.get(key)
-            counts.append(f"{key}={'written' if p else 'off'}")
-        self.root.after(0, lambda c=" | ".join(counts): self.run3_result_text.set("Run 3 completed | " + c))
+        self.run3_last_summary = summary
+        done = [k for k in ("lc", "ldp", "gap", "ttc", "pet", "speed") if c.get(k + "_enabled")]
+        msg = f"Run 3 completed in {summary['timings_s']['total']:.1f} s | " + ", ".join(done)
+        self.root.after(0, lambda m=msg: self.run3_result_text.set(m))
         return outputs
 
     def finish_integrated_ui(self, stopped, output_video, output_csv, output_settings, output_summary, output_id_zone_summary=None, output_zone_summary=None):
         self.running = False
+        self._rt = None
         self.start_button.config(state="normal")
         self.pause_button.config(state="disabled", text="Ⅱ PAUSE")
         self.stop_button.config(state="disabled")
