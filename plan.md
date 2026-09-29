@@ -7,17 +7,17 @@
 ## ▶ ทำต่อจากตรงนี้
 
 - **สถานะปัจจุบัน:** ตรวจโค้ด v27 เสร็จ, เอกสารครบ, git init + นำเข้าประวัติเวอร์ชันแล้ว ยังไม่ได้แก้โค้ดใด ๆ
-- **ขั้นถัดไป:** (1) ตั้ง remote GitHub แล้ว push ครั้งแรก (ข้อ 0.4)  (2) เริ่มเฟส 1 ด้านล่าง โดยเริ่มที่ข้อ 1.1 — commit แรกของเฟส 1 ควรเป็น `Run3 v27(1): ...`
+- **ขั้นถัดไป:** เริ่มเฟส 1 ด้านล่าง โดยเริ่มที่ข้อ 1.1 — commit แรกของเฟส 1 ควรเป็น `Run3 v27(1): ...`
 - **ไฟล์โค้ดปัจจุบัน:** `PKStudio.py` (ในโฟลเดอร์ repo `PK STUDIO/Run`; เท่ากับ v27 ล้วน ๆ ที่ tag `v27`)
 - **ตั้งค่า git แล้ว:** ประวัติ 61 commits (Run0 → Run3 v27) นำเข้าแล้ว; รูปแบบ commit message ดู `CLAUDE.md`; ไฟล์เวอร์ชันเก่าสำรองที่ `PK STUDIO/_Run_backup_before_git/`
-- **Remote (push):** ยังไม่ได้ตั้ง — รอผู้ใช้ให้ URL ของ GitHub repo (private)
+- **Remote (push):** `origin` = https://github.com/boss8152060-cyber/PKT-Project.git (push แล้ว: main + tag v27)
 
 ## เฟส 0 — เตรียมงาน
 
 - [x] 0.1 ตั้งค่า git (ชื่อ, อีเมล) — ทำแล้ว (2026-09-29)
 - [x] 0.2 `.gitignore` + `git init` ที่ `PK STUDIO/Run` (2026-09-29)
 - [x] 0.3 นำเข้าไฟล์เวอร์ชันเก่า 61 ไฟล์เป็น 61 commits ของ `PKStudio.py` (ตรวจ hash ตรงทุก commit) และย้ายไฟล์เก่าไป `_Run_backup_before_git/` (2026-09-29)
-- [ ] 0.4 ตั้ง remote GitHub (private) และ push ครั้งแรก + tag `v27` — รอ URL จากผู้ใช้
+- [x] 0.4 ตั้ง remote GitHub และ push ครั้งแรก + tag `v27` (2026-09-29)
 
 ## เฟส 1 — แก้บั๊กที่กระทบผลลัพธ์ (โค้ด v28)
 
@@ -56,4 +56,4 @@
 
 | วันที่ | สิ่งที่ทำ | ไฟล์ที่เกี่ยวข้อง | ค้างอยู่ |
 |---|---|---|---|
-| 2026-09-29 | ตรวจ v27, เขียน overview, CLAUDE.md, plan.md, GIT_GUIDE.md; git init + import 61 commits (`Run0` … `Run3 v27`) + .gitignore + tag v27 | `PROJECT_OVERVIEW.md`, `CLAUDE.md`, `plan.md`, `GIT_GUIDE.md` | ยังไม่แก้โค้ด, ยังไม่ได้ push (ไม่มี remote) |
+| 2026-09-29 | ตรวจ v27, เขียน overview, CLAUDE.md, plan.md, GIT_GUIDE.md; git init + import 61 commits (`Run0` … `Run3 v27`) + .gitignore + tag v27 | `PROJECT_OVERVIEW.md`, `CLAUDE.md`, `plan.md`, `GIT_GUIDE.md` | ยังไม่แก้โค้ด, push ขึ้น GitHub แล้ว |
