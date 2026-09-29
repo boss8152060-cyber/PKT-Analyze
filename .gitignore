@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# Large / sensitive data: keep OUT of git (road users' faces/plates, models, datasets)
+*.pt
+*.mp4
+*.avi
+*.mov
+*.zip
+*.jpg
+*.jpeg
+*.png
+Output/
+Dataset/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
