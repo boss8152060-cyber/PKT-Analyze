@@ -34,7 +34,8 @@
 - ตรวจก่อน commit ทุกครั้ง (รันจากโฟลเดอร์ `PK STUDIO/Run`):
   1. `python -m py_compile PKStudio.py`
   2. `python -m unittest discover -s tests -v` — unit test ของส่วน CORE (ระหว่าง `# ==== CORE-BEGIN` … `CORE-END` ใน `PKStudio.py`; ฟังก์ชันคำนวณที่ไม่พึ่ง GUI ให้ใส่ในส่วนนี้เพื่อทดสอบได้)
-  3. `python tests/smoke_gui.py` — สร้างหน้าต่างโปรแกรมแบบซ่อน ทดสอบ settings/validation (ต้องมี torch; ใส่พาธ `Detection_Records.csv` เป็นอาร์กิวเมนต์เพื่อทดสอบตัวจับ Movement กับข้อมูลจริง)
+  3. `python tests/e2e_run3.py` — รัน Run 3 จริงบนฉากสังเคราะห์ที่รู้คำตอบ (เพิ่มการตรวจของตัวชี้วัดใหม่ทุกตัวในไฟล์นี้)
+  4. `python tests/smoke_gui.py` — สร้างหน้าต่างโปรแกรมแบบซ่อน ทดสอบ settings/validation (ต้องมี torch; ใส่พาธ `Detection_Records.csv` เป็นอาร์กิวเมนต์เพื่อทดสอบตัวจับ Movement กับข้อมูลจริง)
   - ตัวชี้วัดใหม่ทุกตัวต้องมี unit test ด้วยข้อมูลสังเคราะห์ที่รู้คำตอบ
 - ไม่รันสิ่งที่หนักหรือลบข้อมูล (Dataset zip ~48 GB, วิดีโอ, `Output/`) โดยไม่ถามก่อน
 - โปรแกรมลบไฟล์ `*_Research_*.csv` รุ่นเก่าในโฟลเดอร์ output ของ Run เดิมโดยอัตโนมัติ — ระวังเมื่อชี้ output ไปโฟลเดอร์ที่มีข้อมูลสำคัญ
