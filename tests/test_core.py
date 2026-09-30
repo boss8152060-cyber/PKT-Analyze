@@ -261,5 +261,70 @@ class LdpY1(unittest.TestCase):
         self.assertLess(smooth, 0.05)
 
 
+class LateralClearanceY2(unittest.TestCase):
+    lc = staticmethod(lambda a, h, b, la=2.0, lb=4.5, wa=0.8, wb=1.8:
+                      CORE["lateral_clearance"](a, h, b, la, lb, wa, wb))
+
+    def test_simple_side_by_side(self):
+        r = self.lc((0, 0), (1, 0), (1, 2))
+        self.assertAlmostEqual(r["Lateral_m"], 2.0)
+        self.assertAlmostEqual(r["Along_m"], 1.0)
+        self.assertAlmostEqual(r["Y2"], 2.0 - 1.3)
+        self.assertTrue(r["Overlap"])
+
+    def test_perpendicular_not_point_to_point(self):
+        # B is 2 m to the side and 3 m ahead: point-to-point would give 3.6 m
+        r = self.lc((0, 0), (1, 0), (3, 2), la=2.0, lb=4.5)
+        self.assertAlmostEqual(r["Lateral_m"], 2.0)
+        self.assertGreater(math.hypot(3, 2), 3.6)
+        self.assertTrue(r["Overlap"])                 # |along| = 3 <= (2 + 4.5) / 2
+
+    def test_axis_follows_vehicle_heading(self):
+        u = (math.sqrt(0.5), math.sqrt(0.5))          # A drives diagonally
+        perp = (-u[1], u[0])
+        b = (2 * perp[0] + 1 * u[0], 2 * perp[1] + 1 * u[1])
+        r = self.lc((0, 0), u, b)
+        self.assertAlmostEqual(r["Lateral_m"], 2.0, places=9)
+        self.assertAlmostEqual(r["Along_m"], 1.0, places=9)
+
+    def test_no_overlap_when_far_apart_along_heading(self):
+        r = self.lc((0, 0), (1, 0), (8, 2))            # 8 m ahead > (2 + 4.5) / 2
+        self.assertFalse(r["Overlap"])
+
+    def test_negative_when_boxes_overlap_sideways(self):
+        r = self.lc((0, 0), (1, 0), (0, 0.9))          # 0.9 < (0.8 + 1.8) / 2
+        self.assertLess(r["Y2"], 0)
+
+    def test_same_direction_examples_from_the_user(self):
+        sd = CORE["same_direction_in_zone"]
+        a, b, c_ = (2, 3, 4), (2, 3, 1), (2, 3, 4)
+        self.assertTrue(sd(a, b, 3))                   # A-B share 2-3
+        self.assertTrue(sd(a, b, 2))
+        self.assertFalse(sd(a, b, 4))                  # B never reaches zone 4 (seq stops before)
+        self.assertTrue(sd(a, c_, 2) and sd(a, c_, 3) and sd(a, c_, 4))   # A-C share 2-3-4
+        self.assertTrue(sd(b, c_, 3))                  # B-C share 2-3
+
+    def test_crossing_or_opposite_flows_are_not_same_direction(self):
+        sd = CORE["same_direction_in_zone"]
+        self.assertFalse(sd((2, 3, 4), (1, 3, 6, 7), 3))   # crossing
+        self.assertFalse(sd((2, 3, 4), (5, 6, 7), 3))
+        self.assertFalse(sd((2, 3, 4), (5, 6, 3, 1), 3))   # 3 is shared but not a common transition
+        self.assertFalse(sd((2, 3, 4), (1, 3, 4), 2))      # shared edge 3-4 does not touch zone 2
+        self.assertTrue(sd((2, 3, 4), (1, 3, 4), 4))       # merging flows share 3-4
+
+    def test_need_two_zones_observed(self):
+        self.assertFalse(CORE["same_direction_in_zone"]((3,), (2, 3, 4), 3))
+
+    def test_track_headings(self):
+        ts = [i / 60 for i in range(60)]
+        straight = CORE["track_headings"](ts, [(10 * t, 0.0) for t in ts], 0.5, 0.5)
+        self.assertTrue(all(h is not None and abs(h[0] - 1) < 1e-9 for h in straight))
+        still = CORE["track_headings"](ts, [(1.0, 1.0)] * 60, 0.5, 0.5)
+        self.assertTrue(all(h is None for h in still))
+        diag = CORE["track_headings"](ts, [(6 * t, -6 * t) for t in ts], 0.5, 0.5)
+        self.assertAlmostEqual(diag[30][0], math.sqrt(0.5))
+        self.assertAlmostEqual(diag[30][1], -math.sqrt(0.5))
+
+
 if __name__ == "__main__":
     unittest.main()

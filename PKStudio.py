@@ -438,7 +438,7 @@ RUN3_DEFAULTS = {
     "perspective_l41_m": "",
     "waiting_speed_threshold": "1.00",      # implementation starter value
     "lateral_axis_angle_deg": "0.00",       # implementation starter value; verify per video
-    "lc_longitudinal_window_m": "2.00",     # implementation starter value
+    "lc_heading_window_s": "0.50",          # centred window (s) used to get the heading of vehicle A
     "pet_interaction_distance_m": "3.00",   # implementation starter value
     "pet_threshold_s": "1.00",
     # V27 implementation starter values (editable; verify per site):
@@ -461,7 +461,7 @@ RUN3_DEFAULTS = {
     # to the research role: Zone 1 = access mouth, 2/4 = approach, 3/5 = exit, 6 = middle/access.
     "speed_zones": [1, 2, 3, 4, 5, 6, 7],
     "speed_smoothing_samples": "5",         # rolling-median window on positions before Y6 (1 = off)
-    "lc_zones": [1, 2, 3, 4, 5, 6, 7],
+    "lc_zones": [2, 3, 4, 5, 6, 7],
     "pet_zone6": True,
     "pet_zones": [3, 6],
     "ttc_zones": [1, 2, 3, 4, 5, 6, 7],
@@ -740,6 +740,59 @@ def ldp_for_zone(points, lane_width_m, smoothing=1):
         "Samples": len(pts), "Y1_LDP_percent": dy / float(lane_width_m) * 100.0,
         "Short_Chord": length < LDP_MIN_CHORD_M,
     }
+
+
+def zone_edges(sequence):
+    """Set of directed zone transitions of a sequence: (1,3,4) -> {(1,3), (3,4)}."""
+    seq = list(sequence)
+    return {(seq[i], seq[i + 1]) for i in range(len(seq) - 1)}
+
+
+def same_direction_in_zone(seq_a, seq_b, zone):
+    """Two vehicles move in the same direction in `zone` when their zone sequences
+    share a directed transition that touches that zone (e.g. A = 2-3-4 and
+    B = 2-3-1 share 2->3; A = 2-3-4 and B = 1-3-4 share 3->4). Needs >= 2 zones
+    observed for both vehicles."""
+    common = zone_edges(seq_a) & zone_edges(seq_b)
+    return any(zone in edge for edge in common)
+
+
+def track_headings(times, points, window_s, min_speed_ms):
+    """Unit heading vector per sample from a centred window of observed samples
+    (no interpolation). None where the vehicle is (nearly) stationary."""
+    t = np.asarray(times, dtype=float)
+    m = np.asarray(points, dtype=float).reshape(-1, 2)
+    half = max(1e-6, float(window_s)) / 2.0
+    lo = np.searchsorted(t, t - half, side="left")
+    hi = np.searchsorted(t, t + half, side="right") - 1
+    out = []
+    for k in range(len(t)):
+        a, b = lo[k], hi[k]
+        if b <= a or t[b] <= t[a]:
+            out.append(None)
+            continue
+        v = (m[b] - m[a]) / (t[b] - t[a])
+        sp = float(np.hypot(v[0], v[1]))
+        out.append((float(v[0] / sp), float(v[1] / sp)) if sp >= min_speed_ms else None)
+    return out
+
+
+def lateral_clearance(center_a, heading_a, center_b, len_a, len_b, w_a, w_b):
+    """Y2 for one time sample (SPEC v28 section 5). Axes come from vehicle A's
+    heading: `along` = separation along the heading, `lateral` = perpendicular
+    separation. The boxes overlap along the direction of travel when
+    |along| <= (L_A + L_B) / 2 - only then the clearance is measurable.
+    Y2 = lateral - (W_A + W_B) / 2 (edge to edge; negative = boxes overlap)."""
+    dx, dy = center_b[0] - center_a[0], center_b[1] - center_a[1]
+    hx, hy = heading_a
+    along = dx * hx + dy * hy
+    signed = hx * dy - hy * dx
+    lateral = abs(signed)
+    return {
+        "Along_m": along, "Lateral_m": lateral, "Signed_Lateral_m": signed,
+        "Overlap": abs(along) <= (len_a + len_b) / 2.0,
+        "Y2": lateral - (w_a + w_b) / 2.0,
+    }
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -943,7 +996,7 @@ class Run1App:
         self.run3_perspective_l41_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_l41_m"])
         self.run3_waiting_speed_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["waiting_speed_threshold"])
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
-        self.run3_lc_longitudinal_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_longitudinal_window_m"])
+        self.run3_lc_heading_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_heading_window_s"])
         self.run3_pet_interaction_distance_var = tk.StringVar(value=RUN3_DEFAULTS["pet_interaction_distance_m"])
         self.run3_pet_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["pet_threshold_s"])
         self.run3_speed_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_zones"])) for z in ZONE_IDS}
@@ -1330,7 +1383,7 @@ class Run1App:
         box = zone_row("Y6 Speed — Zones", "ความเร็วต่อโซน + ความเร็วภาพรวมตาม Movement (เช่น 2-3-4) — ความยาวเส้นทางเมตร ÷ เวลา", self.run3_speed_zone_vars)
         ttk.Label(box, text="Median smoothing (samples, 1 = ปิด)").grid(row=2, column=0, columnspan=3, sticky="w", pady=2)
         ttk.Entry(box, textvariable=self.run3_speed_smoothing_var, width=8).grid(row=2, column=3, sticky="w", pady=2)
-        zone_row("Y1 Lateral Clearance — Zones", "ใช้ observation จริงและจับคู่เวลาที่ใกล้กัน — ไม่ทำ interpolation", self.run3_lc_zone_vars)
+        zone_row("Y2 Lateral Clearance — Zones", "คู่รถทิศทางเดียวกัน (ลำดับโซนมีช่วงร่วมกัน) ในโซนเดียวกัน; วัดตั้งฉากกับทิศที่รถ A เคลื่อนที่ เมื่อกรอบรถซ้อนกันตามแนวยาว; A = จักรยานยนต์", self.run3_lc_zone_vars)
 
         box = zone_row("Y1 LDP — Zones", "LDP = ΔY ÷ W × 100 — ΔY = ระยะตั้งฉากของ trajectory จากเส้นอ้างอิง (จุดเข้า→จุดออกโซน); เฉพาะรถทางหลัก 2-3-4 (W_entry) และ 5-6-7 (W_opp)", self.run3_ldp_zone_vars)
         ttk.Label(box, text="Median smoothing (samples)").grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
@@ -1352,8 +1405,8 @@ class Run1App:
             ttk.Label(box, text=label).grid(row=2 + i // 2, column=(i % 2) * 4, columnspan=2, sticky="w", pady=2)
             ttk.Entry(box, textvariable=var, width=8).grid(row=2 + i // 2, column=(i % 2) * 4 + 2, sticky="w", pady=2)
 
-        ttk.Label(frame, text="LC longitudinal window (m)").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_lc_longitudinal_window_var, width=18).grid(row=r, column=1, sticky="w", pady=4)
+        ttk.Label(frame, text="LC heading window (s)").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(frame, textvariable=self.run3_lc_heading_window_var, width=18).grid(row=r, column=1, sticky="w", pady=4)
         ttk.Label(frame, text="Waiting speed threshold (km/h)").grid(row=r, column=2, sticky="e", padx=(12, 8), pady=4)
         ttk.Entry(frame, textvariable=self.run3_waiting_speed_threshold_var, width=18).grid(row=r, column=3, sticky="w", pady=4)
         r += 1
@@ -2825,7 +2878,7 @@ class Run1App:
                 "perspective_l41_m": self.run3_perspective_l41_var.get(),
                 "waiting_speed_threshold": self.run3_waiting_speed_threshold_var.get(),
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
-                "lc_longitudinal_window_m": self.run3_lc_longitudinal_window_var.get(),
+                "lc_heading_window_s": self.run3_lc_heading_window_var.get(),
                 "pet_interaction_distance_m": self.run3_pet_interaction_distance_var.get(),
                 "pet_threshold_s": self.run3_pet_threshold_var.get(),
                 "speed_zones": [z for z,v in self.run3_speed_zone_vars.items() if v.get()],
@@ -2976,7 +3029,7 @@ class Run1App:
                 ("ldp_smoothing_samples", self.run3_ldp_smoothing_var),
                 ("waiting_speed_threshold", self.run3_waiting_speed_threshold_var),
                 ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
-                ("lc_longitudinal_window_m", self.run3_lc_longitudinal_window_var),
+                ("lc_heading_window_s", self.run3_lc_heading_window_var),
                 ("pet_interaction_distance_m", self.run3_pet_interaction_distance_var),
                 ("pet_threshold_s", self.run3_pet_threshold_var),
                 ("gap_subject_134", self.run3_gap_subject_134_var),
@@ -3628,10 +3681,13 @@ class Run1App:
             self._run3_float(self.run3_speed_smoothing_var.get(), "speed smoothing samples")
         if enabled["lc"]:
             need_zone(self.run3_lc_zone_vars, "Y1 Lateral Clearance")
-            self._run3_float(self.run3_lc_longitudinal_window_var.get(), "LC longitudinal window (m)")
+            self._run3_float(self.run3_lc_heading_window_var.get(), "LC heading window (s)")
         if enabled["lc"] or enabled["ttc"]:
             for name in RUN3_VEHICLE_CLASSES:
                 self._run3_float(self.run3_width_vars[name].get(), f"vehicle width for {name}")
+        if enabled["lc"]:
+            for name in RUN3_VEHICLE_CLASSES:
+                self._run3_float(self.run3_length_vars[name].get(), f"vehicle length for {name} (Y2 needs the length)")
         if enabled["ttc"]:
             need_zone(self.run3_ttc_zone_vars, "Y4 TTC")
             for name in RUN3_VEHICLE_CLASSES:
@@ -3680,7 +3736,7 @@ class Run1App:
         warnings = []
         keys = {
             "speed": ("Y6 Speed", self.run3_speed_zone_vars),
-            "lc": ("Y1 Lateral Clearance", self.run3_lc_zone_vars),
+            "lc": ("Y2 Lateral Clearance", self.run3_lc_zone_vars),
             "ttc": ("Y4 TTC", self.run3_ttc_zone_vars),
             "pet": ("Y5 PET", self.run3_pet_zone_vars),
             "ldp": ("Y1 LDP", self.run3_ldp_zone_vars),
@@ -5842,7 +5898,7 @@ class Run1App:
             "ttc_zones": zones_of(self.run3_ttc_zone_vars),
             "ldp_zones": zones_of(self.run3_ldp_zone_vars),
             "waiting_threshold": num(self.run3_waiting_speed_threshold_var, 1.0),
-            "lc_window": num(self.run3_lc_longitudinal_window_var, 2.0),
+            "lc_heading_window_s": num(self.run3_lc_heading_window_var, 0.5),
             "pet_interaction": num(self.run3_pet_interaction_distance_var, 3.0),
             "pet_threshold": num(self.run3_pet_threshold_var, 1.0),
             "pet_max_s": pet_max if (pet_max is not None and pet_max > 0) else None,
@@ -6270,17 +6326,23 @@ class Run1App:
     # LATERAL CLEARANCE — Y1
     # ========================================================
 
-    def _run3_lateral_clearance(self, tracks, c):
-        """Same definition as V26; neighbours are found through a time index
-        (bisect) instead of scanning every track pair and every sample."""
+    def _run3_lateral_clearance(self, tracks, c, sequence_by_id):
+        """Y2 Lateral Clearance (SPEC v28 section 5).
+
+        A = motorcycle, B = any vehicle moving in the SAME DIRECTION (their zone
+        sequences share a transition touching the zone) and standing in the SAME
+        zone at (nearly) the same time. Axes come from A's heading; a sample is
+        only measured when the two boxes overlap along the direction of travel.
+        Neighbours are found through a time index (bisect)."""
         import bisect
-        ppm = c["ppm"]; long_window = c["lc_window"]; zones = c["lc_zones"]
-        perspective = c["perspective"]
-        theta = math.radians(c["axis_deg"])
-        road_u = (math.cos(theta), math.sin(theta)); lat_u = (-math.sin(theta), math.cos(theta))
+        zones = c["lc_zones"]
         widths = {k: v for k, v in c["widths"].items() if v is not None}
+        lengths = {k: v for k, v in c["lengths"].items() if v is not None}
         tol = self._run3_time_tolerance(tracks)
         order = {tid: i for i, tid in enumerate(tracks)}
+        perspective = c["perspective"] is not None
+        diag = {"a_samples": 0, "a_no_heading": 0, "pairs_same_direction": 0, "pairs_other_direction": 0,
+                "time_matched": 0, "no_box_overlap": 0, "rows": 0, "missing_dimension_class": set()}
 
         # zone -> tid -> (timestamps, rows) ; zone -> sorted list of (start, end, tid)
         obs = defaultdict(dict); spans = defaultdict(list)
@@ -6292,36 +6354,60 @@ class Run1App:
             classes[tid] = cls
             per_zone = defaultdict(list)
             for r in rows:
-                if r.get("_center") is not None and r.get("_zone_num") in zones:
+                if r.get("_mc") is not None and r.get("_zone_num") in zones:
                     per_zone[r["_zone_num"]].append(r)
             for z, lst in per_zone.items():
                 obs[z][tid] = ([r["_timestamp"] for r in lst], lst)
                 spans[z].append((lst[0]["_timestamp"], lst[-1]["_timestamp"], tid))
         for z in spans:
             spans[z].sort()
-        span_starts = {z: [s[0] for s in spans[z]] for z in spans}
+        span_starts = {z: [s_[0] for s_ in spans[z]] for z in spans}
 
-        out = []; candidates_seen = 0
+        out = []
         for tid_a, rows_a in tracks.items():
-            if classes.get(tid_a) != "Motorcycle":
+            if classes.get(tid_a) != "Motorcycle" or "Motorcycle" not in widths or "Motorcycle" not in lengths:
                 continue
-            a_obs = [r for r in rows_a if r.get("_center") is not None and r.get("_zone_num") in zones]
+            seq_a = sequence_by_id.get(str(tid_a), [])
+            # heading of A at every observed trajectory sample (metric)
+            valid = [r for r in rows_a if r.get("_m") is not None]
+            if len(valid) < 2:
+                continue
+            heads = track_headings([r["_timestamp"] for r in valid], [r["_m"] for r in valid],
+                                   c["lc_heading_window_s"], 0.5)
+            for r, h in zip(valid, heads):
+                r["_h"] = h
+            a_obs = [r for r in rows_a if r.get("_mc") is not None and r.get("_zone_num") in zones and "_h" in r]
             if not a_obs:
                 continue
-            # neighbours per zone whose time span overlaps A's span in that zone
             neighbours = {}
             for z in {r["_zone_num"] for r in a_obs}:
                 a_ts = obs[z][tid_a][0]
                 hi = bisect.bisect_right(span_starts[z], a_ts[-1] + tol)
-                neighbours[z] = sorted(
-                    [tid_b for (s, e, tid_b) in spans[z][:hi]
-                     if e >= a_ts[0] - tol and tid_b != tid_a and classes.get(tid_b) in widths],
-                    key=lambda t: order[t]
-                )
+                cands = []
+                for (st, en, tid_b) in spans[z][:hi]:
+                    if en < a_ts[0] - tol or tid_b == tid_a:
+                        continue
+                    cls_b = classes.get(tid_b)
+                    if cls_b not in widths or cls_b not in lengths:
+                        if cls_b and cls_b.lower() != "person":
+                            diag["missing_dimension_class"].add(cls_b)
+                        continue
+                    if cls_b == "Motorcycle" and order[tid_b] < order[tid_a]:
+                        continue            # motorcycle pairs: report each pair once (A = earlier ID)
+                    if not same_direction_in_zone(seq_a, sequence_by_id.get(str(tid_b), []), z):
+                        diag["pairs_other_direction"] += 1
+                        continue
+                    diag["pairs_same_direction"] += 1
+                    cands.append(tid_b)
+                neighbours[z] = sorted(cands, key=lambda t: order[t])
             pair_rows = defaultdict(list)
             for r_a in a_obs:
+                diag["a_samples"] += 1
+                if r_a["_h"] is None:
+                    diag["a_no_heading"] += 1
+                    continue
                 z = r_a["_zone_num"]; ta = r_a["_timestamp"]
-                for tid_b in neighbours[z]:
+                for tid_b in neighbours.get(z, []):
                     ts_b, rows_b = obs[z][tid_b]
                     k = bisect.bisect_left(ts_b, ta)
                     best = None
@@ -6333,37 +6419,56 @@ class Run1App:
                     if best is None or best[0] > tol:
                         continue
                     r_b = rows_b[best[1]]
-                    candidates_seen += 1
+                    diag["time_matched"] += 1
                     cls_b = classes[tid_b]
-                    dx = r_b["_center"][0] - r_a["_center"][0]
-                    dy = r_b["_center"][1] - r_a["_center"][1]
-                    lateral_px = abs(dx * lat_u[0] + dy * lat_u[1])
-                    if perspective is not None:
-                        signed_lat = r_b["_mc"][1] - r_a["_mc"][1]
-                        longitudinal_m = abs(r_b["_mc"][0] - r_a["_mc"][0])
-                        ls_m = abs(signed_lat)
-                        side = "Left" if signed_lat > 0 else "Right"
-                    else:
-                        longitudinal_m = abs(dx * road_u[0] + dy * road_u[1]) / ppm
-                        ls_m = lateral_px / ppm
-                        side = "Left" if (dx * lat_u[0] + dy * lat_u[1]) > 0 else "Right"
-                    if longitudinal_m > long_window:
+                    res = lateral_clearance(r_a["_mc"], r_a["_h"], r_b["_mc"],
+                                            lengths["Motorcycle"], lengths[cls_b],
+                                            widths["Motorcycle"], widths[cls_b])
+                    if not res["Overlap"]:
+                        diag["no_box_overlap"] += 1
                         continue
-                    y1 = ls_m - (widths["Motorcycle"] + widths[cls_b]) / 2.0
                     pair_rows[tid_b].append({
                         "Site_ID": c["site_id"], "Pair_ID": f"{tid_a}_{tid_b}",
                         "Timestamp": f"{ta:.6f}", "Zone": f"Zone {z}",
                         "Motorcycle_ID": tid_a, "Motorcycle_Class": "Motorcycle",
-                        "Neighbor_ID": tid_b, "Neighbor_Class": cls_b, "Neighbor_Side": side,
-                        "LS_Pixel": f"{lateral_px:.6f}", "PPM": f"{ppm:.6f}", "LS_Meter": f"{ls_m:.6f}",
+                        "Neighbor_ID": tid_b, "Neighbor_Class": cls_b,
+                        "Zone_Sequence_A": "-".join(str(x) for x in seq_a),
+                        "Zone_Sequence_B": "-".join(str(x) for x in sequence_by_id.get(str(tid_b), [])),
+                        "Along_m": f"{res['Along_m']:.4f}", "LS_Meter": f"{res['Lateral_m']:.6f}",
+                        "Signed_Lateral_m": f"{res['Signed_Lateral_m']:.6f}",
                         "Wm": f"{widths['Motorcycle']:.6f}", "Wv": f"{widths[cls_b]:.6f}",
-                        "Y1_Lateral_Clearance": f"{y1:.6f}",
-                        "QC_Flag": ("Negative_Y1" if y1 < 0 else "") + (";Perspective_Homography" if perspective is not None else ""),
+                        "Lm": f"{lengths['Motorcycle']:.6f}", "Lv": f"{lengths[cls_b]:.6f}",
+                        "Y2_Lateral_Clearance": f"{res['Y2']:.6f}",
+                        "QC_Flag": ("Negative_Y2" if res["Y2"] < 0 else "") + (";Perspective_Homography" if perspective else ""),
                     })
-            # keep V26 output order: by neighbour, then by A's sample order
             for tid_b in sorted(pair_rows, key=lambda t: order[t]):
                 out.extend(pair_rows[tid_b])
-        return out, candidates_seen, tol
+        diag["rows"] = len(out)
+        diag["missing_dimension_class"] = sorted(diag["missing_dimension_class"])
+        diag["time_tolerance_s"] = round(tol, 6)
+        return out, diag
+
+    @staticmethod
+    def _run3_lc_pair_summary(rows):
+        """One row per (A, B, zone): number of samples, minimum / mean clearance."""
+        groups = defaultdict(list)
+        for r in rows:
+            groups[(r["Pair_ID"], r["Zone"])].append(r)
+        out = []
+        for (pair, zone), lst in groups.items():
+            ys = [float(r["Y2_Lateral_Clearance"]) for r in lst]
+            ts = [float(r["Timestamp"]) for r in lst]
+            first = lst[0]
+            out.append({
+                "Site_ID": first["Site_ID"], "Pair_ID": pair, "Zone": zone,
+                "Motorcycle_ID": first["Motorcycle_ID"], "Neighbor_ID": first["Neighbor_ID"],
+                "Neighbor_Class": first["Neighbor_Class"],
+                "Zone_Sequence_A": first["Zone_Sequence_A"], "Zone_Sequence_B": first["Zone_Sequence_B"],
+                "Start_Time": f"{min(ts):.6f}", "End_Time": f"{max(ts):.6f}", "Samples": len(ys),
+                "Y2_Min": f"{min(ys):.6f}", "Y2_Mean": f"{sum(ys) / len(ys):.6f}",
+                "QC_Flag": "Negative_Y2" if min(ys) < 0 else "",
+            })
+        return out
 
     # ========================================================
     # PET — Y5 (Zone 6 and/or Zone 7)
@@ -6784,16 +6889,22 @@ class Run1App:
                 summary["diagnostics"][key] = f"ERROR: {e}"
             timings[key] = round(time.time() - t0, 3)
 
-        # ---------------- Y1 Lateral Clearance (distance) ----------------
+        # ---------------- Y2 Lateral Clearance (distance) ----------------
         def do_lc():
-            status("Run 3 — Y1 Lateral Clearance...")
-            rows, seen, tol = self._run3_lateral_clearance(tracks, c)
-            fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Neighbor_ID","Neighbor_Class","Neighbor_Side","LS_Pixel","PPM","LS_Meter","Wm","Wv","Y1_Lateral_Clearance","QC_Flag"]
-            outputs["lateral_clearance"] = write_csv("Run_3_Y1_Lateral_Clearance.csv", fields, rows)
-            s = indicator("Y1", "Lateral Clearance", "Distance", "m", "All", [float(r["Y1_Lateral_Clearance"]) for r in rows])
-            summary["indicators"]["Y1_Lateral_Clearance"] = s
-            summary["diagnostics"]["lc"] = f"rows={len(rows)}; time-matched candidates={seen}; time_tolerance_s={tol:.6f}"
-        run_step("lc", "Run_3_Y1_Lateral_Clearance.csv", do_lc)
+            status("Run 3 — Y2 Lateral Clearance...")
+            rows, lc_diag = self._run3_lateral_clearance(tracks, c, sequence_by_id)
+            fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Neighbor_ID","Neighbor_Class","Zone_Sequence_A","Zone_Sequence_B","Along_m","LS_Meter","Signed_Lateral_m","Wm","Wv","Lm","Lv","Y2_Lateral_Clearance","QC_Flag"]
+            outputs["lateral_clearance"] = write_csv("Run_3_Y2_Lateral_Clearance.csv", fields, rows)
+            pairs = self._run3_lc_pair_summary(rows)
+            pair_fields = ["Site_ID","Pair_ID","Zone","Motorcycle_ID","Neighbor_ID","Neighbor_Class","Zone_Sequence_A","Zone_Sequence_B","Start_Time","End_Time","Samples","Y2_Min","Y2_Mean","QC_Flag"]
+            outputs["lateral_clearance_pairs"] = write_csv("Run_3_Y2_Lateral_Clearance_Pairs.csv", pair_fields, pairs)
+            s_ = indicator("Y2", "Lateral Clearance (all measured samples)", "Distance", "m", "All samples",
+                           [float(r["Y2_Lateral_Clearance"]) for r in rows])
+            indicator("Y2", "Lateral Clearance (minimum per pair and zone)", "Distance", "m", "Pair minimum",
+                      [float(r["Y2_Min"]) for r in pairs])
+            summary["indicators"]["Y2_Lateral_Clearance"] = s_
+            summary["diagnostics"]["lc"] = lc_diag
+        run_step("lc", "Run_3_Y2_Lateral_Clearance.csv", do_lc)
 
         # ---------------- Y1 LDP (distance) ----------------
         def do_ldp():

@@ -73,6 +73,10 @@ def build_scene():
     rows += vehicle_rows(1, "Motorcycle", (2, 3, 4), 0.0, 10.0, size_m=(2.0, 0.8), y_fn=bump_a)
     rows += vehicle_rows(2, "Car", (2, 3, 4), 1.5, 10.0, size_m=(4.5, 1.8))
     rows += vehicle_rows(3, "Motorcycle", (5, 6, 7), 8.0, 5.0, size_m=(2.0, 0.8), y_fn=bump_c)
+    # D: car 1-3-6 (Partial 1-3-6-7) 2.5 m beside A in zone 3 -> crossing flow, must NOT pair with A
+    rows += vehicle_rows(4, "Car", (1, 3, 6), 2.5, 10.0, size_m=(4.5, 1.8))
+    # E: car 1-3-4 at y = -1.6: merges into A's flow -> pairs with A only in zone 4
+    rows += vehicle_rows(5, "Car", (1, 3, 4), -1.6, 10.0, size_m=(4.5, 1.8))
     rows.sort(key=lambda r: (r["frame"], r["track_id"]))
     return rows
 
@@ -100,7 +104,8 @@ def main():
     write_csv(os.path.join(out, "T_Detection_Records.csv"), fields, rows)
     write_csv(os.path.join(out, "T_ID_Zone_Summary.csv"), ["track_id", "class_name"],
               [{"track_id": 1, "class_name": "Motorcycle"}, {"track_id": 2, "class_name": "Car"},
-               {"track_id": 3, "class_name": "Motorcycle"}])
+               {"track_id": 3, "class_name": "Motorcycle"}, {"track_id": 4, "class_name": "Car"},
+               {"track_id": 5, "class_name": "Car"}])
 
     app.run3_site_id_var.set("8")
     app.run3_ppm_var.set(str(PPM))
@@ -137,7 +142,7 @@ def main():
     z2 = [r for r in stats if r["Scope"] == "Zone" and r["Key"] == "Zone 2" and r["Vehicle_Class"] == "All"][0]
     check("Y6 stats Zone 2: N=2, V50 ~36", z2["N"] == "2" and abs(float(z2["Y6_V50_kmh"]) - 36.0) < 0.6, str(z2))
     wide = read_csv(os.path.join(out, "Run_3_Speed.csv"))
-    check("vehicle summary rows = 3", len(wide) == 3)
+    check("vehicle summary rows = 5", len(wide) == 5)
     check("vehicle summary has Zone_Sequence 2-3-4", any(r["Zone_Sequence"] == "2-3-4" for r in wide))
 
     # ---- Y1 LDP ----
@@ -152,6 +157,24 @@ def main():
     check("Y1 W_entry for A, W_opp for C",
           lz[("1", "Zone 3")]["Lane_Width_W_m"] == "4.750" and lz[("3", "Zone 6")]["Lane_Width_W_m"] == "4.200")
     check("Y1 zone 1 never reported", all(r["Zone"] != "Zone 1" for r in ldp))
+
+    # ---- Y2 Lateral Clearance ----
+    lc = read_csv(os.path.join(out, "Run_3_Y2_Lateral_Clearance.csv"))
+    pairs_seen = {r["Pair_ID"] for r in lc}
+    check("Y2 pairs = A-B (2-3-4 & 2-3-4) and A-E (merging) only; A-D crossing excluded",
+          pairs_seen == {"1_2", "1_5"}, str(sorted(pairs_seen)))
+    ae_zones = {r["Zone"] for r in lc if r["Pair_ID"] == "1_5"}
+    check("Y2 A-E measured in zones 3 and 4 only (shared transition 3-4; not in zone 1/2)", ae_zones == {"Zone 3", "Zone 4"}, str(ae_zones))
+    ab = [float(r["Y2_Lateral_Clearance"]) for r in lc if r["Pair_ID"] == "1_2" and r["Zone"] == "Zone 2"]
+    check("Y2 A-B zone 2 = 1.5 - (0.8+1.8)/2 = 0.20 m", bool(ab) and all(abs(v - 0.20) < 0.03 for v in ab),
+          f"n={len(ab)} mean={sum(ab)/len(ab):.3f}" if ab else "no rows")
+    ae = [float(r["Y2_Lateral_Clearance"]) for r in lc if r["Pair_ID"] == "1_5" and r["Zone"] == "Zone 4"]
+    check("Y2 A-E zone 4 = 1.6 - 1.3 = 0.30 m", bool(ae) and all(abs(v - 0.30) < 0.03 for v in ae),
+          f"n={len(ae)}" + (f" mean={sum(ae)/len(ae):.3f}" if ae else ""))
+    pr = read_csv(os.path.join(out, "Run_3_Y2_Lateral_Clearance_Pairs.csv"))
+    check("Y2 pair summary rows (A-B x 3 zones + A-E x 2)", len(pr) == 5, str([(r['Pair_ID'], r['Zone']) for r in pr]))
+    ind = read_csv(os.path.join(out, "Run_3_Indicator_Summary.csv"))
+    check("indicator summary has Y1 and Y2 and Y6 codes", {"Y1", "Y2", "Y6"} <= {r["Code"] for r in ind})
 
     for extra in EXTRA_CHECKS:
         extra(out, summary, check, read_csv)
