@@ -610,5 +610,18 @@ class GapHoldAndIntervals(unittest.TestCase):
         self.assertEqual(set(CORE["GAP_REFERENCE_ZONE"]), {"2-3-4", "5-6-7", "5-6-3-1", "1-3-6-7"})
 
 
+class ExcelSafe(unittest.TestCase):
+    f = staticmethod(lambda v: CORE["excel_safe_value"](v))
+
+    def test_movements_and_sequences_get_arrows(self):
+        self.assertEqual(self.f("2-3-4"), "2\u21923\u21924")
+        self.assertEqual(self.f("1-3-6-7"), "1\u21923\u21926\u21927")
+        self.assertEqual(self.f("5-6"), "5\u21926")
+
+    def test_other_values_are_untouched(self):
+        for v in ("Zone 3", "Movement 2-3-4", "-1.5", "0.016666", "", "8", "Line 1", "2024-01-05", 7, None, 3.5):
+            self.assertEqual(self.f(v), v)
+
+
 if __name__ == "__main__":
     unittest.main()
