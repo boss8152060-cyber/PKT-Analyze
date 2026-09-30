@@ -6,6 +6,7 @@ Run from the Run folder:   python -m unittest discover -s tests -v
 PKStudio.py starts a GUI/CUDA bootstrap when imported, so the tests exec only
 the region between the CORE-BEGIN / CORE-END markers.
 """
+import math
 import os
 import unittest
 
@@ -206,6 +207,58 @@ class SpeedY6(unittest.TestCase):
     def test_rolling_median(self):
         out = CORE["rolling_median"]([0, 0, 100, 0, 0], 3)
         self.assertEqual(list(out), [0, 0, 0, 0, 0])
+
+
+class LdpY1(unittest.TestCase):
+    ldp = staticmethod(lambda pts, w, k=1: CORE["ldp_for_zone"](pts, w, k))
+
+    def test_straight_line_has_zero_deviation(self):
+        pts = [(x * 0.1, 0.0) for x in range(101)]
+        r = self.ldp(pts, 3.5)
+        self.assertAlmostEqual(r["Delta_Y_m"], 0.0, places=9)
+        self.assertAlmostEqual(r["Y1_LDP_percent"], 0.0, places=9)
+
+    def test_known_bump(self):
+        # enters and leaves at y = 0, peak 0.35 m in the middle; W = 3.5 -> 10 %
+        pts = [(x * 0.1, 0.35 * math.sin(math.pi * x / 100)) for x in range(101)]
+        r = self.ldp(pts, 3.5)
+        self.assertAlmostEqual(r["Delta_Y_m"], 0.35, places=6)
+        self.assertAlmostEqual(r["Y1_LDP_percent"], 10.0, places=4)
+        self.assertEqual(r["P_in"], (0.0, 0.0))
+
+    def test_offset_but_straight_is_zero(self):
+        # drives straight but hugs the kerb (y = 1.2 m): LDP is about weaving, not offset
+        pts = [(x * 0.1, 1.2) for x in range(101)]
+        self.assertAlmostEqual(self.ldp(pts, 3.5)["Y1_LDP_percent"], 0.0, places=9)
+
+    def test_diagonal_path_measured_perpendicular_to_chord(self):
+        # straight diagonal path (45 deg) must give 0; a 0.2 m perpendicular bump gives 0.2
+        pts = [(i * 0.1, i * 0.1) for i in range(101)]
+        self.assertAlmostEqual(self.ldp(pts, 3.5)["Delta_Y_m"], 0.0, places=9)
+        bump = [(x + 0.2 * math.sin(math.pi * i / 100) * -math.sqrt(0.5),
+                 y + 0.2 * math.sin(math.pi * i / 100) * math.sqrt(0.5))
+                for i, (x, y) in enumerate(pts)]
+        self.assertAlmostEqual(self.ldp(bump, 3.5)["Delta_Y_m"], 0.2, places=6)
+
+    def test_denominator_is_full_width_not_half(self):
+        pts = [(x * 0.1, 0.35 * math.sin(math.pi * x / 100)) for x in range(101)]
+        self.assertAlmostEqual(self.ldp(pts, 7.0)["Y1_LDP_percent"], 5.0, places=4)
+
+    def test_too_few_samples_or_zero_chord(self):
+        self.assertIsNone(self.ldp([(0, 0), (1, 0)], 3.5))
+        self.assertIsNone(self.ldp([(0, 0), (1, 1), (0, 0)], 3.5))
+
+    def test_short_chord_flag(self):
+        pts = [(x * 0.01, 0.0) for x in range(51)]          # 0.5 m chord
+        self.assertTrue(self.ldp(pts, 3.5)["Short_Chord"])
+
+    def test_smoothing_ignores_single_spike(self):
+        pts = [(x * 0.1, 0.0) for x in range(101)]
+        pts[50] = (5.0, 0.8)                                  # one bbox glitch
+        raw = self.ldp(pts, 3.5, 1)["Delta_Y_m"]
+        smooth = self.ldp(pts, 3.5, 5)["Delta_Y_m"]
+        self.assertAlmostEqual(raw, 0.8, places=6)
+        self.assertLess(smooth, 0.05)
 
 
 if __name__ == "__main__":
