@@ -4192,6 +4192,22 @@ class Run1App:
             "pet": ("PET", self.run3_pet_zone_vars),
             "ldp": ("LDP", self.run3_ldp_zone_vars),
         }
+        # A Zone file (and its Lines) belongs to ONE camera view. Warn when the Video is a different one.
+        zone_video = str(getattr(self, "zone_source_video", "") or "").strip()
+        video_now = self.video_var.get().strip()
+        if self.zone_line_config_var.get().strip() and zone_video and video_now:
+            if os.path.basename(zone_video).lower() != os.path.basename(video_now).lower():
+                warnings.append(
+                    f"The Zone file was drawn on the video '{os.path.basename(zone_video)}' but the Video to process is "
+                    f"'{os.path.basename(video_now)}'. Zones, Lines and the scale (PPM / Perspective) belong to one camera "
+                    "view; with another video the results (Movement, LDP, Gap Acceptance ...) will be empty or wrong.")
+            else:
+                aw, ah = self._actual_video_size()
+                zw, zh = getattr(self, "zone_source_width", None), getattr(self, "zone_source_height", None)
+                if aw and ah and zw and zh and abs(aw / float(ah) - zw / float(zh)) > 0.02:
+                    warnings.append(
+                        f"The Zone file was drawn on {zw}x{zh} frames but the video is {aw}x{ah} (different shape): "
+                        "the Zones cannot be scaled correctly.")
         defined = {z for z in ZONE_IDS if len(self.zones.get(f"Zone {z}", [])) >= 3}
         any_enabled = any(bool(getattr(self, f"run3_{k}_enabled_var").get())
                           for k in ("speed", "gap", "lc", "pet", "ttc", "ldp"))
@@ -7418,6 +7434,7 @@ class Run1App:
         if mapping_parse_error:
             summary["diagnostics"]["reference_mapping"] = f"Invalid Reference Line Mapping: {mapping_parse_error}"
         indicator_rows = []
+        row_counts = {}
 
         def write_csv(filename, fields, rows):
             csv_file, actual = self._run3_open_csv_safe(os.path.join(output_dir, filename))
@@ -7453,6 +7470,7 @@ class Run1App:
             status("Run 3 — Lateral Clearance...")
             rows, lc_diag = self._run3_lateral_clearance(tracks, c, sequence_by_id)
             fields = ["Site_ID","Pair_ID","Timestamp","Zone","Vehicle_A_ID","Vehicle_A_Class","Vehicle_B_ID","Vehicle_B_Class","Zone_Sequence_A","Zone_Sequence_B","Along_m","LS_Meter","Signed_Lateral_m","Width_A_m","Width_B_m","Length_A_m","Length_B_m","Lateral_Clearance_m","QC_Flag"]
+            row_counts["lc"] = len(rows)
             outputs["lateral_clearance"] = write_csv("Run_3_Lateral_Clearance.csv", fields, rows)
             pairs = self._run3_lc_pair_summary(rows)
             pair_fields = ["Site_ID","Pair_ID","Zone","Vehicle_A_ID","Vehicle_A_Class","Vehicle_B_ID","Vehicle_B_Class","Zone_Sequence_A","Zone_Sequence_B","Start_Time","End_Time","Samples","Lateral_Clearance_Min_m","Lateral_Clearance_Mean_m","QC_Flag"]
@@ -7470,6 +7488,7 @@ class Run1App:
             status("Run 3 — LDP...")
             rows = self._run3_ldp(tracks, c, movement_by_id, movement_source_by_id)
             fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","LDP_percent","LDP_Level","Mean_Speed_kmh","Speed_Level","Calibration_Mode","QC_Flag"]
+            row_counts["ldp"] = len(rows)
             outputs["ldp"] = write_csv("Run_3_LDP.csv", fields, rows)
             vals = [float(r["LDP_percent"]) for r in rows]
             note = f"W_entry={c['w_entry_m']} m; W_opp={c['w_opp_m']} m; smoothing={c['ldp_smoothing_samples']}"
@@ -7488,6 +7507,7 @@ class Run1App:
             status("Run 3 — Gap Acceptance...")
             gap_rows = self._run3_gap(tracks, c, mapping, movement_by_id)
             fields = ["Site_ID","Decision_Event_ID","Subject_ID","Subject_Class","Subject_Movement","Conflicting_Movement","Conflicting_ID_A","Conflicting_ID_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","X32_Waiting_Time","Gap_Role","Gap_Acceptance","Acceptance_Time","QC_Flag"]
+            row_counts["gap"] = len(gap_rows)
             outputs["gap_acceptance"] = write_csv("Run_3_Gap_Acceptance.csv", fields, gap_rows)
             rejected = defaultdict(list); accepted = defaultdict(list)
             for r in gap_rows:
@@ -7533,6 +7553,7 @@ class Run1App:
             status("Run 3 — TTC...")
             rows, diag = self._run3_ttc(tracks, c, movement_by_id)
             fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","S_Conflict_Distance_m","CS_Closing_Speed_kmh","Speed_A_kmh","Speed_B_kmh","Dist_A_to_Crossing_m","Dist_B_to_Crossing_m","Arrival_Diff_s","Path_Angle_deg","TTC_s","TTC_Level","Speed_Level","QC_Flag"]
+            row_counts["ttc"] = len(rows)
             outputs["ttc"] = write_csv("Run_3_TTC.csv", fields, rows)
             vals = [float(r["TTC_s"]) for r in rows]
             s_ = indicator("Time-to-Collision (TTCmin per event)", "Time", "s", "All", vals,
@@ -7553,6 +7574,7 @@ class Run1App:
             status("Run 3 — PET...")
             rows, diag = self._run3_pet(tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
             fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","PET_s","PET_Risk_Level","QC_Flag"]
+            row_counts["pet"] = len(rows)
             outputs["pet"] = write_csv("Run_3_PET.csv", fields, rows)
             vals = [float(r["PET_s"]) for r in rows]
             s = indicator("Post-Encroachment Time", "Time", "s", "All", vals)
@@ -7570,6 +7592,7 @@ class Run1App:
             status("Run 3 — Speed...")
             speed_rows = self._run3_speed(tracks, c, movement_by_id, movement_source_by_id)
             fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Scope","Key","Movement","Movement_Status","Start_Time","End_Time","Start_Frame","End_Frame","Samples","Distance_m","Duration_s","Speed_kmh","Calibration_Mode","QC_Flag"]
+            row_counts["speed"] = len(speed_rows)
             outputs["speed_detail"] = write_csv("Run_3_Speed_Detail.csv", fields, speed_rows)
             vs = self._run3_speed_vehicle_summary(speed_rows, tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
             outputs["speed"] = write_csv("Run_3_Speed.csv", self._run3_speed_vehicle_summary_fields(), vs)
@@ -7601,6 +7624,34 @@ class Run1App:
                 "Run_3_Indicator_Summary.csv",
                 ["Site_ID","Indicator","Domain","Unit","Group","N","Mean","SD","Median","Min","Max","P85","Note"],
                 indicator_rows)
+
+        # Why is an enabled indicator empty? (plain-language reasons, also shown when the run ends)
+        empty = []
+        mstat = summary["source_counts"]["movement_status"]
+        mcount = summary["source_counts"]["movement_counts"]
+        seen = (f"Movement ที่จับได้: Exact {mstat['Exact']}, Partial {mstat['Partial']}, "
+                f"ไม่ตรงแบบใด {mstat['Unclassified']}, เห็นไม่ครบ {mstat['Insufficient']} จาก {len(tracks)} คัน")
+        layout_hint = " — ตรวจว่าไฟล์ Zone/วิดีโอเป็นชุดเดียวกับผังทางแยก (Movement ใหม่ 1-3-4, 2-3-1, 1-3-6-7, 5-6-3-1, 2-3-4, 5-6-7)"
+        if c["ldp_enabled"] and row_counts.get("ldp") == 0:
+            main = mcount.get("2-3-4", 0) + mcount.get("5-6-7", 0)
+            empty.append(f"LDP ไม่มีข้อมูล: LDP คิดเฉพาะรถที่วิ่งครบ 2-3-4 หรือ 5-6-7 ตรง ๆ พบ {main} คัน. {seen}{layout_hint}")
+        if c["gap_enabled"] and row_counts.get("gap") == 0:
+            drawn = [n for n, pts in self.lines.items() if len(pts) == 2]
+            subjects = sum(mcount.get(mv, 0) for mv in c["gap_movements"])
+            if not drawn:
+                empty.append("Gap Acceptance ไม่มีข้อมูล: ไฟล์ Zone ยังไม่มี Line — กด \"วาด Line…\" วาดเส้นของกระแส 2-3-4, 5-6-7, 5-6-3-1, 1-3-6-7")
+            elif not mapping:
+                empty.append("Gap Acceptance ไม่มีข้อมูล: ช่อง Reference Line Mapping ว่างหรือผิดรูปแบบ")
+            elif subjects == 0:
+                empty.append(f"Gap Acceptance ไม่มีข้อมูล: ไม่พบรถที่รอ (Movement {', '.join(c['gap_movements'])}) เลย. {seen}{layout_hint}")
+            else:
+                empty.append(f"Gap Acceptance ไม่มีข้อมูล: พบรถที่รอ {subjects} คัน แต่ไม่มีคันไหนเริ่มรอ (ความเร็ว ≤ {c['waiting_threshold']} km/h ในโซนรอ) แล้วออกตัว หรือไม่มีช่องว่างจากกระแสที่ขัดแย้ง")
+        for key, label in (("lc", "Lateral Clearance"), ("ttc", "TTC"), ("pet", "PET"), ("speed", "Speed")):
+            if c[key + "_enabled"] and row_counts.get(key) == 0:
+                empty.append(f"{label} ไม่มีข้อมูล (ไม่มีรถ/คู่รถที่เข้าเงื่อนไขในโซนที่เลือก)")
+        summary["diagnostics"]["empty_outputs"] = empty
+        for line in empty:
+            print("Run 3 —", line)
 
         summary["architecture"] = {
             "indicators": "LDP, Lateral Clearance, Gap Acceptance, TTC, PET, Speed (V50, V85, Mean, SD)",
@@ -7642,6 +7693,10 @@ class Run1App:
         if self.save_csv_var.get():
             message += f"Run 2 Detection Records:\n{output_csv}\n\n"
         message += f"Run 2 ID Zone Summary:\n{output_id_zone_summary}\n\nRun 2 Zone Summary:\n{output_zone_summary}\n\n"
+        empty_reasons = (self.run3_last_summary or {}).get("diagnostics", {}).get("empty_outputs", [])
+        if empty_reasons:
+            message += "ตัวชี้วัดที่ไม่มีข้อมูล (ไฟล์ CSV มีแต่หัวแถว) และสาเหตุ:\n"
+            message += "\n".join("• " + r for r in empty_reasons) + "\n\n"
         if self.run3_last_outputs:
             message += "Run 3 Outputs:\n"
             for key, value in self.run3_last_outputs.items():
