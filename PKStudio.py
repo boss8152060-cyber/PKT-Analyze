@@ -530,6 +530,7 @@ ZONE_NAMES = [f"Zone {i}" for i in ZONE_IDS]
 
 # ==== CORE-BEGIN (pure logic, no GUI: unit-tested by tests/test_core.py) ====
 import math
+import re
 import numpy as np
 
 # V27(2): zone visits shorter/closer than this are treated as boundary flicker
@@ -1079,6 +1080,15 @@ def build_gap_intervals(events):
                         "id_a": str(a[1]), "class_a": a[2], "id_b": str(b[1]), "class_b": b[2],
                         "reference": a[3], "qc": ";".join(dict.fromkeys(x for x in (a[4], b[4]) if x))})
     return out
+
+
+def excel_safe_value(value):
+    """Excel turns text such as 2-3-4 into a date (2 Mar 2004) and 5-6-7 into a number. A
+    movement / zone sequence (zone numbers 1-7 joined by hyphens) is therefore written with
+    arrows (2→3→4) in the Run 3 CSV files."""
+    if isinstance(value, str) and re.fullmatch(r"[1-7](?:-[1-7])+", value):
+        return value.replace("-", "→")
+    return value
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -7669,7 +7679,7 @@ class Run1App:
             with csv_file as f:
                 w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
                 w.writeheader()
-                w.writerows(rows)
+                w.writerows([{k: excel_safe_value(v) for k, v in r.items()} for r in rows])
             return actual
 
         def indicator(name, domain, unit, group, values, note=""):

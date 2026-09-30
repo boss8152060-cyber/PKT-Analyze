@@ -93,9 +93,14 @@ def write_csv(path, fields, rows):
         w.writerows(rows)
 
 
-def read_csv(path):
+def read_csv(path, raw=False):
+    """Run 3 writes movements / zone sequences with arrows (2→3→4) so that Excel does not
+    turn them into dates; the checks below compare with the hyphen form unless raw=True."""
     with open(path, newline="", encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
+    if not raw:
+        rows = [{k: (v.replace("→", "-") if isinstance(v, str) else v) for k, v in r.items()} for r in rows]
+    return rows
 
 
 def run_scene(app, vehicles):
@@ -160,6 +165,10 @@ def scene1(app):
     stats = read_csv(os.path.join(out, "Run_3_Speed_Statistics.csv"))
     z2 = [r for r in stats if r["Scope"] == "Zone" and r["Key"] == "Zone 2" and r["Vehicle_Class"] == "All"][0]
     check("Speed stats Zone 2: N=2, V50 ~36", z2["N"] == "2" and abs(float(z2["V50_kmh"]) - 36.0) < 0.6, str(z2))
+    raw_speed = read_csv(os.path.join(out, "Run_3_Speed.csv"), raw=True)
+    check("CSV movement / zone-sequence cells use arrows (Excel would turn 2-3-4 into a date)",
+          any(r["Zone_Sequence"] == "2→3→4" for r in raw_speed) and not any("-" in r["Zone_Sequence"] for r in raw_speed),
+          str([r["Zone_Sequence"] for r in raw_speed][:5]))
     wide = read_csv(os.path.join(out, "Run_3_Speed.csv"))
     check("vehicle summary rows = 5 (the duplicate ID 6 has no rows left)", len(wide) == 5, str(len(wide)))
     check("vehicle summary has Zone_Sequence 2-3-4", any(r["Zone_Sequence"] == "2-3-4" for r in wide))
