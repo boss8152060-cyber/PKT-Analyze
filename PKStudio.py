@@ -449,8 +449,7 @@ RUN3_DEFAULTS = {
     "perspective_l23_m": "",
     "perspective_l34_m": "",
     "perspective_l41_m": "",
-    "waiting_speed_threshold": "5.00",      # Gap Acceptance: "stopped" inside the conflict zones = speed <= this (km/h)
-    "gap_hold_min_duration_s": "0.30",      # ... for at least this long (s)
+    "waiting_speed_threshold": "1.00",      # implementation starter value
     "lateral_axis_angle_deg": "0.00",       # implementation starter value; verify per video
     "lc_heading_window_s": "0.50",          # centred window (s) used to get the heading of vehicle A
     "pet_interaction_distance_m": "3.00",   # implementation starter value
@@ -475,8 +474,6 @@ RUN3_DEFAULTS = {
     "lane_opp_motorcycle_m": "",
     "lane_opp_car_m": "",
     "median_m": "",                         # recorded only; not used in any indicator
-    # Run 3 only: renumber the zones of an OLD zone file to the current layout (blank = no change).
-    "zone_remap": "",
     "ldp_smoothing_samples": "5",           # rolling median to suppress bbox jitter (1 = off)
     # Speed: user can select any of Zones 1–6. CSV assigns each selected zone
     # to the research role: Zone 1 = access mouth, 2/4 = approach, 3/5 = exit, 6 = middle/access.
@@ -723,7 +720,7 @@ def track_speed_records(rows, speed_zones, movement_id="", movement_status="", s
     if movement_id:
         zones = set(MOVEMENT_PATTERNS[movement_id]["sequence"])
         add("Movement", movement_id, [r for r in valid if r["_zone_num"] in zones],
-            "Partial_Movement" if str(movement_status).startswith("Partial") else "")
+            "Partial_Movement" if movement_status == "Partial" else "")
     return out
 
 
@@ -971,145 +968,6 @@ def find_duplicate_tracks(frame_boxes, track_length, iou_min=DUPLICATE_TRACK_IOU
         entry = out.setdefault(drop, {"keep": keep, "frames": set()})
         entry["frames"] |= frames
     return out
-
-
-def first_visit_order(sequence):
-    """Zones in the order of their FIRST visit, repeats dropped (the idea of the Run 2
-    column `unique_zones_visited`): 2,3,2,3,4 -> 2,3,4."""
-    out = []
-    for z in sequence:
-        z = int(z)
-        if z not in out:
-            out.append(z)
-    return out
-
-
-def classify_movement_robust(sequence):
-    """classify_movement on the cleaned zone sequence; when that gives no Exact/Partial
-    answer, retry on the first-visit order so a vehicle that wobbles across a zone
-    boundary (2-3-2-3-4) is still recognised. Returns (movement_id, status) with status
-    Exact | Partial | Exact_AfterDedupe | Partial_AfterDedupe | Ambiguous |
-    Unclassified | Insufficient. An Exact/Partial answer of the plain sequence is never
-    changed."""
-    movement, status = classify_movement(sequence)
-    if status in ("Exact", "Partial"):
-        return movement, status
-    plain = []
-    for z in sequence:
-        if not plain or plain[-1] != int(z):
-            plain.append(int(z))
-    uniq = first_visit_order(sequence)
-    if uniq != plain:
-        movement2, status2 = classify_movement(uniq)
-        if status2 == "Exact":
-            return movement2, "Exact_AfterDedupe"
-        if status2 == "Partial":
-            return movement2, "Partial_AfterDedupe"
-    return movement, status
-
-
-# ---- Gap Acceptance (design of v26(5.14.11) "PASS", SPEC v28 section 6.1) ----
-# Subject movement -> zones where the driver waits, conflict ("middle") zones and the target zone.
-GAP_PATHS = {
-    "1-3-4":   {"wait": (1,), "middle": (3,),   "target": 4},
-    "1-3-6-7": {"wait": (1,), "middle": (3, 6), "target": 7},
-    "5-6-3-1": {"wait": (5,), "middle": (6, 3), "target": 1},
-}
-# Fallback reference time of a conflicting stream when no Line is usable: the first time
-# a vehicle of that stream is seen in the stream's origin zone.
-GAP_REFERENCE_ZONE = {"2-3-4": 2, "5-6-7": 5, "5-6-3-1": 5, "1-3-6-7": 1}
-GAP_HOLD_SPEED_KMH = 5.0      # default: "stopped" = speed <= this ...
-GAP_HOLD_MIN_S = 0.30         # ... for at least this long (inside the conflict zones)
-
-
-def find_hold(samples, speed_kmh=GAP_HOLD_SPEED_KMH, min_duration_s=GAP_HOLD_MIN_S):
-    """Did the subject stop inside the conflict zones after entering them?
-
-    samples = [(t, x_m, y_m, in_middle), ...] in time order, starting at the first
-    sample inside the conflict zones. A stop = consecutive samples inside the
-    conflict zones with speed <= speed_kmh lasting >= min_duration_s. No interpolation.
-    Returns {"state": ..., "stop_start": t or None, "resume_time": t or None} with state
-      "Continued"           - never stopped there
-      "Stopped_then_Resumed"- resume_time = first observed sample after the stop that is
-                              faster than the threshold or outside the conflict zones
-      "Stopped_Censored"    - still stopped at the last observed sample"""
-    prev = None
-    run_start = None
-    stop_start = None
-    for t, x, y, inside in samples:
-        if not inside:
-            if stop_start is not None:
-                return {"state": "Stopped_then_Resumed", "stop_start": stop_start, "resume_time": t}
-            return {"state": "Continued", "stop_start": None, "resume_time": None}
-        if prev is None:
-            prev = (t, x, y)
-            continue
-        dt = t - prev[0]
-        if dt <= 0:
-            prev = (t, x, y)
-            continue
-        speed = math.hypot(x - prev[1], y - prev[2]) / dt * 3.6
-        if speed <= speed_kmh:
-            if run_start is None:
-                run_start = prev[0]
-            if stop_start is None and t - run_start >= min_duration_s:
-                stop_start = run_start
-        else:
-            if stop_start is not None:
-                return {"state": "Stopped_then_Resumed", "stop_start": stop_start, "resume_time": t}
-            run_start = None
-        prev = (t, x, y)
-    if stop_start is not None:
-        return {"state": "Stopped_Censored", "stop_start": stop_start, "resume_time": None}
-    return {"state": "Continued", "stop_start": None, "resume_time": None}
-
-
-def build_gap_intervals(events):
-    """events = [(time, vehicle_id, class_name, reference_label, qc_flag), ...] of ONE
-    conflicting stream. One event per vehicle (its earliest); gaps are the time between
-    consecutive vehicles of the stream (different vehicles, positive length)."""
-    first = {}
-    for ev in events:
-        vid = str(ev[1])
-        if vid not in first or ev[0] < first[vid][0]:
-            first[vid] = ev
-    ordered = sorted(first.values(), key=lambda e: e[0])
-    out = []
-    for a, b in zip(ordered, ordered[1:]):
-        if b[0] > a[0]:
-            out.append({"gap_start": float(a[0]), "gap_end": float(b[0]),
-                        "id_a": str(a[1]), "class_a": a[2], "id_b": str(b[1]), "class_b": b[2],
-                        "reference": a[3], "qc": ";".join(dict.fromkeys(x for x in (a[4], b[4]) if x))})
-    return out
-
-
-# Zone numbers of an OLD zone file -> numbers of the current layout (SPEC v28), used by Run 3 only.
-# Old camera (side street at the top): lane next to the side street 2-6-3 -> 2-3-4, opposite lane 4-7-5 -> 5-6-7.
-LEGACY_ZONE_REMAP_TEXT = "6=3, 3=4, 4=5, 7=6, 5=7"
-
-
-def parse_zone_remap(text):
-    """'6=3, 3=4' -> {6: 3, 3: 4}. Empty text = no remap. Zones not listed keep their number,
-    and the final numbering must still be one-to-one (no two old zones may end up as the same
-    new zone). Raises ValueError with a readable message."""
-    mapping = {}
-    for part in str(text or "").replace(";", ",").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "=" not in part:
-            raise ValueError(f"'{part}' must look like old=new (e.g. 6=3)")
-        a, b = (q.strip() for q in part.split("=", 1))
-        if not (a.isdigit() and b.isdigit() and 1 <= int(a) <= 7 and 1 <= int(b) <= 7):
-            raise ValueError(f"'{part}': zone numbers must be 1-7")
-        if int(a) in mapping:
-            raise ValueError(f"old zone {a} is listed twice")
-        mapping[int(a)] = int(b)
-    final = {z: mapping.get(z, z) for z in range(1, 8)}
-    if len(set(final.values())) != 7:
-        dup = sorted(z for z in set(final.values()) if list(final.values()).count(z) > 1)
-        raise ValueError(f"two old zones become the same new zone ({', '.join(map(str, dup))}); list every zone that moves")
-    return mapping
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -1440,7 +1298,6 @@ class Run1App:
         self.run3_perspective_l34_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_l34_m"])
         self.run3_perspective_l41_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_l41_m"])
         self.run3_waiting_speed_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["waiting_speed_threshold"])
-        self.run3_hold_min_duration_var = tk.StringVar(value=RUN3_DEFAULTS["gap_hold_min_duration_s"])
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
         self.run3_lc_heading_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_heading_window_s"])
         self.run3_lc_motorcycle_pairs_only_var = tk.BooleanVar(value=RUN3_DEFAULTS["lc_motorcycle_pairs_only"])
@@ -1467,7 +1324,6 @@ class Run1App:
         self.run3_geometry_vars = {
             key: tk.StringVar(value=RUN3_DEFAULTS[key]) for key in RUN3_GEOMETRY_KEYS
         }
-        self.run3_zone_remap_var = tk.StringVar(value=RUN3_DEFAULTS["zone_remap"])
         self.run3_w_entry_text = tk.StringVar(value="W_entry = -")
         self.run3_w_opp_text = tk.StringVar(value="W_opp = -")
         for _var in self.run3_geometry_vars.values():
@@ -1820,9 +1676,6 @@ class Run1App:
         ttk.Label(geo, textvariable=self.run3_w_opp_text, foreground="#0a5").grid(row=3, column=4, sticky="w")
         ttk.Label(geo, text="ความกว้างเกาะกลาง (บันทึกไว้ ไม่ใช้คำนวณ)").grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 2))
         ttk.Entry(geo, textvariable=self.run3_geometry_vars["median_m"], width=8).grid(row=4, column=2, sticky="w", padx=(4, 16))
-        ttk.Label(geo, text="แปลงเลขโซนของไฟล์ Zone เก่า → ผังใหม่ (Run 3) เช่น 6=3, 3=4 ; ว่าง = ไม่แปลง").grid(row=5, column=0, columnspan=5, sticky="w", pady=(8, 2))
-        ttk.Entry(geo, textvariable=self.run3_zone_remap_var, width=34).grid(row=6, column=0, columnspan=3, sticky="w", padx=(0, 8))
-        ttk.Button(geo, text="ใช้ค่าสำหรับวิดีโอเก่า", command=lambda: self.run3_zone_remap_var.set(LEGACY_ZONE_REMAP_TEXT)).grid(row=6, column=3, columnspan=2, sticky="w")
         self._update_lane_totals()
 
         def zone_row(title, note, var_map):
@@ -1873,11 +1726,8 @@ class Run1App:
 
         ttk.Label(frame, text="LC heading window (s)").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(frame, textvariable=self.run3_lc_heading_window_var, width=18).grid(row=r, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="Gap: รถ \"หยุด\" ในโซนกลาง เมื่อความเร็ว ≤ (km/h)").grid(row=r, column=2, sticky="e", padx=(12, 8), pady=4)
+        ttk.Label(frame, text="Waiting speed threshold (km/h)").grid(row=r, column=2, sticky="e", padx=(12, 8), pady=4)
         ttk.Entry(frame, textvariable=self.run3_waiting_speed_threshold_var, width=18).grid(row=r, column=3, sticky="w", pady=4)
-        r += 1
-        ttk.Label(frame, text="Gap: ... นานอย่างน้อย (s)").grid(row=r, column=2, sticky="e", padx=(12, 8), pady=4)
-        ttk.Entry(frame, textvariable=self.run3_hold_min_duration_var, width=18).grid(row=r, column=3, sticky="w", pady=4)
         r += 1
 
         ttk.Separator(frame, orient="horizontal").grid(row=r, column=0, columnspan=4, sticky="ew", pady=(8, 6)); r += 1
@@ -3460,7 +3310,6 @@ class Run1App:
                 "perspective_l34_m": self.run3_perspective_l34_var.get(),
                 "perspective_l41_m": self.run3_perspective_l41_var.get(),
                 "waiting_speed_threshold": self.run3_waiting_speed_threshold_var.get(),
-                "gap_hold_min_duration_s": self.run3_hold_min_duration_var.get(),
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
                 "lc_heading_window_s": self.run3_lc_heading_window_var.get(),
                 "lc_motorcycle_pairs_only": self.run3_lc_motorcycle_pairs_only_var.get(),
@@ -3484,7 +3333,6 @@ class Run1App:
                 "ttc_side_min_angle_deg": self.run3_ttc_side_angle_var.get(),
                 "ttc_side_mode": self.run3_ttc_side_mode_var.get(),
                 **{key: self.run3_geometry_vars[key].get() for key in RUN3_GEOMETRY_KEYS},
-                "zone_remap": self.run3_zone_remap_var.get(),
                 "ldp_smoothing_samples": self.run3_ldp_smoothing_var.get(),
                 "vehicle_lengths": {name: var.get() for name, var in self.run3_length_vars.items()},
                 "gap_subject_134": self.run3_gap_subject_134_var.get(),
@@ -3622,7 +3470,6 @@ class Run1App:
                 ("speed_smoothing_samples", self.run3_speed_smoothing_var),
                 ("ldp_smoothing_samples", self.run3_ldp_smoothing_var),
                 ("waiting_speed_threshold", self.run3_waiting_speed_threshold_var),
-                ("gap_hold_min_duration_s", self.run3_hold_min_duration_var),
                 ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
                 ("lc_heading_window_s", self.run3_lc_heading_window_var),
                 ("lc_motorcycle_pairs_only", self.run3_lc_motorcycle_pairs_only_var),
@@ -3635,7 +3482,6 @@ class Run1App:
                 ("use_mle", self.run3_use_mle_var),
             ]
             mapping_pairs += [(key, self.run3_geometry_vars[key]) for key in RUN3_GEOMETRY_KEYS]
-            mapping_pairs += [("zone_remap", self.run3_zone_remap_var)]
             for key, variable in mapping_pairs:
                 if key in run3:
                     variable.set(run3[key])
@@ -4301,10 +4147,6 @@ class Run1App:
                     raise ValueError("Run 3 TTC side minimum path angle must be between 0 and 90 degrees.")
                 if float(self.run3_ttc_side_factor_var.get()) < 0 or float(self.run3_ttc_side_margin_var.get()) < 0:
                     raise ValueError("Run 3 TTC side window factor and extra time must not be negative.")
-        try:
-            parse_zone_remap(self.run3_zone_remap_var.get())
-        except ValueError as exc:
-            raise ValueError(f"Run 3 zone remap: {exc}")
         for key in RUN3_GEOMETRY_KEYS:
             text = str(self.run3_geometry_vars[key].get()).strip()
             if text:   # must be numeric when entered (lane widths are required when LDP is enabled)
@@ -4327,8 +4169,7 @@ class Run1App:
                 self.run3_gap_subject_5631_var.get(),
             ]):
                 raise ValueError("Select at least one Gap Acceptance subject movement.")
-            self._run3_float(self.run3_waiting_speed_threshold_var.get(), "Gap Acceptance stop speed threshold (km/h)")
-            self._run3_float(self.run3_hold_min_duration_var.get(), "Gap Acceptance stop minimum duration (s)")
+            self._run3_float(self.run3_waiting_speed_threshold_var.get(), "waiting detection speed threshold (km/h)")
             if not (self.run3_use_raff_var.get() or self.run3_use_mle_var.get()):
                 raise ValueError("Select at least one Critical Gap method.")
             self.run3_reference_mapping_text = (
@@ -4351,27 +4192,7 @@ class Run1App:
             "pet": ("PET", self.run3_pet_zone_vars),
             "ldp": ("LDP", self.run3_ldp_zone_vars),
         }
-        # A Zone file (and its Lines) belongs to ONE camera view. Warn when the Video is a different one.
-        zone_video = str(getattr(self, "zone_source_video", "") or "").strip()
-        video_now = self.video_var.get().strip()
-        if self.zone_line_config_var.get().strip() and zone_video and video_now:
-            if os.path.basename(zone_video).lower() != os.path.basename(video_now).lower():
-                warnings.append(
-                    f"The Zone file was drawn on the video '{os.path.basename(zone_video)}' but the Video to process is "
-                    f"'{os.path.basename(video_now)}'. Zones, Lines and the scale (PPM / Perspective) belong to one camera "
-                    "view; with another video the results (Movement, LDP, Gap Acceptance ...) will be empty or wrong.")
-            else:
-                aw, ah = self._actual_video_size()
-                zw, zh = getattr(self, "zone_source_width", None), getattr(self, "zone_source_height", None)
-                if aw and ah and zw and zh and abs(aw / float(ah) - zw / float(zh)) > 0.02:
-                    warnings.append(
-                        f"The Zone file was drawn on {zw}x{zh} frames but the video is {aw}x{ah} (different shape): "
-                        "the Zones cannot be scaled correctly.")
-        try:
-            remap = parse_zone_remap(self.run3_zone_remap_var.get())
-        except ValueError:
-            remap = {}
-        defined = {remap.get(z, z) for z in ZONE_IDS if len(self.zones.get(f"Zone {z}", [])) >= 3}
+        defined = {z for z in ZONE_IDS if len(self.zones.get(f"Zone {z}", [])) >= 3}
         any_enabled = any(bool(getattr(self, f"run3_{k}_enabled_var").get())
                           for k in ("speed", "gap", "lc", "pet", "ttc", "ldp"))
         if any_enabled and not defined:
@@ -4391,35 +4212,41 @@ class Run1App:
                     "Those zones will produce no data."
                 )
 
-        # Gap Acceptance: a Line per conflicting stream gives the best reference time; without a
-        # usable Line the program uses the time a vehicle first enters the stream's origin zone.
+        # V27(4): Gap Acceptance needs a Reference Line Mapping entry (and a
+        # drawn Line) for the movement(s) that conflict with each subject.
         if bool(self.run3_gap_enabled_var.get()):
             subjects = [m for m, var in (("1-3-4", self.run3_gap_subject_134_var),
                                          ("1-3-6-7", self.run3_gap_subject_1367_var),
                                          ("5-6-3-1", self.run3_gap_subject_5631_var)) if var.get()]
             text = (self.run3_reference_text.get("1.0", "end-1c")
                     if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text)
-            fallback = (" For such streams the program uses the time each vehicle first enters the origin zone "
-                        "of the stream instead (more approximate; button 'วาด Line…' gives better results).")
             try:
                 mapping = self._run3_parse_reference_mapping(text)
             except Exception as exc:
                 mapping = None
-                warnings.append(f"Gap Acceptance: Reference Line Mapping is invalid ({exc})." + fallback)
+                warnings.append(f"Gap Acceptance: Reference Line Mapping is invalid ({exc}). "
+                                "Gap Acceptance output will be empty.")
             if mapping is not None:
                 site = self.run3_site_id_var.get().strip()
                 site_map = {mv: ln for (st, mv), ln in mapping.items() if str(st).strip() == site}
-                needed = sorted({c for m in subjects for c in RUN3_GAP_CONFLICT_MAP[m]})
-                missing = [c for c in needed if c not in site_map]
-                undrawn = sorted({f"{ln} ({c})" for c, ln in site_map.items()
-                                  if c in needed and len(self.lines.get(ln, [])) != 2})
-                parts = []
-                if missing:
-                    parts.append("no Line mapped for stream(s) " + ", ".join(missing) + f" (Site_ID '{site}')")
-                if undrawn:
-                    parts.append("mapped Line is not drawn/loaded in the Zone/Line file: " + ", ".join(undrawn))
-                if parts:
-                    warnings.append("Gap Acceptance: " + "; ".join(parts) + "." + fallback)
+                if not site_map:
+                    warnings.append(
+                        f"Gap Acceptance: no Reference Line Mapping rows for Site_ID '{site}' "
+                        "(rows starting with # are ignored). Gap Acceptance output will be empty.")
+                else:
+                    needed = sorted({c for m in subjects for c in RUN3_GAP_CONFLICT_MAP[m]})
+                    missing = [c for c in needed if c not in site_map]
+                    if missing:
+                        warnings.append(
+                            "Gap Acceptance: no mapping for conflicting movement(s) "
+                            + ", ".join(missing) + f" (Site_ID '{site}'); gaps from these streams "
+                            "cannot be measured.")
+                    undrawn = sorted({f"{ln} ({c})" for c, ln in site_map.items()
+                                      if c in needed and len(self.lines.get(ln, [])) != 2})
+                    if undrawn:
+                        warnings.append(
+                            "Gap Acceptance: mapped Line is not drawn/loaded in the Zone/Line file: "
+                            + ", ".join(undrawn) + ".")
         return warnings
 
     # ========================================================
@@ -6352,7 +6179,7 @@ class Run1App:
         movement_by_id, status_by_id, sequence_by_id = {}, {}, {}
         for tid, rows in tracks.items():
             seq = zone_sequence_from_samples([(r["_timestamp"], r.get("_zone_num")) for r in rows])
-            movement, status = classify_movement_robust(seq)
+            movement, status = classify_movement(seq)
             key = str(tid)
             movement_by_id[key] = movement
             status_by_id[key] = status
@@ -6472,8 +6299,7 @@ class Run1App:
         med=float(np.median(intervals))
         return max(0.02, min(0.10, med*2.5))
 
-    def _run3_build_tracks(self, detection_rows, id_rows, zone_remap=None):
-        zone_remap = zone_remap or {}
+    def _run3_build_tracks(self, detection_rows, id_rows):
         tracks = defaultdict(list)
         for row in detection_rows:
             tid = str(row.get("track_id", "")).strip()
@@ -6491,7 +6317,7 @@ class Run1App:
             z = str(row.get("zone", ""))
             m = re.search(r"(\d+)", z)
             if m:
-                row2["_zone_num"] = zone_remap.get(int(m.group(1)), int(m.group(1)))
+                row2["_zone_num"] = int(m.group(1))
             tracks[tid].append(row2)
         for rows in tracks.values():
             rows.sort(key=lambda r: r["_timestamp"])
@@ -6552,8 +6378,7 @@ class Run1App:
             "pet_zones": zones_of(self.run3_pet_zone_vars),
             "ttc_zones": zones_of(self.run3_ttc_zone_vars),
             "ldp_zones": zones_of(self.run3_ldp_zone_vars),
-            "waiting_threshold": num(self.run3_waiting_speed_threshold_var, GAP_HOLD_SPEED_KMH),
-            "hold_min_duration_s": num(self.run3_hold_min_duration_var, GAP_HOLD_MIN_S),
+            "waiting_threshold": num(self.run3_waiting_speed_threshold_var, 1.0),
             "lc_heading_window_s": num(self.run3_lc_heading_window_var, 0.5),
             "lc_motorcycle_pairs_only": bool(self.run3_lc_motorcycle_pairs_only_var.get()),
             "pet_interaction": num(self.run3_pet_interaction_distance_var, 3.0),
@@ -6570,7 +6395,6 @@ class Run1App:
             "ttc_side_mode": {"Later arrival": "later", "Average of arrivals": "average"}.get(
                 str(self.run3_ttc_side_mode_var.get()), "earlier"),
             "geometry": geometry,
-            "zone_remap": parse_zone_remap(self.run3_zone_remap_var.get()),
             "w_entry_m": w_entry, "w_opp_m": w_opp,
             "ldp_smoothing_samples": int(num(self.run3_ldp_smoothing_var, 5) or 1),
             "gap_movements": gap_movements,
@@ -6861,7 +6685,7 @@ class Run1App:
         return mapping
 
     # ========================================================
-    # GAP ACCEPTANCE (two stages: Access / Exit - design of v26(5.14.11) PASS)
+    # GAP ACCEPTANCE
     # ========================================================
 
     @staticmethod
@@ -6873,232 +6697,118 @@ class Run1App:
             return None
         return math.hypot(cur["_m"][0] - prev["_m"][0], cur["_m"][1] - prev["_m"][1]) / dt * 3.6
 
-    def _run3_speed_at(self, rows, t):
-        """Speed (km/h) from the observed step around time t (no interpolation), or None."""
-        valid = [r for r in rows if r.get("_m") is not None and r.get("_timestamp") is not None]
-        if len(valid) < 2:
-            return None
-        import bisect
-        ts = [r["_timestamp"] for r in valid]
-        i = bisect.bisect_left(ts, t)
-        if i >= len(valid):
-            i = len(valid) - 1
-        if i == 0:
-            return self._run3_step_speed_kmh(valid[0], valid[1])
-        return self._run3_step_speed_kmh(valid[i - 1], valid[i])
-
     def _run3_gap(self, tracks, c, mapping, movement_by_id):
-        """Binary Gap Acceptance decisions (accepted / rejected gaps) of waiting drivers.
-
-        Subjects: movements 1-3-4, 1-3-6-7, 5-6-3-1 (GAP_PATHS: wait zone -> conflict
-        ("middle") zones -> target zone). Conflicting streams: RUN3_GAP_CONFLICT_MAP; several
-        streams may apply at once. A stream's reference time per vehicle = its first crossing
-        of the mapped Line, or (no usable Line) its first observation in the stream's origin
-        zone. Gap = time between consecutive vehicles of one stream.
-
-        Stage 1 - Access: the driver's waiting starts when it is first seen in the waiting
-          zone. Gaps that close before it enters the conflict zones are Rejected; the gap
-          still open when it enters is Accepted (the smallest remaining gap controls when
-          several streams apply) - unless the driver then stops inside the conflict zones.
-        Stage 2 - Exit (only after such a stop): that gap becomes Rejected and the driver
-          decides again after it resumes: only NEW gaps (starting after the resumption) count;
-          the gap that contains the target-zone entry is Accepted, earlier new gaps Rejected.
-        The available gap X31 is the time left until the gap closes at the decision time."""
         selected = c["gap_movements"]
+        wait_threshold = c["waiting_threshold"]
         site = c["site_id"]
-        thr = c["waiting_threshold"]
-        hold_min = c["hold_min_duration_s"]
-        diag = {"subjects": 0, "subjects_without_conflict_zone_entry": 0, "access_events": 0, "exit_events": 0,
-                "holds_resumed": 0, "holds_censored": 0, "streams": {}}
 
-        # ---- 1) reference events and gap intervals of every stream that is needed ----
-        streams = sorted({cm for mv in selected for cm in RUN3_GAP_CONFLICT_MAP.get(mv, [])})
-        intervals = {}
-        for cm in streams:
-            lname = mapping.get((site, cm)) if mapping else None
-            line = self.lines.get(lname, []) if lname else []
-            events = []
-            if len(line) == 2:
-                for tid, rows in tracks.items():
-                    if movement_by_id.get(str(tid), "") != cm:
-                        continue
-                    prev = prev_t = None
-                    for r in rows:
-                        pnt, t = r.get("_point"), r.get("_timestamp")
-                        if pnt is None or t is None:
-                            continue
-                        if prev is not None:
-                            cross_t = self._run3_line_crossing_time(prev, prev_t, pnt, t, line)
-                            if cross_t is not None:
-                                events.append((float(cross_t), str(tid), r.get("class_name", ""), lname, ""))
-                                break      # a vehicle crosses its reference line ONCE (first crossing)
-                        prev, prev_t = pnt, t
-            basis = "Line"
-            if len(events) < 2:
-                events, basis = [], "Origin_Zone_Entry"
-                ref_zone = GAP_REFERENCE_ZONE.get(cm)
-                for tid, rows in tracks.items():
-                    if movement_by_id.get(str(tid), "") != cm or ref_zone is None:
-                        continue
-                    cand = [r for r in rows if r.get("_zone_num") == ref_zone and r.get("_timestamp") is not None]
-                    if cand:
-                        first = min(cand, key=lambda r: r["_timestamp"])
-                        events.append((float(first["_timestamp"]), str(tid), first.get("class_name", ""),
-                                       f"Observed Zone {ref_zone}",
-                                       "Reference_Time_From_Origin_Zone_Entry" + ("" if not lname else "_Line_Unusable")))
-            intervals[cm] = build_gap_intervals(events)
-            diag["streams"][cm] = {"basis": basis, "vehicles": len({e[1] for e in events}), "gaps": len(intervals[cm])}
-
-        # ---- 2) every subject ----
-        rows_out = []
-        for tid, raw_rows in tracks.items():
-            tid = str(tid)
+        line_times = defaultdict(list)
+        for tid, rows in tracks.items():
             movement = movement_by_id.get(tid, "")
-            if movement not in selected or movement not in GAP_PATHS:
+            if movement not in RUN3_ALL_MOVEMENTS:
                 continue
-            path = GAP_PATHS[movement]
-            wait_zones, middle_zones, target_zone = set(path["wait"]), set(path["middle"]), path["target"]
-            rows = sorted((r for r in raw_rows if r.get("_timestamp") is not None), key=lambda r: r["_timestamp"])
-            decision_rows = [r for r in rows if r.get("_zone_num") in wait_zones | middle_zones]
-            if not decision_rows:
+            lname = mapping.get((site, movement))
+            if not lname:
                 continue
-            diag["subjects"] += 1
-            wait_rows = [r for r in decision_rows if r.get("_zone_num") in wait_zones]
-            if wait_rows:
-                wait_start = float(wait_rows[0]["_timestamp"])
-            else:                                   # the track starts inside the conflict zones
-                wait_start = float(decision_rows[0]["_timestamp"])
-            middle_after = [r for r in rows if r["_timestamp"] >= wait_start and r.get("_zone_num") in middle_zones]
-            if not middle_after:
-                diag["subjects_without_conflict_zone_entry"] += 1
-                continue
-            entry_t = float(middle_after[0]["_timestamp"])
-            conflict_movements = RUN3_GAP_CONFLICT_MAP.get(movement, [])
-
-            # -- Stage 1: Access --
-            stage_rows = []
-            for cm in conflict_movements:
-                for gap in intervals.get(cm, []):
-                    gs, ge = gap["gap_start"], gap["gap_end"]
-                    if ge <= wait_start or gs > entry_t:
-                        continue
-                    overlap = [r for r in decision_rows
-                               if max(gs, wait_start) <= r["_timestamp"] < min(ge, entry_t + 1e-12)]
-                    if not overlap:
-                        continue
-                    contains = gs <= entry_t < ge
-                    eval_t = entry_t if contains else float(overlap[0]["_timestamp"])
-                    avail = ge - eval_t
-                    if avail <= 0:
-                        continue
-                    stage_rows.append({**gap, "conflict_movement": cm, "stage": "Access", "gap": avail,
-                                       "opportunity_time": eval_t,
-                                       "decision_zone": int((middle_after[0] if contains else overlap[0]).get("_zone_num") or 0),
-                                       "contains_anchor": contains})
-
-            # did the driver stop inside the conflict zones after entering them?
-            samples = [(float(r["_timestamp"]), r["_m"][0], r["_m"][1], r.get("_zone_num") in middle_zones)
-                       for r in rows if r["_timestamp"] >= entry_t and r.get("_m") is not None]
-            hold = find_hold(samples, thr, hold_min) if samples else {"state": "Continued", "stop_start": None, "resume_time": None}
-            confirmed_hold = hold["state"] in ("Stopped_then_Resumed", "Stopped_Censored")
-
-            def pick(cands):
-                return min(cands, key=lambda o: (o["gap"], o["conflict_movement"], o["id_a"], o["id_b"])) if cands else None
-
-            controlling = pick([o for o in stage_rows if o["contains_anchor"]])
-            for o in stage_rows:
-                if o is controlling:
-                    o["accepted"] = 0 if confirmed_hold else 1
-                    o["basis"] = "Conflict_Zone_Entry_Followed_By_Stop" if confirmed_hold else "Conflict_Zone_Entry_No_Stop"
-                elif o["gap_end"] <= entry_t:
-                    o["accepted"], o["basis"] = 0, "Gap_Closed_Before_Conflict_Zone_Entry"
-                else:
-                    o["accepted"], o["basis"] = None, "Simultaneous_Alternative_Omitted"
-            stage_rows = [o for o in stage_rows if o["accepted"] is not None]
-            diag["access_events"] += int(bool(stage_rows))
-            target_entry_t = None
-
-            # -- Stage 2: Exit (only after a stop inside the conflict zones) --
-            if confirmed_hold:
-                if hold["resume_time"] is None:
-                    diag["holds_censored"] += 1
-                else:
-                    diag["holds_resumed"] += 1
-                    resume_t = float(hold["resume_time"])
-                    tgt = [r for r in rows if r["_timestamp"] > resume_t and r.get("_zone_num") == target_zone]
-                    target_entry_t = float(tgt[0]["_timestamp"]) if tgt else None
-                    end_t = target_entry_t if target_entry_t is not None else float(rows[-1]["_timestamp"])
-                    exit_rows = []
-                    for cm in conflict_movements:
-                        for gap in intervals.get(cm, []):
-                            gs, ge = gap["gap_start"], gap["gap_end"]
-                            if gs < resume_t or (target_entry_t is not None and gs > target_entry_t):
-                                continue
-                            overlap = [r for r in rows if r.get("_zone_num") in (wait_zones | middle_zones)
-                                       and gs <= r["_timestamp"] < min(ge, end_t + 1e-12)]
-                            target_overlap = target_entry_t is not None and gs <= target_entry_t < ge
-                            if not overlap and not target_overlap:
-                                continue
-                            eval_t = target_entry_t if target_overlap else float(overlap[0]["_timestamp"])
-                            avail = ge - eval_t
-                            if avail <= 0:
-                                continue
-                            exit_rows.append({**gap, "conflict_movement": cm, "stage": "Exit", "gap": avail,
-                                              "opportunity_time": eval_t,
-                                              "decision_zone": int(target_zone if target_overlap else (overlap[0].get("_zone_num") or 0)),
-                                              "contains_anchor": target_overlap})
-                    controlling_exit = pick([o for o in exit_rows if o["contains_anchor"]])
-                    for o in exit_rows:
-                        if o is controlling_exit:
-                            o["accepted"], o["basis"] = 1, "Target_Zone_Entry_After_Stop"
-                        elif target_entry_t is None:
-                            o["accepted"], o["basis"] = 0, "No_Observed_Target_Zone_Entry"
-                        elif o["gap_end"] <= target_entry_t:
-                            o["accepted"], o["basis"] = 0, "New_Gap_Closed_Before_Target_Zone"
-                        else:
-                            o["accepted"], o["basis"] = None, "Post_Target_Not_A_Decision"
-                    exit_rows = [o for o in exit_rows if o["accepted"] is not None]
-                    diag["exit_events"] += int(bool(exit_rows))
-                    stage_rows.extend(exit_rows)
-
-            # -- rows --
-            subject_class = rows[0].get("class_name", "") if rows else ""
-            ordered = sorted(stage_rows, key=lambda o: (o["stage"], o["opportunity_time"], -int(o["accepted"]),
-                                                        o["conflict_movement"], o["id_a"], o["id_b"]))
-            seen = set()
-            number = 0
-            for o in ordered:
-                key = (o["stage"], o["conflict_movement"], o["id_a"], o["id_b"], round(o["gap_start"], 6), round(o["gap_end"], 6))
-                if key in seen:
+            line = self.lines.get(lname, [])
+            prev = prev_t = None
+            for r in rows:
+                p = r.get("_point"); t = r.get("_timestamp")
+                if p is None:
                     continue
-                seen.add(key)
-                number += 1
-                anchor = entry_t if o["stage"] == "Access" else (target_entry_t if target_entry_t is not None else o["opportunity_time"])
-                qc = [o.get("qc", ""), o.get("basis", "")]
-                if confirmed_hold:
-                    qc.append(f"Stop_{thr:.1f}kmh_{hold_min:.2f}s")
-                sp_subject = self._run3_speed_at(rows, o["opportunity_time"])
-                sp_a = self._run3_speed_at(tracks.get(o["id_a"], []), o["gap_start"])
-                sp_b = self._run3_speed_at(tracks.get(o["id_b"], []), o["gap_end"])
-                rows_out.append({
-                    "Site_ID": site, "Decision_Event_ID": f"{tid}_{o['stage']}_{anchor:.6f}", "Opportunity_No": number,
-                    "Subject_ID": tid, "Subject_Class": subject_class, "Subject_Movement": movement,
-                    "Decision_Stage": o["stage"], "Decision_Zone": o["decision_zone"],
-                    "Gap_Evaluation_Time": f"{o['opportunity_time']:.6f}",
-                    "X32_Waiting_Time": f"{max(0.0, o['opportunity_time'] - wait_start):.6f}",
-                    "Conflicting_Movement": o["conflict_movement"],
-                    "Conflicting_ID_A": o["id_a"], "Conflicting_Class_A": o["class_a"],
-                    "Conflicting_ID_B": o["id_b"], "Conflicting_Class_B": o["class_b"],
-                    "Reference_Line": o["reference"],
-                    "Gap_Start_Time": f"{o['gap_start']:.6f}", "Gap_End_Time": f"{o['gap_end']:.6f}",
-                    "X31_Available_Gap": f"{o['gap']:.6f}",
-                    "Subject_Speed_kmh": self._fmt(sp_subject, 3), "Conflict_Speed_A_kmh": self._fmt(sp_a, 3),
-                    "Conflict_Speed_B_kmh": self._fmt(sp_b, 3),
-                    "Gap_Role": "Accepted" if o["accepted"] == 1 else "Rejected", "Gap_Acceptance": int(o["accepted"]),
-                    "Decision_Time": f"{o['opportunity_time']:.6f}",
-                    "QC_Flag": ";".join(dict.fromkeys(x for x in qc if x)),
-                })
-        self._run3_gap_diag = diag
+                if prev is not None:
+                    cross_t = self._run3_line_crossing_time(prev, prev_t, p, t, line)
+                    if cross_t is not None:
+                        # V28: a vehicle crosses its reference line ONCE (first crossing);
+                        # a jittering trajectory point must not create extra tiny gaps.
+                        line_times[movement].append((cross_t, tid, r.get("class_name", ""), lname))
+                        break
+                prev, prev_t = p, t
+        for key in line_times:
+            line_times[key].sort(key=lambda x: x[0])
+
+        # Conflict-stream gaps are identical for every subject -> build once.
+        conflict_map = RUN3_GAP_CONFLICT_MAP
+        gap_cache = {}
+        def gaps_for(cm):
+            if cm not in gap_cache:
+                events = line_times.get(cm, [])
+                gap_cache[cm] = [
+                    {"conflict_movement": cm, "conflicting_id_a": a[1], "conflicting_class_a": a[2],
+                     "conflicting_id_b": b[1], "conflicting_class_b": b[2], "reference_line": a[3],
+                     "gap_start": a[0], "gap_end": b[0], "gap": b[0] - a[0]}
+                    for a, b in zip(events, events[1:]) if b[0] > a[0]
+                ]
+            return gap_cache[cm]
+
+        rows_out = []
+        for tid, rows in tracks.items():
+            movement = movement_by_id.get(tid, "")
+            if movement not in selected:
+                continue
+            wait_zone = MOVEMENT_PATTERNS[movement]["sequence"][0]   # waiting zone = first zone of the movement
+
+            # Waiting start = first observed step inside the waiting zone whose
+            # speed is at or below the waiting threshold.
+            wait_idx = None
+            for idx in range(1, len(rows)):
+                cur = rows[idx]
+                if cur.get("_zone_num") != wait_zone:
+                    continue
+                sp = self._run3_step_speed_kmh(rows[idx - 1], cur)
+                if sp is not None and sp <= wait_threshold:
+                    wait_idx = idx
+                    break
+            if wait_idx is None:
+                continue
+            wait_start = rows[wait_idx]["_timestamp"]
+
+            # V27 FIX: acceptance must be searched AFTER the waiting start.
+            # V26 searched from the first frame, so a vehicle that entered the
+            # waiting zone while still moving got an acceptance time earlier
+            # than its waiting start (negative waiting time, no rejected gaps).
+            accepted_time = None
+            for idx in range(wait_idx + 1, len(rows)):
+                prev = rows[idx - 1]; cur = rows[idx]
+                if prev.get("_zone_num") != wait_zone:
+                    continue
+                sp = self._run3_step_speed_kmh(prev, cur)
+                if sp is not None and sp > wait_threshold:
+                    accepted_time = cur["_timestamp"]
+                    break
+            if accepted_time is None:
+                continue
+
+            candidates = []
+            for cm in conflict_map.get(movement, []):
+                candidates.extend(gaps_for(cm))
+            active = [g for g in candidates if g["gap_start"] <= accepted_time <= g["gap_end"]]
+            controlling = min(active, key=lambda g: g["gap"]) if active else None
+            seen = set(); prior = []
+            for g in sorted((g for g in candidates if wait_start <= g["gap_end"] < accepted_time), key=lambda x: x["gap_end"]):
+                key = (g["conflict_movement"], round(g["gap_start"], 6), round(g["gap_end"], 6))
+                if key not in seen:
+                    seen.add(key); prior.append(g)
+            decision_id = f"{tid}_{accepted_time:.6f}"
+            waiting_time = accepted_time - wait_start
+            subject_class = rows[0].get("class_name", "")
+
+            def make(g, role, accepted):
+                return {
+                    "Site_ID": site, "Decision_Event_ID": decision_id, "Subject_ID": tid,
+                    "Subject_Class": subject_class, "Subject_Movement": movement,
+                    "Conflicting_Movement": g["conflict_movement"],
+                    "Conflicting_ID_A": g["conflicting_id_a"], "Conflicting_ID_B": g["conflicting_id_b"],
+                    "Reference_Line": g["reference_line"],
+                    "Gap_Start_Time": f"{g['gap_start']:.6f}", "Gap_End_Time": f"{g['gap_end']:.6f}",
+                    "X31_Available_Gap": f"{g['gap']:.6f}", "X32_Waiting_Time": f"{waiting_time:.6f}",
+                    "Gap_Role": role, "Gap_Acceptance": 1 if accepted else 0,
+                    "Acceptance_Time": f"{accepted_time:.6f}" if accepted else "", "QC_Flag": "",
+                }
+            for g in prior:
+                rows_out.append(make(g, "Rejected", False))
+            if controlling:
+                rows_out.append(make(controlling, "Accepted / Controlling", True))
         return rows_out
 
     @staticmethod
@@ -7606,7 +7316,7 @@ class Run1App:
             if not rows:
                 continue
             movement = movement_by_id.get(str(tid), "")
-            if not movement or not str(status_by_id.get(str(tid), "")).startswith("Exact"):
+            if not movement or status_by_id.get(str(tid)) != "Exact":
                 continue
             info = MOVEMENT_PATTERNS[movement]
             if not info["main_road"]:
@@ -7664,7 +7374,7 @@ class Run1App:
 
         status("Run 3 — loading Run 2 results...")
         detection_rows, id_rows, zone_rows, det_path, id_path, zone_path = self._run3_load_inputs(output_dir, run_name)
-        tracks, summaries = self._run3_build_tracks(detection_rows, id_rows, c.get("zone_remap"))
+        tracks, summaries = self._run3_build_tracks(detection_rows, id_rows)
         duplicate_report = self._run3_remove_duplicate_tracks(tracks)
         self._run3_attach_metric(tracks, c)
         outputs = {}
@@ -7692,16 +7402,12 @@ class Run1App:
                 "id_zone_summary_rows": len(id_rows), "tracks_by_zone": dict(tracks_by_zone),
                 "movement_counts": {m: sum(1 for t in tracks if movement_by_id.get(str(t), "") == m) for m in RUN3_ALL_MOVEMENTS},
                 "movement_status": {st: sum(1 for t in tracks if movement_source_by_id.get(str(t), "") == st)
-                                    for st in ("Exact", "Exact_AfterDedupe", "Partial", "Partial_AfterDedupe",
-                                               "Ambiguous", "Unclassified", "Insufficient")},
+                                    for st in ("Exact", "Partial", "Ambiguous", "Unclassified", "Insufficient")},
                 "selected_zones": {k: sorted(c[k + "_zones"]) for k in ("speed", "lc", "pet", "ttc", "ldp")},
             },
             "diagnostics": {},
             "indicators": {},
         }
-        if c.get("zone_remap"):
-            summary["diagnostics"]["zone_remap"] = {"old_to_new": {str(k): v for k, v in c["zone_remap"].items()},
-                                                   "note": "Run 3 renumbered the zones of the Detection_Records before any calculation"}
         summary["diagnostics"]["duplicate_tracks"] = {
             "rule": f"boxes IoU >= {DUPLICATE_TRACK_IOU} in >= {DUPLICATE_TRACK_MIN_FRAMES} frames = one vehicle under two IDs; the shorter track's overlapping frames are removed",
             "tracks_affected": len(duplicate_report),
@@ -7712,7 +7418,6 @@ class Run1App:
         if mapping_parse_error:
             summary["diagnostics"]["reference_mapping"] = f"Invalid Reference Line Mapping: {mapping_parse_error}"
         indicator_rows = []
-        row_counts = {}
 
         def write_csv(filename, fields, rows):
             csv_file, actual = self._run3_open_csv_safe(os.path.join(output_dir, filename))
@@ -7748,7 +7453,6 @@ class Run1App:
             status("Run 3 — Lateral Clearance...")
             rows, lc_diag = self._run3_lateral_clearance(tracks, c, sequence_by_id)
             fields = ["Site_ID","Pair_ID","Timestamp","Zone","Vehicle_A_ID","Vehicle_A_Class","Vehicle_B_ID","Vehicle_B_Class","Zone_Sequence_A","Zone_Sequence_B","Along_m","LS_Meter","Signed_Lateral_m","Width_A_m","Width_B_m","Length_A_m","Length_B_m","Lateral_Clearance_m","QC_Flag"]
-            row_counts["lc"] = len(rows)
             outputs["lateral_clearance"] = write_csv("Run_3_Lateral_Clearance.csv", fields, rows)
             pairs = self._run3_lc_pair_summary(rows)
             pair_fields = ["Site_ID","Pair_ID","Zone","Vehicle_A_ID","Vehicle_A_Class","Vehicle_B_ID","Vehicle_B_Class","Zone_Sequence_A","Zone_Sequence_B","Start_Time","End_Time","Samples","Lateral_Clearance_Min_m","Lateral_Clearance_Mean_m","QC_Flag"]
@@ -7766,7 +7470,6 @@ class Run1App:
             status("Run 3 — LDP...")
             rows = self._run3_ldp(tracks, c, movement_by_id, movement_source_by_id)
             fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","LDP_percent","LDP_Level","Mean_Speed_kmh","Speed_Level","Calibration_Mode","QC_Flag"]
-            row_counts["ldp"] = len(rows)
             outputs["ldp"] = write_csv("Run_3_LDP.csv", fields, rows)
             vals = [float(r["LDP_percent"]) for r in rows]
             note = f"W_entry={c['w_entry_m']} m; W_opp={c['w_opp_m']} m; smoothing={c['ldp_smoothing_samples']}"
@@ -7784,8 +7487,7 @@ class Run1App:
         def do_gap():
             status("Run 3 — Gap Acceptance...")
             gap_rows = self._run3_gap(tracks, c, mapping, movement_by_id)
-            fields = ["Site_ID","Decision_Event_ID","Opportunity_No","Subject_ID","Subject_Class","Subject_Movement","Decision_Stage","Decision_Zone","Gap_Evaluation_Time","X32_Waiting_Time","Conflicting_Movement","Conflicting_ID_A","Conflicting_Class_A","Conflicting_ID_B","Conflicting_Class_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","Subject_Speed_kmh","Conflict_Speed_A_kmh","Conflict_Speed_B_kmh","Gap_Role","Gap_Acceptance","Decision_Time","QC_Flag"]
-            row_counts["gap"] = len(gap_rows)
+            fields = ["Site_ID","Decision_Event_ID","Subject_ID","Subject_Class","Subject_Movement","Conflicting_Movement","Conflicting_ID_A","Conflicting_ID_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","X32_Waiting_Time","Gap_Role","Gap_Acceptance","Acceptance_Time","QC_Flag"]
             outputs["gap_acceptance"] = write_csv("Run_3_Gap_Acceptance.csv", fields, gap_rows)
             rejected = defaultdict(list); accepted = defaultdict(list)
             for r in gap_rows:
@@ -7820,8 +7522,10 @@ class Run1App:
                 "accepted_events": len(acc_vals), "rejected_events": len(rej_vals),
                 "critical_gap": critical, "reference_mapping_rows": len(mapping),
             }
-            summary["diagnostics"]["gap"] = dict(getattr(self, "_run3_gap_diag", {}), rows=len(gap_rows),
-                                                 rule="two-stage Access/Exit (v26 5.14.11); Line optional (origin-zone entry fallback)")
+            if not mapping:
+                summary["diagnostics"]["gap"] = "No Reference Line Mapping entered; CSV header only. Enter Site_ID|Movement|Line N for subject and conflict movements."
+            else:
+                summary["diagnostics"]["gap"] = "OK" if gap_rows else "No valid gap-decision events under the configured mapping."
         run_step("gap", "Run_3_Gap_Acceptance.csv", do_gap)
 
         # ---------------- TTC (time) ----------------
@@ -7829,7 +7533,6 @@ class Run1App:
             status("Run 3 — TTC...")
             rows, diag = self._run3_ttc(tracks, c, movement_by_id)
             fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","S_Conflict_Distance_m","CS_Closing_Speed_kmh","Speed_A_kmh","Speed_B_kmh","Dist_A_to_Crossing_m","Dist_B_to_Crossing_m","Arrival_Diff_s","Path_Angle_deg","TTC_s","TTC_Level","Speed_Level","QC_Flag"]
-            row_counts["ttc"] = len(rows)
             outputs["ttc"] = write_csv("Run_3_TTC.csv", fields, rows)
             vals = [float(r["TTC_s"]) for r in rows]
             s_ = indicator("Time-to-Collision (TTCmin per event)", "Time", "s", "All", vals,
@@ -7850,7 +7553,6 @@ class Run1App:
             status("Run 3 — PET...")
             rows, diag = self._run3_pet(tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
             fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","PET_s","PET_Risk_Level","QC_Flag"]
-            row_counts["pet"] = len(rows)
             outputs["pet"] = write_csv("Run_3_PET.csv", fields, rows)
             vals = [float(r["PET_s"]) for r in rows]
             s = indicator("Post-Encroachment Time", "Time", "s", "All", vals)
@@ -7868,7 +7570,6 @@ class Run1App:
             status("Run 3 — Speed...")
             speed_rows = self._run3_speed(tracks, c, movement_by_id, movement_source_by_id)
             fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Scope","Key","Movement","Movement_Status","Start_Time","End_Time","Start_Frame","End_Frame","Samples","Distance_m","Duration_s","Speed_kmh","Calibration_Mode","QC_Flag"]
-            row_counts["speed"] = len(speed_rows)
             outputs["speed_detail"] = write_csv("Run_3_Speed_Detail.csv", fields, speed_rows)
             vs = self._run3_speed_vehicle_summary(speed_rows, tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
             outputs["speed"] = write_csv("Run_3_Speed.csv", self._run3_speed_vehicle_summary_fields(), vs)
@@ -7900,33 +7601,6 @@ class Run1App:
                 "Run_3_Indicator_Summary.csv",
                 ["Site_ID","Indicator","Domain","Unit","Group","N","Mean","SD","Median","Min","Max","P85","Note"],
                 indicator_rows)
-
-        # Why is an enabled indicator empty? (plain-language reasons, also shown when the run ends)
-        empty = []
-        mstat = summary["source_counts"]["movement_status"]
-        mcount = summary["source_counts"]["movement_counts"]
-        seen = (f"Movement ที่จับได้: ครบ {mstat['Exact'] + mstat['Exact_AfterDedupe']}, "
-                f"บางส่วน {mstat['Partial'] + mstat['Partial_AfterDedupe']}, "
-                f"ไม่ตรงแบบใด {mstat['Unclassified']}, เห็นไม่ครบ {mstat['Insufficient']} จาก {len(tracks)} คัน")
-        layout_hint = " — ตรวจว่าไฟล์ Zone/วิดีโอเป็นชุดเดียวกับผังทางแยก (Movement ใหม่ 1-3-4, 2-3-1, 1-3-6-7, 5-6-3-1, 2-3-4, 5-6-7)"
-        if c["ldp_enabled"] and row_counts.get("ldp") == 0:
-            main = mcount.get("2-3-4", 0) + mcount.get("5-6-7", 0)
-            empty.append(f"LDP ไม่มีข้อมูล: LDP คิดเฉพาะรถที่วิ่งครบ 2-3-4 หรือ 5-6-7 ตรง ๆ พบ {main} คัน. {seen}{layout_hint}")
-        if c["gap_enabled"] and row_counts.get("gap") == 0:
-            subjects = sum(mcount.get(mv, 0) for mv in c["gap_movements"])
-            if subjects == 0:
-                empty.append(f"Gap Acceptance ไม่มีข้อมูล: ไม่พบรถที่รอ (Movement {', '.join(c['gap_movements'])}) เลย. {seen}{layout_hint}")
-            else:
-                st_info = getattr(self, "_run3_gap_diag", {}).get("streams", {})
-                streams_txt = ", ".join(f"{cm} = {v['vehicles']} คัน" for cm, v in sorted(st_info.items())) or "-"
-                empty.append(f"Gap Acceptance ไม่มีข้อมูล: พบรถที่รอ {subjects} คัน แต่ไม่มีคันไหนเข้าโซนกลาง (3/6) ขณะที่มีช่องว่างจากกระแสที่ขัดแย้ง — "
-                             f"ช่องว่างต้องมีรถกระแสที่ขัดแย้งอย่างน้อย 2 คันในคลิป (คันหน้าและคันหลัง). รถกระแสที่ขัดแย้งที่พบ: {streams_txt}. ตรวจ Line หรือโซนต้นทางของกระแสเหล่านั้น")
-        for key, label in (("lc", "Lateral Clearance"), ("ttc", "TTC"), ("pet", "PET"), ("speed", "Speed")):
-            if c[key + "_enabled"] and row_counts.get(key) == 0:
-                empty.append(f"{label} ไม่มีข้อมูล (ไม่มีรถ/คู่รถที่เข้าเงื่อนไขในโซนที่เลือก)")
-        summary["diagnostics"]["empty_outputs"] = empty
-        for line in empty:
-            print("Run 3 —", line)
 
         summary["architecture"] = {
             "indicators": "LDP, Lateral Clearance, Gap Acceptance, TTC, PET, Speed (V50, V85, Mean, SD)",
@@ -7968,10 +7642,6 @@ class Run1App:
         if self.save_csv_var.get():
             message += f"Run 2 Detection Records:\n{output_csv}\n\n"
         message += f"Run 2 ID Zone Summary:\n{output_id_zone_summary}\n\nRun 2 Zone Summary:\n{output_zone_summary}\n\n"
-        empty_reasons = (self.run3_last_summary or {}).get("diagnostics", {}).get("empty_outputs", [])
-        if empty_reasons:
-            message += "ตัวชี้วัดที่ไม่มีข้อมูล (ไฟล์ CSV มีแต่หัวแถว) และสาเหตุ:\n"
-            message += "\n".join("• " + r for r in empty_reasons) + "\n\n"
         if self.run3_last_outputs:
             message += "Run 3 Outputs:\n"
             for key, value in self.run3_last_outputs.items():
