@@ -326,5 +326,90 @@ class LateralClearanceY2(unittest.TestCase):
         self.assertAlmostEqual(diag[30][1], -math.sqrt(0.5))
 
 
+class RearEndTtc(unittest.TestCase):
+    VMIN = 2.0 / 3.6
+    COS = math.cos(math.radians(45))
+
+    def re(self, p_f, v_f, p_l, v_l, lf=4.5, ll=4.5, wf=1.8, wl=1.8):
+        return CORE["rear_end_ttc"](p_f, v_f, p_l, v_l, lf, ll, wf, wl, self.VMIN, self.COS)
+
+    def test_known_value(self):
+        r = self.re((0, 0), (10, 0), (20, 0), (5, 0))     # S = 20 - 4.5 = 15.5 ; CS = 5
+        self.assertAlmostEqual(r["S"], 15.5)
+        self.assertAlmostEqual(r["CS"], 5.0)
+        self.assertAlmostEqual(r["TTC"], 3.1)
+
+    def test_stationary_leader(self):
+        r = self.re((0, 0), (10, 0), (30, 0), (0, 0))
+        self.assertAlmostEqual(r["TTC"], 25.5 / 10.0)
+
+    def test_leader_behind_or_not_closing_or_beside(self):
+        self.assertIsNone(self.re((20, 0), (10, 0), (0, 0), (5, 0)))        # leader behind
+        self.assertIsNone(self.re((0, 0), (5, 0), (20, 0), (10, 0)))        # leader faster
+        self.assertIsNone(self.re((0, 0), (10, 0), (20, 3.0), (5, 0)))      # 3 m to the side > (1.8+1.8)/2
+
+    def test_opposite_direction_is_not_rear_end(self):
+        self.assertIsNone(self.re((0, 0), (10, 0), (20, 0), (-5, 0)))
+
+    def test_boxes_already_overlap(self):
+        r = self.re((0, 0), (10, 0), (3.0, 0), (5, 0))
+        self.assertIsNotNone(r)
+        self.assertIsNone(r["TTC"])
+
+    def test_slow_follower_ignored(self):
+        self.assertIsNone(self.re((0, 0), (0.1, 0), (20, 0), (0, 0)))
+
+
+class SideTtc(unittest.TestCase):
+    VMIN = 2.0 / 3.6
+
+    def sd(self, p_i, v_i, p_j, v_j, li=4.5, lj=4.5):
+        return CORE["side_ttc"](p_i, v_i, p_j, v_j, li, lj, self.VMIN)
+
+    def test_perpendicular_same_arrival(self):
+        r = self.sd((0, -10), (0, 10), (-10, 0), (10, 0))     # both reach (0,0) after 1 s
+        self.assertAlmostEqual(r["TTC"], 1.0)
+        self.assertAlmostEqual(r["d_i"], 10.0)
+        self.assertAlmostEqual(r["angle_deg"], 90.0)
+
+    def test_arrivals_too_far_apart_is_no_collision(self):
+        self.assertIsNone(self.sd((0, -10), (0, 10), (-20, 0), (10, 0)))    # 1 s vs 2 s, window 0.45 s
+
+    def test_arrival_difference_inside_window(self):
+        r = self.sd((0, -10), (0, 10), (-14, 0), (10, 0))                   # 1.0 s vs 1.4 s
+        self.assertAlmostEqual(r["TTC"], 1.0)
+        self.assertAlmostEqual(r["t_j"], 1.4)
+
+    def test_crossing_point_behind_one_vehicle(self):
+        self.assertIsNone(self.sd((0, 5), (0, 10), (-10, 0), (10, 0)))      # i already past X
+
+    def test_parallel_or_same_direction_excluded(self):
+        self.assertIsNone(self.sd((0, 0), (10, 0), (5, 2), (10, 0)))
+        self.assertIsNone(self.sd((0, 0), (10, 0), (5, 2), (10, 0.5)))      # 2.9 deg < 10 deg
+
+    def test_merging_angle_counts(self):
+        # 30 deg merge: j comes from the side and joins i's path 10 m ahead of i
+        x = (10.0, 0.0)
+        hj = (math.cos(math.radians(150)), math.sin(math.radians(150)))     # heading up-left
+        pj = (x[0] - hj[0] * 10.0, x[1] - hj[1] * 10.0)
+        r = self.sd((0, 0), (10, 0), pj, (hj[0] * 10.0, hj[1] * 10.0))
+        self.assertIsNotNone(r)
+        self.assertAlmostEqual(r["TTC"], 1.0, places=6)
+        self.assertAlmostEqual(r["angle_deg"], 30.0, places=6)
+
+    def test_stationary_vehicle_excluded(self):
+        self.assertIsNone(self.sd((0, -10), (0, 10), (0, 0), (0, 0)))
+
+
+class ConflictType(unittest.TestCase):
+    def test_types(self):
+        ct = CORE["conflict_type_from_sequences"]
+        self.assertEqual(ct((1, 3, 4), (2, 3, 4), True), "Crossing")
+        self.assertEqual(ct((1, 3, 4), (2, 3, 4)), "Merging")
+        self.assertEqual(ct((1, 3, 4), (1, 3, 6, 7)), "Diverging")
+        self.assertEqual(ct((2, 3, 4), (5, 6, 7)), "Merging/Diverging")
+        self.assertEqual(ct([], [1, 2]), "Merging/Diverging")
+
+
 if __name__ == "__main__":
     unittest.main()
