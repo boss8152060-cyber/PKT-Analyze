@@ -464,7 +464,7 @@ RUN3_DEFAULTS = {
     "lc_zones": [2, 3, 4, 5, 6, 7],
     "pet_zone6": True,
     "pet_zones": [3, 6],
-    "ttc_zones": [1, 2, 3, 4, 5, 6, 7],
+    "ttc_zones": [3, 6],
     "ldp_zones": [2, 3, 4, 5, 6, 7],
     "gap_subject_134": True,
     "gap_subject_1367": True,
@@ -793,6 +793,82 @@ def lateral_clearance(center_a, heading_a, center_b, len_a, len_b, w_a, w_b):
         "Overlap": abs(along) <= (len_a + len_b) / 2.0,
         "Y2": lateral - (w_a + w_b) / 2.0,
     }
+
+
+def conflict_type_from_sequences(seq_a, seq_b, trajectories_intersect=False):
+    """PET conflict type. Crossing when the two trajectories intersect; otherwise
+    Merging when both leave to the same zone, Diverging when both come from the
+    same zone, else the undecided 'Merging/Diverging'."""
+    if trajectories_intersect:
+        return "Crossing"
+    seq_a, seq_b = list(seq_a), list(seq_b)
+    if seq_a and seq_b:
+        if seq_a[-1] == seq_b[-1]:
+            return "Merging"
+        if seq_a[0] == seq_b[0]:
+            return "Diverging"
+    return "Merging/Diverging"
+
+
+def rear_end_ttc(p_f, v_f, p_l, v_l, len_f, len_l, w_f, w_l, vmin, cos_max):
+    """Y4 rear-end TTC = S / CS (SPEC v28 section 7). Follower f, leader l;
+    positions in m, velocities in m/s.
+      S  = separation along the follower's heading - (L_f + L_l) / 2
+      CS = closing speed along that heading = v_f - v_l(along)
+    Conditions: follower moving (>= vmin), leader ahead, lateral offset within
+    (W_f + W_l) / 2, same direction (or leader (nearly) stationary), CS > 0.
+    Returns None when not a rear-end course, else a dict; TTC is None when the
+    boxes already overlap (S <= 0)."""
+    spd_f = math.hypot(v_f[0], v_f[1])
+    if spd_f < vmin:
+        return None
+    hx, hy = v_f[0] / spd_f, v_f[1] / spd_f
+    dx, dy = p_l[0] - p_f[0], p_l[1] - p_f[1]
+    d_long = dx * hx + dy * hy
+    if d_long <= 0:
+        return None
+    if abs(hx * dy - hy * dx) > (w_f + w_l) / 2.0:
+        return None
+    spd_l = math.hypot(v_l[0], v_l[1])
+    if spd_l >= vmin and (hx * v_l[0] + hy * v_l[1]) / spd_l < cos_max:
+        return None
+    closing = spd_f - (v_l[0] * hx + v_l[1] * hy)
+    if closing <= 0:
+        return None
+    gap = d_long - (len_f + len_l) / 2.0
+    return {"S": gap, "CS": closing, "TTC": (gap / closing) if gap > 0 else None,
+            "Speed_F": spd_f, "Speed_L": spd_l}
+
+
+SIDE_TTC_MIN_ANGLE_DEG = 10.0   # paths closer to parallel than this are not a side (crossing) conflict
+
+
+def side_ttc(p_i, v_i, p_j, v_j, len_i, len_j, vmin, min_angle_deg=SIDE_TTC_MIN_ANGLE_DEG):
+    """Y4 side (crossing / merging) TTC by distance to the path intersection
+    (SPEC v28 section 7; constant velocity, straight paths along the velocity).
+      X = intersection of the two straight paths (must be ahead of both)
+      t_i = d_i / v_i,  t_j = d_j / v_j
+    A collision course exists when the arrivals overlap: |t_i - t_j| <= (L_i/v_i + L_j/v_j) / 2
+    (time the vehicles need to clear X). TTC = min(t_i, t_j)."""
+    spd_i, spd_j = math.hypot(v_i[0], v_i[1]), math.hypot(v_j[0], v_j[1])
+    if spd_i < vmin or spd_j < vmin:
+        return None
+    hix, hiy = v_i[0] / spd_i, v_i[1] / spd_i
+    hjx, hjy = v_j[0] / spd_j, v_j[1] / spd_j
+    den = hix * hjy - hiy * hjx
+    if abs(den) < math.sin(math.radians(min_angle_deg)):
+        return None
+    dx, dy = p_j[0] - p_i[0], p_j[1] - p_i[1]
+    s_i = (dx * hjy - dy * hjx) / den
+    s_j = (dx * hiy - dy * hix) / den
+    if s_i <= 0 or s_j <= 0:
+        return None
+    t_i, t_j = s_i / spd_i, s_j / spd_j
+    window = (len_i / spd_i + len_j / spd_j) / 2.0
+    if abs(t_i - t_j) > window:
+        return None
+    return {"TTC": min(t_i, t_j), "t_i": t_i, "t_j": t_j, "d_i": s_i, "d_j": s_j,
+            "window": window, "angle_deg": math.degrees(math.asin(min(1.0, abs(den))))}
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -1390,9 +1466,9 @@ class Run1App:
         ttk.Entry(box, textvariable=self.run3_ldp_smoothing_var, width=8).grid(row=2, column=2, sticky="w", pady=2)
         ttk.Checkbutton(box, text="เฉพาะรถจักรยานยนต์", variable=self.run3_ldp_motorcycle_only_var).grid(row=2, column=3, columnspan=3, sticky="w", pady=2)
 
-        box = zone_row("Y4 TTC — Zones (ความขัดแย้งแบบชนท้าย / เลี้ยว-เบี่ยงทิศทางเดียวกัน)", "TTC = S / CS; S = ระยะว่างระหว่างรถ, CS = ความเร็วเข้าใกล้ (Closing speed)", self.run3_ttc_zone_vars)
+        box = zone_row("Y4 TTC — Zones 3, 6 (ชนท้าย + ชนด้านข้าง)", "ชนท้าย: TTC = S / CS   |   ชนด้านข้าง: เวลาถึงจุดตัดของเส้นทางสองคัน (ระยะทางถึงจุดตัด ÷ ความเร็ว), ชนเมื่อเวลาถึงต่างกันไม่เกินเวลาที่ตัวรถใช้พ้นจุดตัด", self.run3_ttc_zone_vars)
         for i, (label, var) in enumerate((("บันทึกเมื่อ TTCmin ≤ (s)", self.run3_ttc_max_record_var),
-                                          ("มุมทิศทางต่างกันไม่เกิน (deg)", self.run3_ttc_heading_max_var),
+                                          ("ชนท้าย: มุมทิศทางต่างกันไม่เกิน (deg)", self.run3_ttc_heading_max_var),
                                           ("หน้าต่างคำนวณความเร็ว (s)", self.run3_ttc_velocity_window_var),
                                           ("ความเร็วรถตามขั้นต่ำ (km/h)", self.run3_ttc_min_speed_var))):
             ttk.Label(box, text=label).grid(row=2 + i // 2, column=(i % 2) * 4, columnspan=2, sticky="w", pady=2)
@@ -6471,7 +6547,7 @@ class Run1App:
         return out
 
     # ========================================================
-    # PET — Y5 (Zone 6 and/or Zone 7)
+    # PET — Y5 (Zones 3 and/or 6)
     # ========================================================
 
     @staticmethod
@@ -6485,19 +6561,6 @@ class Run1App:
         if 0 <= t <= 1 and 0 <= u <= 1:
             return t, u, (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
         return None
-
-    @staticmethod
-    def _run3_conflict_type(movement_a, movement_b, trajectory_intersects=False):
-        if trajectory_intersects:
-            return "Crossing"
-        seq_a = tuple(int(x) for x in re.findall(r"\d+", str(movement_a)))
-        seq_b = tuple(int(x) for x in re.findall(r"\d+", str(movement_b)))
-        if len(seq_a) == 2 and len(seq_b) == 2:
-            if seq_a[1] == seq_b[1]:
-                return "Merging"
-            if seq_a[0] == seq_b[0]:
-                return "Diverging"
-        return "Merging/Diverging"
 
     @staticmethod
     def _run3_best_intersection(A, B):
@@ -6529,7 +6592,7 @@ class Run1App:
         ib = j if db0[i, j] <= db1[i, j] else j + 1
         return float(score[i, j]), int(ia), int(ib), (float(ipx[i, j]), float(ipy[i, j]))
 
-    def _run3_pet(self, tracks, c, movement_by_id, movement_source_by_id):
+    def _run3_pet(self, tracks, c, movement_by_id, movement_source_by_id, sequence_by_id=None):
         """PET per conflict zone. Timestamps come only from observed frames.
 
         V27 changes: (1) distances use metric coordinates in BOTH calibration
@@ -6582,7 +6645,8 @@ class Run1App:
                         if d[ia, ib] > radius:
                             continue
                         ip = ((A[ia, 0] + B[ib, 0]) / 2.0, (A[ia, 1] + B[ib, 1]) / 2.0)
-                        ctype = self._run3_conflict_type(ma, mb, False)
+                        ctype = conflict_type_from_sequences((sequence_by_id or {}).get(str(a_id), []),
+                                                             (sequence_by_id or {}).get(str(b_id), []), False)
                         diag["fallback_close_pairs"] += 1
                     diag["interaction_candidates"] += 1
                     a_near = At[np.hypot(A[:, 0] - ip[0], A[:, 1] - ip[1]) <= radius]
@@ -6628,25 +6692,22 @@ class Run1App:
     # ========================================================
 
     def _run3_ttc(self, tracks, c, movement_by_id):
-        """TTC = S / CS for same-direction pairs (rear-end, turning/deviation).
+        """Y4 TTC (SPEC v28 section 7) for vehicles standing in the selected zones
+        (default Zones 3 and 6) at the same frame.
 
-        S  = clear longitudinal gap between follower and leader (m)
-             = centre spacing along the follower heading - (L_f + L_l) / 2
-        CS = closing speed along the follower heading (m/s) = v_f - v_l
-        Collision course requires: leader ahead, lateral offset within
-        (W_f + W_l) / 2, closing speed > 0, heading difference <= limit
-        (a stopped leader is always a valid obstacle).
-        Velocities come from a short centred window of observed samples
-        (no interpolation). One row per follower-leader event = TTCmin.
-        Crossing conflicts are evaluated by PET, as defined in Chapter 2.
-        """
+        RearEnd: TTC = S / CS (same-direction follower / leader).
+        Side   : pairs that are not on a rear-end course but whose straight paths
+                 cross ahead of both; TTC = min(d_i/v_i, d_j/v_j) when the arrival
+                 times differ by at most the time needed to clear the crossing.
+        One row per event (pair + type) = its TTCmin. Velocities come from a short
+        centred window of observed samples (no interpolation)."""
         zones = c["ttc_zones"]
         win = max(1e-3, c["ttc_velocity_window_s"]) / 2.0
         vmin = c["ttc_min_speed_kmh"] / 3.6
         cos_max = math.cos(math.radians(c["ttc_heading_max_deg"]))
         ttc_max = c["ttc_max_record_s"]
         widths = c["widths"]; lengths = c["lengths"]
-        diag = {"frames_with_pairs": 0, "pairs_evaluated": 0, "candidates": 0,
+        diag = {"frames_with_pairs": 0, "pairs_evaluated": 0, "rear_end_candidates": 0, "side_candidates": 0,
                 "skipped_overlap_boxes": 0, "missing_dimension_class": set()}
 
         per_frame = defaultdict(list)
@@ -6675,7 +6736,9 @@ class Run1App:
                     fr = int(float(r.get("frame", "")))
                 except Exception:
                     fr = int(round(r["_timestamp"] * 1000))
-                per_frame[fr].append((tid, cls, r["_timestamp"], m[k], v, r["_zone_num"]))
+                per_frame[fr].append({"tid": tid, "cls": cls, "t": r["_timestamp"],
+                                      "p": (float(m[k][0]), float(m[k][1])),
+                                      "v": (float(v[0]), float(v[1])), "zone": r["_zone_num"]})
 
         cand = defaultdict(list)
         for fr, items in per_frame.items():
@@ -6683,62 +6746,80 @@ class Run1App:
             if n < 2:
                 continue
             diag["frames_with_pairs"] += 1
-            P = np.array([it[3] for it in items]); V = np.array([it[4] for it in items])
-            W = np.array([widths[it[1]] for it in items]); L = np.array([lengths[it[1]] for it in items])
-            spd = np.hypot(V[:, 0], V[:, 1])
-            with np.errstate(divide="ignore", invalid="ignore"):
-                H = V / spd[:, None]
-            D = P[None, :, :] - P[:, None, :]                         # i -> j
-            d_long = D[..., 0] * H[:, None, 0] + D[..., 1] * H[:, None, 1]
-            d_lat = np.abs(D[..., 0] * H[:, None, 1] - D[..., 1] * H[:, None, 0])
-            v_lead = V[None, :, 0] * H[:, None, 0] + V[None, :, 1] * H[:, None, 1]
-            closing = spd[:, None] - v_lead
-            cosang = H[:, None, 0] * H[None, :, 0] + H[:, None, 1] * H[None, :, 1]
-            same_dir = (spd[None, :] < vmin) | (cosang >= cos_max)
-            S = d_long - (L[:, None] + L[None, :]) / 2.0
-            base = ((spd[:, None] >= vmin) & (d_long > 0) & (d_lat <= (W[:, None] + W[None, :]) / 2.0)
-                    & same_dir & (closing > 0))
-            np.fill_diagonal(base, False)
-            diag["pairs_evaluated"] += int(n * (n - 1))
-            diag["skipped_overlap_boxes"] += int(np.sum(base & (S <= 0)))
-            with np.errstate(divide="ignore", invalid="ignore"):
-                TTC = S / closing
-            ok = base & (S > 0) & (TTC <= ttc_max)
-            for i, j in zip(*np.nonzero(ok)):
-                fi = items[i]; lj = items[j]
-                cand[(fi[0], lj[0])].append((fi[2], fr, float(TTC[i, j]), float(S[i, j]),
-                                             float(closing[i, j]), float(spd[i]), float(spd[j]), fi[5], fi[1], lj[1]))
-                diag["candidates"] += 1
+            for i in range(n):
+                for j in range(i + 1, n):
+                    A, B = items[i], items[j]
+                    diag["pairs_evaluated"] += 1
+                    la, lb = lengths[A["cls"]], lengths[B["cls"]]
+                    wa, wb = widths[A["cls"]], widths[B["cls"]]
+                    on_rear_end_course = False
+                    for f, l in ((A, B), (B, A)):
+                        res = rear_end_ttc(f["p"], f["v"], l["p"], l["v"],
+                                           lengths[f["cls"]], lengths[l["cls"]],
+                                           widths[f["cls"]], widths[l["cls"]], vmin, cos_max)
+                        if res is None:
+                            continue
+                        on_rear_end_course = True
+                        if res["TTC"] is None:
+                            diag["skipped_overlap_boxes"] += 1
+                            continue
+                        if res["TTC"] <= ttc_max:
+                            diag["rear_end_candidates"] += 1
+                            cand[("RearEnd", f["tid"], l["tid"])].append({
+                                "t": f["t"], "fr": fr, "ttc": res["TTC"], "zone": f["zone"],
+                                "a": f, "b": l, "S": res["S"], "CS": res["CS"],
+                                "vA": res["Speed_F"], "vB": res["Speed_L"]})
+                    if on_rear_end_course:
+                        continue
+                    sd = side_ttc(A["p"], A["v"], B["p"], B["v"], la, lb, vmin)
+                    if sd is None or sd["TTC"] > ttc_max:
+                        continue
+                    diag["side_candidates"] += 1
+                    first, second = (A, B) if sd["t_i"] <= sd["t_j"] else (B, A)
+                    d_first, d_second = (sd["d_i"], sd["d_j"]) if first is A else (sd["d_j"], sd["d_i"])
+                    key_ids = tuple(sorted((A["tid"], B["tid"]), key=lambda x: str(x)))
+                    cand[("Side", key_ids[0], key_ids[1])].append({
+                        "t": A["t"], "fr": fr, "ttc": sd["TTC"], "zone": first["zone"],
+                        "a": first, "b": second, "d_a": d_first, "d_b": d_second,
+                        "dt": abs(sd["t_i"] - sd["t_j"]), "angle": sd["angle_deg"],
+                        "vA": math.hypot(*first["v"]), "vB": math.hypot(*second["v"])})
 
         out = []
         event_gap = 1.0
-        for (f_id, l_id), lst in cand.items():
-            lst.sort(key=lambda x: x[0])
+        for (kind, id_a, id_b), lst in cand.items():
+            lst.sort(key=lambda x: x["t"])
             events = [[lst[0]]]
             for item in lst[1:]:
-                if item[0] - events[-1][-1][0] > event_gap:
+                if item["t"] - events[-1][-1]["t"] > event_gap:
                     events.append([item])
                 else:
                     events[-1].append(item)
             for ev in events:
-                best = min(ev, key=lambda x: x[2])
-                ts, fr, ttc, s_m, cs, vf, vl, zone, cls_f, cls_l = best
-                vf_kmh = vf * 3.6
+                best = min(ev, key=lambda x: x["ttc"])
+                a_, b_ = best["a"], best["b"]
+                vA_kmh = best["vA"] * 3.6
+                rear = kind == "RearEnd"
                 out.append({
                     "Site_ID": c["site_id"],
-                    "Event_ID": f"{f_id}_{l_id}_{ev[0][0]:.6f}",
-                    "Follower_ID": f_id, "Follower_Class": cls_f, "Movement_Follower": movement_by_id.get(f_id, ""),
-                    "Leader_ID": l_id, "Leader_Class": cls_l, "Movement_Leader": movement_by_id.get(l_id, ""),
-                    "Zone": f"Zone {zone}", "Event_Start": f"{ev[0][0]:.6f}", "Event_End": f"{ev[-1][0]:.6f}",
-                    "Event_Frames": len(ev), "TTCmin_Time": f"{ts:.6f}", "TTCmin_Frame": fr,
-                    "S_Conflict_Distance_m": f"{s_m:.6f}", "CS_Closing_Speed_kmh": f"{cs * 3.6:.6f}",
-                    "Follower_Speed_kmh": f"{vf_kmh:.6f}", "Leader_Speed_kmh": f"{vl * 3.6:.6f}",
-                    "Y4_TTC_s": f"{ttc:.6f}",
-                    "TTC_Level": self._level_ttc(ttc),
-                    "Speed_Level": self._level_ttc_speed(vf_kmh, cls_f),
+                    "Event_ID": f"{kind}_{a_['tid']}_{b_['tid']}_{ev[0]['t']:.6f}",
+                    "TTC_Type": kind,
+                    "Vehicle_A_ID": a_["tid"], "Vehicle_A_Class": a_["cls"], "Movement_A": movement_by_id.get(str(a_["tid"]), ""),
+                    "Vehicle_B_ID": b_["tid"], "Vehicle_B_Class": b_["cls"], "Movement_B": movement_by_id.get(str(b_["tid"]), ""),
+                    "Zone": f"Zone {best['zone']}", "Event_Start": f"{ev[0]['t']:.6f}", "Event_End": f"{ev[-1]['t']:.6f}",
+                    "Event_Frames": len(ev), "TTCmin_Time": f"{best['t']:.6f}", "TTCmin_Frame": best["fr"],
+                    "S_Conflict_Distance_m": f"{best['S']:.6f}" if rear else "",
+                    "CS_Closing_Speed_kmh": f"{best['CS'] * 3.6:.6f}" if rear else "",
+                    "Speed_A_kmh": f"{vA_kmh:.6f}", "Speed_B_kmh": f"{best['vB'] * 3.6:.6f}",
+                    "Dist_A_to_Crossing_m": "" if rear else f"{best['d_a']:.6f}",
+                    "Dist_B_to_Crossing_m": "" if rear else f"{best['d_b']:.6f}",
+                    "Arrival_Diff_s": "" if rear else f"{best['dt']:.6f}",
+                    "Path_Angle_deg": "" if rear else f"{best['angle']:.2f}",
+                    "Y4_TTC_s": f"{best['ttc']:.6f}",
+                    "TTC_Level": self._level_ttc(best["ttc"]),
+                    "Speed_Level": self._level_ttc_speed(vA_kmh, a_["cls"]),
                     "QC_Flag": ";".join(x for x in [
                         "Single_Frame_Event" if len(ev) == 1 else "",
-                        "Leader_Stationary" if vl < vmin else "",
+                        "Leader_Stationary" if rear and best["vB"] < vmin else "",
                         self._run3_qc_calibration(c),
                     ] if x),
                 })
@@ -6974,20 +7055,23 @@ class Run1App:
         def do_ttc():
             status("Run 3 — Y4 TTC...")
             rows, diag = self._run3_ttc(tracks, c, movement_by_id)
-            fields = ["Site_ID","Event_ID","Follower_ID","Follower_Class","Movement_Follower","Leader_ID","Leader_Class","Movement_Leader","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","S_Conflict_Distance_m","CS_Closing_Speed_kmh","Follower_Speed_kmh","Leader_Speed_kmh","Y4_TTC_s","TTC_Level","Speed_Level","QC_Flag"]
+            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","S_Conflict_Distance_m","CS_Closing_Speed_kmh","Speed_A_kmh","Speed_B_kmh","Dist_A_to_Crossing_m","Dist_B_to_Crossing_m","Arrival_Diff_s","Path_Angle_deg","Y4_TTC_s","TTC_Level","Speed_Level","QC_Flag"]
             outputs["ttc"] = write_csv("Run_3_Y4_TTC.csv", fields, rows)
             vals = [float(r["Y4_TTC_s"]) for r in rows]
-            s = indicator("Y4", "Time-to-Collision (TTCmin per event)", "Time", "s", "All", vals,
-                          f"events with TTCmin <= {c['ttc_max_record_s']} s")
-            s["Level_Counts"] = {lv: sum(1 for r in rows if r["TTC_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
-            summary["indicators"]["Y4_TTC"] = s
+            s_ = indicator("Y4", "Time-to-Collision (TTCmin per event)", "Time", "s", "All", vals,
+                           f"events with TTCmin <= {c['ttc_max_record_s']} s")
+            for kind in ("RearEnd", "Side"):
+                indicator("Y4", "Time-to-Collision (TTCmin per event)", "Time", "s", kind,
+                          [float(r["Y4_TTC_s"]) for r in rows if r["TTC_Type"] == kind])
+            s_["Level_Counts"] = {lv: sum(1 for r in rows if r["TTC_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
+            summary["indicators"]["Y4_TTC"] = s_
             summary["diagnostics"]["ttc"] = diag
         run_step("ttc", "Run_3_Y4_TTC.csv", do_ttc)
 
         # ---------------- Y5 PET (time) ----------------
         def do_pet():
             status("Run 3 — Y5 PET...")
-            rows, diag = self._run3_pet(tracks, c, movement_by_id, movement_source_by_id)
+            rows, diag = self._run3_pet(tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
             fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Y5_PET","PET_Risk_Level","QC_Flag"]
             outputs["pet"] = write_csv("Run_3_Y5_PET.csv", fields, rows)
             vals = [float(r["Y5_PET"]) for r in rows]
