@@ -238,6 +238,9 @@ def scene2(app):
     kinds_tight = {r["TTC_Type"] for r in read_csv(os.path.join(out_tight, "Run_3_TTC.csv"))}
     check("TTC side window is adjustable (factor 0, margin 0.05 s drops the 0.1 s apart pair)", kinds_tight == {"RearEnd"}, str(kinds_tight))
 
+    reasons = summary["diagnostics"].get("empty_outputs", [])
+    check("empty Gap Acceptance output is explained (no Line drawn yet)", any("Gap Acceptance" in r and "Line" in r for r in reasons), str(reasons))
+    check("non-empty indicators are not listed as empty", not any(r.startswith(("LDP", "TTC", "PET", "Speed")) for r in reasons), str(reasons))
     mv = summary["source_counts"]["movement_counts"]
     check("scene 2 movements: P = 2-3-4, Q and R = 1-3-6-7 (partial)", mv.get("2-3-4") == 1 and mv.get("1-3-6-7") == 2, str(mv))
 
