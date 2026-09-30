@@ -462,6 +462,7 @@ RUN3_DEFAULTS = {
     # Speed: user can select any of Zones 1–6. CSV assigns each selected zone
     # to the research role: Zone 1 = access mouth, 2/4 = approach, 3/5 = exit, 6 = middle/access.
     "speed_zones": [1, 2, 3, 4, 5, 6, 7],
+    "speed_smoothing_samples": "5",         # rolling-median window on positions before Y6 (1 = off)
     "lc_zones": [1, 2, 3, 4, 5, 6, 7],
     "pet_zone6": True,
     "pet_zones": [3, 6],
@@ -510,6 +511,9 @@ CONFLICT_ZONE_IDS = (3, 6)              # V28: conflict zones (PET / TTC); ordin
 ZONE_NAMES = [f"Zone {i}" for i in ZONE_IDS]
 
 # ==== CORE-BEGIN (pure logic, no GUI: unit-tested by tests/test_core.py) ====
+import math
+import numpy as np
+
 # V27(2): zone visits shorter/closer than this are treated as boundary flicker
 # when the Run 2 summaries are built (raw Detection_Records zones are untouched).
 ZONE_FLICKER_MERGE_S = 0.10
@@ -633,6 +637,74 @@ def classify_movement(sequence):
     if len(cands) > 1:
         return "", "Ambiguous"
     return "", "Unclassified"
+
+
+def rolling_median(values, k):
+    """Rolling median with a window that shrinks at the ends (k odd; k<=1 = off)."""
+    a = np.asarray(values, dtype=float)
+    k = int(k)
+    if k <= 1 or len(a) < 3:
+        return a.copy()
+    if k % 2 == 0:
+        k += 1
+    h = k // 2
+    return np.array([np.median(a[max(0, i - h): i + h + 1]) for i in range(len(a))])
+
+
+def path_speed(times, points, smoothing=1):
+    """(distance_m, duration_s, speed_kmh) of one sample series, or None.
+    points are metric (x, y). smoothing = rolling-median window (samples):
+    only FULL symmetric windows are used, so the series is shortened by half a
+    window at each end (a shrinking window at the ends would bias the path
+    length of a moving vehicle low)."""
+    n = len(times)
+    if n < 2:
+        return None
+    pts = np.asarray(points, dtype=float).reshape(-1, 2)
+    ts = list(times)
+    k = int(smoothing) if smoothing else 1
+    if k > 1:
+        h = min(k // 2, (n - 2) // 2)
+        if h >= 1:
+            sx = [float(np.median(pts[i - h: i + h + 1, 0])) for i in range(h, n - h)]
+            sy = [float(np.median(pts[i - h: i + h + 1, 1])) for i in range(h, n - h)]
+            pts = np.stack([sx, sy], axis=1)
+            ts = ts[h: n - h]
+    dist = float(np.sum(np.hypot(np.diff(pts[:, 0]), np.diff(pts[:, 1]))))
+    dur = float(ts[-1] - ts[0])
+    if dur <= 0 or dist <= 0:
+        return None
+    return dist, dur, dist / dur * 3.6
+
+
+def track_speed_records(rows, speed_zones, movement_id="", movement_status="", smoothing=1):
+    """Y6 speed records of ONE track (rows in time order; dict rows with
+    _timestamp, _m, _zone_num, frame): one record per selected zone plus one
+    for the whole Movement (all samples inside the movement's zones)."""
+    valid = [r for r in rows if r.get("_m") is not None and r.get("_zone_num") is not None]
+    out = []
+
+    def add(scope, key, sel, flag=""):
+        if len(sel) < 2:
+            return
+        res = path_speed([r["_timestamp"] for r in sel], [r["_m"] for r in sel], smoothing)
+        if res is None:
+            return
+        dist, dur, speed = res
+        out.append({
+            "Scope": scope, "Key": key, "Samples": len(sel),
+            "Start_Time": sel[0]["_timestamp"], "End_Time": sel[-1]["_timestamp"],
+            "Start_Frame": sel[0].get("frame", ""), "End_Frame": sel[-1].get("frame", ""),
+            "Distance_m": dist, "Duration_s": dur, "Speed_kmh": speed, "Flag": flag,
+        })
+
+    for zone in sorted(speed_zones):
+        add("Zone", f"Zone {zone}", [r for r in valid if r["_zone_num"] == zone])
+    if movement_id:
+        zones = set(MOVEMENT_PATTERNS[movement_id]["sequence"])
+        add("Movement", movement_id, [r for r in valid if r["_zone_num"] in zones],
+            "Partial_Movement" if movement_status == "Partial" else "")
+    return out
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -840,6 +912,7 @@ class Run1App:
         self.run3_pet_interaction_distance_var = tk.StringVar(value=RUN3_DEFAULTS["pet_interaction_distance_m"])
         self.run3_pet_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["pet_threshold_s"])
         self.run3_speed_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_zones"])) for z in ZONE_IDS}
+        self.run3_speed_smoothing_var = tk.StringVar(value=RUN3_DEFAULTS["speed_smoothing_samples"])
         self.run3_lc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["lc_zones"])) for z in ZONE_IDS}
         self.run3_pet_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["pet_zones"])) for z in CONFLICT_ZONE_IDS}
         self.run3_pet_zone6_var = self.run3_pet_zone_vars[6]   # backward-compatible alias
@@ -1180,7 +1253,7 @@ class Run1App:
         r += 1
 
         # ---------------- Indicator switches by domain ----------------
-        sw = ttk.LabelFrame(frame, text="ตัวชี้วัด (Y1–Y7)", padding=(8, 4))
+        sw = ttk.LabelFrame(frame, text="ตัวชี้วัด (Y1–Y6)", padding=(8, 4))
         sw.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 4)); r += 1
         ttk.Label(sw, text="ด้านระยะทาง").grid(row=0, column=0, sticky="w", padx=(0, 10))
         ttk.Checkbutton(sw, text="Y1 Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=0, column=1, sticky="w", padx=(0, 12))
@@ -1190,7 +1263,7 @@ class Run1App:
         ttk.Checkbutton(sw, text="Y4 TTC", variable=self.run3_ttc_enabled_var).grid(row=1, column=2, sticky="w", padx=(0, 12))
         ttk.Checkbutton(sw, text="Y5 PET", variable=self.run3_pet_enabled_var).grid(row=1, column=3, sticky="w", padx=(0, 12))
         ttk.Label(sw, text="ด้านความเร็ว").grid(row=2, column=0, sticky="w", padx=(0, 10))
-        ttk.Checkbutton(sw, text="Y6 V50 (Mean, SD) + Y7 V85", variable=self.run3_speed_enabled_var).grid(row=2, column=1, columnspan=2, sticky="w")
+        ttk.Checkbutton(sw, text="Y6 Speed (V50, V85, Mean, SD)", variable=self.run3_speed_enabled_var).grid(row=2, column=1, columnspan=2, sticky="w")
 
         # ---------------- V28 road geometry ----------------
         geo = ttk.LabelFrame(frame, text="ความกว้างถนน (m) — ใช้เป็นตัวหารของ LDP", padding=(8, 4))
@@ -1221,7 +1294,9 @@ class Run1App:
                 ttk.Checkbutton(box, text=f"Zone {z}", variable=var_map[z]).grid(row=1, column=i, sticky="w", padx=(2, 12), pady=2)
             return box
 
-        zone_row("Y6/Y7 Speed — Zones", "บทบาทใน CSV: 1=Access_Mouth, 2/4=Approach, 3/5=Exit, 6=Middle_Access, 7=Conflict_Zone7", self.run3_speed_zone_vars)
+        box = zone_row("Y6 Speed — Zones", "ความเร็วต่อโซน + ความเร็วภาพรวมตาม Movement (เช่น 2-3-4) — ความยาวเส้นทางเมตร ÷ เวลา", self.run3_speed_zone_vars)
+        ttk.Label(box, text="Median smoothing (samples, 1 = ปิด)").grid(row=2, column=0, columnspan=3, sticky="w", pady=2)
+        ttk.Entry(box, textvariable=self.run3_speed_smoothing_var, width=8).grid(row=2, column=3, sticky="w", pady=2)
         zone_row("Y1 Lateral Clearance — Zones", "ใช้ observation จริงและจับคู่เวลาที่ใกล้กัน — ไม่ทำ interpolation", self.run3_lc_zone_vars)
 
         box = zone_row("Y2 LDP — Zones", "LDP = ΔY / (W/2) × 100 — ΔY วัดจากตำแหน่งเริ่มต้นใน Zone หรือจาก Line ที่วาดเป็นเส้นกึ่งกลางช่องจราจร", self.run3_ldp_zone_vars)
@@ -2726,6 +2801,7 @@ class Run1App:
                 "pet_interaction_distance_m": self.run3_pet_interaction_distance_var.get(),
                 "pet_threshold_s": self.run3_pet_threshold_var.get(),
                 "speed_zones": [z for z,v in self.run3_speed_zone_vars.items() if v.get()],
+                "speed_smoothing_samples": self.run3_speed_smoothing_var.get(),
                 "lc_zones": [z for z,v in self.run3_lc_zone_vars.items() if v.get()],
                 "pet_zone6": self.run3_pet_zone6_var.get(),
                 "pet_zones": [z for z, v in self.run3_pet_zone_vars.items() if v.get()],
@@ -2870,6 +2946,7 @@ class Run1App:
                 ("ttc_velocity_window_s", self.run3_ttc_velocity_window_var),
                 ("ttc_min_speed_kmh", self.run3_ttc_min_speed_var),
                 ("ldp_lane_width_m", self.run3_ldp_lane_width_var),
+                ("speed_smoothing_samples", self.run3_speed_smoothing_var),
                 ("ldp_reference", self.run3_ldp_reference_var),
                 ("ldp_motorcycle_only", self.run3_ldp_motorcycle_only_var),
                 ("ldp_smoothing_samples", self.run3_ldp_smoothing_var),
@@ -3523,7 +3600,8 @@ class Run1App:
                 raise ValueError(f"Select at least one Zone for {label}.")
 
         if enabled["speed"]:
-            need_zone(self.run3_speed_zone_vars, "Y6/Y7 Speed")
+            need_zone(self.run3_speed_zone_vars, "Y6 Speed")
+            self._run3_float(self.run3_speed_smoothing_var.get(), "speed smoothing samples")
         if enabled["lc"]:
             need_zone(self.run3_lc_zone_vars, "Y1 Lateral Clearance")
             self._run3_float(self.run3_lc_longitudinal_window_var.get(), "LC longitudinal window (m)")
@@ -3579,7 +3657,7 @@ class Run1App:
         """
         warnings = []
         keys = {
-            "speed": ("Y6/Y7 Speed", self.run3_speed_zone_vars),
+            "speed": ("Y6 Speed", self.run3_speed_zone_vars),
             "lc": ("Y1 Lateral Clearance", self.run3_lc_zone_vars),
             "ttc": ("Y4 TTC", self.run3_ttc_zone_vars),
             "pet": ("Y5 PET", self.run3_pet_zone_vars),
@@ -5731,6 +5809,7 @@ class Run1App:
             "perspective": self._run3_get_perspective_matrix(silent=True),
             "axis_deg": num(self.run3_lateral_axis_angle_var, 0.0) or 0.0,
             "speed_zones": zones_of(self.run3_speed_zone_vars),
+            "speed_smoothing_samples": max(1, int(num(self.run3_speed_smoothing_var, 5) or 1)),
             "lc_zones": zones_of(self.run3_lc_zone_vars),
             "pet_zones": zones_of(self.run3_pet_zone_vars),
             "ttc_zones": zones_of(self.run3_ttc_zone_vars),
@@ -5760,16 +5839,6 @@ class Run1App:
     # ========================================================
     # RUN 3 — SHARED HELPERS
     # ========================================================
-
-    RUN3_ZONE_ROLES = {
-        1: ("Access_Mouth", "Access_Mouth_Zone1"),
-        2: ("Approach", "Approach_Zone2"),
-        3: ("Exit", "Exit_Zone3"),
-        4: ("Approach", "Approach_Zone4"),
-        5: ("Exit", "Exit_Zone5"),
-        6: ("Middle_Access", "Middle_Access_Zone6"),
-        7: ("Conflict_Zone7", "Conflict_Zone7"),
-    }
 
     @staticmethod
     def _run3_calibration_mode(c):
@@ -5876,14 +5945,14 @@ class Run1App:
         return "None"
 
     # ========================================================
-    # SPEED — Y6 (V50 / Mean / SD) and Y7 (V85)
+    # SPEED — Y6 (per Zone 1-7 and per Movement; V50, V85, Mean, SD)
     # ========================================================
 
-    def _run3_speed(self, tracks, c):
-        """Per-vehicle, per-zone space-mean speed from observed samples only."""
-        selected = sorted(c["speed_zones"])
+    def _run3_speed(self, tracks, c, movement_by_id, status_by_id):
+        """Y6 detail rows: one per vehicle x zone and one per vehicle x Movement."""
         mode = self._run3_calibration_mode(c)
-        qc = self._run3_qc_calibration(c)
+        qc_cal = self._run3_qc_calibration(c)
+        k = c["speed_smoothing_samples"]
         results = []
         for tid, rows in tracks.items():
             if not rows:
@@ -5891,102 +5960,85 @@ class Run1App:
             cls = rows[0].get("class_name", "")
             if str(cls).lower() == "person":
                 continue
-            by_zone = defaultdict(list)
-            for r in rows:
-                z = r.get("_zone_num")
-                if z in c["speed_zones"] and r.get("_m") is not None:
-                    by_zone[z].append(r)
-            for zone in selected:
-                zr = by_zone.get(zone, [])
-                if len(zr) < 2:
-                    continue
-                d_m = self._run3_segment_distance_sum([r["_m"] for r in zr])
-                dt = zr[-1]["_timestamp"] - zr[0]["_timestamp"]
-                if dt <= 0 or d_m <= 0:
-                    continue
-                role = self.RUN3_ZONE_ROLES.get(zone, (f"Zone{zone}", f"Zone{zone}"))[0]
+            movement = movement_by_id.get(str(tid), "")
+            status = status_by_id.get(str(tid), "")
+            for rec in track_speed_records(rows, c["speed_zones"], movement, status, k):
                 results.append({
-                    "Site_ID": c["site_id"],
-                    "Vehicle_ID": tid,
-                    "Vehicle_Class": cls,
-                    "Speed_Type": role,
-                    "Zone": str(zone),
-                    "Start_Time": f"{zr[0]['_timestamp']:.6f}",
-                    "End_Time": f"{zr[-1]['_timestamp']:.6f}",
-                    "Start_Frame": str(zr[0].get("frame", "")),
-                    "End_Frame": str(zr[-1].get("frame", "")),
-                    "Distance_m": f"{d_m:.6f}",
-                    "Speed_kmh": f"{d_m / dt * 3.6:.6f}",
+                    "Site_ID": c["site_id"], "Vehicle_ID": tid, "Vehicle_Class": cls,
+                    "Scope": rec["Scope"], "Key": rec["Key"],
+                    "Movement": movement, "Movement_Status": status,
+                    "Start_Time": f"{rec['Start_Time']:.6f}", "End_Time": f"{rec['End_Time']:.6f}",
+                    "Start_Frame": str(rec["Start_Frame"]), "End_Frame": str(rec["End_Frame"]),
+                    "Samples": rec["Samples"],
+                    "Distance_m": f"{rec['Distance_m']:.6f}", "Duration_s": f"{rec['Duration_s']:.6f}",
+                    "Speed_kmh": f"{rec['Speed_kmh']:.6f}",
                     "Calibration_Mode": mode,
-                    "QC_Flag": qc,
+                    "QC_Flag": ";".join(x for x in (rec["Flag"], qc_cal) if x),
                 })
         return results
 
-    def _run3_speed_vehicle_summary(self, speed_rows, tracks, c):
-        """One row per Vehicle_ID with every Zone 1-7 speed field (audit view)."""
-        by_vehicle_zone = defaultdict(dict)
+    def _run3_speed_vehicle_summary_fields(self):
+        fields = ["Site_ID", "Vehicle_ID", "Vehicle_Class", "Zone_Sequence", "Movement", "Movement_Status"]
+        for zone in ZONE_IDS:
+            fields += [f"Zone{zone}_Speed_kmh", f"Zone{zone}_Distance_m", f"Zone{zone}_Duration_s"]
+        return fields + ["Movement_Speed_kmh", "Movement_Distance_m", "Movement_Duration_s", "Calibration_Mode", "QC_Flag"]
+
+    def _run3_speed_vehicle_summary(self, speed_rows, tracks, c, movement_by_id, status_by_id, sequence_by_id):
+        """One row per Vehicle_ID: speed in every Zone 1-7 and over the whole Movement."""
+        by_vehicle = defaultdict(dict)
         for row in speed_rows:
-            try:
-                by_vehicle_zone[str(row["Vehicle_ID"])][int(row["Zone"])] = row
-            except Exception:
-                continue
-        vehicle_ids = sorted(
-            set(str(tid) for tid in tracks.keys()),
-            key=lambda x: (int(x) if x.isdigit() else 10**18, x)
-        )
+            by_vehicle[str(row["Vehicle_ID"])][(row["Scope"], row["Key"])] = row
         out = []
-        for tid in vehicle_ids:
+        for tid in sorted((str(t) for t in tracks), key=lambda x: (int(x) if x.isdigit() else 10**18, x)):
             rows = tracks.get(tid, [])
             if not rows:
                 continue
             cls = str(rows[0].get("class_name", ""))
             if cls.lower() == "person":
                 continue
-            seq = []
-            for r in rows:
-                z = r.get("_zone_num")
-                if z in ZONE_IDS and (not seq or seq[-1] != z):
-                    seq.append(z)
             row = {"Site_ID": c["site_id"], "Vehicle_ID": tid, "Vehicle_Class": cls,
-                   "Zone_Sequence": "→".join(str(z) for z in seq)}
+                   "Zone_Sequence": "-".join(str(z) for z in sequence_by_id.get(tid, [])),
+                   "Movement": movement_by_id.get(tid, ""), "Movement_Status": status_by_id.get(tid, "")}
+            items = by_vehicle.get(tid, {})
             for zone in ZONE_IDS:
-                prefix = self.RUN3_ZONE_ROLES[zone][1]
-                item = by_vehicle_zone.get(tid, {}).get(zone)
-                row[f"{prefix}_Timestamp_Range"] = f"{item['Start_Time']} → {item['End_Time']}" if item else ""
-                row[f"{prefix}_Start_Frame"] = item["Start_Frame"] if item else ""
-                row[f"{prefix}_End_Frame"] = item["End_Frame"] if item else ""
-                row[f"{prefix}_Distance_m"] = item["Distance_m"] if item else ""
-                row[f"{prefix}_Speed_kmh"] = item["Speed_kmh"] if item else ""
-            items = by_vehicle_zone.get(tid, {}).values()
-            row["Calibration_Mode"] = ";".join(sorted({r["Calibration_Mode"] for r in items if r.get("Calibration_Mode")}))
-            row["QC_Flag"] = ";".join(sorted({r["QC_Flag"] for r in items if r.get("QC_Flag")}))
+                it = items.get(("Zone", f"Zone {zone}"))
+                row[f"Zone{zone}_Speed_kmh"] = it["Speed_kmh"] if it else ""
+                row[f"Zone{zone}_Distance_m"] = it["Distance_m"] if it else ""
+                row[f"Zone{zone}_Duration_s"] = it["Duration_s"] if it else ""
+            mv = next((v for (sc, _k), v in items.items() if sc == "Movement"), None)
+            row["Movement_Speed_kmh"] = mv["Speed_kmh"] if mv else ""
+            row["Movement_Distance_m"] = mv["Distance_m"] if mv else ""
+            row["Movement_Duration_s"] = mv["Duration_s"] if mv else ""
+            row["Calibration_Mode"] = ";".join(sorted({v["Calibration_Mode"] for v in items.values() if v.get("Calibration_Mode")}))
+            row["QC_Flag"] = ";".join(sorted({f for v in items.values() for f in str(v.get("QC_Flag", "")).split(";") if f}))
             out.append(row)
         return out
 
-    def _run3_speed_vehicle_summary_fields(self):
-        fields = ["Site_ID", "Vehicle_ID", "Vehicle_Class", "Zone_Sequence"]
-        for zone in ZONE_IDS:
-            p = self.RUN3_ZONE_ROLES[zone][1]
-            fields += [f"{p}_Timestamp_Range", f"{p}_Start_Frame", f"{p}_End_Frame", f"{p}_Distance_m", f"{p}_Speed_kmh"]
-        return fields + ["Calibration_Mode", "QC_Flag"]
-
     def _run3_speed_statistics(self, speed_rows, c):
-        """Y6 = V50 (with Mean and SD) and Y7 = V85, per Speed_Type x class."""
+        """Y6 statistics (Mean, SD, V50 = median, V85 = P85) per Zone / per Movement x class."""
         groups = defaultdict(list)
         for r in speed_rows:
             v = float(r["Speed_kmh"])
-            groups[(r["Speed_Type"], "All")].append(v)
-            groups[(r["Speed_Type"], r["Vehicle_Class"])].append(v)
-        role_order = ["Approach", "Exit", "Access_Mouth", "Middle_Access", "Conflict_Zone7"]
+            groups[(r["Scope"], r["Key"], "All")].append(v)
+            groups[(r["Scope"], r["Key"], r["Vehicle_Class"])].append(v)
+
+        def order(k):
+            scope, key, cls = k
+            if scope == "Zone":
+                pos = (0, int(key.split()[-1]))
+            else:
+                pos = (1, MOVEMENT_IDS.index(key) if key in MOVEMENT_IDS else 99)
+            return (pos, cls != "All", cls)
+
         out = []
-        for (role, cls) in sorted(groups, key=lambda k: (role_order.index(k[0]) if k[0] in role_order else 99, k[1] != "All", k[1])):
-            s = self._run3_stats(groups[(role, cls)])
+        for (scope, key, cls) in sorted(groups, key=order):
+            s_ = self._run3_stats(groups[(scope, key, cls)])
             out.append({
-                "Site_ID": c["site_id"], "Speed_Type": role, "Vehicle_Class": cls, "N": s["N"],
-                "Mean_kmh": self._fmt(s["Mean"], 3), "SD_kmh": self._fmt(s["SD"], 3),
-                "Y6_V50_kmh": self._fmt(s["P50"], 3), "Y7_V85_kmh": self._fmt(s["P85"], 3),
-                "V85_minus_V50_kmh": self._fmt(None if s["N"] == 0 else s["P85"] - s["P50"], 3),
-                "Min_kmh": self._fmt(s["Min"], 3), "Max_kmh": self._fmt(s["Max"], 3),
+                "Site_ID": c["site_id"], "Scope": scope, "Key": key, "Vehicle_Class": cls, "N": s_["N"],
+                "Mean_kmh": self._fmt(s_["Mean"], 3), "SD_kmh": self._fmt(s_["SD"], 3),
+                "Y6_V50_kmh": self._fmt(s_["P50"], 3), "Y6_V85_kmh": self._fmt(s_["P85"], 3),
+                "V85_minus_V50_kmh": self._fmt(None if s_["N"] == 0 else s_["P85"] - s_["P50"], 3),
+                "Min_kmh": self._fmt(s_["Min"], 3), "Max_kmh": self._fmt(s_["Max"], 3),
             })
         return out
 
@@ -6829,28 +6881,29 @@ class Run1App:
             summary["diagnostics"]["pet"] = diag
         run_step("pet", "Run_3_Y5_PET.csv", do_pet)
 
-        # ---------------- Y6 V50 / Y7 V85 (speed) ----------------
+        # ---------------- Y6 Speed (V50, V85, Mean, SD) ----------------
         def do_speed():
-            status("Run 3 — Y6/Y7 Speed...")
-            speed_rows = self._run3_speed(tracks, c)
-            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Speed_Type","Zone","Start_Time","End_Time","Start_Frame","End_Frame","Distance_m","Speed_kmh","Calibration_Mode","QC_Flag"]
+            status("Run 3 — Y6 Speed...")
+            speed_rows = self._run3_speed(tracks, c, movement_by_id, movement_source_by_id)
+            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Scope","Key","Movement","Movement_Status","Start_Time","End_Time","Start_Frame","End_Frame","Samples","Distance_m","Duration_s","Speed_kmh","Calibration_Mode","QC_Flag"]
             outputs["speed_detail"] = write_csv("Run_3_Speed_Detail.csv", fields, speed_rows)
-            vs = self._run3_speed_vehicle_summary(speed_rows, tracks, c)
+            vs = self._run3_speed_vehicle_summary(speed_rows, tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
             outputs["speed"] = write_csv("Run_3_Speed.csv", self._run3_speed_vehicle_summary_fields(), vs)
             stats = self._run3_speed_statistics(speed_rows, c)
-            outputs["speed_statistics"] = write_csv("Run_3_Y6_Y7_Speed_Statistics.csv",
-                ["Site_ID","Speed_Type","Vehicle_Class","N","Mean_kmh","SD_kmh","Y6_V50_kmh","Y7_V85_kmh","V85_minus_V50_kmh","Min_kmh","Max_kmh"], stats)
-            by_role = defaultdict(list)
+            outputs["speed_statistics"] = write_csv("Run_3_Y6_Speed_Statistics.csv",
+                ["Site_ID","Scope","Key","Vehicle_Class","N","Mean_kmh","SD_kmh","Y6_V50_kmh","Y6_V85_kmh","V85_minus_V50_kmh","Min_kmh","Max_kmh"], stats)
+            groups = defaultdict(list)
             for r in speed_rows:
-                by_role[r["Speed_Type"]].append(float(r["Speed_kmh"]))
+                groups[(r["Scope"], r["Key"])].append(float(r["Speed_kmh"]))
             spd = {}
-            for role in ("Approach", "Exit", "Access_Mouth", "Middle_Access", "Conflict_Zone7"):
-                if role in by_role:
-                    # One row per group: Median column = Y6 (V50), P85 column = Y7 (V85)
-                    s = indicator("Y6/Y7", "Speed: V50 = Median, V85 = P85 (Mean, SD)", "Speed", "km/h", role, by_role[role])
-                    spd[role] = {"N": s["N"], "Mean": s["Mean"], "SD": s["SD"], "Y6_V50": s["P50"], "Y7_V85": s["P85"]}
-            summary["indicators"]["Y6_Y7_Speed"] = spd
-            summary["diagnostics"]["speed"] = f"vehicle_rows={len(vs)}; detail_rows={len(speed_rows)}; zones={sorted(c['speed_zones'])}"
+            for (scope, key) in sorted(groups, key=lambda k: (k[0] != "Zone", MOVEMENT_IDS.index(k[1]) if k[1] in MOVEMENT_IDS else 0, k[1])):
+                # One row per group: Median column = V50, P85 column = V85
+                s_ = indicator("Y6", "Speed (Mean, SD, V50 = Median, V85 = P85)", "Speed", "km/h",
+                               key if scope == "Zone" else f"Movement {key}", groups[(scope, key)])
+                spd[f"{scope} {key}"] = {"N": s_["N"], "Mean": s_["Mean"], "SD": s_["SD"], "V50": s_["P50"], "V85": s_["P85"]}
+            summary["indicators"]["Y6_Speed"] = spd
+            summary["diagnostics"]["speed"] = (f"vehicle_rows={len(vs)}; detail_rows={len(speed_rows)}; "
+                                               f"zones={sorted(c['speed_zones'])}; smoothing_samples={c['speed_smoothing_samples']}")
         run_step("speed", "Run_3_Speed.csv", do_speed)
 
         if indicator_rows:

@@ -24,6 +24,7 @@ def load_core():
 
 
 CORE = load_core()
+import random
 clean = CORE["clean_zone_visits"]
 seq_from = CORE["zone_sequence_from_samples"]
 classify = CORE["classify_movement"]
@@ -128,6 +129,83 @@ class SequenceFromSamples(unittest.TestCase):
     def test_right_turn_through_conflict_zones(self):
         z = [1] * 40 + [3] * 20 + [6] * 20 + [7] * 40
         self.assertEqual(classify(seq_from(self.run_samples(z))), ("1-3-6-7", "Exact"))
+
+
+def make_rows(zone_plan, speed_ms=10.0, dt=1 / 60, jitter=0.0, seed=1):
+    """One vehicle moving along +x at speed_ms; zone_plan = [(zone, n_samples), ...]."""
+    rnd = random.Random(seed)
+    rows, i = [], 0
+    for zone, n in zone_plan:
+        for _ in range(n):
+            t = i * dt
+            x = speed_ms * t + rnd.uniform(-jitter, jitter)
+            y = rnd.uniform(-jitter, jitter)
+            rows.append({"_timestamp": t, "_m": (x, y), "_zone_num": zone, "frame": str(i + 1)})
+            i += 1
+    return rows
+
+
+class SpeedY6(unittest.TestCase):
+    def test_path_speed_known(self):
+        rows = make_rows([(2, 61)])           # 1 s at 10 m/s -> 10 m -> 36 km/h
+        d, t, v = CORE["path_speed"]([r["_timestamp"] for r in rows], [r["_m"] for r in rows])
+        self.assertAlmostEqual(d, 10.0, places=6)
+        self.assertAlmostEqual(v, 36.0, places=6)
+
+    def test_path_speed_rejects_short_or_static(self):
+        self.assertIsNone(CORE["path_speed"]([0.0], [(0, 0)]))
+        self.assertIsNone(CORE["path_speed"]([0.0, 1.0], [(0, 0), (0, 0)]))
+
+    def test_zone_and_movement_speed(self):
+        rows = make_rows([(2, 61), (3, 61), (4, 61)])
+        recs = CORE["track_speed_records"](rows, {2, 3, 4}, "2-3-4", "Exact", 1)
+        by = {(r["Scope"], r["Key"]): r for r in recs}
+        for z in (2, 3, 4):
+            self.assertAlmostEqual(by[("Zone", f"Zone {z}")]["Speed_kmh"], 36.0, places=6)
+        mv = by[("Movement", "2-3-4")]
+        self.assertAlmostEqual(mv["Speed_kmh"], 36.0, places=6)
+        self.assertAlmostEqual(mv["Distance_m"], 182 * 10.0 / 60, places=6)   # 183 samples = 182 steps of 1/60 s
+        self.assertEqual(mv["Flag"], "")
+
+    def test_unselected_zone_not_reported_but_movement_is(self):
+        rows = make_rows([(2, 61), (3, 61), (4, 61)])
+        recs = CORE["track_speed_records"](rows, {3}, "2-3-4", "Exact", 1)
+        self.assertEqual({(r["Scope"], r["Key"]) for r in recs}, {("Zone", "Zone 3"), ("Movement", "2-3-4")})
+
+    def test_no_movement_when_unclassified(self):
+        rows = make_rows([(3, 61), (4, 61)])
+        recs = CORE["track_speed_records"](rows, {3, 4}, "", "Ambiguous", 1)
+        self.assertEqual({r["Scope"] for r in recs}, {"Zone"})
+
+    def test_partial_flag(self):
+        rows = make_rows([(1, 30), (3, 30), (6, 30)])
+        recs = CORE["track_speed_records"](rows, {1, 3, 6}, "1-3-6-7", "Partial", 1)
+        mv = [r for r in recs if r["Scope"] == "Movement"][0]
+        self.assertEqual(mv["Flag"], "Partial_Movement")
+
+    def test_smoothing_reduces_jitter_inflation(self):
+        # slow vehicle (2 m/s = 7.2 km/h, 3.3 cm per frame) with +-3 cm bbox jitter
+        rows = make_rows([(2, 121)], speed_ms=2.0, jitter=0.03, seed=7)
+        raw = CORE["track_speed_records"](rows, {2}, "", "", 1)[0]["Speed_kmh"]
+        smooth = CORE["track_speed_records"](rows, {2}, "", "", 5)[0]["Speed_kmh"]
+        self.assertGreater(raw, 7.2 + 1.5)                        # jitter inflates path length a lot
+        self.assertLess(abs(smooth - 7.2), abs(raw - 7.2))        # smoothing pulls it back
+        self.assertLess(abs(smooth - 7.2), 0.5)
+
+    def test_smoothing_does_not_bias_clean_motion(self):
+        rows = make_rows([(2, 61)])                              # noise-free 36 km/h
+        for k in (1, 3, 5, 9, 31):
+            v = CORE["track_speed_records"](rows, {2}, "", "", k)[0]["Speed_kmh"]
+            self.assertAlmostEqual(v, 36.0, places=6, msg=f"k={k}")
+
+    def test_smoothing_window_shrinks_for_short_series(self):
+        rows = make_rows([(2, 4)])                               # only 4 samples, k=9 requested
+        v = CORE["track_speed_records"](rows, {2}, "", "", 9)[0]["Speed_kmh"]
+        self.assertAlmostEqual(v, 36.0, places=6)
+
+    def test_rolling_median(self):
+        out = CORE["rolling_median"]([0, 0, 100, 0, 0], 3)
+        self.assertEqual(list(out), [0, 0, 0, 0, 0])
 
 
 if __name__ == "__main__":
