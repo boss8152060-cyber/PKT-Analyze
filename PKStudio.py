@@ -3435,6 +3435,40 @@ class Run1App:
             )
         return True
 
+    def collect_run3_warnings(self):
+        """Non-blocking pre-flight checks. Returns a list of warning strings.
+
+        These are situations that would otherwise produce empty or partial
+        Run 3 output without any message (the run still completes).
+        """
+        warnings = []
+        keys = {
+            "speed": ("Y6/Y7 Speed", self.run3_speed_zone_vars),
+            "lc": ("Y1 Lateral Clearance", self.run3_lc_zone_vars),
+            "ttc": ("Y4 TTC", self.run3_ttc_zone_vars),
+            "pet": ("Y5 PET", self.run3_pet_zone_vars),
+            "ldp": ("Y2 LDP", self.run3_ldp_zone_vars),
+        }
+        defined = {z for z in ZONE_IDS if len(self.zones.get(f"Zone {z}", [])) >= 3}
+        any_enabled = any(bool(getattr(self, f"run3_{k}_enabled_var").get())
+                          for k in ("speed", "gap", "lc", "pet", "ttc", "ldp"))
+        if any_enabled and not defined:
+            warnings.append(
+                "Run 3 is enabled but no Zone is loaded. Zones are required for every "
+                "Run 3 indicator, so all Run 3 outputs will be empty."
+            )
+            return warnings
+        for key, (label, var_map) in keys.items():
+            if not bool(getattr(self, f"run3_{key}_enabled_var").get()):
+                continue
+            missing = sorted(z for z, v in var_map.items() if v.get() and z not in defined)
+            if missing:
+                warnings.append(
+                    f"{label}: Zone {', '.join(str(z) for z in missing)} selected but not defined in the "
+                    f"loaded Zone file (defined: {', '.join(str(z) for z in sorted(defined))}). "
+                    "Those zones will produce no data."
+                )
+        return warnings
 
     # ========================================================
     # DEVICE
@@ -3587,6 +3621,17 @@ class Run1App:
                 str(e)
             )
             return
+
+        # V27(3): soft pre-flight warnings (run can still proceed).
+        self._run3_warnings = self.collect_run3_warnings()
+        if self._run3_warnings:
+            text = "\n\n".join(f"• {w}" for w in self._run3_warnings)
+            if not messagebox.askokcancel(
+                "Run 3 pre-flight warnings",
+                text + "\n\nContinue anyway?",
+                icon="warning"
+            ):
+                return
 
         settings = self.get_settings()
 
@@ -6626,6 +6671,8 @@ class Run1App:
             "diagnostics": {},
             "indicators": {},
         }
+        if getattr(self, "_run3_warnings", None):
+            summary["diagnostics"]["preflight_warnings"] = list(self._run3_warnings)
         if mapping_parse_error:
             summary["diagnostics"]["reference_mapping"] = f"Invalid Reference Line Mapping: {mapping_parse_error}"
         indicator_rows = []
