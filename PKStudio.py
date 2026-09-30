@@ -479,11 +479,11 @@ RUN3_DEFAULTS = {
     "gap_subject_5631": True,
     "use_raff": True,
     "use_mle": True,
-    # Copy/paste template for Reference Line Mapping.
-    # Lines beginning with # are ignored by the program. Replace the Line N
-    # entries with the ACTUAL Line 1–6 geometry for the selected Site before
-    # enabling Gap Acceptance.
-    "reference_line_mapping": "# Site_ID|Movement|Line N\n# 8|2-3-4|Line N\n# 8|5-6-7|Line N\n# 8|5-6-3-1|Line N\n# 8|1-3-6-7|Line N",
+    # Reference Line Mapping (Site_ID|Movement|Line N): ready-made for Site 8 - the four conflicting
+    # streams of Gap Acceptance use Line 1-4. The Lines themselves still have to be drawn
+    # (button "วาด Line…" next to the Zone File); the editor keeps this mapping in sync.
+    # Lines beginning with # are ignored by the program.
+    "reference_line_mapping": "# Site_ID|Movement|Line N\n8|2-3-4|Line 1\n8|5-6-7|Line 2\n8|5-6-3-1|Line 3\n8|1-3-6-7|Line 4",
     # Starter width values entered in the current researcher UI.
     "vehicle_widths": {
         "Bus": "2.50",
