@@ -438,5 +438,39 @@ class ConflictType(unittest.TestCase):
         self.assertEqual(ct([], [1, 2]), "Merging/Diverging")
 
 
+class LineEditorHelpers(unittest.TestCase):
+    def test_canvas_to_video(self):
+        f = CORE["canvas_to_video"]
+        self.assertEqual(f(100, 50, 0.5, 1920, 1080), (200, 100))
+        self.assertEqual(f(-10, 99999, 0.5, 1920, 1080), (0, 1079))
+        self.assertEqual(f(0, 0, 1.0, 640, 360), (0, 0))
+
+    def test_scale_points(self):
+        f = CORE["scale_points"]
+        self.assertEqual(f([(100, 50), (200, 150)], 320, 180, 640, 360), [(200, 100), (400, 300)])
+        self.assertEqual(f([(100, 50)], 640, 360, 640, 360), [(100, 50)])
+        self.assertEqual(f([(100, 50)], None, None, 640, 360), [(100, 50)])      # unknown size: unchanged
+
+    def test_mapping_text_fills_and_keeps_other_rows(self):
+        f = CORE["update_reference_mapping_text"]
+        old = ("# Site_ID|Movement|Line N\n# 8|2-3-4|Line N\n# 8|5-6-7|Line N\n9|2-3-4|Line 6\n8|2-3-1|Line 5")
+        new = f(old, "8", {"2-3-4": "Line 1", "5-6-7": "Line 2"})
+        rows = new.splitlines()
+        self.assertIn("# Site_ID|Movement|Line N", rows)         # header comment kept
+        self.assertNotIn("# 8|2-3-4|Line N", rows)              # template rows replaced
+        self.assertIn("9|2-3-4|Line 6", rows)                   # other site kept
+        self.assertIn("8|2-3-1|Line 5", rows)                   # other movement kept
+        self.assertEqual(rows[-2:], ["8|2-3-4|Line 1", "8|5-6-7|Line 2"])
+
+    def test_mapping_text_replaces_an_existing_active_row(self):
+        f = CORE["update_reference_mapping_text"]
+        new = f("8|2-3-4|Line 3", "8", {"2-3-4": "Line 1"})
+        self.assertEqual(new, "8|2-3-4|Line 1")
+
+    def test_mapping_text_from_empty(self):
+        f = CORE["update_reference_mapping_text"]
+        self.assertEqual(f("", "8", {"5-6-7": "Line 2"}), "8|5-6-7|Line 2")
+
+
 if __name__ == "__main__":
     unittest.main()
