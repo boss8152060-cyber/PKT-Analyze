@@ -472,5 +472,51 @@ class LineEditorHelpers(unittest.TestCase):
         self.assertEqual(f("", "8", {"5-6-7": "Line 2"}), "8|5-6-7|Line 2")
 
 
+class DuplicateTracks(unittest.TestCase):
+    def boxes(self, spec):
+        """spec = {track_id: {frame: (x1, y1, x2, y2)}} -> frame_boxes"""
+        fb = {}
+        for tid, frames in spec.items():
+            for fr, box in frames.items():
+                fb.setdefault(fr, []).append((tid, box))
+        return fb
+
+    def test_iou(self):
+        f = CORE["bbox_iou"]
+        self.assertAlmostEqual(f((0, 0, 10, 10), (0, 0, 10, 10)), 1.0)
+        self.assertAlmostEqual(f((0, 0, 10, 10), (5, 0, 15, 10)), 1.0 / 3.0)
+        self.assertEqual(f((0, 0, 10, 10), (20, 20, 30, 30)), 0.0)
+
+    def test_same_car_under_two_ids_is_found(self):
+        a = {fr: (100 + fr, 50, 130 + fr, 70) for fr in range(1, 101)}        # long track
+        b = {fr: (101 + fr, 51, 131 + fr, 71) for fr in range(40, 70)}        # 30 frames, same car
+        dup = CORE["find_duplicate_tracks"](self.boxes({"6": a, "22": b}), {"6": 100, "22": 30})
+        self.assertEqual(set(dup), {"22"})
+        self.assertEqual(dup["22"]["keep"], "6")
+        self.assertEqual(dup["22"]["frames"], set(range(40, 70)))
+
+    def test_two_cars_side_by_side_are_not_duplicates(self):
+        a = {fr: (100 + fr, 50, 130 + fr, 70) for fr in range(1, 60)}
+        b = {fr: (100 + fr, 75, 130 + fr, 95) for fr in range(1, 60)}
+        self.assertEqual(CORE["find_duplicate_tracks"](self.boxes({"1": a, "2": b}), {"1": 59, "2": 59}), {})
+
+    def test_short_overlap_is_not_enough(self):
+        a = {fr: (100, 50, 130, 70) for fr in range(1, 50)}
+        b = {fr: (100, 50, 130, 70) for fr in range(1, 6)}                     # only 5 frames
+        self.assertEqual(CORE["find_duplicate_tracks"](self.boxes({"1": a, "2": b}), {"1": 49, "2": 5}), {})
+
+    def test_partial_overlap_removes_only_the_overlapping_frames(self):
+        a = {fr: (100, 50, 130, 70) for fr in range(1, 101)}
+        b = {fr: (100, 50, 130, 70) for fr in range(1, 21)}
+        b.update({fr: (300, 200, 330, 220) for fr in range(21, 61)})           # later it is a different car
+        dup = CORE["find_duplicate_tracks"](self.boxes({"1": a, "2": b}), {"1": 100, "2": 60})
+        self.assertEqual(dup["2"]["frames"], set(range(1, 21)))
+
+    def test_equal_length_keeps_the_earlier_id(self):
+        a = {fr: (100, 50, 130, 70) for fr in range(1, 31)}
+        dup = CORE["find_duplicate_tracks"](self.boxes({"3": a, "9": dict(a)}), {"3": 30, "9": 30})
+        self.assertEqual(list(dup), ["9"])
+
+
 if __name__ == "__main__":
     unittest.main()

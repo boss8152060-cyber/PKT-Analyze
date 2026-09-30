@@ -928,6 +928,46 @@ def update_reference_mapping_text(text, site_id, assignments):
     for movement, line_name in assignments.items():
         out.append(f"{site}|{movement}|{line_name}")
     return "\n".join(out)
+
+
+DUPLICATE_TRACK_IOU = 0.70          # two track IDs whose boxes overlap this much are one vehicle
+DUPLICATE_TRACK_MIN_FRAMES = 10     # ... for at least this many frames
+
+
+def bbox_iou(a, b):
+    """Intersection over union of two (x1, y1, x2, y2) boxes."""
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def find_duplicate_tracks(frame_boxes, track_length, iou_min=DUPLICATE_TRACK_IOU,
+                          min_frames=DUPLICATE_TRACK_MIN_FRAMES):
+    """Detect one vehicle tracked under two IDs at the same time (an ID switch where the
+    old ID does not die). frame_boxes = {frame: [(track_id, (x1, y1, x2, y2)), ...]},
+    track_length = {track_id: number of rows}.
+
+    Two IDs are duplicates when their boxes overlap with IoU >= iou_min in at least
+    min_frames frames. The track with fewer rows (ties: the later ID) is the duplicate.
+    Returns {duplicate_id: {"keep": kept_id, "frames": set_of_frames_to_remove}}."""
+    shared = {}
+    for frame, items in frame_boxes.items():
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                (ta, ba), (tb, bb) = items[i], items[j]
+                if ta != tb and bbox_iou(ba, bb) >= iou_min:
+                    shared.setdefault((ta, tb) if str(ta) < str(tb) else (tb, ta), set()).add(frame)
+    out = {}
+    for (ta, tb), frames in shared.items():
+        if len(frames) < min_frames:
+            continue
+        la, lb = track_length.get(ta, 0), track_length.get(tb, 0)
+        keep, drop = (ta, tb) if (la, str(tb)) > (lb, str(ta)) else (tb, ta)
+        entry = out.setdefault(drop, {"keep": keep, "frames": set()})
+        entry["frames"] |= frames
+    return out
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -6399,6 +6439,45 @@ class Run1App:
         lat_u = np.array([-math.sin(th), math.cos(th)])
         return np.stack([m @ road_u, m @ lat_u], axis=1)
 
+    def _run3_remove_duplicate_tracks(self, tracks):
+        """Remove the frames of a track that duplicates another track (same vehicle, two IDs).
+        Modifies `tracks` in place; returns report rows. Without this, the two IDs look like
+        two vehicles standing on top of each other (negative Lateral Clearance, fake TTC/PET)."""
+        frame_boxes = defaultdict(list)
+        for tid, rows in tracks.items():
+            for r in rows:
+                try:
+                    box = (float(r["bbox_x1"]), float(r["bbox_y1"]), float(r["bbox_x2"]), float(r["bbox_y2"]))
+                    frame = int(float(r["frame"]))
+                except Exception:
+                    continue
+                frame_boxes[frame].append((tid, box))
+        length = {tid: len(rows) for tid, rows in tracks.items()}
+        dup = find_duplicate_tracks(frame_boxes, length)
+        report = []
+        for drop, info in dup.items():
+            rows = tracks.get(drop, [])
+            keep_rows = []
+            removed = []
+            for r in rows:
+                try:
+                    frame = int(float(r["frame"]))
+                except Exception:
+                    frame = None
+                (removed if frame in info["frames"] else keep_rows).append(r)
+            cls = rows[0].get("class_name", "") if rows else ""
+            report.append({
+                "Duplicate_ID": drop, "Kept_ID": info["keep"], "Vehicle_Class": cls,
+                "Frames_Removed": len(removed),
+                "First_Frame": min(info["frames"]), "Last_Frame": max(info["frames"]),
+                "Remaining_Rows_Of_Duplicate_ID": len(keep_rows),
+            })
+            if len(keep_rows) >= 2:
+                tracks[drop] = keep_rows
+            else:
+                tracks.pop(drop, None)
+        return report
+
     def _run3_attach_metric(self, tracks, c):
         """Transform every observed point ONCE (batch) instead of per use."""
         rows_all = [r for rows in tracks.values() for r in rows]
@@ -7296,6 +7375,7 @@ class Run1App:
         status("Run 3 — loading Run 2 results...")
         detection_rows, id_rows, zone_rows, det_path, id_path, zone_path = self._run3_load_inputs(output_dir, run_name)
         tracks, summaries = self._run3_build_tracks(detection_rows, id_rows)
+        duplicate_report = self._run3_remove_duplicate_tracks(tracks)
         self._run3_attach_metric(tracks, c)
         outputs = {}
         mapping = {}; mapping_parse_error = ""
@@ -7327,6 +7407,11 @@ class Run1App:
             },
             "diagnostics": {},
             "indicators": {},
+        }
+        summary["diagnostics"]["duplicate_tracks"] = {
+            "rule": f"boxes IoU >= {DUPLICATE_TRACK_IOU} in >= {DUPLICATE_TRACK_MIN_FRAMES} frames = one vehicle under two IDs; the shorter track's overlapping frames are removed",
+            "tracks_affected": len(duplicate_report),
+            "frames_removed": sum(r["Frames_Removed"] for r in duplicate_report),
         }
         if getattr(self, "_run3_warnings", None):
             summary["diagnostics"]["preflight_warnings"] = list(self._run3_warnings)
@@ -7504,6 +7589,12 @@ class Run1App:
             summary["diagnostics"]["speed"] = (f"vehicle_rows={len(vs)}; detail_rows={len(speed_rows)}; "
                                                f"zones={sorted(c['speed_zones'])}; smoothing_samples={c['speed_smoothing_samples']}")
         run_step("speed", "Run_3_Speed.csv", do_speed)
+
+        if duplicate_report:
+            outputs["duplicate_tracks"] = write_csv(
+                "Run_3_Duplicate_Tracks.csv",
+                ["Duplicate_ID", "Kept_ID", "Vehicle_Class", "Frames_Removed", "First_Frame", "Last_Frame", "Remaining_Rows_Of_Duplicate_ID"],
+                duplicate_report)
 
         if indicator_rows:
             outputs["indicator_summary"] = write_csv(
