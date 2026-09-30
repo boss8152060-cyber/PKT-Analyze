@@ -66,7 +66,7 @@ def _python_has_cuda(python_exe):
             ],
             capture_output=True,
             text=True,
-            timeout=15
+            timeout=90
         )
 
         return result.returncode == 0 and result.stdout.strip() == "1"
@@ -193,6 +193,17 @@ def _get_python_candidates():
     return candidates
 
 
+def find_cuda_python(exclude=None):
+    """Path of another installed Python whose PyTorch can use CUDA, or None."""
+    skip = os.path.normcase(os.path.abspath(exclude or sys.executable))
+    for python_exe in _get_python_candidates():
+        if os.path.normcase(os.path.abspath(python_exe)) == skip:
+            continue
+        if _python_has_cuda(python_exe):
+            return python_exe
+    return None
+
+
 def _bootstrap_cuda_environment():
     """
     If this Python has CPU-only PyTorch, automatically find another
@@ -217,7 +228,7 @@ def _bootstrap_cuda_environment():
             ],
             capture_output=True,
             text=True,
-            timeout=15
+            timeout=90
         )
 
         output = (
@@ -4202,6 +4213,34 @@ class Run1App:
     # DEVICE
     # ========================================================
 
+    def offer_restart_with_cuda_python(self, error_text):
+        """GPU selected but this Python has a CPU-only PyTorch: look for another installed
+        Python with CUDA and offer to reopen PK Studio with it. True = restarting."""
+        try:
+            self.status_var.set("กำลังหา Python ที่ใช้ GPU ได้...")
+            self.root.update_idletasks()
+            cuda_python = find_cuda_python()
+        except Exception:
+            cuda_python = None
+        if not cuda_python:
+            return False
+        if not messagebox.askyesno(
+                "CUDA / Device Error",
+                error_text + "\n\n"
+                "พบ Python ที่ใช้ GPU ได้:\n" + cuda_python + "\n\n"
+                "ปิดหน้าต่างนี้แล้วเปิด PK Studio ใหม่ด้วย Python ตัวนั้นเลยหรือไม่?\n"
+                "(ค่าที่ยังไม่ได้บันทึกจะหาย — กด No เพื่อใช้ CPU ต่อ)"):
+            return False
+        env = os.environ.copy()
+        env[BOOTSTRAP_MARKER] = "1"
+        try:
+            subprocess.Popen([cuda_python, os.path.abspath(sys.argv[0]), *sys.argv[1:]], env=env)
+        except Exception as exc:
+            messagebox.showerror("Restart", f"เปิดใหม่ไม่สำเร็จ: {exc}")
+            return False
+        self.root.after(200, self.root.destroy)
+        return True
+
     def resolve_device(self):
 
         selected = self.device_var.get()
@@ -4344,6 +4383,8 @@ class Run1App:
         try:
             selected_device = self.resolve_device()
         except Exception as e:
+            if self.offer_restart_with_cuda_python(str(e)):
+                return
             messagebox.showerror(
                 "CUDA / Device Error",
                 str(e)
