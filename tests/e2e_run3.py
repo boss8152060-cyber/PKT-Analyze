@@ -492,6 +492,25 @@ def scene5(app):
     check("vehicle speed table shows status and movement", wide[0]["Movement"] == "2-3-4" and wide[0]["Movement_Status"] == "Exact_AfterDedupe")
 
 
+def scene8(app):
+    """Old zone numbering (2,6,3 / 4,7,5 / 1,6,3) becomes the current layout with the zone remap."""
+    zone_old_lane = lambda x, y: 2 if x < 10 else (6 if x < 20 else 3)      # old lane next to the side street
+    zone_old_opp = lambda x, y: 4 if x < 10 else (7 if x < 20 else 5)       # old opposite lane
+    veh = [(1, "Car", make_rows(1, "Car", along_x(0.0, 10.0), zone_old_lane, 360, (4.5, 1.8))),
+           (2, "Car", make_rows(2, "Car", along_x(8.0, 10.0), zone_old_opp, 360, (4.5, 1.8)))]
+    out, summary = run_scene(app, veh)
+    mv0 = summary["source_counts"]["movement_counts"]
+    check("without the remap the old numbering matches no movement", mv0.get("2-3-4") == 0 and mv0.get("5-6-7") == 0, str(mv0))
+    app.run3_zone_remap_var.set(m.LEGACY_ZONE_REMAP_TEXT)
+    out, summary = run_scene(app, veh)
+    app.run3_zone_remap_var.set("")
+    mv = summary["source_counts"]["movement_counts"]
+    check("with the remap: old 2-6-3 = 2-3-4 and old 4-7-5 = 5-6-7", mv.get("2-3-4") == 1 and mv.get("5-6-7") == 1, str(mv))
+    ldp = read_csv(os.path.join(out, "Run_3_LDP.csv"))
+    check("LDP rows appear for both lanes after the remap", {r["Movement"] for r in ldp} == {"2-3-4", "5-6-7"}, str(len(ldp)))
+    check("remap is written into the summary", summary["diagnostics"].get("zone_remap", {}).get("old_to_new", {}).get("6") == 3)
+
+
 def main():
     root = tk.Tk()
     root.withdraw()
@@ -519,6 +538,8 @@ def main():
     scene6(app)
     print("=== scene 7: Gap Acceptance, stop in the conflict zone ===")
     scene7(app)
+    print("=== scene 8: zone remap for an old zone file ===")
+    scene8(app)
 
     root.destroy()
     print("FAILED: " + ", ".join(failures) if failures else "ALL OK")

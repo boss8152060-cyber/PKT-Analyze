@@ -92,6 +92,7 @@ Run<N> v<เวอร์ชัน>: <คำอธิบายสั้น ๆ �
 
 - Site ID = 8, วิดีโอ ~60 FPS, โมเดล `PK STUDIO/Input/Model/best.pt` (8 คลาส)
 - **Zone ไฟล์ปัจจุบัน:** `PK STUDIO/Input/Zone/DJI_0426_zones.json` (Zone 1–7 ตรงกับภาพโดรน; ผู้ใช้อัปโหลด 2026-10-01; ยังไม่มี Line — ให้วาดด้วยปุ่ม "วาด Line…") ส่วน `20260907_073251A__zones.*` เป็นชุดเก่ามุมกล้องอื่น
+- **วิดีโอเก่าที่ผู้ใช้ใช้ทดสอบอยู่ (ผู้ใช้สั่งให้ทำให้ใช้ได้ก่อน อย่ารัน DJI_0426 เอง):** `Input/Video/20260907_084751A_.mp4` + `Input/Zone/20260907_073251A__zones.json` (ผังโซนเก่า) — ใช้กับ Run 3 ได้โดยกรอกตัวแปลงเลขโซน `6=3, 3=4, 4=5, 7=6, 5=7` (ปุ่ม "ใช้ค่าสำหรับวิดีโอเก่า")
 - **วิดีโอโดรนที่ใช้กับไฟล์ Zone นี้:** `Drone/ทางเข้าคณะทรัพย์/DJI_0426.MP4` (3840×2160, 29.97 FPS, 3,635 เฟรม ≈ 121 วินาที, 1.5 GB) — ต้องตั้ง PPM/Perspective ใหม่ให้วิดีโอนี้ (ค่าเดิม 57.8/61.97 px/m เป็นของวิดีโอ 1080p เก่า)
 - Python ต้องมี torch + CUDA: **ใช้ Python 3.12** (`C:/Users/boss8/AppData/Local/Programs/Python/Python312/python.exe`, torch 2.6.0+cu124, GTX 1650); Python 3.14 เป็น torch CPU เท่านั้น — เปิดโปรแกรมด้วย `Run_PKStudio.bat` หรือ `py -3.12 PKStudio.py` (โปรแกรมมี bootstrap สลับ Python อัตโนมัติ + กล่องถามเปิดใหม่เมื่อเลือก GPU แต่ Python ปัจจุบันไม่มี CUDA)
 - ประวัติ git: `git log --oneline` (61 commits: Run0 → Run1 → Run2 v2–v17 → Run3 → v27); tag `v27` = เวอร์ชันที่ตรวจในเอกสาร overview
