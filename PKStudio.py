@@ -1,9 +1,9 @@
 # ============================================================
 # PK Studio V17 - Run 1 + 2 + 3 V28
 # V28: 6 safety indicators in 3 domains (definitions: SPEC_v28_NewIndicators.md)
-#   Distance: Y1 LDP, Y2 Lateral Clearance
-#   Time    : Y3 Gap Acceptance, Y4 TTC (rear-end + side), Y5 PET
-#   Speed   : Y6 Speed (per zone and per Movement; V50, V85, Mean, SD)
+#   Distance: LDP, Lateral Clearance
+#   Time    : Gap Acceptance, TTC (rear-end + side), PET
+#   Speed   : Speed (per zone and per Movement; V50, V85, Mean, SD)
 #   Zones 1-7; conflict zones 3 and 6. Movement = full zone sequence (6 patterns).
 #   No Tk access from worker thread.
 # ============================================================
@@ -461,7 +461,7 @@ RUN3_DEFAULTS = {
     # Speed: user can select any of Zones 1–6. CSV assigns each selected zone
     # to the research role: Zone 1 = access mouth, 2/4 = approach, 3/5 = exit, 6 = middle/access.
     "speed_zones": [1, 2, 3, 4, 5, 6, 7],
-    "speed_smoothing_samples": "5",         # rolling-median window on positions before Y6 (1 = off)
+    "speed_smoothing_samples": "5",         # rolling-median window on positions before Speed (1 = off)
     "lc_zones": [2, 3, 4, 5, 6, 7],
     "pet_zone6": True,
     "pet_zones": [3, 6],
@@ -677,7 +677,7 @@ def path_speed(times, points, smoothing=1):
 
 
 def track_speed_records(rows, speed_zones, movement_id="", movement_status="", smoothing=1):
-    """Y6 speed records of ONE track (rows in time order; dict rows with
+    """Speed records of ONE track (rows in time order; dict rows with
     _timestamp, _m, _zone_num, frame): one record per selected zone plus one
     for the whole Movement (all samples inside the movement's zones)."""
     valid = [r for r in rows if r.get("_m") is not None and r.get("_zone_num") is not None]
@@ -710,7 +710,7 @@ LDP_MIN_CHORD_M = 1.0   # the entry->exit reference line must be at least this l
 
 
 def ldp_for_zone(points, lane_width_m, smoothing=1):
-    """Y1 LDP of ONE vehicle in ONE zone (SPEC v28 section 4).
+    """LDP of ONE vehicle in ONE zone (SPEC v28 section 4).
 
     Reference line = straight line from the point where the vehicle entered the
     zone (first sample) to the point where it left (last sample). Lateral
@@ -724,7 +724,7 @@ def ldp_for_zone(points, lane_width_m, smoothing=1):
         return None
     if smoothing and int(smoothing) > 1:
         # shrinking window at the ends on purpose: P_in / P_out must stay at the
-        # zone entry / exit (unlike Y6, LDP is not a path-length measure)
+        # zone entry / exit (unlike Speed, LDP is not a path-length measure)
         pts = np.stack([rolling_median(pts[:, 0], smoothing), rolling_median(pts[:, 1], smoothing)], axis=1)
     p_in, p_out = pts[0], pts[-1]
     chord = p_out - p_in
@@ -738,7 +738,7 @@ def ldp_for_zone(points, lane_width_m, smoothing=1):
     return {
         "P_in": (float(p_in[0]), float(p_in[1])), "P_out": (float(p_out[0]), float(p_out[1])),
         "Chord_Length_m": length, "Delta_Y_m": dy, "Mean_Dev_m": float(np.mean(dev)),
-        "Samples": len(pts), "Y1_LDP_percent": dy / float(lane_width_m) * 100.0,
+        "Samples": len(pts), "LDP_percent": dy / float(lane_width_m) * 100.0,
         "Short_Chord": length < LDP_MIN_CHORD_M,
     }
 
@@ -779,11 +779,11 @@ def track_headings(times, points, window_s, min_speed_ms):
 
 
 def lateral_clearance(center_a, heading_a, center_b, len_a, len_b, w_a, w_b):
-    """Y2 for one time sample (SPEC v28 section 5). Axes come from vehicle A's
+    """Lateral clearance for one time sample (SPEC v28 section 5). Axes come from vehicle A's
     heading: `along` = separation along the heading, `lateral` = perpendicular
     separation. The boxes overlap along the direction of travel when
     |along| <= (L_A + L_B) / 2 - only then the clearance is measurable.
-    Y2 = lateral - (W_A + W_B) / 2 (edge to edge; negative = boxes overlap)."""
+    clearance = lateral - (W_A + W_B) / 2 (edge to edge; negative = boxes overlap)."""
     dx, dy = center_b[0] - center_a[0], center_b[1] - center_a[1]
     hx, hy = heading_a
     along = dx * hx + dy * hy
@@ -792,7 +792,7 @@ def lateral_clearance(center_a, heading_a, center_b, len_a, len_b, w_a, w_b):
     return {
         "Along_m": along, "Lateral_m": lateral, "Signed_Lateral_m": signed,
         "Overlap": abs(along) <= (len_a + len_b) / 2.0,
-        "Y2": lateral - (w_a + w_b) / 2.0,
+        "Clearance_m": lateral - (w_a + w_b) / 2.0,
     }
 
 
@@ -812,7 +812,7 @@ def conflict_type_from_sequences(seq_a, seq_b, trajectories_intersect=False):
 
 
 def rear_end_ttc(p_f, v_f, p_l, v_l, len_f, len_l, w_f, w_l, vmin, cos_max):
-    """Y4 rear-end TTC = S / CS (SPEC v28 section 7). Follower f, leader l;
+    """Rear-end TTC = S / CS (SPEC v28 section 7). Follower f, leader l;
     positions in m, velocities in m/s.
       S  = separation along the follower's heading - (L_f + L_l) / 2
       CS = closing speed along that heading = v_f - v_l(along)
@@ -845,7 +845,7 @@ SIDE_TTC_MIN_ANGLE_DEG = 10.0   # paths closer to parallel than this are not a s
 
 
 def side_ttc(p_i, v_i, p_j, v_j, len_i, len_j, vmin, min_angle_deg=SIDE_TTC_MIN_ANGLE_DEG):
-    """Y4 side (crossing / merging) TTC by distance to the path intersection
+    """Side (crossing / merging) TTC by distance to the path intersection
     (SPEC v28 section 7; constant velocity, straight paths along the velocity).
       X = intersection of the two straight paths (must be ahead of both)
       t_i = d_i / v_i,  t_j = d_j / v_j
@@ -1411,22 +1411,22 @@ class Run1App:
             ttk.Label(frame, text=lb).grid(row=r, column=2, sticky="e", padx=4, pady=2)
             ttk.Entry(frame, textvariable=vb, width=18).grid(row=r, column=3, sticky="w", pady=2)
             r += 1
-        ttk.Label(frame, text="Road direction angle (deg) — ใช้เมื่อไม่มี Perspective (มีผลต่อ Y1 และ Y2)").grid(row=r, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Label(frame, text="Road direction angle (deg) — ใช้เมื่อไม่มี Perspective (มีผลต่อการแปลงพิกัดเมตรแบบ PPM)").grid(row=r, column=0, columnspan=2, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=r, column=2, sticky="w", pady=4)
         r += 1
 
         # ---------------- Indicator switches by domain ----------------
-        sw = ttk.LabelFrame(frame, text="ตัวชี้วัด (Y1–Y6)", padding=(8, 4))
+        sw = ttk.LabelFrame(frame, text="ตัวชี้วัด", padding=(8, 4))
         sw.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 4)); r += 1
         ttk.Label(sw, text="ด้านระยะทาง").grid(row=0, column=0, sticky="w", padx=(0, 10))
-        ttk.Checkbutton(sw, text="Y2 Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=0, column=2, sticky="w", padx=(0, 12))
-        ttk.Checkbutton(sw, text="Y1 LDP", variable=self.run3_ldp_enabled_var).grid(row=0, column=1, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(sw, text="Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=0, column=2, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(sw, text="LDP", variable=self.run3_ldp_enabled_var).grid(row=0, column=1, sticky="w", padx=(0, 12))
         ttk.Label(sw, text="ด้านเวลา").grid(row=1, column=0, sticky="w", padx=(0, 10))
-        ttk.Checkbutton(sw, text="Y3 Gap Acceptance", variable=self.run3_gap_enabled_var).grid(row=1, column=1, sticky="w", padx=(0, 12))
-        ttk.Checkbutton(sw, text="Y4 TTC", variable=self.run3_ttc_enabled_var).grid(row=1, column=2, sticky="w", padx=(0, 12))
-        ttk.Checkbutton(sw, text="Y5 PET", variable=self.run3_pet_enabled_var).grid(row=1, column=3, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(sw, text="Gap Acceptance", variable=self.run3_gap_enabled_var).grid(row=1, column=1, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(sw, text="TTC", variable=self.run3_ttc_enabled_var).grid(row=1, column=2, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(sw, text="PET", variable=self.run3_pet_enabled_var).grid(row=1, column=3, sticky="w", padx=(0, 12))
         ttk.Label(sw, text="ด้านความเร็ว").grid(row=2, column=0, sticky="w", padx=(0, 10))
-        ttk.Checkbutton(sw, text="Y6 Speed (V50, V85, Mean, SD)", variable=self.run3_speed_enabled_var).grid(row=2, column=1, columnspan=2, sticky="w")
+        ttk.Checkbutton(sw, text="Speed (V50, V85, Mean, SD)", variable=self.run3_speed_enabled_var).grid(row=2, column=1, columnspan=2, sticky="w")
 
         # ---------------- V28 road geometry ----------------
         geo = ttk.LabelFrame(frame, text="ความกว้างถนน (m) — ใช้เป็นตัวหารของ LDP", padding=(8, 4))
@@ -1457,17 +1457,17 @@ class Run1App:
                 ttk.Checkbutton(box, text=f"Zone {z}", variable=var_map[z]).grid(row=1, column=i, sticky="w", padx=(2, 12), pady=2)
             return box
 
-        box = zone_row("Y6 Speed — Zones", "ความเร็วต่อโซน + ความเร็วภาพรวมตาม Movement (เช่น 2-3-4) — ความยาวเส้นทางเมตร ÷ เวลา", self.run3_speed_zone_vars)
+        box = zone_row("Speed — Zones", "ความเร็วต่อโซน + ความเร็วภาพรวมตาม Movement (เช่น 2-3-4) — ความยาวเส้นทางเมตร ÷ เวลา", self.run3_speed_zone_vars)
         ttk.Label(box, text="Median smoothing (samples, 1 = ปิด)").grid(row=2, column=0, columnspan=3, sticky="w", pady=2)
         ttk.Entry(box, textvariable=self.run3_speed_smoothing_var, width=8).grid(row=2, column=3, sticky="w", pady=2)
-        zone_row("Y2 Lateral Clearance — Zones", "คู่รถทิศทางเดียวกัน (ลำดับโซนมีช่วงร่วมกัน) ในโซนเดียวกัน; วัดตั้งฉากกับทิศที่รถ A เคลื่อนที่ เมื่อกรอบรถซ้อนกันตามแนวยาว; A = จักรยานยนต์", self.run3_lc_zone_vars)
+        zone_row("Lateral Clearance — Zones", "คู่รถทิศทางเดียวกัน (ลำดับโซนมีช่วงร่วมกัน) ในโซนเดียวกัน; วัดตั้งฉากกับทิศที่รถ A เคลื่อนที่ เมื่อกรอบรถซ้อนกันตามแนวยาว; A = จักรยานยนต์", self.run3_lc_zone_vars)
 
-        box = zone_row("Y1 LDP — Zones", "LDP = ΔY ÷ W × 100 — ΔY = ระยะตั้งฉากของ trajectory จากเส้นอ้างอิง (จุดเข้า→จุดออกโซน); เฉพาะรถทางหลัก 2-3-4 (W_entry) และ 5-6-7 (W_opp)", self.run3_ldp_zone_vars)
+        box = zone_row("LDP — Zones", "LDP = ΔY ÷ W × 100 — ΔY = ระยะตั้งฉากของ trajectory จากเส้นอ้างอิง (จุดเข้า→จุดออกโซน); เฉพาะรถทางหลัก 2-3-4 (W_entry) และ 5-6-7 (W_opp)", self.run3_ldp_zone_vars)
         ttk.Label(box, text="Median smoothing (samples)").grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Entry(box, textvariable=self.run3_ldp_smoothing_var, width=8).grid(row=2, column=2, sticky="w", pady=2)
         ttk.Checkbutton(box, text="เฉพาะรถจักรยานยนต์", variable=self.run3_ldp_motorcycle_only_var).grid(row=2, column=3, columnspan=3, sticky="w", pady=2)
 
-        box = zone_row("Y4 TTC — Zones 3, 6 (ชนท้าย + ชนด้านข้าง)", "ชนท้าย: TTC = S / CS   |   ชนด้านข้าง: เวลาถึงจุดตัดของเส้นทางสองคัน (ระยะทางถึงจุดตัด ÷ ความเร็ว), ชนเมื่อเวลาถึงต่างกันไม่เกินเวลาที่ตัวรถใช้พ้นจุดตัด", self.run3_ttc_zone_vars)
+        box = zone_row("TTC — Zones 3, 6 (ชนท้าย + ชนด้านข้าง)", "ชนท้าย: TTC = S / CS   |   ชนด้านข้าง: เวลาถึงจุดตัดของเส้นทางสองคัน (ระยะทางถึงจุดตัด ÷ ความเร็ว), ชนเมื่อเวลาถึงต่างกันไม่เกินเวลาที่ตัวรถใช้พ้นจุดตัด", self.run3_ttc_zone_vars)
         for i, (label, var) in enumerate((("บันทึกเมื่อ TTCmin ≤ (s)", self.run3_ttc_max_record_var),
                                           ("ชนท้าย: มุมทิศทางต่างกันไม่เกิน (deg)", self.run3_ttc_heading_max_var),
                                           ("หน้าต่างคำนวณความเร็ว (s)", self.run3_ttc_velocity_window_var),
@@ -1475,7 +1475,7 @@ class Run1App:
             ttk.Label(box, text=label).grid(row=2 + i // 2, column=(i % 2) * 4, columnspan=2, sticky="w", pady=2)
             ttk.Entry(box, textvariable=var, width=8).grid(row=2 + i // 2, column=(i % 2) * 4 + 2, sticky="w", pady=2)
 
-        box = zone_row("Y5 PET — Conflict Zones", "PET คำนวณแยกในแต่ละ Conflict Zone (Zone 3 / Zone 6)", self.run3_pet_zone_vars)
+        box = zone_row("PET — Conflict Zones", "PET คำนวณแยกในแต่ละ Conflict Zone (Zone 3 / Zone 6)", self.run3_pet_zone_vars)
         for i, (label, var) in enumerate((("Interaction distance (m)", self.run3_pet_interaction_distance_var),
                                           ("PET threshold (s)", self.run3_pet_threshold_var),
                                           ("PET max (s) — ว่าง = ไม่จำกัด", self.run3_pet_max_var))):
@@ -1489,7 +1489,7 @@ class Run1App:
         r += 1
 
         ttk.Separator(frame, orient="horizontal").grid(row=r, column=0, columnspan=4, sticky="ew", pady=(8, 6)); r += 1
-        ttk.Label(frame, text="Y3 Gap Acceptance — Subject Movement").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Label(frame, text="Gap Acceptance — Subject Movement").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Checkbutton(frame, text="1-3-4", variable=self.run3_gap_subject_134_var).grid(row=r, column=1, sticky="w")
         ttk.Checkbutton(frame, text="1-3-6-7", variable=self.run3_gap_subject_1367_var).grid(row=r, column=2, sticky="w")
         ttk.Checkbutton(frame, text="5-6-3-1", variable=self.run3_gap_subject_5631_var).grid(row=r, column=3, sticky="w")
@@ -1506,7 +1506,7 @@ class Run1App:
         self.run3_reference_text.insert("1.0", self.run3_reference_mapping_text)
         r += 1
 
-        ttk.Label(frame, text="Vehicle dimensions (m): Width W (Y1, Y4) / Length L (Y4)").grid(row=r, column=0, columnspan=4, sticky="w", pady=(2, 4))
+        ttk.Label(frame, text="Vehicle dimensions (m): Width W and Length L (Lateral Clearance, TTC)").grid(row=r, column=0, columnspan=4, sticky="w", pady=(2, 4))
         r += 1
         dims = ttk.Frame(frame)
         dims.grid(row=r, column=0, columnspan=4, sticky="w"); r += 1
@@ -3754,19 +3754,19 @@ class Run1App:
                 raise ValueError(f"Select at least one Zone for {label}.")
 
         if enabled["speed"]:
-            need_zone(self.run3_speed_zone_vars, "Y6 Speed")
+            need_zone(self.run3_speed_zone_vars, "Speed")
             self._run3_float(self.run3_speed_smoothing_var.get(), "speed smoothing samples")
         if enabled["lc"]:
-            need_zone(self.run3_lc_zone_vars, "Y1 Lateral Clearance")
+            need_zone(self.run3_lc_zone_vars, "Lateral Clearance")
             self._run3_float(self.run3_lc_heading_window_var.get(), "LC heading window (s)")
         if enabled["lc"] or enabled["ttc"]:
             for name in RUN3_VEHICLE_CLASSES:
                 self._run3_float(self.run3_width_vars[name].get(), f"vehicle width for {name}")
         if enabled["lc"]:
             for name in RUN3_VEHICLE_CLASSES:
-                self._run3_float(self.run3_length_vars[name].get(), f"vehicle length for {name} (Y2 needs the length)")
+                self._run3_float(self.run3_length_vars[name].get(), f"vehicle length for {name} (Lateral Clearance needs the length)")
         if enabled["ttc"]:
-            need_zone(self.run3_ttc_zone_vars, "Y4 TTC")
+            need_zone(self.run3_ttc_zone_vars, "TTC")
             for name in RUN3_VEHICLE_CLASSES:
                 self._run3_float(self.run3_length_vars[name].get(), f"vehicle length for {name}")
             self._run3_float(self.run3_ttc_max_record_var.get(), "TTC record limit (s)")
@@ -3775,15 +3775,15 @@ class Run1App:
             self._run3_float(self.run3_ttc_min_speed_var.get(), "TTC minimum follower speed (km/h)", positive=False)
         for key in RUN3_GEOMETRY_KEYS:
             text = str(self.run3_geometry_vars[key].get()).strip()
-            if text:   # must be numeric when entered (lane widths are required when Y1 LDP is enabled)
+            if text:   # must be numeric when entered (lane widths are required when LDP is enabled)
                 self._run3_float(text, f"road geometry {key}", positive=(key != "median_m"))
         if enabled["ldp"]:
-            need_zone(self.run3_ldp_zone_vars, "Y1 LDP")
+            need_zone(self.run3_ldp_zone_vars, "LDP")
             self._run3_float(self.run3_ldp_smoothing_var.get(), "LDP smoothing samples")
             for key in ("lane_entry_motorcycle_m", "lane_entry_car_m", "lane_opp_motorcycle_m", "lane_opp_car_m"):
-                self._run3_float(self.run3_geometry_vars[key].get(), f"road geometry {key} (required by Y1 LDP)")
+                self._run3_float(self.run3_geometry_vars[key].get(), f"road geometry {key} (required by LDP)")
         if enabled["pet"]:
-            need_zone(self.run3_pet_zone_vars, "Y5 PET (Zone 3 / Zone 6)")
+            need_zone(self.run3_pet_zone_vars, "PET (Zone 3 / Zone 6)")
             self._run3_float(self.run3_pet_interaction_distance_var.get(), "PET interaction distance (m)")
             self._run3_float(self.run3_pet_threshold_var.get(), "PET threshold (s)")
             if str(self.run3_pet_max_var.get()).strip():
@@ -3812,11 +3812,11 @@ class Run1App:
         """
         warnings = []
         keys = {
-            "speed": ("Y6 Speed", self.run3_speed_zone_vars),
-            "lc": ("Y2 Lateral Clearance", self.run3_lc_zone_vars),
-            "ttc": ("Y4 TTC", self.run3_ttc_zone_vars),
-            "pet": ("Y5 PET", self.run3_pet_zone_vars),
-            "ldp": ("Y1 LDP", self.run3_ldp_zone_vars),
+            "speed": ("Speed", self.run3_speed_zone_vars),
+            "lc": ("Lateral Clearance", self.run3_lc_zone_vars),
+            "ttc": ("TTC", self.run3_ttc_zone_vars),
+            "pet": ("PET", self.run3_pet_zone_vars),
+            "ldp": ("LDP", self.run3_ldp_zone_vars),
         }
         defined = {z for z in ZONE_IDS if len(self.zones.get(f"Zone {z}", [])) >= 3}
         any_enabled = any(bool(getattr(self, f"run3_{k}_enabled_var").get())
@@ -3850,28 +3850,28 @@ class Run1App:
                 mapping = self._run3_parse_reference_mapping(text)
             except Exception as exc:
                 mapping = None
-                warnings.append(f"Y3 Gap Acceptance: Reference Line Mapping is invalid ({exc}). "
-                                "Y3 output will be empty.")
+                warnings.append(f"Gap Acceptance: Reference Line Mapping is invalid ({exc}). "
+                                "Gap Acceptance output will be empty.")
             if mapping is not None:
                 site = self.run3_site_id_var.get().strip()
                 site_map = {mv: ln for (st, mv), ln in mapping.items() if str(st).strip() == site}
                 if not site_map:
                     warnings.append(
-                        f"Y3 Gap Acceptance: no Reference Line Mapping rows for Site_ID '{site}' "
-                        "(rows starting with # are ignored). Y3 output will be empty.")
+                        f"Gap Acceptance: no Reference Line Mapping rows for Site_ID '{site}' "
+                        "(rows starting with # are ignored). Gap Acceptance output will be empty.")
                 else:
                     needed = sorted({c for m in subjects for c in RUN3_GAP_CONFLICT_MAP[m]})
                     missing = [c for c in needed if c not in site_map]
                     if missing:
                         warnings.append(
-                            "Y3 Gap Acceptance: no mapping for conflicting movement(s) "
+                            "Gap Acceptance: no mapping for conflicting movement(s) "
                             + ", ".join(missing) + f" (Site_ID '{site}'); gaps from these streams "
                             "cannot be measured.")
                     undrawn = sorted({f"{ln} ({c})" for c, ln in site_map.items()
                                       if c in needed and len(self.lines.get(ln, [])) != 2})
                     if undrawn:
                         warnings.append(
-                            "Y3 Gap Acceptance: mapped Line is not drawn/loaded in the Zone/Line file: "
+                            "Gap Acceptance: mapped Line is not drawn/loaded in the Zone/Line file: "
                             + ", ".join(undrawn) + ".")
         return warnings
 
@@ -4898,7 +4898,7 @@ class Run1App:
                                         "zone_states": {},
                                         # Short trajectory history used only for the
                                         # on-screen live-speed display. This does not
-                                        # replace the research Y1/Y2 calculation.
+                                        # replace the research calculation.
                                         "live_speed_history": [],
                                         "live_speed_kmh": None,
                                     })
@@ -4922,7 +4922,7 @@ class Run1App:
                                     # Uses the same Trajectory Position point and the
                                     # configured PPM. A short rolling window is used
                                     # only to make the displayed speed less noisy.
-                                    # Y1/Y2 research values are still calculated later
+                                    # research values are still calculated later
                                     # by Run 3 and are not changed by this display value.
                                     live_ppm = rt.get("live_ppm", 0.0)
                                     hist = zstate.get("live_speed_history", [])
@@ -5092,7 +5092,7 @@ class Run1App:
 
                                 if confirmed_label:
                                     # Individual vehicle label controls.
-                                    # Live speed is display-only; research Y1/Y2 remain
+                                    # Live speed is display-only; research values remain
                                     # calculated by Run 3 from the stored trajectory.
                                     live_speed = zone_track_state.get(track_id, {}).get("live_speed_kmh")
                                     parts = []
@@ -6104,11 +6104,11 @@ class Run1App:
         return "None"
 
     # ========================================================
-    # SPEED — Y6 (per Zone 1-7 and per Movement; V50, V85, Mean, SD)
+    # SPEED (per Zone 1-7 and per Movement; V50, V85, Mean, SD)
     # ========================================================
 
     def _run3_speed(self, tracks, c, movement_by_id, status_by_id):
-        """Y6 detail rows: one per vehicle x zone and one per vehicle x Movement."""
+        """Speed detail rows: one per vehicle x zone and one per vehicle x Movement."""
         mode = self._run3_calibration_mode(c)
         qc_cal = self._run3_qc_calibration(c)
         k = c["speed_smoothing_samples"]
@@ -6174,7 +6174,7 @@ class Run1App:
         return out
 
     def _run3_speed_statistics(self, speed_rows, c):
-        """Y6 statistics (Mean, SD, V50 = median, V85 = P85) per Zone / per Movement x class."""
+        """Speed statistics (Mean, SD, V50 = median, V85 = P85) per Zone / per Movement x class."""
         groups = defaultdict(list)
         for r in speed_rows:
             v = float(r["Speed_kmh"])
@@ -6195,7 +6195,7 @@ class Run1App:
             out.append({
                 "Site_ID": c["site_id"], "Scope": scope, "Key": key, "Vehicle_Class": cls, "N": s_["N"],
                 "Mean_kmh": self._fmt(s_["Mean"], 3), "SD_kmh": self._fmt(s_["SD"], 3),
-                "Y6_V50_kmh": self._fmt(s_["P50"], 3), "Y6_V85_kmh": self._fmt(s_["P85"], 3),
+                "V50_kmh": self._fmt(s_["P50"], 3), "V85_kmh": self._fmt(s_["P85"], 3),
                 "V85_minus_V50_kmh": self._fmt(None if s_["N"] == 0 else s_["P85"] - s_["P50"], 3),
                 "Min_kmh": self._fmt(s_["Min"], 3), "Max_kmh": self._fmt(s_["Max"], 3),
             })
@@ -6235,7 +6235,7 @@ class Run1App:
         return mapping
 
     # ========================================================
-    # GAP ACCEPTANCE — Y3
+    # GAP ACCEPTANCE
     # ========================================================
 
     @staticmethod
@@ -6352,7 +6352,7 @@ class Run1App:
                     "Reference_Line": g["reference_line"],
                     "Gap_Start_Time": f"{g['gap_start']:.6f}", "Gap_End_Time": f"{g['gap_end']:.6f}",
                     "X31_Available_Gap": f"{g['gap']:.6f}", "X32_Waiting_Time": f"{waiting_time:.6f}",
-                    "Gap_Role": role, "Y3_Gap_Acceptance": 1 if accepted else 0,
+                    "Gap_Role": role, "Gap_Acceptance": 1 if accepted else 0,
                     "Acceptance_Time": f"{accepted_time:.6f}" if accepted else "", "QC_Flag": "",
                 }
             for g in prior:
@@ -6403,11 +6403,11 @@ class Run1App:
                 "critical_gap_median": float(math.exp(mu)), "negative_log_likelihood": float(res.fun)}
 
     # ========================================================
-    # LATERAL CLEARANCE — Y1
+    # LATERAL CLEARANCE
     # ========================================================
 
     def _run3_lateral_clearance(self, tracks, c, sequence_by_id):
-        """Y2 Lateral Clearance (SPEC v28 section 5).
+        """Lateral Clearance (SPEC v28 section 5).
 
         A = motorcycle, B = any vehicle moving in the SAME DIRECTION (their zone
         sequences share a transition touching the zone) and standing in the SAME
@@ -6518,8 +6518,8 @@ class Run1App:
                         "Signed_Lateral_m": f"{res['Signed_Lateral_m']:.6f}",
                         "Wm": f"{widths['Motorcycle']:.6f}", "Wv": f"{widths[cls_b]:.6f}",
                         "Lm": f"{lengths['Motorcycle']:.6f}", "Lv": f"{lengths[cls_b]:.6f}",
-                        "Y2_Lateral_Clearance": f"{res['Y2']:.6f}",
-                        "QC_Flag": ("Negative_Y2" if res["Y2"] < 0 else "") + (";Perspective_Homography" if perspective else ""),
+                        "Lateral_Clearance_m": f"{res['Clearance_m']:.6f}",
+                        "QC_Flag": ("Negative_Lateral_Clearance" if res["Clearance_m"] < 0 else "") + (";Perspective_Homography" if perspective else ""),
                     })
             for tid_b in sorted(pair_rows, key=lambda t: order[t]):
                 out.extend(pair_rows[tid_b])
@@ -6536,7 +6536,7 @@ class Run1App:
             groups[(r["Pair_ID"], r["Zone"])].append(r)
         out = []
         for (pair, zone), lst in groups.items():
-            ys = [float(r["Y2_Lateral_Clearance"]) for r in lst]
+            ys = [float(r["Lateral_Clearance_m"]) for r in lst]
             ts = [float(r["Timestamp"]) for r in lst]
             first = lst[0]
             out.append({
@@ -6545,13 +6545,13 @@ class Run1App:
                 "Neighbor_Class": first["Neighbor_Class"],
                 "Zone_Sequence_A": first["Zone_Sequence_A"], "Zone_Sequence_B": first["Zone_Sequence_B"],
                 "Start_Time": f"{min(ts):.6f}", "End_Time": f"{max(ts):.6f}", "Samples": len(ys),
-                "Y2_Min": f"{min(ys):.6f}", "Y2_Mean": f"{sum(ys) / len(ys):.6f}",
-                "QC_Flag": "Negative_Y2" if min(ys) < 0 else "",
+                "Lateral_Clearance_Min_m": f"{min(ys):.6f}", "Lateral_Clearance_Mean_m": f"{sum(ys) / len(ys):.6f}",
+                "QC_Flag": "Negative_Lateral_Clearance" if min(ys) < 0 else "",
             })
         return out
 
     # ========================================================
-    # PET — Y5 (Zones 3 and/or 6)
+    # PET (Zones 3 and/or 6)
     # ========================================================
 
     @staticmethod
@@ -6679,7 +6679,7 @@ class Run1App:
                         "Vehicle_ID_B": b_id, "Vehicle_Class_B": b_rows[0].get("class_name", ""), "Movement_B": mb,
                         "Conflict_Type": ctype, "Conflict_Zone": f"Zone {zone}",
                         "Interaction_Start": f"{min(a_entry, b_entry):.6f}", "Interaction_End": f"{max(a_exit, b_exit):.6f}",
-                        "T1_Exit_Time": f"{t1:.6f}", "T2_Entry_Time": f"{t2:.6f}", "Y5_PET": f"{pet:.6f}",
+                        "T1_Exit_Time": f"{t1:.6f}", "T2_Entry_Time": f"{t2:.6f}", "PET_s": f"{pet:.6f}",
                         "PET_Risk_Level": self._level_pet(pet),
                         "QC_Flag": ";".join(x for x in [
                             "Threshold_At_or_Below" if pet <= threshold else "",
@@ -6692,11 +6692,11 @@ class Run1App:
         return out, diag
 
     # ========================================================
-    # TTC — Y4 (rear-end / same-direction following conflicts)
+    # TTC (rear-end and side conflicts)
     # ========================================================
 
     def _run3_ttc(self, tracks, c, movement_by_id):
-        """Y4 TTC (SPEC v28 section 7) for vehicles standing in the selected zones
+        """TTC (SPEC v28 section 7) for vehicles standing in the selected zones
         (default Zones 3 and 6) at the same frame.
 
         RearEnd: TTC = S / CS (same-direction follower / leader).
@@ -6818,7 +6818,7 @@ class Run1App:
                     "Dist_B_to_Crossing_m": "" if rear else f"{best['d_b']:.6f}",
                     "Arrival_Diff_s": "" if rear else f"{best['dt']:.6f}",
                     "Path_Angle_deg": "" if rear else f"{best['angle']:.2f}",
-                    "Y4_TTC_s": f"{best['ttc']:.6f}",
+                    "TTC_s": f"{best['ttc']:.6f}",
                     "TTC_Level": self._level_ttc(best["ttc"]),
                     "Speed_Level": self._level_ttc_speed(vA_kmh, a_["cls"]),
                     "QC_Flag": ";".join(x for x in [
@@ -6832,11 +6832,11 @@ class Run1App:
         return out, diag
 
     # ========================================================
-    # LDP — Y2 (Lane / Lateral Deviation Position)
+    # LDP (Lane / Lateral Deviation Position)
     # ========================================================
 
     def _run3_ldp(self, tracks, c, movement_by_id, status_by_id):
-        """Y1 LDP (SPEC v28 section 4): main-road vehicles only (2-3-4 -> W_entry,
+        """LDP (SPEC v28 section 4): main-road vehicles only (2-3-4 -> W_entry,
         5-6-7 -> W_opp), zones selected in `ldp_zones`, metric trajectory points."""
         widths = {"entry": c["w_entry_m"], "opposite": c["w_opp_m"]}
         mode = self._run3_calibration_mode(c)
@@ -6866,7 +6866,7 @@ class Run1App:
                 res = ldp_for_zone([r["_m"] for r in zr], W, k)
                 if res is None:
                     continue
-                ldp = res["Y1_LDP_percent"]
+                ldp = res["LDP_percent"]
                 dt = zr[-1]["_timestamp"] - zr[0]["_timestamp"]
                 dist = self._run3_segment_distance_sum([r["_m"] for r in zr])
                 speed = dist / dt * 3.6 if dt > 0 else None
@@ -6879,7 +6879,7 @@ class Run1App:
                     "P_out_x_m": f"{res['P_out'][0]:.4f}", "P_out_y_m": f"{res['P_out'][1]:.4f}",
                     "Chord_Length_m": f"{res['Chord_Length_m']:.4f}",
                     "Delta_Y_m": f"{res['Delta_Y_m']:.6f}", "Lane_Width_W_m": f"{W:.3f}",
-                    "Y1_LDP_percent": f"{ldp:.3f}",
+                    "LDP_percent": f"{ldp:.3f}",
                     "LDP_Level": self._level_ldp(ldp),
                     "Mean_Speed_kmh": self._fmt(speed, 3),
                     "Speed_Level": self._level_ldp_speed(speed) if speed is not None else "",
@@ -6953,10 +6953,10 @@ class Run1App:
                 w.writerows(rows)
             return actual
 
-        def indicator(code, name, domain, unit, group, values, note=""):
+        def indicator(name, domain, unit, group, values, note=""):
             s = self._run3_stats(values)
             indicator_rows.append({
-                "Site_ID": c["site_id"], "Code": code, "Indicator": name, "Domain": domain, "Unit": unit,
+                "Site_ID": c["site_id"], "Indicator": name, "Domain": domain, "Unit": unit,
                 "Group": group, "N": s["N"], "Mean": self._fmt(s["Mean"], 4), "SD": self._fmt(s["SD"], 4),
                 "Median": self._fmt(s["Median"], 4), "Min": self._fmt(s["Min"], 4), "Max": self._fmt(s["Max"], 4),
                 "P85": self._fmt(s["P85"], 4), "Note": note,
@@ -6974,52 +6974,52 @@ class Run1App:
                 summary["diagnostics"][key] = f"ERROR: {e}"
             timings[key] = round(time.time() - t0, 3)
 
-        # ---------------- Y2 Lateral Clearance (distance) ----------------
+        # ---------------- Lateral Clearance (distance) ----------------
         def do_lc():
-            status("Run 3 — Y2 Lateral Clearance...")
+            status("Run 3 — Lateral Clearance...")
             rows, lc_diag = self._run3_lateral_clearance(tracks, c, sequence_by_id)
-            fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Neighbor_ID","Neighbor_Class","Zone_Sequence_A","Zone_Sequence_B","Along_m","LS_Meter","Signed_Lateral_m","Wm","Wv","Lm","Lv","Y2_Lateral_Clearance","QC_Flag"]
-            outputs["lateral_clearance"] = write_csv("Run_3_Y2_Lateral_Clearance.csv", fields, rows)
+            fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Neighbor_ID","Neighbor_Class","Zone_Sequence_A","Zone_Sequence_B","Along_m","LS_Meter","Signed_Lateral_m","Wm","Wv","Lm","Lv","Lateral_Clearance_m","QC_Flag"]
+            outputs["lateral_clearance"] = write_csv("Run_3_Lateral_Clearance.csv", fields, rows)
             pairs = self._run3_lc_pair_summary(rows)
-            pair_fields = ["Site_ID","Pair_ID","Zone","Motorcycle_ID","Neighbor_ID","Neighbor_Class","Zone_Sequence_A","Zone_Sequence_B","Start_Time","End_Time","Samples","Y2_Min","Y2_Mean","QC_Flag"]
-            outputs["lateral_clearance_pairs"] = write_csv("Run_3_Y2_Lateral_Clearance_Pairs.csv", pair_fields, pairs)
-            s_ = indicator("Y2", "Lateral Clearance (all measured samples)", "Distance", "m", "All samples",
-                           [float(r["Y2_Lateral_Clearance"]) for r in rows])
-            indicator("Y2", "Lateral Clearance (minimum per pair and zone)", "Distance", "m", "Pair minimum",
-                      [float(r["Y2_Min"]) for r in pairs])
-            summary["indicators"]["Y2_Lateral_Clearance"] = s_
+            pair_fields = ["Site_ID","Pair_ID","Zone","Motorcycle_ID","Neighbor_ID","Neighbor_Class","Zone_Sequence_A","Zone_Sequence_B","Start_Time","End_Time","Samples","Lateral_Clearance_Min_m","Lateral_Clearance_Mean_m","QC_Flag"]
+            outputs["lateral_clearance_pairs"] = write_csv("Run_3_Lateral_Clearance_Pairs.csv", pair_fields, pairs)
+            s_ = indicator("Lateral Clearance (all measured samples)", "Distance", "m", "All samples",
+                           [float(r["Lateral_Clearance_m"]) for r in rows])
+            indicator("Lateral Clearance (minimum per pair and zone)", "Distance", "m", "Pair minimum",
+                      [float(r["Lateral_Clearance_Min_m"]) for r in pairs])
+            summary["indicators"]["Lateral_Clearance"] = s_
             summary["diagnostics"]["lc"] = lc_diag
-        run_step("lc", "Run_3_Y2_Lateral_Clearance.csv", do_lc)
+        run_step("lc", "Run_3_Lateral_Clearance.csv", do_lc)
 
-        # ---------------- Y1 LDP (distance) ----------------
+        # ---------------- LDP (distance) ----------------
         def do_ldp():
-            status("Run 3 — Y1 LDP...")
+            status("Run 3 — LDP...")
             rows = self._run3_ldp(tracks, c, movement_by_id, movement_source_by_id)
-            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","Y1_LDP_percent","LDP_Level","Mean_Speed_kmh","Speed_Level","Calibration_Mode","QC_Flag"]
-            outputs["ldp"] = write_csv("Run_3_Y1_LDP.csv", fields, rows)
-            vals = [float(r["Y1_LDP_percent"]) for r in rows]
+            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","LDP_percent","LDP_Level","Mean_Speed_kmh","Speed_Level","Calibration_Mode","QC_Flag"]
+            outputs["ldp"] = write_csv("Run_3_LDP.csv", fields, rows)
+            vals = [float(r["LDP_percent"]) for r in rows]
             note = f"W_entry={c['w_entry_m']} m; W_opp={c['w_opp_m']} m; smoothing={c['ldp_smoothing_samples']}"
-            s_ = indicator("Y1", "Lane/Lateral Deviation Position (LDP)", "Distance", "%", "All", vals, note)
+            s_ = indicator("Lane/Lateral Deviation Position (LDP)", "Distance", "%", "All", vals, note)
             for z in sorted(c["ldp_zones"]):
-                indicator("Y1", "Lane/Lateral Deviation Position (LDP)", "Distance", "%", f"Zone {z}",
-                          [float(r["Y1_LDP_percent"]) for r in rows if r["Zone"] == f"Zone {z}"])
+                indicator("Lane/Lateral Deviation Position (LDP)", "Distance", "%", f"Zone {z}",
+                          [float(r["LDP_percent"]) for r in rows if r["Zone"] == f"Zone {z}"])
             s_["Level_Counts"] = {lv: sum(1 for r in rows if r["LDP_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
-            summary["indicators"]["Y1_LDP"] = s_
+            summary["indicators"]["LDP"] = s_
             summary["diagnostics"]["ldp"] = (f"rows={len(rows)}; zones={sorted(c['ldp_zones'])}; "
                                              f"motorcycle_only={c['ldp_motorcycle_only']}; main-road movements 2-3-4 / 5-6-7 only; "
                                              "LDP_Level uses the DOH thresholds (30/50/80 %) defined for dY/(W/2) - confirm for dY/W")
-        run_step("ldp", "Run_3_Y1_LDP.csv", do_ldp)
+        run_step("ldp", "Run_3_LDP.csv", do_ldp)
 
-        # ---------------- Y3 Gap Acceptance (time) ----------------
+        # ---------------- Gap Acceptance (time) ----------------
         def do_gap():
-            status("Run 3 — Y3 Gap Acceptance...")
+            status("Run 3 — Gap Acceptance...")
             gap_rows = self._run3_gap(tracks, c, mapping, movement_by_id)
-            fields = ["Site_ID","Decision_Event_ID","Subject_ID","Subject_Class","Subject_Movement","Conflicting_Movement","Conflicting_ID_A","Conflicting_ID_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","X32_Waiting_Time","Gap_Role","Y3_Gap_Acceptance","Acceptance_Time","QC_Flag"]
-            outputs["gap_acceptance"] = write_csv("Run_3_Y3_Gap_Acceptance.csv", fields, gap_rows)
+            fields = ["Site_ID","Decision_Event_ID","Subject_ID","Subject_Class","Subject_Movement","Conflicting_Movement","Conflicting_ID_A","Conflicting_ID_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","X32_Waiting_Time","Gap_Role","Gap_Acceptance","Acceptance_Time","QC_Flag"]
+            outputs["gap_acceptance"] = write_csv("Run_3_Gap_Acceptance.csv", fields, gap_rows)
             rejected = defaultdict(list); accepted = defaultdict(list)
             for r in gap_rows:
                 key = (r["Subject_Class"], r["Subject_Movement"], r["Subject_ID"])
-                (accepted if r["Y3_Gap_Acceptance"] == 1 else rejected)[key].append(float(r["X31_Available_Gap"]))
+                (accepted if r["Gap_Acceptance"] == 1 else rejected)[key].append(float(r["X31_Available_Gap"]))
             groups = defaultdict(lambda: {"accepted": [], "rejected": [], "intervals": []})
             for key in set(rejected) | set(accepted):
                 acc = accepted.get(key, []); rej = rejected.get(key, [])
@@ -7038,12 +7038,12 @@ class Run1App:
                     "MLE_mu": self._fmt(mle["mu"] if mle else None), "MLE_sigma": self._fmt(mle["sigma"] if mle else None),
                 })
             if critical:
-                outputs["critical_gap"] = write_csv("Run_3_Y3_Critical_Gap.csv", list(critical[0].keys()), critical)
-            acc_vals = [float(r["X31_Available_Gap"]) for r in gap_rows if r["Y3_Gap_Acceptance"] == 1]
-            rej_vals = [float(r["X31_Available_Gap"]) for r in gap_rows if r["Y3_Gap_Acceptance"] == 0]
-            indicator("Y3", "Gap Acceptance — accepted gaps", "Time", "s", "Accepted", acc_vals)
-            indicator("Y3", "Gap Acceptance — rejected gaps", "Time", "s", "Rejected", rej_vals)
-            summary["indicators"]["Y3_Gap_Acceptance"] = {
+                outputs["critical_gap"] = write_csv("Run_3_Critical_Gap.csv", list(critical[0].keys()), critical)
+            acc_vals = [float(r["X31_Available_Gap"]) for r in gap_rows if r["Gap_Acceptance"] == 1]
+            rej_vals = [float(r["X31_Available_Gap"]) for r in gap_rows if r["Gap_Acceptance"] == 0]
+            indicator("Gap Acceptance — accepted gaps", "Time", "s", "Accepted", acc_vals)
+            indicator("Gap Acceptance — rejected gaps", "Time", "s", "Rejected", rej_vals)
+            summary["indicators"]["Gap_Acceptance"] = {
                 "gap_rows": len(gap_rows),
                 "decision_events": len({r["Decision_Event_ID"] for r in gap_rows}),
                 "accepted_events": len(acc_vals), "rejected_events": len(rej_vals),
@@ -7053,63 +7053,63 @@ class Run1App:
                 summary["diagnostics"]["gap"] = "No Reference Line Mapping entered; CSV header only. Enter Site_ID|Movement|Line N for subject and conflict movements."
             else:
                 summary["diagnostics"]["gap"] = "OK" if gap_rows else "No valid gap-decision events under the configured mapping."
-        run_step("gap", "Run_3_Y3_Gap_Acceptance.csv", do_gap)
+        run_step("gap", "Run_3_Gap_Acceptance.csv", do_gap)
 
-        # ---------------- Y4 TTC (time) ----------------
+        # ---------------- TTC (time) ----------------
         def do_ttc():
-            status("Run 3 — Y4 TTC...")
+            status("Run 3 — TTC...")
             rows, diag = self._run3_ttc(tracks, c, movement_by_id)
-            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","S_Conflict_Distance_m","CS_Closing_Speed_kmh","Speed_A_kmh","Speed_B_kmh","Dist_A_to_Crossing_m","Dist_B_to_Crossing_m","Arrival_Diff_s","Path_Angle_deg","Y4_TTC_s","TTC_Level","Speed_Level","QC_Flag"]
-            outputs["ttc"] = write_csv("Run_3_Y4_TTC.csv", fields, rows)
-            vals = [float(r["Y4_TTC_s"]) for r in rows]
-            s_ = indicator("Y4", "Time-to-Collision (TTCmin per event)", "Time", "s", "All", vals,
+            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","S_Conflict_Distance_m","CS_Closing_Speed_kmh","Speed_A_kmh","Speed_B_kmh","Dist_A_to_Crossing_m","Dist_B_to_Crossing_m","Arrival_Diff_s","Path_Angle_deg","TTC_s","TTC_Level","Speed_Level","QC_Flag"]
+            outputs["ttc"] = write_csv("Run_3_TTC.csv", fields, rows)
+            vals = [float(r["TTC_s"]) for r in rows]
+            s_ = indicator("Time-to-Collision (TTCmin per event)", "Time", "s", "All", vals,
                            f"events with TTCmin <= {c['ttc_max_record_s']} s")
             for kind in ("RearEnd", "Side"):
-                indicator("Y4", "Time-to-Collision (TTCmin per event)", "Time", "s", kind,
-                          [float(r["Y4_TTC_s"]) for r in rows if r["TTC_Type"] == kind])
+                indicator("Time-to-Collision (TTCmin per event)", "Time", "s", kind,
+                          [float(r["TTC_s"]) for r in rows if r["TTC_Type"] == kind])
             s_["Level_Counts"] = {lv: sum(1 for r in rows if r["TTC_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
-            summary["indicators"]["Y4_TTC"] = s_
+            summary["indicators"]["TTC"] = s_
             summary["diagnostics"]["ttc"] = diag
-        run_step("ttc", "Run_3_Y4_TTC.csv", do_ttc)
+        run_step("ttc", "Run_3_TTC.csv", do_ttc)
 
-        # ---------------- Y5 PET (time) ----------------
+        # ---------------- PET (time) ----------------
         def do_pet():
-            status("Run 3 — Y5 PET...")
+            status("Run 3 — PET...")
             rows, diag = self._run3_pet(tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
-            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Y5_PET","PET_Risk_Level","QC_Flag"]
-            outputs["pet"] = write_csv("Run_3_Y5_PET.csv", fields, rows)
-            vals = [float(r["Y5_PET"]) for r in rows]
-            s = indicator("Y5", "Post-Encroachment Time", "Time", "s", "All", vals)
+            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","PET_s","PET_Risk_Level","QC_Flag"]
+            outputs["pet"] = write_csv("Run_3_PET.csv", fields, rows)
+            vals = [float(r["PET_s"]) for r in rows]
+            s = indicator("Post-Encroachment Time", "Time", "s", "All", vals)
             s["At_or_Below_Threshold"] = sum(v <= c["pet_threshold"] for v in vals)
             s["Level_Counts"] = {lv: sum(1 for r in rows if r["PET_Risk_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
             for z in sorted(c["pet_zones"]):
-                indicator("Y5", "Post-Encroachment Time", "Time", "s", f"Zone {z}",
-                          [float(r["Y5_PET"]) for r in rows if r["Conflict_Zone"] == f"Zone {z}"])
-            summary["indicators"]["Y5_PET"] = s
+                indicator("Post-Encroachment Time", "Time", "s", f"Zone {z}",
+                          [float(r["PET_s"]) for r in rows if r["Conflict_Zone"] == f"Zone {z}"])
+            summary["indicators"]["PET"] = s
             summary["diagnostics"]["pet"] = diag
-        run_step("pet", "Run_3_Y5_PET.csv", do_pet)
+        run_step("pet", "Run_3_PET.csv", do_pet)
 
-        # ---------------- Y6 Speed (V50, V85, Mean, SD) ----------------
+        # ---------------- Speed (V50, V85, Mean, SD) ----------------
         def do_speed():
-            status("Run 3 — Y6 Speed...")
+            status("Run 3 — Speed...")
             speed_rows = self._run3_speed(tracks, c, movement_by_id, movement_source_by_id)
             fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Scope","Key","Movement","Movement_Status","Start_Time","End_Time","Start_Frame","End_Frame","Samples","Distance_m","Duration_s","Speed_kmh","Calibration_Mode","QC_Flag"]
             outputs["speed_detail"] = write_csv("Run_3_Speed_Detail.csv", fields, speed_rows)
             vs = self._run3_speed_vehicle_summary(speed_rows, tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
             outputs["speed"] = write_csv("Run_3_Speed.csv", self._run3_speed_vehicle_summary_fields(), vs)
             stats = self._run3_speed_statistics(speed_rows, c)
-            outputs["speed_statistics"] = write_csv("Run_3_Y6_Speed_Statistics.csv",
-                ["Site_ID","Scope","Key","Vehicle_Class","N","Mean_kmh","SD_kmh","Y6_V50_kmh","Y6_V85_kmh","V85_minus_V50_kmh","Min_kmh","Max_kmh"], stats)
+            outputs["speed_statistics"] = write_csv("Run_3_Speed_Statistics.csv",
+                ["Site_ID","Scope","Key","Vehicle_Class","N","Mean_kmh","SD_kmh","V50_kmh","V85_kmh","V85_minus_V50_kmh","Min_kmh","Max_kmh"], stats)
             groups = defaultdict(list)
             for r in speed_rows:
                 groups[(r["Scope"], r["Key"])].append(float(r["Speed_kmh"]))
             spd = {}
             for (scope, key) in sorted(groups, key=lambda k: (k[0] != "Zone", MOVEMENT_IDS.index(k[1]) if k[1] in MOVEMENT_IDS else 0, k[1])):
                 # One row per group: Median column = V50, P85 column = V85
-                s_ = indicator("Y6", "Speed (Mean, SD, V50 = Median, V85 = P85)", "Speed", "km/h",
+                s_ = indicator("Speed (Mean, SD, V50 = Median, V85 = P85)", "Speed", "km/h",
                                key if scope == "Zone" else f"Movement {key}", groups[(scope, key)])
                 spd[f"{scope} {key}"] = {"N": s_["N"], "Mean": s_["Mean"], "SD": s_["SD"], "V50": s_["P50"], "V85": s_["P85"]}
-            summary["indicators"]["Y6_Speed"] = spd
+            summary["indicators"]["Speed"] = spd
             summary["diagnostics"]["speed"] = (f"vehicle_rows={len(vs)}; detail_rows={len(speed_rows)}; "
                                                f"zones={sorted(c['speed_zones'])}; smoothing_samples={c['speed_smoothing_samples']}")
         run_step("speed", "Run_3_Speed.csv", do_speed)
@@ -7117,12 +7117,12 @@ class Run1App:
         if indicator_rows:
             outputs["indicator_summary"] = write_csv(
                 "Run_3_Indicator_Summary.csv",
-                ["Site_ID","Code","Indicator","Domain","Unit","Group","N","Mean","SD","Median","Min","Max","P85","Note"],
+                ["Site_ID","Indicator","Domain","Unit","Group","N","Mean","SD","Median","Min","Max","P85","Note"],
                 indicator_rows)
 
         summary["architecture"] = {
-            "indicator_codes": "Y1 LDP, Y2 Lateral Clearance, Y3 Gap Acceptance, Y4 TTC, Y5 PET, Y6 Speed (V50, V85, Mean, SD)",
-            "domains": {"Distance": ["Y1", "Y2"], "Time": ["Y3", "Y4", "Y5"], "Speed": ["Y6"]},
+            "indicators": "LDP, Lateral Clearance, Gap Acceptance, TTC, PET, Speed (V50, V85, Mean, SD)",
+            "domains": {"Distance": ["LDP", "Lateral Clearance"], "Time": ["Gap Acceptance", "TTC", "PET"], "Speed": ["Speed"]},
             "movement_resolver": "Full flicker-cleaned zone sequence of each track matched to 6 patterns (1-3-4, 2-3-1, 1-3-6-7, 5-6-3-1, 2-3-4, 5-6-7); ambiguous fragments stay unclassified",
             "metric_coordinates": "Computed once per sample (batch); perspective or PPM + road angle",
             "risk_levels": "Exported per dimension; combination rule not defined in sources",

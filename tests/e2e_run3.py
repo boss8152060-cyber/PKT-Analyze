@@ -134,7 +134,7 @@ def scene1(app):
     check("movement 5-6-7 = 1 vehicle (C)", mc.get("5-6-7") == 1, str(mc))
     check("movement 1-3-4 = 1 vehicle (E)", mc.get("1-3-4") == 1, str(mc))
 
-    # ---- Y6 speed ----
+    # ---- Speed ----
     det = read_csv(os.path.join(out, "Run_3_Speed_Detail.csv"))
     by = {(r["Vehicle_ID"], r["Scope"], r["Key"]): float(r["Speed_kmh"]) for r in det}
     for vid, kmh in (("1", 36.0), ("2", 36.0), ("3", 18.0)):
@@ -144,44 +144,44 @@ def scene1(app):
               all(abs(by[(vid, 'Zone', k)] - kmh) < 0.6 for k in zs), str({k: round(by[(vid, 'Zone', k)], 2) for k in zs}))
     check("vehicle 1 Movement 2-3-4 speed ~36", abs(by.get(("1", "Movement", "2-3-4"), 0) - 36.0) < 0.6)
     check("vehicle 3 Movement 5-6-7 speed ~18", abs(by.get(("3", "Movement", "5-6-7"), 0) - 18.0) < 0.6)
-    stats = read_csv(os.path.join(out, "Run_3_Y6_Speed_Statistics.csv"))
+    stats = read_csv(os.path.join(out, "Run_3_Speed_Statistics.csv"))
     z2 = [r for r in stats if r["Scope"] == "Zone" and r["Key"] == "Zone 2" and r["Vehicle_Class"] == "All"][0]
-    check("Y6 stats Zone 2: N=2, V50 ~36", z2["N"] == "2" and abs(float(z2["Y6_V50_kmh"]) - 36.0) < 0.6, str(z2))
+    check("Speed stats Zone 2: N=2, V50 ~36", z2["N"] == "2" and abs(float(z2["V50_kmh"]) - 36.0) < 0.6, str(z2))
     wide = read_csv(os.path.join(out, "Run_3_Speed.csv"))
     check("vehicle summary rows = 5", len(wide) == 5)
     check("vehicle summary has Zone_Sequence 2-3-4", any(r["Zone_Sequence"] == "2-3-4" for r in wide))
 
-    # ---- Y1 LDP ----
-    ldp = read_csv(os.path.join(out, "Run_3_Y1_LDP.csv"))
+    # ---- LDP ----
+    ldp = read_csv(os.path.join(out, "Run_3_LDP.csv"))
     lz = {(r["Vehicle_ID"], r["Zone"]): r for r in ldp}
-    check("Y1 rows only for main-road motorcycles A and C (car B excluded)", {v for v, _ in lz} == {"1", "3"}, str(sorted(lz)))
-    a3 = float(lz[("1", "Zone 3")]["Y1_LDP_percent"])
-    check("Y1 A zone 3 ~ 0.35/4.75 = 7.37 %", abs(a3 - 7.37) < 0.35, f"{a3:.3f}")
-    check("Y1 A zone 2 ~ 0 %", float(lz[("1", "Zone 2")]["Y1_LDP_percent"]) < 0.5)
-    c6 = float(lz[("3", "Zone 6")]["Y1_LDP_percent"])
-    check("Y1 C zone 6 ~ 0.60/4.20 = 14.29 % (opposite-side W)", abs(c6 - 14.29) < 0.6, f"{c6:.3f}")
-    check("Y1 W_entry for A, W_opp for C",
+    check("LDP rows only for main-road motorcycles A and C (car B excluded)", {v for v, _ in lz} == {"1", "3"}, str(sorted(lz)))
+    a3 = float(lz[("1", "Zone 3")]["LDP_percent"])
+    check("LDP A zone 3 ~ 0.35/4.75 = 7.37 %", abs(a3 - 7.37) < 0.35, f"{a3:.3f}")
+    check("LDP A zone 2 ~ 0 %", float(lz[("1", "Zone 2")]["LDP_percent"]) < 0.5)
+    c6 = float(lz[("3", "Zone 6")]["LDP_percent"])
+    check("LDP C zone 6 ~ 0.60/4.20 = 14.29 % (opposite-side W)", abs(c6 - 14.29) < 0.6, f"{c6:.3f}")
+    check("LDP W_entry for A, W_opp for C",
           lz[("1", "Zone 3")]["Lane_Width_W_m"] == "4.750" and lz[("3", "Zone 6")]["Lane_Width_W_m"] == "4.200")
-    check("Y1 zone 1 never reported", all(r["Zone"] != "Zone 1" for r in ldp))
+    check("LDP zone 1 never reported", all(r["Zone"] != "Zone 1" for r in ldp))
 
-    # ---- Y2 Lateral Clearance ----
-    lc = read_csv(os.path.join(out, "Run_3_Y2_Lateral_Clearance.csv"))
+    # ---- Lateral Clearance ----
+    lc = read_csv(os.path.join(out, "Run_3_Lateral_Clearance.csv"))
     pairs_seen = {r["Pair_ID"] for r in lc}
-    check("Y2 pairs = A-B (2-3-4 & 2-3-4) and A-E (merging) only; A-D crossing excluded",
+    check("Lateral Clearance pairs = A-B (2-3-4 & 2-3-4) and A-E (merging) only; A-D crossing excluded",
           pairs_seen == {"1_2", "1_5"}, str(sorted(pairs_seen)))
     ae_zones = {r["Zone"] for r in lc if r["Pair_ID"] == "1_5"}
-    check("Y2 A-E measured in zones 3 and 4 only (shared transition 3-4; not in zone 1/2)",
+    check("Lateral Clearance A-E measured in zones 3 and 4 only (shared transition 3-4; not in zone 1/2)",
           ae_zones == {"Zone 3", "Zone 4"}, str(ae_zones))
-    ab = [float(r["Y2_Lateral_Clearance"]) for r in lc if r["Pair_ID"] == "1_2" and r["Zone"] == "Zone 2"]
-    check("Y2 A-B zone 2 = 1.5 - (0.8+1.8)/2 = 0.20 m", bool(ab) and all(abs(v - 0.20) < 0.03 for v in ab),
+    ab = [float(r["Lateral_Clearance_m"]) for r in lc if r["Pair_ID"] == "1_2" and r["Zone"] == "Zone 2"]
+    check("Lateral Clearance A-B zone 2 = 1.5 - (0.8+1.8)/2 = 0.20 m", bool(ab) and all(abs(v - 0.20) < 0.03 for v in ab),
           f"n={len(ab)} mean={sum(ab)/len(ab):.3f}" if ab else "no rows")
-    ae = [float(r["Y2_Lateral_Clearance"]) for r in lc if r["Pair_ID"] == "1_5" and r["Zone"] == "Zone 4"]
-    check("Y2 A-E zone 4 = 1.6 - 1.3 = 0.30 m", bool(ae) and all(abs(v - 0.30) < 0.03 for v in ae),
+    ae = [float(r["Lateral_Clearance_m"]) for r in lc if r["Pair_ID"] == "1_5" and r["Zone"] == "Zone 4"]
+    check("Lateral Clearance A-E zone 4 = 1.6 - 1.3 = 0.30 m", bool(ae) and all(abs(v - 0.30) < 0.03 for v in ae),
           f"n={len(ae)}" + (f" mean={sum(ae)/len(ae):.3f}" if ae else ""))
-    pr = read_csv(os.path.join(out, "Run_3_Y2_Lateral_Clearance_Pairs.csv"))
-    check("Y2 pair summary rows (A-B x 3 zones + A-E x 2)", len(pr) == 5, str([(r['Pair_ID'], r['Zone']) for r in pr]))
+    pr = read_csv(os.path.join(out, "Run_3_Lateral_Clearance_Pairs.csv"))
+    check("Lateral Clearance pair summary rows (A-B x 3 zones + A-E x 2)", len(pr) == 5, str([(r['Pair_ID'], r['Zone']) for r in pr]))
     ind = read_csv(os.path.join(out, "Run_3_Indicator_Summary.csv"))
-    check("indicator summary has Y1, Y2, Y6", {"Y1", "Y2", "Y6"} <= {r["Code"] for r in ind})
+    check("indicator summary lists LDP, Lateral Clearance, Speed", any("LDP" in r["Indicator"] for r in ind) and any("Lateral Clearance" in r["Indicator"] for r in ind) and any("Speed" in r["Indicator"] for r in ind))
 
 
 def scene2(app):
@@ -202,39 +202,39 @@ def scene2(app):
     mv = summary["source_counts"]["movement_counts"]
     check("scene 2 movements: P = 2-3-4, Q and R = 1-3-6-7 (partial)", mv.get("2-3-4") == 1 and mv.get("1-3-6-7") == 2, str(mv))
 
-    # ---- Y5 PET ----
-    pet = read_csv(os.path.join(out, "Run_3_Y5_PET.csv"))
+    # ---- PET ----
+    pet = read_csv(os.path.join(out, "Run_3_PET.csv"))
     pairs = {(r["Vehicle_ID_A"], r["Vehicle_ID_B"]): r for r in pet}
-    check("Y5 exactly one PET event: P-Q (P-R overlaps in time, Q-R same movement, F/L no movement)",
+    check("PET exactly one PET event: P-Q (P-R overlaps in time, Q-R same movement, F/L no movement)",
           set(pairs) == {("1", "2")}, str(sorted(pairs)))
     if ("1", "2") in pairs:
         r = pairs[("1", "2")]
-        check("Y5 PET(P,Q) = 1.0 s", abs(float(r["Y5_PET"]) - 1.0) < 0.06, r["Y5_PET"])
-        check("Y5 conflict type Crossing in Zone 3", r["Conflict_Type"] == "Crossing" and r["Conflict_Zone"] == "Zone 3",
+        check("PET PET(P,Q) = 1.0 s", abs(float(r["PET_s"]) - 1.0) < 0.06, r["PET_s"])
+        check("PET conflict type Crossing in Zone 3", r["Conflict_Type"] == "Crossing" and r["Conflict_Zone"] == "Zone 3",
               f"{r['Conflict_Type']} {r['Conflict_Zone']}")
 
-    # ---- Y4 TTC ----
-    ttc = read_csv(os.path.join(out, "Run_3_Y4_TTC.csv"))
+    # ---- TTC ----
+    ttc = read_csv(os.path.join(out, "Run_3_TTC.csv"))
     kinds = {(r["TTC_Type"], frozenset((r["Vehicle_A_ID"], r["Vehicle_B_ID"]))): r for r in ttc}
-    check("Y4 event set = RearEnd F->L and Side P-R",
+    check("TTC event set = RearEnd F->L and Side P-R",
           set(kinds) == {("RearEnd", frozenset(("4", "5"))), ("Side", frozenset(("1", "3")))},
           str(sorted((k, sorted(v)) for k, v in kinds)))
     re_ = kinds.get(("RearEnd", frozenset(("4", "5"))))
     if re_:
-        check("Y4 rear-end: follower is vehicle 4", re_["Vehicle_A_ID"] == "4")
-        check("Y4 rear-end TTCmin ~ 1.12 s", abs(float(re_["Y4_TTC_s"]) - 1.12) < 0.08, re_["Y4_TTC_s"])
-        check("Y4 rear-end CS = 5 m/s = 18 km/h", abs(float(re_["CS_Closing_Speed_kmh"]) - 18.0) < 0.5, re_["CS_Closing_Speed_kmh"])
+        check("TTC rear-end: follower is vehicle 4", re_["Vehicle_A_ID"] == "4")
+        check("TTC rear-end TTCmin ~ 1.12 s", abs(float(re_["TTC_s"]) - 1.12) < 0.08, re_["TTC_s"])
+        check("TTC rear-end CS = 5 m/s = 18 km/h", abs(float(re_["CS_Closing_Speed_kmh"]) - 18.0) < 0.5, re_["CS_Closing_Speed_kmh"])
     sd = kinds.get(("Side", frozenset(("1", "3"))))
     if sd:
-        check("Y4 side TTCmin < 0.1 s (P passes the crossing 0.1 s before R)", float(sd["Y4_TTC_s"]) < 0.1, sd["Y4_TTC_s"])
-        check("Y4 side: P arrives first, arrival diff 0.1 s",
+        check("TTC side TTCmin < 0.1 s (P passes the crossing 0.1 s before R)", float(sd["TTC_s"]) < 0.1, sd["TTC_s"])
+        check("TTC side: P arrives first, arrival diff 0.1 s",
               sd["Vehicle_A_ID"] == "1" and abs(float(sd["Arrival_Diff_s"]) - 0.1) < 0.03,
               f"A={sd['Vehicle_A_ID']} diff={sd['Arrival_Diff_s']}")
-        check("Y4 side path angle 90 deg", abs(float(sd["Path_Angle_deg"]) - 90.0) < 1.0, sd["Path_Angle_deg"])
+        check("TTC side path angle 90 deg", abs(float(sd["Path_Angle_deg"]) - 90.0) < 1.0, sd["Path_Angle_deg"])
 
 
 def scene3(app):
-    """Y3 Gap Acceptance with Line + mapping (first-crossing-only, jitter robust).
+    """Gap Acceptance with Line + mapping (first-crossing-only, jitter robust).
     S waits in zone 1 until t = 3.0 s, then goes 1 -> 3 -> 4.  Stream 2-3-4 crosses Line 1 (x = 15 m)
     at t = 1, ~1.92 (jitters back and forth across the line 3 times: 1.917 / 2.0 / 2.083) and 5 s
     -> only FIRST crossings count: gaps 0.917 s (rejected) and 3.083 s (accepted)."""
@@ -274,24 +274,24 @@ def scene3(app):
 
     mv = summary["source_counts"]["movement_counts"]
     check("scene 3 movements: S = 1-3-4, stream = 2-3-4 x3", mv.get("1-3-4") == 1 and mv.get("2-3-4") == 3, str(mv))
-    gap = read_csv(os.path.join(out, "Run_3_Y3_Gap_Acceptance.csv"))
+    gap = read_csv(os.path.join(out, "Run_3_Gap_Acceptance.csv"))
     roles = sorted(r["Gap_Role"] for r in gap)
-    check("Y3 exactly one rejected + one accepted gap (jitter did not add gaps)",
+    check("Gap Acceptance exactly one rejected + one accepted gap (jitter did not add gaps)",
           roles == ["Accepted / Controlling", "Rejected"], str(roles) + " " + str([r["X31_Available_Gap"] for r in gap]))
     by = {r["Gap_Role"]: r for r in gap}
     if by:
         rej, acc = by.get("Rejected"), by.get("Accepted / Controlling")
-        check("Y3 rejected gap = 0.917 s (C1 -> first crossing of C2)", rej is not None and abs(float(rej["X31_Available_Gap"]) - 0.917) < 0.04,
+        check("Gap Acceptance rejected gap = 0.917 s (C1 -> first crossing of C2)", rej is not None and abs(float(rej["X31_Available_Gap"]) - 0.917) < 0.04,
               rej["X31_Available_Gap"] if rej else "")
-        check("Y3 accepted gap = 3.083 s (first crossing of C2 -> C3)", acc is not None and abs(float(acc["X31_Available_Gap"]) - 3.083) < 0.04,
+        check("Gap Acceptance accepted gap = 3.083 s (first crossing of C2 -> C3)", acc is not None and abs(float(acc["X31_Available_Gap"]) - 3.083) < 0.04,
               acc["X31_Available_Gap"] if acc else "")
-        check("Y3 waiting time ~ 3.0 s", acc is not None and abs(float(acc["X32_Waiting_Time"]) - 3.0) < 0.1,
+        check("Gap Acceptance waiting time ~ 3.0 s", acc is not None and abs(float(acc["X32_Waiting_Time"]) - 3.0) < 0.1,
               acc["X32_Waiting_Time"] if acc else "")
-        check("Y3 subject is vehicle 4 (1-3-4), conflicting movement 2-3-4",
+        check("Gap Acceptance subject is vehicle 4 (1-3-4), conflicting movement 2-3-4",
               acc is not None and acc["Subject_ID"] == "4" and acc["Subject_Movement"] == "1-3-4"
               and acc["Conflicting_Movement"] == "2-3-4")
-        check("Y3 flags Y3_Gap_Acceptance 1 / 0",
-              acc is not None and acc["Y3_Gap_Acceptance"] == "1" and rej is not None and rej["Y3_Gap_Acceptance"] == "0")
+        check("Gap Acceptance flags Gap_Acceptance 1 / 0",
+              acc is not None and acc["Gap_Acceptance"] == "1" and rej is not None and rej["Gap_Acceptance"] == "0")
 
 
 def main():
