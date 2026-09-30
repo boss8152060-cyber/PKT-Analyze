@@ -219,11 +219,11 @@ class LdpTests(unittest.TestCase):
         self.assertAlmostEqual(r["LDP_percent"], 0.0, places=9)
 
     def test_known_bump(self):
-        # enters and leaves at y = 0, peak 0.35 m in the middle; W = 3.5 -> 10 %
+        # enters and leaves at y = 0, peak 0.35 m in the middle; W = 3.5 -> dY / (W/2) = 0.35 / 1.75 = 20 %
         pts = [(x * 0.1, 0.35 * math.sin(math.pi * x / 100)) for x in range(101)]
         r = self.ldp(pts, 3.5)
         self.assertAlmostEqual(r["Delta_Y_m"], 0.35, places=6)
-        self.assertAlmostEqual(r["LDP_percent"], 10.0, places=4)
+        self.assertAlmostEqual(r["LDP_percent"], 20.0, places=4)
         self.assertEqual(r["P_in"], (0.0, 0.0))
 
     def test_offset_but_straight_is_zero(self):
@@ -240,9 +240,10 @@ class LdpTests(unittest.TestCase):
                 for i, (x, y) in enumerate(pts)]
         self.assertAlmostEqual(self.ldp(bump, 3.5)["Delta_Y_m"], 0.2, places=6)
 
-    def test_denominator_is_full_width_not_half(self):
+    def test_denominator_is_half_the_width(self):
         pts = [(x * 0.1, 0.35 * math.sin(math.pi * x / 100)) for x in range(101)]
-        self.assertAlmostEqual(self.ldp(pts, 7.0)["LDP_percent"], 5.0, places=4)
+        self.assertAlmostEqual(self.ldp(pts, 7.0)["LDP_percent"], 10.0, places=4)    # 0.35 / 3.5
+        self.assertAlmostEqual(self.ldp(pts, 1.4)["LDP_percent"], 50.0, places=4)    # 0.35 / 0.7
 
     def test_too_few_samples_or_zero_chord(self):
         self.assertIsNone(self.ldp([(0, 0), (1, 0)], 3.5))

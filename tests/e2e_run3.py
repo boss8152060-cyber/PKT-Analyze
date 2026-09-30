@@ -156,12 +156,12 @@ def scene1(app):
     lz = {(r["Vehicle_ID"], r["Zone"]): r for r in ldp}
     check("LDP rows for every main-road vehicle A, B, C (any class); D, E are not main-road", {v for v, _ in lz} == {"1", "2", "3"}, str(sorted(lz)))
     check("LDP car B (straight) ~ 0 %", float(lz[("2", "Zone 3")]["LDP_percent"]) < 0.5)
-    check("LDP has no risk-level column (decision pending)", "LDP_Level" not in ldp[0])
+    check("LDP risk level: A zone 3 (14.7 %) = None, C zone 6 (28.6 %) = None", lz[("1", "Zone 3")]["LDP_Level"] == "None" and lz[("3", "Zone 6")]["LDP_Level"] == "None")
     a3 = float(lz[("1", "Zone 3")]["LDP_percent"])
-    check("LDP A zone 3 ~ 0.35/4.75 = 7.37 %", abs(a3 - 7.37) < 0.35, f"{a3:.3f}")
+    check("LDP A zone 3 ~ 0.35/(4.75/2) = 14.74 %", abs(a3 - 14.74) < 0.7, f"{a3:.3f}")
     check("LDP A zone 2 ~ 0 %", float(lz[("1", "Zone 2")]["LDP_percent"]) < 0.5)
     c6 = float(lz[("3", "Zone 6")]["LDP_percent"])
-    check("LDP C zone 6 ~ 0.60/4.20 = 14.29 % (opposite-side W)", abs(c6 - 14.29) < 0.6, f"{c6:.3f}")
+    check("LDP C zone 6 ~ 0.60/(4.20/2) = 28.57 % (opposite-side W)", abs(c6 - 28.57) < 1.2, f"{c6:.3f}")
     check("LDP W_entry for A, W_opp for C",
           lz[("1", "Zone 3")]["Lane_Width_W_m"] == "4.750" and lz[("3", "Zone 6")]["Lane_Width_W_m"] == "4.200")
     check("LDP zone 1 never reported", all(r["Zone"] != "Zone 1" for r in ldp))
