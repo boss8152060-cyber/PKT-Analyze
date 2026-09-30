@@ -448,6 +448,12 @@ RUN3_DEFAULTS = {
     "ttc_heading_max_deg": "45",            # same-direction test for rear-end / deviation
     "ttc_velocity_window_s": "0.50",        # centred window of observed samples for velocity
     "ttc_min_speed_kmh": "2.0",             # follower must be moving
+    # Side (crossing / merging) collision - adjustable because the rule is not settled yet:
+    "ttc_side_enabled": True,
+    "ttc_side_window_factor": "1.0",        # x (L_i/v_i + L_j/v_j)/2  (0 = ignore vehicle length)
+    "ttc_side_margin_s": "0.0",             # seconds added to the arrival-time window
+    "ttc_side_min_angle_deg": "10",         # paths closer to parallel than this are not a side conflict
+    "ttc_side_mode": "Earlier arrival",     # Earlier arrival | Later arrival | Average of arrivals
     # V28: road geometry (m). Blank = not entered (never guessed).
     # W_entry = entry motorcycle lane + entry car lane (side with the side street: Zones 2-3-4)
     # W_opp   = opposite motorcycle lane + opposite car lane (Zones 5-6-7)
@@ -456,13 +462,13 @@ RUN3_DEFAULTS = {
     "lane_opp_motorcycle_m": "",
     "lane_opp_car_m": "",
     "median_m": "",                         # recorded only; not used in any indicator
-    "ldp_motorcycle_only": True,
     "ldp_smoothing_samples": "5",           # rolling median to suppress bbox jitter (1 = off)
     # Speed: user can select any of Zones 1–6. CSV assigns each selected zone
     # to the research role: Zone 1 = access mouth, 2/4 = approach, 3/5 = exit, 6 = middle/access.
     "speed_zones": [1, 2, 3, 4, 5, 6, 7],
     "speed_smoothing_samples": "5",         # rolling-median window on positions before Speed (1 = off)
     "lc_zones": [2, 3, 4, 5, 6, 7],
+    "lc_motorcycle_pairs_only": False,      # False = every pair of vehicles; True = only pairs that include a motorcycle
     "pet_zone6": True,
     "pet_zones": [3, 6],
     "ttc_zones": [3, 6],
@@ -476,7 +482,7 @@ RUN3_DEFAULTS = {
     # Lines beginning with # are ignored by the program. Replace the Line N
     # entries with the ACTUAL Line 1–6 geometry for the selected Site before
     # enabling Gap Acceptance.
-    "reference_line_mapping": "# Site_ID|Movement|Line N\n# 8|2-3-4|Line N\n# 8|2-3-1|Line N\n# 8|5-6-7|Line N\n# 8|5-6-3-1|Line N",
+    "reference_line_mapping": "# Site_ID|Movement|Line N\n# 8|2-3-4|Line N\n# 8|5-6-7|Line N\n# 8|5-6-3-1|Line N\n# 8|1-3-6-7|Line N",
     # Starter width values entered in the current researcher UI.
     "vehicle_widths": {
         "Bus": "2.50",
@@ -844,13 +850,16 @@ def rear_end_ttc(p_f, v_f, p_l, v_l, len_f, len_l, w_f, w_l, vmin, cos_max):
 SIDE_TTC_MIN_ANGLE_DEG = 10.0   # paths closer to parallel than this are not a side (crossing) conflict
 
 
-def side_ttc(p_i, v_i, p_j, v_j, len_i, len_j, vmin, min_angle_deg=SIDE_TTC_MIN_ANGLE_DEG):
+def side_ttc(p_i, v_i, p_j, v_j, len_i, len_j, vmin, min_angle_deg=SIDE_TTC_MIN_ANGLE_DEG,
+             window_factor=1.0, margin_s=0.0, mode="earlier"):
     """Side (crossing / merging) TTC by distance to the path intersection
     (SPEC v28 section 7; constant velocity, straight paths along the velocity).
       X = intersection of the two straight paths (must be ahead of both)
       t_i = d_i / v_i,  t_j = d_j / v_j
-    A collision course exists when the arrivals overlap: |t_i - t_j| <= (L_i/v_i + L_j/v_j) / 2
-    (time the vehicles need to clear X). TTC = min(t_i, t_j)."""
+    User-adjustable (the exact rule is not settled yet):
+      window = window_factor x (L_i/v_i + L_j/v_j) / 2 + margin_s   (time the vehicles need to clear X)
+      a collision course exists when |t_i - t_j| <= window
+      TTC = "earlier" -> min(t_i, t_j) | "later" -> max(t_i, t_j) | "average" -> (t_i + t_j) / 2"""
     spd_i, spd_j = math.hypot(v_i[0], v_i[1]), math.hypot(v_j[0], v_j[1])
     if spd_i < vmin or spd_j < vmin:
         return None
@@ -865,21 +874,22 @@ def side_ttc(p_i, v_i, p_j, v_j, len_i, len_j, vmin, min_angle_deg=SIDE_TTC_MIN_
     if s_i <= 0 or s_j <= 0:
         return None
     t_i, t_j = s_i / spd_i, s_j / spd_j
-    window = (len_i / spd_i + len_j / spd_j) / 2.0
+    window = float(window_factor) * (len_i / spd_i + len_j / spd_j) / 2.0 + float(margin_s)
     if abs(t_i - t_j) > window:
         return None
-    return {"TTC": min(t_i, t_j), "t_i": t_i, "t_j": t_j, "d_i": s_i, "d_j": s_j,
+    ttc = {"later": max(t_i, t_j), "average": (t_i + t_j) / 2.0}.get(mode, min(t_i, t_j))
+    return {"TTC": ttc, "t_i": t_i, "t_j": t_j, "d_i": s_i, "d_j": s_j,
             "window": window, "angle_deg": math.degrees(math.asin(min(1.0, abs(den))))}
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
 # Gap Acceptance: subject movement -> conflicting movements whose line-crossing times
 # form the available gaps (each needs a Reference Line Mapping entry).
-# PROVISIONAL (SPEC v28 section 6): to be confirmed with the user in v28(6).
+# Confirmed by the user (2026-10-01): a subject may meet any of these streams, also several at once.
 RUN3_GAP_CONFLICT_MAP = {
-    "1-3-4": ["2-3-4", "2-3-1"],
-    "1-3-6-7": ["2-3-4", "2-3-1", "5-6-7", "5-6-3-1"],
-    "5-6-3-1": ["2-3-4", "2-3-1"],
+    "1-3-4": ["2-3-4"],
+    "1-3-6-7": ["2-3-4", "5-6-7", "5-6-3-1"],
+    "5-6-3-1": ["2-3-4", "1-3-6-7"],
 }
 LINE_NAMES = [f"Line {i}" for i in range(1, 7)]
 
@@ -1074,6 +1084,7 @@ class Run1App:
         self.run3_waiting_speed_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["waiting_speed_threshold"])
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
         self.run3_lc_heading_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_heading_window_s"])
+        self.run3_lc_motorcycle_pairs_only_var = tk.BooleanVar(value=RUN3_DEFAULTS["lc_motorcycle_pairs_only"])
         self.run3_pet_interaction_distance_var = tk.StringVar(value=RUN3_DEFAULTS["pet_interaction_distance_m"])
         self.run3_pet_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["pet_threshold_s"])
         self.run3_speed_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_zones"])) for z in ZONE_IDS}
@@ -1088,6 +1099,11 @@ class Run1App:
         self.run3_ttc_heading_max_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_heading_max_deg"])
         self.run3_ttc_velocity_window_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_velocity_window_s"])
         self.run3_ttc_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_speed_kmh"])
+        self.run3_ttc_side_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["ttc_side_enabled"])
+        self.run3_ttc_side_factor_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_side_window_factor"])
+        self.run3_ttc_side_margin_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_side_margin_s"])
+        self.run3_ttc_side_angle_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_side_min_angle_deg"])
+        self.run3_ttc_side_mode_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_side_mode"])
         # V28: road geometry (lane widths per side + median)
         self.run3_geometry_vars = {
             key: tk.StringVar(value=RUN3_DEFAULTS[key]) for key in RUN3_GEOMETRY_KEYS
@@ -1096,7 +1112,6 @@ class Run1App:
         self.run3_w_opp_text = tk.StringVar(value="W_opp = -")
         for _var in self.run3_geometry_vars.values():
             _var.trace_add("write", lambda *_: self._update_lane_totals())
-        self.run3_ldp_motorcycle_only_var = tk.BooleanVar(value=RUN3_DEFAULTS["ldp_motorcycle_only"])
         self.run3_ldp_smoothing_var = tk.StringVar(value=RUN3_DEFAULTS["ldp_smoothing_samples"])
         self.run3_gap_subject_134_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_subject_134"])
         self.run3_gap_subject_1367_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_subject_1367"])
@@ -1460,12 +1475,13 @@ class Run1App:
         box = zone_row("Speed — Zones", "ความเร็วต่อโซน + ความเร็วภาพรวมตาม Movement (เช่น 2-3-4) — ความยาวเส้นทางเมตร ÷ เวลา", self.run3_speed_zone_vars)
         ttk.Label(box, text="Median smoothing (samples, 1 = ปิด)").grid(row=2, column=0, columnspan=3, sticky="w", pady=2)
         ttk.Entry(box, textvariable=self.run3_speed_smoothing_var, width=8).grid(row=2, column=3, sticky="w", pady=2)
-        zone_row("Lateral Clearance — Zones", "คู่รถทิศทางเดียวกัน (ลำดับโซนมีช่วงร่วมกัน) ในโซนเดียวกัน; วัดตั้งฉากกับทิศที่รถ A เคลื่อนที่ เมื่อกรอบรถซ้อนกันตามแนวยาว; A = จักรยานยนต์", self.run3_lc_zone_vars)
+        box = zone_row("Lateral Clearance — Zones", "คู่รถทิศทางเดียวกัน (ลำดับโซนมีช่วงร่วมกัน) ในโซนเดียวกัน; วัดตั้งฉากกับทิศที่รถ A เคลื่อนที่ เมื่อกรอบรถซ้อนกันตามแนวยาว; ถ้ามีจักรยานยนต์ในคู่ รถจักรยานยนต์คือ A", self.run3_lc_zone_vars)
+        ttk.Checkbutton(box, text="เฉพาะคู่ที่มีรถจักรยานยนต์ (ไม่ติ๊ก = ทุกคู่ของยานพาหนะทุกประเภท)", variable=self.run3_lc_motorcycle_pairs_only_var).grid(row=2, column=0, columnspan=8, sticky="w", pady=2)
 
         box = zone_row("LDP — Zones", "LDP = ΔY ÷ W × 100 — ΔY = ระยะตั้งฉากของ trajectory จากเส้นอ้างอิง (จุดเข้า→จุดออกโซน); เฉพาะรถทางหลัก 2-3-4 (W_entry) และ 5-6-7 (W_opp)", self.run3_ldp_zone_vars)
         ttk.Label(box, text="Median smoothing (samples)").grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Entry(box, textvariable=self.run3_ldp_smoothing_var, width=8).grid(row=2, column=2, sticky="w", pady=2)
-        ttk.Checkbutton(box, text="เฉพาะรถจักรยานยนต์", variable=self.run3_ldp_motorcycle_only_var).grid(row=2, column=3, columnspan=3, sticky="w", pady=2)
+        ttk.Label(box, text="ใช้กับยานพาหนะทุกประเภท", foreground="#555555").grid(row=2, column=3, columnspan=3, sticky="w", pady=2)
 
         box = zone_row("TTC — Zones 3, 6 (ชนท้าย + ชนด้านข้าง)", "ชนท้าย: TTC = S / CS   |   ชนด้านข้าง: เวลาถึงจุดตัดของเส้นทางสองคัน (ระยะทางถึงจุดตัด ÷ ความเร็ว), ชนเมื่อเวลาถึงต่างกันไม่เกินเวลาที่ตัวรถใช้พ้นจุดตัด", self.run3_ttc_zone_vars)
         for i, (label, var) in enumerate((("บันทึกเมื่อ TTCmin ≤ (s)", self.run3_ttc_max_record_var),
@@ -1474,6 +1490,16 @@ class Run1App:
                                           ("ความเร็วรถตามขั้นต่ำ (km/h)", self.run3_ttc_min_speed_var))):
             ttk.Label(box, text=label).grid(row=2 + i // 2, column=(i % 2) * 4, columnspan=2, sticky="w", pady=2)
             ttk.Entry(box, textvariable=var, width=8).grid(row=2 + i // 2, column=(i % 2) * 4 + 2, sticky="w", pady=2)
+
+        ttk.Checkbutton(box, text="คำนวณ TTC ชนด้านข้าง", variable=self.run3_ttc_side_enabled_var).grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 2))
+        for i, (label, var) in enumerate((("ตัวคูณหน้าต่างเวลาถึงจุดตัด (× เวลาที่ตัวรถพ้นจุดตัด, 0 = ไม่คิดความยาวรถ)", self.run3_ttc_side_factor_var),
+                                          ("เวลาเผื่อเพิ่ม (s)", self.run3_ttc_side_margin_var),
+                                          ("มุมระหว่างเส้นทางอย่างน้อย (deg)", self.run3_ttc_side_angle_var))):
+            ttk.Label(box, text=label).grid(row=5 + i, column=0, columnspan=6, sticky="w", pady=2)
+            ttk.Entry(box, textvariable=var, width=8).grid(row=5 + i, column=6, sticky="w", pady=2)
+        ttk.Label(box, text="TTC ด้านข้าง = ").grid(row=8, column=0, sticky="w", pady=2)
+        ttk.Combobox(box, textvariable=self.run3_ttc_side_mode_var, state="readonly", width=20,
+                     values=["Earlier arrival", "Later arrival", "Average of arrivals"]).grid(row=8, column=1, columnspan=3, sticky="w", pady=2)
 
         box = zone_row("PET — Conflict Zones", "PET คำนวณแยกในแต่ละ Conflict Zone (Zone 3 / Zone 6)", self.run3_pet_zone_vars)
         for i, (label, var) in enumerate((("Interaction distance (m)", self.run3_pet_interaction_distance_var),
@@ -2956,6 +2982,7 @@ class Run1App:
                 "waiting_speed_threshold": self.run3_waiting_speed_threshold_var.get(),
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
                 "lc_heading_window_s": self.run3_lc_heading_window_var.get(),
+                "lc_motorcycle_pairs_only": self.run3_lc_motorcycle_pairs_only_var.get(),
                 "pet_interaction_distance_m": self.run3_pet_interaction_distance_var.get(),
                 "pet_threshold_s": self.run3_pet_threshold_var.get(),
                 "speed_zones": [z for z,v in self.run3_speed_zone_vars.items() if v.get()],
@@ -2970,8 +2997,12 @@ class Run1App:
                 "ttc_heading_max_deg": self.run3_ttc_heading_max_var.get(),
                 "ttc_velocity_window_s": self.run3_ttc_velocity_window_var.get(),
                 "ttc_min_speed_kmh": self.run3_ttc_min_speed_var.get(),
+                "ttc_side_enabled": self.run3_ttc_side_enabled_var.get(),
+                "ttc_side_window_factor": self.run3_ttc_side_factor_var.get(),
+                "ttc_side_margin_s": self.run3_ttc_side_margin_var.get(),
+                "ttc_side_min_angle_deg": self.run3_ttc_side_angle_var.get(),
+                "ttc_side_mode": self.run3_ttc_side_mode_var.get(),
                 **{key: self.run3_geometry_vars[key].get() for key in RUN3_GEOMETRY_KEYS},
-                "ldp_motorcycle_only": self.run3_ldp_motorcycle_only_var.get(),
                 "ldp_smoothing_samples": self.run3_ldp_smoothing_var.get(),
                 "vehicle_lengths": {name: var.get() for name, var in self.run3_length_vars.items()},
                 "gap_subject_134": self.run3_gap_subject_134_var.get(),
@@ -3101,12 +3132,17 @@ class Run1App:
                 ("ttc_heading_max_deg", self.run3_ttc_heading_max_var),
                 ("ttc_velocity_window_s", self.run3_ttc_velocity_window_var),
                 ("ttc_min_speed_kmh", self.run3_ttc_min_speed_var),
+                ("ttc_side_enabled", self.run3_ttc_side_enabled_var),
+                ("ttc_side_window_factor", self.run3_ttc_side_factor_var),
+                ("ttc_side_margin_s", self.run3_ttc_side_margin_var),
+                ("ttc_side_min_angle_deg", self.run3_ttc_side_angle_var),
+                ("ttc_side_mode", self.run3_ttc_side_mode_var),
                 ("speed_smoothing_samples", self.run3_speed_smoothing_var),
-                ("ldp_motorcycle_only", self.run3_ldp_motorcycle_only_var),
                 ("ldp_smoothing_samples", self.run3_ldp_smoothing_var),
                 ("waiting_speed_threshold", self.run3_waiting_speed_threshold_var),
                 ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
                 ("lc_heading_window_s", self.run3_lc_heading_window_var),
+                ("lc_motorcycle_pairs_only", self.run3_lc_motorcycle_pairs_only_var),
                 ("pet_interaction_distance_m", self.run3_pet_interaction_distance_var),
                 ("pet_threshold_s", self.run3_pet_threshold_var),
                 ("gap_subject_134", self.run3_gap_subject_134_var),
@@ -3773,6 +3809,14 @@ class Run1App:
             self._run3_float(self.run3_ttc_heading_max_var.get(), "TTC heading limit (deg)")
             self._run3_float(self.run3_ttc_velocity_window_var.get(), "TTC velocity window (s)")
             self._run3_float(self.run3_ttc_min_speed_var.get(), "TTC minimum follower speed (km/h)", positive=False)
+            if self.run3_ttc_side_enabled_var.get():
+                self._run3_float(self.run3_ttc_side_factor_var.get(), "TTC side window factor", positive=False)
+                self._run3_float(self.run3_ttc_side_margin_var.get(), "TTC side extra time (s)", positive=False)
+                angle = self._run3_float(self.run3_ttc_side_angle_var.get(), "TTC side minimum path angle (deg)")
+                if not 0 < angle < 90:
+                    raise ValueError("Run 3 TTC side minimum path angle must be between 0 and 90 degrees.")
+                if float(self.run3_ttc_side_factor_var.get()) < 0 or float(self.run3_ttc_side_margin_var.get()) < 0:
+                    raise ValueError("Run 3 TTC side window factor and extra time must not be negative.")
         for key in RUN3_GEOMETRY_KEYS:
             text = str(self.run3_geometry_vars[key].get()).strip()
             if text:   # must be numeric when entered (lane widths are required when LDP is enabled)
@@ -5976,6 +6020,7 @@ class Run1App:
             "ldp_zones": zones_of(self.run3_ldp_zone_vars),
             "waiting_threshold": num(self.run3_waiting_speed_threshold_var, 1.0),
             "lc_heading_window_s": num(self.run3_lc_heading_window_var, 0.5),
+            "lc_motorcycle_pairs_only": bool(self.run3_lc_motorcycle_pairs_only_var.get()),
             "pet_interaction": num(self.run3_pet_interaction_distance_var, 3.0),
             "pet_threshold": num(self.run3_pet_threshold_var, 1.0),
             "pet_max_s": pet_max if (pet_max is not None and pet_max > 0) else None,
@@ -5983,9 +6028,14 @@ class Run1App:
             "ttc_heading_max_deg": num(self.run3_ttc_heading_max_var, 45.0),
             "ttc_velocity_window_s": num(self.run3_ttc_velocity_window_var, 0.5),
             "ttc_min_speed_kmh": num(self.run3_ttc_min_speed_var, 2.0),
+            "ttc_side_enabled": bool(self.run3_ttc_side_enabled_var.get()),
+            "ttc_side_window_factor": num(self.run3_ttc_side_factor_var, 1.0),
+            "ttc_side_margin_s": num(self.run3_ttc_side_margin_var, 0.0),
+            "ttc_side_min_angle_deg": num(self.run3_ttc_side_angle_var, 10.0),
+            "ttc_side_mode": {"Later arrival": "later", "Average of arrivals": "average"}.get(
+                str(self.run3_ttc_side_mode_var.get()), "earlier"),
             "geometry": geometry,
             "w_entry_m": w_entry, "w_opp_m": w_opp,
-            "ldp_motorcycle_only": bool(self.run3_ldp_motorcycle_only_var.get()),
             "ldp_smoothing_samples": int(num(self.run3_ldp_smoothing_var, 5) or 1),
             "gap_movements": gap_movements,
             "use_raff": bool(self.run3_use_raff_var.get()),
@@ -6087,20 +6137,6 @@ class Run1App:
         if pet < 1.0: return "High"
         if pet <= 2.0: return "Moderate"
         if pet <= 3.0: return "Low"
-        return "None"
-
-    @staticmethod
-    def _level_ldp(ldp):
-        if ldp >= 80.0: return "High"
-        if ldp >= 50.0: return "Moderate"
-        if ldp >= 30.0: return "Low"
-        return "None"
-
-    @staticmethod
-    def _level_ldp_speed(speed_kmh):
-        if speed_kmh >= 80.0: return "High"
-        if speed_kmh >= 50.0: return "Moderate"
-        if speed_kmh >= 30.0: return "Low"
         return "None"
 
     # ========================================================
@@ -6409,20 +6445,23 @@ class Run1App:
     def _run3_lateral_clearance(self, tracks, c, sequence_by_id):
         """Lateral Clearance (SPEC v28 section 5).
 
-        A = motorcycle, B = any vehicle moving in the SAME DIRECTION (their zone
-        sequences share a transition touching the zone) and standing in the SAME
-        zone at (nearly) the same time. Axes come from A's heading; a sample is
-        only measured when the two boxes overlap along the direction of travel.
-        Neighbours are found through a time index (bisect)."""
+        Pairs (A, B) of ANY two vehicle classes moving in the SAME DIRECTION (their
+        zone sequences share a transition touching the zone) and standing in the
+        SAME zone at (nearly) the same time. If a pair contains a motorcycle it is
+        A; otherwise A is the earlier ID, so each pair is reported once. Axes come
+        from A's heading; a sample is only measured when the two boxes overlap
+        along the direction of travel. Neighbours are found through a time index."""
         import bisect
         zones = c["lc_zones"]
+        moto_pairs_only = c["lc_motorcycle_pairs_only"]
         widths = {k: v for k, v in c["widths"].items() if v is not None}
         lengths = {k: v for k, v in c["lengths"].items() if v is not None}
         tol = self._run3_time_tolerance(tracks)
         order = {tid: i for i, tid in enumerate(tracks)}
         perspective = c["perspective"] is not None
         diag = {"a_samples": 0, "a_no_heading": 0, "pairs_same_direction": 0, "pairs_other_direction": 0,
-                "time_matched": 0, "no_box_overlap": 0, "rows": 0, "missing_dimension_class": set()}
+                "time_matched": 0, "no_box_overlap": 0, "rows": 0, "missing_dimension_class": set(),
+                "motorcycle_pairs_only": moto_pairs_only}
 
         # zone -> tid -> (timestamps, rows) ; zone -> sorted list of (start, end, tid)
         obs = defaultdict(dict); spans = defaultdict(list)
@@ -6443,12 +6482,18 @@ class Run1App:
             spans[z].sort()
         span_starts = {z: [s_[0] for s_ in spans[z]] for z in spans}
 
+        def has_dims(cls):
+            return cls in widths and cls in lengths
+
         out = []
         for tid_a, rows_a in tracks.items():
-            if classes.get(tid_a) != "Motorcycle" or "Motorcycle" not in widths or "Motorcycle" not in lengths:
+            cls_a = classes.get(tid_a)
+            if not cls_a or cls_a.lower() == "person":
+                continue
+            if not has_dims(cls_a):
+                diag["missing_dimension_class"].add(cls_a)
                 continue
             seq_a = sequence_by_id.get(str(tid_a), [])
-            # heading of A at every observed trajectory sample (metric)
             valid = [r for r in rows_a if r.get("_m") is not None]
             if len(valid) < 2:
                 continue
@@ -6468,12 +6513,20 @@ class Run1App:
                     if en < a_ts[0] - tol or tid_b == tid_a:
                         continue
                     cls_b = classes.get(tid_b)
-                    if cls_b not in widths or cls_b not in lengths:
-                        if cls_b and cls_b.lower() != "person":
-                            diag["missing_dimension_class"].add(cls_b)
+                    if not cls_b or cls_b.lower() == "person":
                         continue
-                    if cls_b == "Motorcycle" and order[tid_b] < order[tid_a]:
-                        continue            # motorcycle pairs: report each pair once (A = earlier ID)
+                    if not has_dims(cls_b):
+                        diag["missing_dimension_class"].add(cls_b)
+                        continue
+                    a_moto, b_moto = cls_a == "Motorcycle", cls_b == "Motorcycle"
+                    if moto_pairs_only and not (a_moto or b_moto):
+                        continue
+                    # which vehicle of the pair is A?
+                    if a_moto != b_moto:
+                        if not a_moto:
+                            continue                      # the motorcycle is A
+                    elif order[tid_b] < order[tid_a]:
+                        continue                          # same kind: A = earlier ID
                     if not same_direction_in_zone(seq_a, sequence_by_id.get(str(tid_b), []), z):
                         diag["pairs_other_direction"] += 1
                         continue
@@ -6502,22 +6555,21 @@ class Run1App:
                     diag["time_matched"] += 1
                     cls_b = classes[tid_b]
                     res = lateral_clearance(r_a["_mc"], r_a["_h"], r_b["_mc"],
-                                            lengths["Motorcycle"], lengths[cls_b],
-                                            widths["Motorcycle"], widths[cls_b])
+                                            lengths[cls_a], lengths[cls_b], widths[cls_a], widths[cls_b])
                     if not res["Overlap"]:
                         diag["no_box_overlap"] += 1
                         continue
                     pair_rows[tid_b].append({
                         "Site_ID": c["site_id"], "Pair_ID": f"{tid_a}_{tid_b}",
                         "Timestamp": f"{ta:.6f}", "Zone": f"Zone {z}",
-                        "Motorcycle_ID": tid_a, "Motorcycle_Class": "Motorcycle",
-                        "Neighbor_ID": tid_b, "Neighbor_Class": cls_b,
+                        "Vehicle_A_ID": tid_a, "Vehicle_A_Class": cls_a,
+                        "Vehicle_B_ID": tid_b, "Vehicle_B_Class": cls_b,
                         "Zone_Sequence_A": "-".join(str(x) for x in seq_a),
                         "Zone_Sequence_B": "-".join(str(x) for x in sequence_by_id.get(str(tid_b), [])),
                         "Along_m": f"{res['Along_m']:.4f}", "LS_Meter": f"{res['Lateral_m']:.6f}",
                         "Signed_Lateral_m": f"{res['Signed_Lateral_m']:.6f}",
-                        "Wm": f"{widths['Motorcycle']:.6f}", "Wv": f"{widths[cls_b]:.6f}",
-                        "Lm": f"{lengths['Motorcycle']:.6f}", "Lv": f"{lengths[cls_b]:.6f}",
+                        "Width_A_m": f"{widths[cls_a]:.6f}", "Width_B_m": f"{widths[cls_b]:.6f}",
+                        "Length_A_m": f"{lengths[cls_a]:.6f}", "Length_B_m": f"{lengths[cls_b]:.6f}",
                         "Lateral_Clearance_m": f"{res['Clearance_m']:.6f}",
                         "QC_Flag": ("Negative_Lateral_Clearance" if res["Clearance_m"] < 0 else "") + (";Perspective_Homography" if perspective else ""),
                     })
@@ -6541,8 +6593,8 @@ class Run1App:
             first = lst[0]
             out.append({
                 "Site_ID": first["Site_ID"], "Pair_ID": pair, "Zone": zone,
-                "Motorcycle_ID": first["Motorcycle_ID"], "Neighbor_ID": first["Neighbor_ID"],
-                "Neighbor_Class": first["Neighbor_Class"],
+                "Vehicle_A_ID": first["Vehicle_A_ID"], "Vehicle_A_Class": first["Vehicle_A_Class"],
+                "Vehicle_B_ID": first["Vehicle_B_ID"], "Vehicle_B_Class": first["Vehicle_B_Class"],
                 "Zone_Sequence_A": first["Zone_Sequence_A"], "Zone_Sequence_B": first["Zone_Sequence_B"],
                 "Start_Time": f"{min(ts):.6f}", "End_Time": f"{max(ts):.6f}", "Samples": len(ys),
                 "Lateral_Clearance_Min_m": f"{min(ys):.6f}", "Lateral_Clearance_Mean_m": f"{sum(ys) / len(ys):.6f}",
@@ -6775,7 +6827,11 @@ class Run1App:
                                 "vA": res["Speed_F"], "vB": res["Speed_L"]})
                     if on_rear_end_course:
                         continue
-                    sd = side_ttc(A["p"], A["v"], B["p"], B["v"], la, lb, vmin)
+                    if not c["ttc_side_enabled"]:
+                        continue
+                    sd = side_ttc(A["p"], A["v"], B["p"], B["v"], la, lb, vmin,
+                                  c["ttc_side_min_angle_deg"], c["ttc_side_window_factor"],
+                                  c["ttc_side_margin_s"], c["ttc_side_mode"])
                     if sd is None or sd["TTC"] > ttc_max:
                         continue
                     diag["side_candidates"] += 1
@@ -6854,8 +6910,6 @@ class Run1App:
             cls = self._run3_canonical_class(rows[0].get("class_name", ""))
             if cls.lower() == "person":
                 continue
-            if c["ldp_motorcycle_only"] and cls != "Motorcycle":
-                continue
             W = widths[info["side"]]
             if not W:
                 raise ValueError(f"LDP needs the lane widths of the {info['side']} side (Road width inputs).")
@@ -6880,9 +6934,7 @@ class Run1App:
                     "Chord_Length_m": f"{res['Chord_Length_m']:.4f}",
                     "Delta_Y_m": f"{res['Delta_Y_m']:.6f}", "Lane_Width_W_m": f"{W:.3f}",
                     "LDP_percent": f"{ldp:.3f}",
-                    "LDP_Level": self._level_ldp(ldp),
                     "Mean_Speed_kmh": self._fmt(speed, 3),
-                    "Speed_Level": self._level_ldp_speed(speed) if speed is not None else "",
                     "Calibration_Mode": mode,
                     "QC_Flag": ";".join(x for x in [
                         "Short_Chord_Reference_Line_Unreliable" if res["Short_Chord"] else "",
@@ -6978,10 +7030,10 @@ class Run1App:
         def do_lc():
             status("Run 3 — Lateral Clearance...")
             rows, lc_diag = self._run3_lateral_clearance(tracks, c, sequence_by_id)
-            fields = ["Site_ID","Pair_ID","Timestamp","Zone","Motorcycle_ID","Motorcycle_Class","Neighbor_ID","Neighbor_Class","Zone_Sequence_A","Zone_Sequence_B","Along_m","LS_Meter","Signed_Lateral_m","Wm","Wv","Lm","Lv","Lateral_Clearance_m","QC_Flag"]
+            fields = ["Site_ID","Pair_ID","Timestamp","Zone","Vehicle_A_ID","Vehicle_A_Class","Vehicle_B_ID","Vehicle_B_Class","Zone_Sequence_A","Zone_Sequence_B","Along_m","LS_Meter","Signed_Lateral_m","Width_A_m","Width_B_m","Length_A_m","Length_B_m","Lateral_Clearance_m","QC_Flag"]
             outputs["lateral_clearance"] = write_csv("Run_3_Lateral_Clearance.csv", fields, rows)
             pairs = self._run3_lc_pair_summary(rows)
-            pair_fields = ["Site_ID","Pair_ID","Zone","Motorcycle_ID","Neighbor_ID","Neighbor_Class","Zone_Sequence_A","Zone_Sequence_B","Start_Time","End_Time","Samples","Lateral_Clearance_Min_m","Lateral_Clearance_Mean_m","QC_Flag"]
+            pair_fields = ["Site_ID","Pair_ID","Zone","Vehicle_A_ID","Vehicle_A_Class","Vehicle_B_ID","Vehicle_B_Class","Zone_Sequence_A","Zone_Sequence_B","Start_Time","End_Time","Samples","Lateral_Clearance_Min_m","Lateral_Clearance_Mean_m","QC_Flag"]
             outputs["lateral_clearance_pairs"] = write_csv("Run_3_Lateral_Clearance_Pairs.csv", pair_fields, pairs)
             s_ = indicator("Lateral Clearance (all measured samples)", "Distance", "m", "All samples",
                            [float(r["Lateral_Clearance_m"]) for r in rows])
@@ -6995,7 +7047,7 @@ class Run1App:
         def do_ldp():
             status("Run 3 — LDP...")
             rows = self._run3_ldp(tracks, c, movement_by_id, movement_source_by_id)
-            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","LDP_percent","LDP_Level","Mean_Speed_kmh","Speed_Level","Calibration_Mode","QC_Flag"]
+            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","LDP_percent","Mean_Speed_kmh","Calibration_Mode","QC_Flag"]
             outputs["ldp"] = write_csv("Run_3_LDP.csv", fields, rows)
             vals = [float(r["LDP_percent"]) for r in rows]
             note = f"W_entry={c['w_entry_m']} m; W_opp={c['w_opp_m']} m; smoothing={c['ldp_smoothing_samples']}"
@@ -7003,11 +7055,9 @@ class Run1App:
             for z in sorted(c["ldp_zones"]):
                 indicator("Lane/Lateral Deviation Position (LDP)", "Distance", "%", f"Zone {z}",
                           [float(r["LDP_percent"]) for r in rows if r["Zone"] == f"Zone {z}"])
-            s_["Level_Counts"] = {lv: sum(1 for r in rows if r["LDP_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
             summary["indicators"]["LDP"] = s_
-            summary["diagnostics"]["ldp"] = (f"rows={len(rows)}; zones={sorted(c['ldp_zones'])}; "
-                                             f"motorcycle_only={c['ldp_motorcycle_only']}; main-road movements 2-3-4 / 5-6-7 only; "
-                                             "LDP_Level uses the DOH thresholds (30/50/80 %) defined for dY/(W/2) - confirm for dY/W")
+            summary["diagnostics"]["ldp"] = (f"rows={len(rows)}; zones={sorted(c['ldp_zones'])}; all vehicle classes; "
+                                             "main-road movements 2-3-4 / 5-6-7 only; no risk level (decision pending)")
         run_step("ldp", "Run_3_LDP.csv", do_ldp)
 
         # ---------------- Gap Acceptance (time) ----------------
@@ -7069,6 +7119,9 @@ class Run1App:
                           [float(r["TTC_s"]) for r in rows if r["TTC_Type"] == kind])
             s_["Level_Counts"] = {lv: sum(1 for r in rows if r["TTC_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
             summary["indicators"]["TTC"] = s_
+            diag["side_rule"] = {"enabled": c["ttc_side_enabled"], "window_factor": c["ttc_side_window_factor"],
+                                 "margin_s": c["ttc_side_margin_s"], "min_angle_deg": c["ttc_side_min_angle_deg"],
+                                 "ttc_is": c["ttc_side_mode"]}
             summary["diagnostics"]["ttc"] = diag
         run_step("ttc", "Run_3_TTC.csv", do_ttc)
 

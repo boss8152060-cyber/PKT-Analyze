@@ -154,7 +154,9 @@ def scene1(app):
     # ---- LDP ----
     ldp = read_csv(os.path.join(out, "Run_3_LDP.csv"))
     lz = {(r["Vehicle_ID"], r["Zone"]): r for r in ldp}
-    check("LDP rows only for main-road motorcycles A and C (car B excluded)", {v for v, _ in lz} == {"1", "3"}, str(sorted(lz)))
+    check("LDP rows for every main-road vehicle A, B, C (any class); D, E are not main-road", {v for v, _ in lz} == {"1", "2", "3"}, str(sorted(lz)))
+    check("LDP car B (straight) ~ 0 %", float(lz[("2", "Zone 3")]["LDP_percent"]) < 0.5)
+    check("LDP has no risk-level column (decision pending)", "LDP_Level" not in ldp[0])
     a3 = float(lz[("1", "Zone 3")]["LDP_percent"])
     check("LDP A zone 3 ~ 0.35/4.75 = 7.37 %", abs(a3 - 7.37) < 0.35, f"{a3:.3f}")
     check("LDP A zone 2 ~ 0 %", float(lz[("1", "Zone 2")]["LDP_percent"]) < 0.5)
@@ -167,8 +169,14 @@ def scene1(app):
     # ---- Lateral Clearance ----
     lc = read_csv(os.path.join(out, "Run_3_Lateral_Clearance.csv"))
     pairs_seen = {r["Pair_ID"] for r in lc}
-    check("Lateral Clearance pairs = A-B (2-3-4 & 2-3-4) and A-E (merging) only; A-D crossing excluded",
-          pairs_seen == {"1_2", "1_5"}, str(sorted(pairs_seen)))
+    check("Lateral Clearance pairs (all classes): A-B, A-E, B-E, D-E; crossing A-D / B-D excluded",
+          pairs_seen == {"1_2", "1_5", "2_5", "4_5"}, str(sorted(pairs_seen)))
+    be = [float(r["Lateral_Clearance_m"]) for r in lc if r["Pair_ID"] == "2_5" and r["Zone"] == "Zone 4"]
+    check("Lateral Clearance car-car B-E zone 4 = 3.1 - 1.8 = 1.30 m (A = earlier ID)", bool(be) and all(abs(v - 1.30) < 0.05 for v in be),
+          f"n={len(be)}" + (f" mean={sum(be)/len(be):.3f}" if be else ""))
+    de = [float(r["Lateral_Clearance_m"]) for r in lc if r["Pair_ID"] == "4_5" and r["Zone"] == "Zone 3"]
+    check("Lateral Clearance car-car D-E zone 3 = 4.1 - 1.8 = 2.30 m", bool(de) and all(abs(v - 2.30) < 0.05 for v in de),
+          f"n={len(de)}" + (f" mean={sum(de)/len(de):.3f}" if de else ""))
     ae_zones = {r["Zone"] for r in lc if r["Pair_ID"] == "1_5"}
     check("Lateral Clearance A-E measured in zones 3 and 4 only (shared transition 3-4; not in zone 1/2)",
           ae_zones == {"Zone 3", "Zone 4"}, str(ae_zones))
@@ -179,7 +187,13 @@ def scene1(app):
     check("Lateral Clearance A-E zone 4 = 1.6 - 1.3 = 0.30 m", bool(ae) and all(abs(v - 0.30) < 0.03 for v in ae),
           f"n={len(ae)}" + (f" mean={sum(ae)/len(ae):.3f}" if ae else ""))
     pr = read_csv(os.path.join(out, "Run_3_Lateral_Clearance_Pairs.csv"))
-    check("Lateral Clearance pair summary rows (A-B x 3 zones + A-E x 2)", len(pr) == 5, str([(r['Pair_ID'], r['Zone']) for r in pr]))
+    check("Lateral Clearance pair summary rows (A-B x3, A-E x2, B-E x2, D-E x1)", len(pr) == 8, str([(r['Pair_ID'], r['Zone']) for r in pr]))
+    # motorcycle-pairs-only switch: only the pairs that include a motorcycle remain
+    app.run3_lc_motorcycle_pairs_only_var.set(True)
+    out_m, _ = run_scene(app, veh)
+    app.run3_lc_motorcycle_pairs_only_var.set(False)
+    only_m = {r["Pair_ID"] for r in read_csv(os.path.join(out_m, "Run_3_Lateral_Clearance.csv"))}
+    check("Lateral Clearance motorcycle-pairs-only option keeps A-B and A-E only", only_m == {"1_2", "1_5"}, str(sorted(only_m)))
     ind = read_csv(os.path.join(out, "Run_3_Indicator_Summary.csv"))
     check("indicator summary lists LDP, Lateral Clearance, Speed", any("LDP" in r["Indicator"] for r in ind) and any("Lateral Clearance" in r["Indicator"] for r in ind) and any("Speed" in r["Indicator"] for r in ind))
 
@@ -198,6 +212,18 @@ def scene2(app):
     ]
     out, summary = run_scene(app, veh)
     print("scene 2 output:", out)
+    # side collision off -> only the rear-end event remains
+    app.run3_ttc_side_enabled_var.set(False)
+    out_off, _ = run_scene(app, veh)
+    app.run3_ttc_side_enabled_var.set(True)
+    kinds_off = {r["TTC_Type"] for r in read_csv(os.path.join(out_off, "Run_3_TTC.csv"))}
+    check("TTC side collision can be switched off (only RearEnd remains)", kinds_off == {"RearEnd"}, str(kinds_off))
+    # a tighter window rule (factor 0, margin 0.05 s): P-R arrive 0.1 s apart -> no longer a collision course
+    app.run3_ttc_side_factor_var.set("0"); app.run3_ttc_side_margin_var.set("0.05")
+    out_tight, _ = run_scene(app, veh)
+    app.run3_ttc_side_factor_var.set("1.0"); app.run3_ttc_side_margin_var.set("0.0")
+    kinds_tight = {r["TTC_Type"] for r in read_csv(os.path.join(out_tight, "Run_3_TTC.csv"))}
+    check("TTC side window is adjustable (factor 0, margin 0.05 s drops the 0.1 s apart pair)", kinds_tight == {"RearEnd"}, str(kinds_tight))
 
     mv = summary["source_counts"]["movement_counts"]
     check("scene 2 movements: P = 2-3-4, Q and R = 1-3-6-7 (partial)", mv.get("2-3-4") == 1 and mv.get("1-3-6-7") == 2, str(mv))
@@ -294,6 +320,60 @@ def scene3(app):
               acc is not None and acc["Gap_Acceptance"] == "1" and rej is not None and rej["Gap_Acceptance"] == "0")
 
 
+def scene4(app):
+    """Gap Acceptance: subject 1-3-6-7 meets TWO streams at once (2-3-4 on Line 1, 5-6-7 on Line 2).
+    Subject waits in zone 1 until t = 3.0 s.  Stream 2-3-4 crosses at 1, 2, 5 s; stream 5-6-7 at 1.5, 2.5, 4 s.
+    Gaps containing t = 3.0: 2-3-4 -> 3.0 s, 5-6-7 -> 1.5 s  => the smaller (5-6-7, 1.5 s) controls.
+    Rejected: 2-3-4 (1 -> 2 = 1.0 s) and 5-6-7 (1.5 -> 2.5 = 1.0 s)."""
+    n = 480
+
+    def stream(t_cross, x_line, y):
+        return lambda t: (x_line + 10.0 * (t - t_cross), y)
+
+    def subject(t):
+        if t < 3.0:
+            return (15.0, -6.0)
+        return (15.0, -6.0 + 4.0 * (t - 3.0))
+
+    zone_s = lambda x, y: 1 if y < -2 else (3 if y < 2 else (6 if y < 6 else 7))
+    zone_a = lambda x, y: 2 if x < 10 else (3 if x < 20 else 4)
+    zone_b = lambda x, y: 5 if x < 10 else (6 if x < 20 else 7)
+    veh = [
+        (1, "Car", make_rows(1, "Car", stream(1.0, 15.0, 5.0), zone_a, n, (4.5, 1.8))),
+        (2, "Car", make_rows(2, "Car", stream(2.0, 15.0, 5.0), zone_a, n, (4.5, 1.8))),
+        (3, "Car", make_rows(3, "Car", stream(5.0, 15.0, 5.0), zone_a, n, (4.5, 1.8))),
+        (4, "Car", make_rows(4, "Car", stream(1.5, 16.0, -20.0), zone_b, n, (4.5, 1.8))),
+        (5, "Car", make_rows(5, "Car", stream(2.5, 16.0, -20.0), zone_b, n, (4.5, 1.8))),
+        (6, "Car", make_rows(6, "Car", stream(4.0, 16.0, -20.0), zone_b, n, (4.5, 1.8))),
+        (7, "Car", make_rows(7, "Car", subject, zone_s, n, (4.5, 1.8))),
+    ]
+    app.lines["Line 1"] = [(1500, -1000), (1500, 2000)]
+    app.lines["Line 2"] = [(1600, -3000), (1600, 1000)]
+    app.run3_reference_text.delete("1.0", "end")
+    app.run3_reference_text.insert("1.0", "8|2-3-4|Line 1\n8|5-6-7|Line 2")
+    app.run3_gap_subject_134_var.set(False)
+    app.run3_gap_subject_1367_var.set(True)
+    app.run3_gap_subject_5631_var.set(False)
+    out, summary = run_scene(app, veh)
+    print("scene 4 output:", out)
+    mv = summary["source_counts"]["movement_counts"]
+    check("scene 4 movements: subject 1-3-6-7, streams 2-3-4 x3 and 5-6-7 x3",
+          mv.get("1-3-6-7") == 1 and mv.get("2-3-4") == 3 and mv.get("5-6-7") == 3, str(mv))
+    gap = read_csv(os.path.join(out, "Run_3_Gap_Acceptance.csv"))
+    acc = [r for r in gap if r["Gap_Role"] == "Accepted / Controlling"]
+    rej = [r for r in gap if r["Gap_Role"] == "Rejected"]
+    check("Gap Acceptance two simultaneous streams: 1 accepted + 2 rejected", len(acc) == 1 and len(rej) == 2,
+          str([(r["Gap_Role"], r["Conflicting_Movement"], r["X31_Available_Gap"]) for r in gap]))
+    if acc:
+        check("Gap Acceptance smaller gap controls (5-6-7, 1.5 s)",
+              acc[0]["Conflicting_Movement"] == "5-6-7" and abs(float(acc[0]["X31_Available_Gap"]) - 1.5) < 0.05,
+              f"{acc[0]['Conflicting_Movement']} {acc[0]['X31_Available_Gap']}")
+    check("Gap Acceptance rejected gaps come from both streams",
+          {r["Conflicting_Movement"] for r in rej} == {"2-3-4", "5-6-7"}, str([r["Conflicting_Movement"] for r in rej]))
+    app.run3_gap_subject_134_var.set(True)
+    app.run3_gap_subject_5631_var.set(True)
+
+
 def main():
     root = tk.Tk()
     root.withdraw()
@@ -313,6 +393,8 @@ def main():
     scene2(app)
     print("=== scene 3: Gap Acceptance ===")
     scene3(app)
+    print("=== scene 4: Gap Acceptance, two streams at once ===")
+    scene4(app)
 
     root.destroy()
     print("FAILED: " + ", ".join(failures) if failures else "ALL OK")

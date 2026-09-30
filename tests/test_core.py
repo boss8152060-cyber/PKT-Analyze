@@ -400,6 +400,32 @@ class SideTtc(unittest.TestCase):
     def test_stationary_vehicle_excluded(self):
         self.assertIsNone(self.sd((0, -10), (0, 10), (0, 0), (0, 0)))
 
+    # ---- adjustable rule (the user has not settled the exact side-collision rule) ----
+    def sdp(self, **kw):
+        # arrivals 1.0 s and 1.4 s, both cars (4.5 m long) at 10 m/s -> default window 0.45 s
+        return CORE["side_ttc"]((0, -10), (0, 10), (-14, 0), (10, 0), 4.5, 4.5, self.VMIN, **kw)
+
+    def test_window_factor_zero_uses_margin_only(self):
+        self.assertIsNotNone(self.sdp())                                   # 0.4 <= 0.45
+        self.assertIsNone(self.sdp(window_factor=0.0, margin_s=0.3))       # 0.4 >  0.3
+        self.assertIsNotNone(self.sdp(window_factor=0.0, margin_s=0.5))    # 0.4 <= 0.5
+
+    def test_window_factor_scales_vehicle_length_window(self):
+        self.assertIsNone(self.sdp(window_factor=0.5))                     # 0.225 < 0.4
+        self.assertIsNotNone(self.sdp(window_factor=1.0, margin_s=0.0))
+        self.assertIsNotNone(self.sdp(window_factor=0.5, margin_s=0.2))    # 0.225 + 0.2 = 0.425
+
+    def test_ttc_mode(self):
+        self.assertAlmostEqual(self.sdp(mode="earlier")["TTC"], 1.0)
+        self.assertAlmostEqual(self.sdp(mode="later")["TTC"], 1.4)
+        self.assertAlmostEqual(self.sdp(mode="average")["TTC"], 1.2)
+
+    def test_min_angle_is_adjustable(self):
+        near_parallel = CORE["side_ttc"]((0, 0), (10, 0), (8, 2), (10, -1.5), 4.5, 4.5, self.VMIN, 10.0)
+        self.assertIsNone(near_parallel)                                   # 8.5 deg < 10 deg
+        allowed = CORE["side_ttc"]((0, 0), (10, 0), (8, 2), (10, -1.5), 4.5, 4.5, self.VMIN, 5.0, margin_s=5.0)
+        self.assertIsNotNone(allowed)
+
 
 class ConflictType(unittest.TestCase):
     def test_types(self):

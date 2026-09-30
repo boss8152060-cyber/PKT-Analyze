@@ -54,10 +54,10 @@ Video ─► YOLO + ByteTrack ─► Detection_Records.csv (ต่อเฟร�
 
 | ตัวชี้วัด | กลุ่ม | ไฟล์ผลลัพธ์ | สรุปวิธี |
 |---|---|---|---|
-| LDP | ระยะ | `Run_3_LDP.csv` | โซน 2–7, เฉพาะรถทางหลัก (2-3-4 / 5-6-7); ΔY = ระยะตั้งฉากสูงสุดจากเส้นอ้างอิงจุดเข้า→ออกโซน ÷ W (W_entry/W_opp) × 100 |
-| Lateral Clearance | ระยะ | `Run_3_Lateral_Clearance.csv`, `_Pairs.csv` | A = จักรยานยนต์ กับรถทิศทางเดียวกันในโซนเดียวกัน; ตั้งฉากกับ heading ของ A เมื่อกรอบซ้อนกันตามแนวยาว |
-| Gap Acceptance | เวลา | `Run_3_Gap_Acceptance.csv`, `Run_3_Critical_Gap.csv` | ยังใช้ Line + Reference Line Mapping; ข้ามเส้นครั้งแรกครั้งเดียวต่อคัน; โซนรอ = โซนแรกของ Movement (ตารางกระแสขัดแย้งชั่วคราว) |
-| TTC | เวลา | `Run_3_TTC.csv` | โซน 3, 6; ชนท้าย S/CS + ชนด้านข้าง (ระยะทางถึงจุดตัดเส้นทาง) |
+| LDP | ระยะ | `Run_3_LDP.csv` | โซน 2–7, เฉพาะรถทางหลัก (2-3-4 / 5-6-7) ทุกประเภทยานพาหนะ ไม่มีระดับความเสี่ยงตอนนี้; ΔY = ระยะตั้งฉากสูงสุดจากเส้นอ้างอิงจุดเข้า→ออกโซน ÷ W (W_entry/W_opp) × 100 |
+| Lateral Clearance | ระยะ | `Run_3_Lateral_Clearance.csv`, `_Pairs.csv` | ทุกคู่ของยานพาหนะทิศทางเดียวกันในโซนเดียวกัน (ถ้ามีจักรยานยนต์ในคู่ = A); ตั้งฉากกับ heading ของ A เมื่อกรอบซ้อนกันตามแนวยาว |
+| Gap Acceptance | เวลา | `Run_3_Gap_Acceptance.csv`, `Run_3_Critical_Gap.csv` | ยังใช้ Line + Reference Line Mapping; ข้ามเส้นครั้งแรกครั้งเดียวต่อคัน; โซนรอ = โซนแรกของ Movement; ตารางกระแสขัดแย้งตามผู้ใช้ยืนยัน (หลายกระแสพร้อมกันได้) |
+| TTC | เวลา | `Run_3_TTC.csv` | โซน 3, 6; ชนท้าย S/CS + ชนด้านข้าง (ระยะทางถึงจุดตัดเส้นทาง; กติกาปรับได้ในหน้าโปรแกรม) |
 | PET | เวลา | `Run_3_PET.csv` | โซน 3, 6 ตรรกะเดิม |
 | Speed | ความเร็ว | `Run_3_Speed.csv`, `_Speed_Detail.csv`, `Run_3_Speed_Statistics.csv` | ต่อโซน 1–7 + ภาพรวมตาม Movement; rolling median 5 ตัวอย่าง |
 
