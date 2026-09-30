@@ -518,5 +518,97 @@ class DuplicateTracks(unittest.TestCase):
         self.assertEqual(list(dup), ["9"])
 
 
+class RobustMovement(unittest.TestCase):
+    f = staticmethod(lambda seq: CORE["classify_movement_robust"](seq))
+
+    def test_wobble_across_a_boundary_is_recovered(self):
+        self.assertEqual(self.f([2, 3, 2, 3, 4]), ("2-3-4", "Exact_AfterDedupe"))
+        self.assertEqual(self.f([1, 3, 6, 3, 6, 7]), ("1-3-6-7", "Exact_AfterDedupe"))
+        self.assertEqual(self.f([5, 6, 5, 6, 7]), ("5-6-7", "Exact_AfterDedupe"))
+
+    def test_plain_answers_are_never_changed(self):
+        self.assertEqual(self.f([2, 3, 4]), ("2-3-4", "Exact"))
+        self.assertEqual(self.f([1, 3, 6]), ("1-3-6-7", "Partial"))
+        self.assertEqual(self.f([3, 4]), ("", "Ambiguous"))
+        self.assertEqual(self.f([3]), ("", "Insufficient"))
+
+    def test_partial_after_dedupe(self):
+        self.assertEqual(self.f([1, 3, 1, 3, 6]), ("1-3-6-7", "Partial_AfterDedupe"))
+
+    def test_real_world_oscillation_that_still_fits_nothing(self):
+        # from the old run: 4-3-4-3-4-3-6-1 -> first visits 4,3,6,1 is not a defined movement
+        self.assertEqual(self.f([4, 3, 4, 3, 4, 3, 6, 1]), ("", "Unclassified"))
+
+    def test_first_visit_order(self):
+        self.assertEqual(CORE["first_visit_order"]([4, 7, 6, 7, 6, 7, 1]), [4, 7, 6, 1])
+
+
+class GapHoldAndIntervals(unittest.TestCase):
+    def samples(self, plan, dt=1 / 60):
+        """plan = [(n_samples, speed_ms, inside_bool), ...] -> [(t, x, y, inside)]"""
+        out, x, i = [], 0.0, 0
+        for n, v, inside in plan:
+            for _ in range(n):
+                out.append((i * dt, x, 0.0, inside))
+                x += v * dt
+                i += 1
+        return out
+
+    def test_moving_through_is_not_a_stop(self):
+        r = CORE["find_hold"](self.samples([(60, 4.0, True)]))
+        self.assertEqual(r["state"], "Continued")
+
+    def test_stop_then_resume(self):
+        r = CORE["find_hold"](self.samples([(10, 4.0, True), (60, 0.0, True), (30, 4.0, True)]))
+        self.assertEqual(r["state"], "Stopped_then_Resumed")
+        self.assertAlmostEqual(r["stop_start"], 10 / 60, places=6)
+        self.assertAlmostEqual(r["resume_time"], 71 / 60, places=6)        # first sample whose step is fast
+
+    def test_stop_then_leaves_the_conflict_zones(self):
+        r = CORE["find_hold"](self.samples([(10, 4.0, True), (40, 0.0, True), (5, 4.0, False)]))
+        self.assertEqual(r["state"], "Stopped_then_Resumed")
+        self.assertAlmostEqual(r["resume_time"], 50 / 60, places=6)
+
+    def test_stopped_until_the_end_is_censored(self):
+        r = CORE["find_hold"](self.samples([(10, 4.0, True), (60, 0.0, True)]))
+        self.assertEqual(r["state"], "Stopped_Censored")
+        self.assertIsNone(r["resume_time"])
+
+    def test_short_pause_is_not_a_stop(self):
+        # 0.2 s at rest < 0.30 s minimum
+        r = CORE["find_hold"](self.samples([(10, 4.0, True), (12, 0.0, True), (30, 4.0, True)]))
+        self.assertEqual(r["state"], "Continued")
+
+    def test_thresholds_are_adjustable(self):
+        plan = [(10, 4.0, True), (60, 0.5, True), (30, 4.0, True)]         # crawling at 1.8 km/h
+        self.assertEqual(CORE["find_hold"](self.samples(plan), 5.0, 0.3)["state"], "Stopped_then_Resumed")
+        self.assertEqual(CORE["find_hold"](self.samples(plan), 1.0, 0.3)["state"], "Continued")
+        self.assertEqual(CORE["find_hold"](self.samples([(10, 4.0, True), (12, 0.0, True), (30, 4.0, True)]), 5.0, 0.1)["state"],
+                         "Stopped_then_Resumed")
+
+    def test_leaving_without_a_stop(self):
+        r = CORE["find_hold"](self.samples([(10, 4.0, True), (5, 4.0, False)]))
+        self.assertEqual(r["state"], "Continued")
+
+    def test_gap_intervals(self):
+        ev = [(5.0, "3", "Car", "Line 1", ""), (1.0, "1", "Car", "Line 1", ""), (2.0, "2", "Bus", "Line 1", "")]
+        g = CORE["build_gap_intervals"](ev)
+        self.assertEqual([(x["gap_start"], x["gap_end"], x["id_a"], x["id_b"]) for x in g], [(1.0, 2.0, "1", "2"), (2.0, 5.0, "2", "3")])
+
+    def test_gap_intervals_one_event_per_vehicle_and_no_empty_gap(self):
+        ev = [(1.0, "1", "Car", "L", ""), (1.5, "1", "Car", "L", ""), (1.0, "2", "Car", "L", ""), (4.0, "3", "Car", "L", "")]
+        g = CORE["build_gap_intervals"](ev)
+        self.assertEqual([(x["gap_start"], x["gap_end"]) for x in g], [(1.0, 4.0)])      # 1 and 2 at the same time: no zero gap
+        self.assertEqual(CORE["build_gap_intervals"]([(1.0, "1", "Car", "L", "")]), [])
+
+    def test_gap_paths_follow_the_movement_patterns(self):
+        for mv, info in CORE["GAP_PATHS"].items():
+            seq = CORE["MOVEMENT_PATTERNS"][mv]["sequence"]
+            self.assertEqual(info["wait"], (seq[0],))
+            self.assertEqual(info["target"], seq[-1])
+            self.assertEqual(set(info["middle"]), set(seq[1:-1]))
+        self.assertEqual(set(CORE["GAP_REFERENCE_ZONE"]), {"2-3-4", "5-6-7", "5-6-3-1", "1-3-6-7"})
+
+
 if __name__ == "__main__":
     unittest.main()
