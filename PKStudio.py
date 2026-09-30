@@ -409,6 +409,9 @@ RUN3_VEHICLE_CLASSES = [
 
 RUN3_MOVEMENTS = ["1→3", "1→5", "4→1"]
 RUN3_ALL_MOVEMENTS = ["1→3", "1→5", "4→1", "2→3", "4→5"]
+# Gap Acceptance: subject movement -> conflicting movements whose line-crossing
+# times form the available gaps (each needs a Reference Line Mapping entry).
+RUN3_GAP_CONFLICT_MAP = {"1→3": ["2→3"], "1→5": ["2→3", "4→5"], "4→1": ["2→3", "1→5"]}
 
 RUN3_DEFAULTS = {
     # Starter preset based on the values currently entered in the researcher UI.
@@ -3468,6 +3471,42 @@ class Run1App:
                     f"loaded Zone file (defined: {', '.join(str(z) for z in sorted(defined))}). "
                     "Those zones will produce no data."
                 )
+
+        # V27(4): Gap Acceptance needs a Reference Line Mapping entry (and a
+        # drawn Line) for the movement(s) that conflict with each subject.
+        if bool(self.run3_gap_enabled_var.get()):
+            subjects = [m for m, var in (("1→3", self.run3_gap_movement_13_var),
+                                         ("1→5", self.run3_gap_movement_15_var),
+                                         ("4→1", self.run3_gap_movement_41_var)) if var.get()]
+            text = (self.run3_reference_text.get("1.0", "end-1c")
+                    if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text)
+            try:
+                mapping = self._run3_parse_reference_mapping(text)
+            except Exception as exc:
+                mapping = None
+                warnings.append(f"Y3 Gap Acceptance: Reference Line Mapping is invalid ({exc}). "
+                                "Y3 output will be empty.")
+            if mapping is not None:
+                site = self.run3_site_id_var.get().strip()
+                site_map = {mv: ln for (st, mv), ln in mapping.items() if str(st).strip() == site}
+                if not site_map:
+                    warnings.append(
+                        f"Y3 Gap Acceptance: no Reference Line Mapping rows for Site_ID '{site}' "
+                        "(rows starting with # are ignored). Y3 output will be empty.")
+                else:
+                    needed = sorted({c for m in subjects for c in RUN3_GAP_CONFLICT_MAP[m]})
+                    missing = [c for c in needed if c not in site_map]
+                    if missing:
+                        warnings.append(
+                            "Y3 Gap Acceptance: no mapping for conflicting movement(s) "
+                            + ", ".join(missing) + f" (Site_ID '{site}'); gaps from these streams "
+                            "cannot be measured.")
+                    undrawn = sorted({f"{ln} ({c})" for c, ln in site_map.items()
+                                      if c in needed and len(self.lines.get(ln, [])) != 2})
+                    if undrawn:
+                        warnings.append(
+                            "Y3 Gap Acceptance: mapped Line is not drawn/loaded in the Zone/Line file: "
+                            + ", ".join(undrawn) + ".")
         return warnings
 
     # ========================================================
@@ -6044,7 +6083,7 @@ class Run1App:
             line_times[key].sort(key=lambda x: x[0])
 
         # Conflict-stream gaps are identical for every subject -> build once.
-        conflict_map = {"1→3": ["2→3"], "1→5": ["2→3", "4→5"], "4→1": ["2→3", "1→5"]}
+        conflict_map = RUN3_GAP_CONFLICT_MAP
         gap_cache = {}
         def gaps_for(cm):
             if cm not in gap_cache:

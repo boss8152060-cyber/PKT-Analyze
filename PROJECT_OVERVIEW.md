@@ -82,7 +82,7 @@ Y1 N=2,354 (mean 3.68 m) · Y2 N=73 (mean 117%) · **Y3 N=0** · Y4 N=11 (TTCmin
    ผลคือ Y5 ของ Zone 7 ได้ N=0 โดยไม่มีคำเตือน (เห็นในสรุป Run3)
    **แก้:** ใน `validate_run3_settings` ตรวจว่าโซนที่เลือกมี polygon จริงหรือไม่ แล้วเตือน/ตัดออกอัตโนมัติ
 
-5. **Y3 Gap Acceptance ว่างเปล่า (N=0)** เพราะ Reference Line Mapping ยังเป็นเทมเพลต (`Line N`) และ `lines_defined` = `[]`
+5. ✅ **คำเตือนเพิ่มแล้ว (2026-09-30, `Run3 v27(4)`; รอกด START จริงยืนยัน) — แต่ Y3 จะมีข้อมูลเมื่อผู้ใช้วาด Line/กรอก mapping เอง** — **Y3 Gap Acceptance ว่างเปล่า (N=0)** เพราะ Reference Line Mapping ยังเป็นเทมเพลต (`Line N`) และ `lines_defined` = `[]`
    **แก้:** วาด Line 1–6 ลงไฟล์ Zone/Line, กรอก mapping จริง, และให้โปรแกรม *เตือนชัดเจนก่อนเริ่มรัน* (ตอนนี้แค่เขียนไว้ใน diagnostics ท้ายรัน) และควรตรวจว่ามี `Site_ID|Movement|Line` ครบสำหรับทุก movement ที่ใช้ใน `conflict_map`
 
 6. **ไฟล์ Zone มาจากวิดีโอ `..._073251A_` แต่รันกับวิดีโอ `..._084751A_`**
