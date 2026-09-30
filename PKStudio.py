@@ -4463,7 +4463,12 @@ class Run1App:
                                     if previous_confirmed_zone and previous_confirmed_zone != confirmed_zone:
                                         oldzs = zstate.get("zone_states", {}).get(previous_confirmed_zone)
                                         if oldzs and oldzs.get("inside"):
-                                            duration = max(0.0, timestamp_now - float(oldzs["entry_time"]))
+                                            # V27(1): the visit ends at the last observed
+                                            # sample inside the Zone and is stored so the
+                                            # summaries can use it after the state is reset.
+                                            exit_time = float(oldzs.get("last_inside_time") or oldzs["entry_time"])
+                                            duration = max(0.0, exit_time - float(oldzs["entry_time"]))
+                                            oldzs.setdefault("visits", []).append((float(oldzs["entry_time"]), exit_time))
                                             avg_speed = oldzs["distance_px"] / duration if duration > 0 else 0.0
                                             zone_exit_count[previous_confirmed_zone] += 1
                                             measurement_events_writer.writerow([
@@ -4486,6 +4491,8 @@ class Run1App:
                                             "inside": False,
                                             "entry_frame": None,
                                             "entry_time": None,
+                                            "last_inside_time": None,
+                                            "visits": [],
                                             "distance_px": 0.0,
                                             "last_point": None,
                                         })
@@ -4495,6 +4502,7 @@ class Run1App:
                                                 zs["inside"] = True
                                                 zs["entry_frame"] = frame_index
                                                 zs["entry_time"] = timestamp_now
+                                                zs["last_inside_time"] = timestamp_now
                                                 zs["distance_px"] = 0.0
                                                 zs["last_point"] = point
                                                 zone_entry_count[zname] += 1
@@ -4503,6 +4511,7 @@ class Run1App:
                                                     "ZONE", zname, "ENTRY", "0.000000", "0.000", "", "CONFIRMED"
                                                 ])
                                             elif previous_confirmed_zone == zname and previous_zone_point is not None:
+                                                zs["last_inside_time"] = timestamp_now
                                                 px, py = previous_zone_point
                                                 zs["distance_px"] += (
                                                     (point[0] - px) ** 2 + (point[1] - py) ** 2
@@ -4884,13 +4893,13 @@ class Run1App:
                     total_zone_time = 0.0
                     zmap = zone_track_state.get(track_id, {}).get("zone_states", {})
                     for zs in zmap.values():
-                        if zs.get("entry_time") is not None:
-                            if zs.get("inside"):
+                        for v_start, v_end in zs.get("visits", []):
+                            total_zone_time += max(0.0, v_end - v_start)
+                        if zs.get("inside") and zs.get("entry_time") is not None:
+                            end_t = zs.get("last_inside_time")
+                            if end_t is None:
                                 end_t = state_info.get("last_frame", frame_index) / fps
-                            else:
-                                end_t = zs.get("last_exit_time")
-                            if end_t is not None:
-                                total_zone_time += max(0.0, float(end_t) - float(zs["entry_time"]))
+                            total_zone_time += max(0.0, float(end_t) - float(zs["entry_time"]))
                     track_state_final = track_stats.get(track_id, {})
                     first_seen_final = float(track_state_final.get("first_frame", 0)) / fps if fps > 0 else 0.0
                     last_seen_final = float(track_state_final.get("last_frame", frame_index)) / fps if fps > 0 else 0.0
@@ -4920,19 +4929,19 @@ class Run1App:
                     last_frame_final = state_info.get("last_frame", frame_index)
                     last_time_final = last_frame_final / fps if fps > 0 else 0.0
                     for zname, zs in zmap.get("zone_states", {}).items():
-                        if zs.get("entry_time") is None:
-                            continue
-                        start_t = float(zs["entry_time"])
-                        end_t = (last_time_final if zs.get("inside") else zs.get("last_exit_time"))
-                        if end_t is None:
-                            continue
-                        duration = max(0.0, float(end_t) - start_t)
-                        agg = zone_aggregate[zname]
-                        agg["ids"].add(track_id)
-                        agg["durations"].append(duration)
-                        agg["entries"] += 1
-                        agg["first_entry"] = start_t if agg["first_entry"] is None else min(agg["first_entry"], start_t)
-                        agg["last_entry"] = start_t if agg["last_entry"] is None else max(agg["last_entry"], start_t)
+                        visits = list(zs.get("visits", []))
+                        if zs.get("inside") and zs.get("entry_time") is not None:
+                            open_end = zs.get("last_inside_time")
+                            visits.append((float(zs["entry_time"]),
+                                           float(open_end) if open_end is not None else last_time_final))
+                        for start_t, end_t in visits:
+                            duration = max(0.0, float(end_t) - float(start_t))
+                            agg = zone_aggregate[zname]
+                            agg["ids"].add(track_id)
+                            agg["durations"].append(duration)
+                            agg["entries"] += 1
+                            agg["first_entry"] = start_t if agg["first_entry"] is None else min(agg["first_entry"], start_t)
+                            agg["last_entry"] = start_t if agg["last_entry"] is None else max(agg["last_entry"], start_t)
 
                 for zname in ZONE_NAMES:
                     agg = zone_aggregate.get(zname)
