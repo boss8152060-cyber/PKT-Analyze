@@ -720,7 +720,7 @@ def track_speed_records(rows, speed_zones, movement_id="", movement_status="", s
     if movement_id:
         zones = set(MOVEMENT_PATTERNS[movement_id]["sequence"])
         add("Movement", movement_id, [r for r in valid if r["_zone_num"] in zones],
-            "Partial_Movement" if movement_status == "Partial" else "")
+            "Partial_Movement" if str(movement_status).startswith("Partial") else "")
     return out
 
 
@@ -968,6 +968,41 @@ def find_duplicate_tracks(frame_boxes, track_length, iou_min=DUPLICATE_TRACK_IOU
         entry = out.setdefault(drop, {"keep": keep, "frames": set()})
         entry["frames"] |= frames
     return out
+
+
+def first_visit_order(sequence):
+    """Zones in the order of their FIRST visit, repeats dropped (the idea of the Run 2
+    column `unique_zones_visited`): 2,3,2,3,4 -> 2,3,4."""
+    out = []
+    for z in sequence:
+        z = int(z)
+        if z not in out:
+            out.append(z)
+    return out
+
+
+def classify_movement_robust(sequence):
+    """classify_movement on the cleaned zone sequence; when that gives no Exact/Partial
+    answer, retry on the first-visit order so a vehicle that wobbles across a zone
+    boundary (2-3-2-3-4) is still recognised. Returns (movement_id, status) with status
+    Exact | Partial | Exact_AfterDedupe | Partial_AfterDedupe | Ambiguous |
+    Unclassified | Insufficient. An Exact/Partial answer of the plain sequence is never
+    changed."""
+    movement, status = classify_movement(sequence)
+    if status in ("Exact", "Partial"):
+        return movement, status
+    plain = []
+    for z in sequence:
+        if not plain or plain[-1] != int(z):
+            plain.append(int(z))
+    uniq = first_visit_order(sequence)
+    if uniq != plain:
+        movement2, status2 = classify_movement(uniq)
+        if status2 == "Exact":
+            return movement2, "Exact_AfterDedupe"
+        if status2 == "Partial":
+            return movement2, "Partial_AfterDedupe"
+    return movement, status
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -6195,7 +6230,7 @@ class Run1App:
         movement_by_id, status_by_id, sequence_by_id = {}, {}, {}
         for tid, rows in tracks.items():
             seq = zone_sequence_from_samples([(r["_timestamp"], r.get("_zone_num")) for r in rows])
-            movement, status = classify_movement(seq)
+            movement, status = classify_movement_robust(seq)
             key = str(tid)
             movement_by_id[key] = movement
             status_by_id[key] = status
@@ -7332,7 +7367,7 @@ class Run1App:
             if not rows:
                 continue
             movement = movement_by_id.get(str(tid), "")
-            if not movement or status_by_id.get(str(tid)) != "Exact":
+            if not movement or not str(status_by_id.get(str(tid), "")).startswith("Exact"):
                 continue
             info = MOVEMENT_PATTERNS[movement]
             if not info["main_road"]:
@@ -7418,7 +7453,8 @@ class Run1App:
                 "id_zone_summary_rows": len(id_rows), "tracks_by_zone": dict(tracks_by_zone),
                 "movement_counts": {m: sum(1 for t in tracks if movement_by_id.get(str(t), "") == m) for m in RUN3_ALL_MOVEMENTS},
                 "movement_status": {st: sum(1 for t in tracks if movement_source_by_id.get(str(t), "") == st)
-                                    for st in ("Exact", "Partial", "Ambiguous", "Unclassified", "Insufficient")},
+                                    for st in ("Exact", "Exact_AfterDedupe", "Partial", "Partial_AfterDedupe",
+                                               "Ambiguous", "Unclassified", "Insufficient")},
                 "selected_zones": {k: sorted(c[k + "_zones"]) for k in ("speed", "lc", "pet", "ttc", "ldp")},
             },
             "diagnostics": {},
@@ -7629,7 +7665,8 @@ class Run1App:
         empty = []
         mstat = summary["source_counts"]["movement_status"]
         mcount = summary["source_counts"]["movement_counts"]
-        seen = (f"Movement ที่จับได้: Exact {mstat['Exact']}, Partial {mstat['Partial']}, "
+        seen = (f"Movement ที่จับได้: ครบ {mstat['Exact'] + mstat['Exact_AfterDedupe']}, "
+                f"บางส่วน {mstat['Partial'] + mstat['Partial_AfterDedupe']}, "
                 f"ไม่ตรงแบบใด {mstat['Unclassified']}, เห็นไม่ครบ {mstat['Insufficient']} จาก {len(tracks)} คัน")
         layout_hint = " — ตรวจว่าไฟล์ Zone/วิดีโอเป็นชุดเดียวกับผังทางแยก (Movement ใหม่ 1-3-4, 2-3-1, 1-3-6-7, 5-6-3-1, 2-3-4, 5-6-7)"
         if c["ldp_enabled"] and row_counts.get("ldp") == 0:

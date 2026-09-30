@@ -390,6 +390,22 @@ def scene4(app):
     app.run3_gap_subject_5631_var.set(True)
 
 
+def scene5(app):
+    """A car that wobbles across a zone boundary (labels 2,3,2,3,4 with visits of 0.2 s each) is
+    still recognised as 2-3-4 (status Exact_AfterDedupe) and gets LDP rows."""
+    zone_w = lambda x, y: 2 if x < 10 else (3 if x < 12 else (2 if x < 14 else (3 if x < 20 else 4)))
+    veh = [(1, "Car", make_rows(1, "Car", along_x(0.0, 10.0), zone_w, 360, (4.5, 1.8)))]
+    out, summary = run_scene(app, veh)
+    print("scene 5 output:", out)
+    ms = summary["source_counts"]["movement_status"]
+    check("wobbling car recognised as 2-3-4 after removing repeated zones", ms.get("Exact_AfterDedupe") == 1
+          and summary["source_counts"]["movement_counts"].get("2-3-4") == 1, str(ms))
+    ldp = read_csv(os.path.join(out, "Run_3_LDP.csv"))
+    check("LDP is computed for it (status Exact_AfterDedupe counts as Exact)", len(ldp) >= 2, str(len(ldp)))
+    wide = read_csv(os.path.join(out, "Run_3_Speed.csv"))
+    check("vehicle speed table shows status and movement", wide[0]["Movement"] == "2-3-4" and wide[0]["Movement_Status"] == "Exact_AfterDedupe")
+
+
 def main():
     root = tk.Tk()
     root.withdraw()
@@ -411,6 +427,8 @@ def main():
     scene3(app)
     print("=== scene 4: Gap Acceptance, two streams at once ===")
     scene4(app)
+    print("=== scene 5: zone-boundary wobble ===")
+    scene5(app)
 
     root.destroy()
     print("FAILED: " + ", ".join(failures) if failures else "ALL OK")

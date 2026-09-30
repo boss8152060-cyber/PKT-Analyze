@@ -518,5 +518,30 @@ class DuplicateTracks(unittest.TestCase):
         self.assertEqual(list(dup), ["9"])
 
 
+class RobustMovement(unittest.TestCase):
+    f = staticmethod(lambda seq: CORE["classify_movement_robust"](seq))
+
+    def test_wobble_across_a_boundary_is_recovered(self):
+        self.assertEqual(self.f([2, 3, 2, 3, 4]), ("2-3-4", "Exact_AfterDedupe"))
+        self.assertEqual(self.f([1, 3, 6, 3, 6, 7]), ("1-3-6-7", "Exact_AfterDedupe"))
+        self.assertEqual(self.f([5, 6, 5, 6, 7]), ("5-6-7", "Exact_AfterDedupe"))
+
+    def test_plain_answers_are_never_changed(self):
+        self.assertEqual(self.f([2, 3, 4]), ("2-3-4", "Exact"))
+        self.assertEqual(self.f([1, 3, 6]), ("1-3-6-7", "Partial"))
+        self.assertEqual(self.f([3, 4]), ("", "Ambiguous"))
+        self.assertEqual(self.f([3]), ("", "Insufficient"))
+
+    def test_partial_after_dedupe(self):
+        self.assertEqual(self.f([1, 3, 1, 3, 6]), ("1-3-6-7", "Partial_AfterDedupe"))
+
+    def test_real_world_oscillation_that_still_fits_nothing(self):
+        # from the old run: 4-3-4-3-4-3-6-1 -> first visits 4,3,6,1 is not a defined movement
+        self.assertEqual(self.f([4, 3, 4, 3, 4, 3, 6, 1]), ("", "Unclassified"))
+
+    def test_first_visit_order(self):
+        self.assertEqual(CORE["first_visit_order"]([4, 7, 6, 7, 6, 7, 1]), [4, 7, 6, 1])
+
+
 if __name__ == "__main__":
     unittest.main()
