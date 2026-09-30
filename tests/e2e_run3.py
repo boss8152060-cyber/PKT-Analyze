@@ -233,6 +233,67 @@ def scene2(app):
         check("Y4 side path angle 90 deg", abs(float(sd["Path_Angle_deg"]) - 90.0) < 1.0, sd["Path_Angle_deg"])
 
 
+def scene3(app):
+    """Y3 Gap Acceptance with Line + mapping (first-crossing-only, jitter robust).
+    S waits in zone 1 until t = 3.0 s, then goes 1 -> 3 -> 4.  Stream 2-3-4 crosses Line 1 (x = 15 m)
+    at t = 1, ~1.92 (jitters back and forth across the line 3 times: 1.917 / 2.0 / 2.083) and 5 s
+    -> only FIRST crossings count: gaps 0.917 s (rejected) and 3.083 s (accepted)."""
+    n = 480
+
+    def stream(t_cross, jitter=0.0):
+        import math as _m
+        def f(t):
+            x = 15.0 + 10.0 * (t - t_cross) + jitter * _m.sin(30.0 * t)
+            return (x, 5.0)
+        return f
+
+    zone_x = lambda x, y: 2 if x < 10 else (3 if x < 20 else 4)
+
+    def subject(t):
+        if t < 3.0:
+            return (15.0, -6.0)
+        if t < 4.5:
+            return (15.0, -6.0 + 4.0 * (t - 3.0))
+        return (15.0 + 6.0 * (t - 4.5), 0.0)
+
+    zone_s = lambda x, y: 1 if y < -2 else (3 if x < 20 else 4)
+    veh = [
+        (1, "Car", make_rows(1, "Car", stream(1.0), zone_x, n, (4.5, 1.8))),
+        (2, "Car", make_rows(2, "Car", stream(2.0, jitter=1.2), zone_x, n, (4.5, 1.8))),
+        (3, "Car", make_rows(3, "Car", stream(5.0), zone_x, n, (4.5, 1.8))),
+        (4, "Car", make_rows(4, "Car", subject, zone_s, n, (4.5, 1.8))),
+    ]
+    # the stream vehicles move in the x direction only: keep only the part inside the scene
+    app.lines["Line 1"] = [(1500, -1000), (1500, 2000)]
+    app.run3_reference_text.delete("1.0", "end")
+    app.run3_reference_text.insert("1.0", "8|2-3-4|Line 1")
+    app.run3_gap_subject_1367_var.set(False)
+    app.run3_gap_subject_5631_var.set(False)
+    out, summary = run_scene(app, veh)
+    print("scene 3 output:", out)
+
+    mv = summary["source_counts"]["movement_counts"]
+    check("scene 3 movements: S = 1-3-4, stream = 2-3-4 x3", mv.get("1-3-4") == 1 and mv.get("2-3-4") == 3, str(mv))
+    gap = read_csv(os.path.join(out, "Run_3_Y3_Gap_Acceptance.csv"))
+    roles = sorted(r["Gap_Role"] for r in gap)
+    check("Y3 exactly one rejected + one accepted gap (jitter did not add gaps)",
+          roles == ["Accepted / Controlling", "Rejected"], str(roles) + " " + str([r["X31_Available_Gap"] for r in gap]))
+    by = {r["Gap_Role"]: r for r in gap}
+    if by:
+        rej, acc = by.get("Rejected"), by.get("Accepted / Controlling")
+        check("Y3 rejected gap = 0.917 s (C1 -> first crossing of C2)", rej is not None and abs(float(rej["X31_Available_Gap"]) - 0.917) < 0.04,
+              rej["X31_Available_Gap"] if rej else "")
+        check("Y3 accepted gap = 3.083 s (first crossing of C2 -> C3)", acc is not None and abs(float(acc["X31_Available_Gap"]) - 3.083) < 0.04,
+              acc["X31_Available_Gap"] if acc else "")
+        check("Y3 waiting time ~ 3.0 s", acc is not None and abs(float(acc["X32_Waiting_Time"]) - 3.0) < 0.1,
+              acc["X32_Waiting_Time"] if acc else "")
+        check("Y3 subject is vehicle 4 (1-3-4), conflicting movement 2-3-4",
+              acc is not None and acc["Subject_ID"] == "4" and acc["Subject_Movement"] == "1-3-4"
+              and acc["Conflicting_Movement"] == "2-3-4")
+        check("Y3 flags Y3_Gap_Acceptance 1 / 0",
+              acc is not None and acc["Y3_Gap_Acceptance"] == "1" and rej is not None and rej["Y3_Gap_Acceptance"] == "0")
+
+
 def main():
     root = tk.Tk()
     root.withdraw()
@@ -250,6 +311,8 @@ def main():
     scene1(app)
     print("=== scene 2: PET / TTC ===")
     scene2(app)
+    print("=== scene 3: Gap Acceptance ===")
+    scene3(app)
 
     root.destroy()
     print("FAILED: " + ", ".join(failures) if failures else "ALL OK")

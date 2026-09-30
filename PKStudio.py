@@ -1,15 +1,16 @@
 # ============================================================
-# PK Studio V17 - Run 1 + 2 + 3 V27
-# V27: 7 safety indicators in 3 domains (thesis Ch.2 / Ch.3)
-#   Distance: Y1 Lateral Clearance, Y2 LDP
-#   Time    : Y3 Gap Acceptance, Y4 TTC, Y5 PET
-#   Speed   : Y6 V50 (Mean, SD), Y7 V85
-#   Zones 1-7 (Zone 7 = second conflict area). No Tk access from worker thread.
+# PK Studio V17 - Run 1 + 2 + 3 V28
+# V28: 6 safety indicators in 3 domains (definitions: SPEC_v28_NewIndicators.md)
+#   Distance: Y1 LDP, Y2 Lateral Clearance
+#   Time    : Y3 Gap Acceptance, Y4 TTC (rear-end + side), Y5 PET
+#   Speed   : Y6 Speed (per zone and per Movement; V50, V85, Mean, SD)
+#   Zones 1-7; conflict zones 3 and 6. Movement = full zone sequence (6 patterns).
+#   No Tk access from worker thread.
 # ============================================================
 #
 # Vehicle Detection + Tracking + Trajectory + Zone/Line Measurement Research
-# PET movement primary source: ID Zone Summary first_zone + last_zone (internal only)
-# PET CSV outputs Movement_A / Movement_B only; first_zone/last_zone are not exported.
+# Movement (Run 3) comes from the flicker-cleaned zone sequence of each track
+# (classify_movement); it is never guessed when the sequence is ambiguous.
 # GUI Version 3 - CUDA Auto Environment
 #
 # IMPORTANT:
@@ -504,7 +505,7 @@ RUN3_DEFAULTS = {
 # APPLICATION
 # ============================================================
 
-ZONE_IDS = list(range(1, 8))            # V27: Zone 7 added (second conflict area)
+ZONE_IDS = list(range(1, 8))
 CONFLICT_ZONE_IDS = (3, 6)              # V28: conflict zones (PET / TTC); ordinary path zones for Movement
 ZONE_NAMES = [f"Zone {i}" for i in ZONE_IDS]
 
@@ -5871,7 +5872,7 @@ class Run1App:
             "bus": "Bus", "car": "Car", "motorcycle": "Motorcycle",
             "motorbike": "Motorcycle", "motor cycle": "Motorcycle",
             "pickup": "Pickup", "pickup truck": "Pickup",
-            "sidecar": "Sidecar", "motorcycle sidecar": "Sidecar",
+            "sidecar": "Sidecar", "side car": "Sidecar", "motorcycle sidecar": "Sidecar",
             "truck": "Truck", "van": "Van", "person": "person",
         }
         return aliases.get(raw, str(value or "").strip())
@@ -6268,7 +6269,10 @@ class Run1App:
                 if prev is not None:
                     cross_t = self._run3_line_crossing_time(prev, prev_t, p, t, line)
                     if cross_t is not None:
+                        # V28: a vehicle crosses its reference line ONCE (first crossing);
+                        # a jittering trajectory point must not create extra tiny gaps.
                         line_times[movement].append((cross_t, tid, r.get("class_name", ""), lname))
+                        break
                 prev, prev_t = p, t
         for key in line_times:
             line_times[key].sort(key=lambda x: x[0])
@@ -6917,7 +6921,7 @@ class Run1App:
                 if z in ZONE_IDS:
                     tracks_by_zone[str(z)] += 1
         summary = {
-            "program_version": "PK Studio V27",
+            "program_version": "PK Studio V28",
             "site_id": c["site_id"],
             "inputs": {"detection": det_path, "id_zone_summary": id_path, "zone_summary": zone_path},
             "calibration": {"mode": self._run3_calibration_mode(c), "ppm": c["ppm"],
@@ -7117,9 +7121,9 @@ class Run1App:
                 indicator_rows)
 
         summary["architecture"] = {
-            "indicator_codes": "Y1 LC, Y2 LDP, Y3 Gap Acceptance, Y4 TTC, Y5 PET, Y6 V50, Y7 V85",
-            "domains": {"Distance": ["Y1", "Y2"], "Time": ["Y3", "Y4", "Y5"], "Speed": ["Y6", "Y7"]},
-            "movement_resolver": "Common: ID Zone Summary first_zone + last_zone, then shared fallbacks (Zones 6/7 ignored as endpoints)",
+            "indicator_codes": "Y1 LDP, Y2 Lateral Clearance, Y3 Gap Acceptance, Y4 TTC, Y5 PET, Y6 Speed (V50, V85, Mean, SD)",
+            "domains": {"Distance": ["Y1", "Y2"], "Time": ["Y3", "Y4", "Y5"], "Speed": ["Y6"]},
+            "movement_resolver": "Full flicker-cleaned zone sequence of each track matched to 6 patterns (1-3-4, 2-3-1, 1-3-6-7, 5-6-3-1, 2-3-4, 5-6-7); ambiguous fragments stay unclassified",
             "metric_coordinates": "Computed once per sample (batch); perspective or PPM + road angle",
             "risk_levels": "Exported per dimension; combination rule not defined in sources",
         }
