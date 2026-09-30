@@ -500,6 +500,59 @@ RUN3_DEFAULTS = {
 ZONE_IDS = list(range(1, 8))            # V27: Zone 7 added (second conflict area)
 CONFLICT_ZONE_IDS = (6, 7)              # conflict/search areas — never movement endpoints
 ZONE_NAMES = [f"Zone {i}" for i in ZONE_IDS]
+
+# V27(2): zone visits shorter/closer than this are treated as boundary flicker
+# when the Run 2 summaries are built (raw Detection_Records zones are untouched).
+ZONE_FLICKER_MERGE_S = 0.10
+
+
+def collect_zone_visits(zone_states, fallback_end):
+    """All (zone, start, end) visits of one track, including a visit that is
+    still open when processing ends. Sorted by start time."""
+    out = []
+    for zname, zs in zone_states.items():
+        for start, end in zs.get("visits", []):
+            out.append((zname, float(start), float(end)))
+        if zs.get("inside") and zs.get("entry_time") is not None:
+            end = zs.get("last_inside_time")
+            out.append((zname, float(zs["entry_time"]),
+                        float(end) if end is not None else float(fallback_end)))
+    out.sort(key=lambda v: (v[1], v[2]))
+    return out
+
+
+def clean_zone_visits(visits, merge_gap_s=ZONE_FLICKER_MERGE_S):
+    """Remove zone-boundary flicker from a track's visit list.
+
+    1. A short visit to another zone sandwiched between two visits of the same
+       zone (A -> B -> A, B lasting <= merge_gap_s) is dropped.
+    2. Consecutive visits of the same zone separated by <= merge_gap_s
+       (the point briefly left the polygon) are merged into one visit.
+    Real movements such as 1 -> 6 -> 5 are never changed.
+    """
+    vs = [list(v) for v in visits]
+    changed = True
+    while changed:
+        changed = False
+        i = 1
+        while i < len(vs) - 1:
+            a, b, c = vs[i - 1], vs[i], vs[i + 1]
+            if (a[0] == c[0] and a[0] != b[0]
+                    and b[2] - b[1] <= merge_gap_s
+                    and c[1] - a[2] <= 2 * merge_gap_s):
+                del vs[i]
+                changed = True
+            else:
+                i += 1
+        merged = []
+        for v in vs:
+            if merged and merged[-1][0] == v[0] and v[1] - merged[-1][2] <= merge_gap_s:
+                merged[-1][2] = max(merged[-1][2], v[2])
+                changed = True
+            else:
+                merged.append(v)
+        vs = merged
+    return [tuple(v) for v in vs]
 LINE_NAMES = [f"Line {i}" for i in range(1, 7)]
 
 
@@ -3972,7 +4025,6 @@ class Run1App:
             zone_track_state = {}
             line_track_state = {}
             zone_assignment_summary = defaultdict(lambda: defaultdict(int))
-            id_zone_history = defaultdict(list)
             trajectory_position = settings.get("trajectory_position", self.trajectory_position_var.get())
             trajectory_offset = float(settings.get("trajectory_offset", self.trajectory_offset_var.get() or 0))
             zone_confirmation_frames = 1
@@ -4452,13 +4504,6 @@ class Run1App:
                                     previous_zone_point = zstate.get("previous_confirmed_point")
                                     previous_confirmed_zone = zstate.get("previous_confirmed_zone")
 
-                                    # Keep a compact per-ID route history: Zone A -> Zone B -> ...
-                                    if confirmed_zone and confirmed_zone != previous_confirmed_zone:
-                                        id_zone_history[track_id].append({
-                                            "zone": confirmed_zone,
-                                            "timestamp": timestamp_now,
-                                        })
-
                                     # Close the previous confirmed Zone when a new Zone is confirmed.
                                     if previous_confirmed_zone and previous_confirmed_zone != confirmed_zone:
                                         oldzs = zstate.get("zone_states", {}).get(previous_confirmed_zone)
@@ -4883,31 +4928,27 @@ class Run1App:
 
             # Finalize a compact per-ID route summary before closing any files.
             if measurement_enabled:
-                for track_id, history in sorted(id_zone_history.items()):
-                    if not history:
-                        continue
+                for track_id in sorted(zone_track_state):
                     state_info = track_stats.get(track_id, {})
+                    last_time_final = state_info.get("last_frame", frame_index) / fps if fps > 0 else 0.0
+                    visits = clean_zone_visits(collect_zone_visits(
+                        zone_track_state[track_id].get("zone_states", {}), last_time_final
+                    ))
+                    if not visits:
+                        continue
                     class_name_final = state_info.get("class_name", "")
-                    zones_sequence = [item["zone"] for item in history]
-                    timestamps = [float(item["timestamp"]) for item in history]
-                    total_zone_time = 0.0
-                    zmap = zone_track_state.get(track_id, {}).get("zone_states", {})
-                    for zs in zmap.values():
-                        for v_start, v_end in zs.get("visits", []):
-                            total_zone_time += max(0.0, v_end - v_start)
-                        if zs.get("inside") and zs.get("entry_time") is not None:
-                            end_t = zs.get("last_inside_time")
-                            if end_t is None:
-                                end_t = state_info.get("last_frame", frame_index) / fps
-                            total_zone_time += max(0.0, float(end_t) - float(zs["entry_time"]))
-                    track_state_final = track_stats.get(track_id, {})
-                    first_seen_final = float(track_state_final.get("first_frame", 0)) / fps if fps > 0 else 0.0
-                    last_seen_final = float(track_state_final.get("last_frame", frame_index)) / fps if fps > 0 else 0.0
+                    zones_sequence = []
+                    for zname, _s, _e in visits:
+                        if not zones_sequence or zones_sequence[-1] != zname:
+                            zones_sequence.append(zname)
+                    total_zone_time = sum(max(0.0, e - s0) for _z, s0, e in visits)
+                    first_seen_final = float(state_info.get("first_frame", 0)) / fps if fps > 0 else 0.0
+                    last_seen_final = float(state_info.get("last_frame", frame_index)) / fps if fps > 0 else 0.0
                     unique_zones = []
                     for z in zones_sequence:
                         if z not in unique_zones:
                             unique_zones.append(z)
-                    transitions = sum(1 for i in range(1, len(zones_sequence)) if zones_sequence[i] != zones_sequence[i-1])
+                    transitions = len(zones_sequence) - 1
                     id_zone_summary_writer.writerow([
                         track_id, class_name_final,
                         f"{first_seen_final:.6f}", f"{last_seen_final:.6f}",
@@ -4928,20 +4969,16 @@ class Run1App:
                     state_info = track_stats.get(track_id, {})
                     last_frame_final = state_info.get("last_frame", frame_index)
                     last_time_final = last_frame_final / fps if fps > 0 else 0.0
-                    for zname, zs in zmap.get("zone_states", {}).items():
-                        visits = list(zs.get("visits", []))
-                        if zs.get("inside") and zs.get("entry_time") is not None:
-                            open_end = zs.get("last_inside_time")
-                            visits.append((float(zs["entry_time"]),
-                                           float(open_end) if open_end is not None else last_time_final))
-                        for start_t, end_t in visits:
-                            duration = max(0.0, float(end_t) - float(start_t))
-                            agg = zone_aggregate[zname]
-                            agg["ids"].add(track_id)
-                            agg["durations"].append(duration)
-                            agg["entries"] += 1
-                            agg["first_entry"] = start_t if agg["first_entry"] is None else min(agg["first_entry"], start_t)
-                            agg["last_entry"] = start_t if agg["last_entry"] is None else max(agg["last_entry"], start_t)
+                    for zname, start_t, end_t in clean_zone_visits(
+                        collect_zone_visits(zmap.get("zone_states", {}), last_time_final)
+                    ):
+                        duration = max(0.0, float(end_t) - float(start_t))
+                        agg = zone_aggregate[zname]
+                        agg["ids"].add(track_id)
+                        agg["durations"].append(duration)
+                        agg["entries"] += 1
+                        agg["first_entry"] = start_t if agg["first_entry"] is None else min(agg["first_entry"], start_t)
+                        agg["last_entry"] = start_t if agg["last_entry"] is None else max(agg["last_entry"], start_t)
 
                 for zname in ZONE_NAMES:
                     agg = zone_aggregate.get(zname)
@@ -4974,6 +5011,7 @@ class Run1App:
                             "trajectory_offset_percent": float(self.trajectory_offset_var.get()),
                             "temporal_confirmation_frames": 0,
                              "zone_assignment_rule": "Trajectory Position point-in-polygon only",
+                            "summary_flicker_merge_s": ZONE_FLICKER_MERGE_S,
                             "assignment_observations": {
                                 z: dict(v) for z, v in zone_assignment_summary.items()
                             },
@@ -5129,6 +5167,7 @@ class Run1App:
                     "trajectory_offset_percent": float(self.trajectory_offset_var.get()),
                     "temporal_confirmation_frames": 0,
                              "zone_assignment_rule": "Trajectory Position point-in-polygon only",
+                            "summary_flicker_merge_s": ZONE_FLICKER_MERGE_S,
                 },
                 "processing_time_seconds": round(total_time, 6),
                 "average_fps": round(average_fps, 6),
