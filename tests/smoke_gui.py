@@ -39,6 +39,13 @@ for key, val in (("lane_entry_motorcycle_m", "1.5"), ("lane_entry_car_m", "3.25"
 check("W_entry total", app.run3_w_entry_text.get() == "W_entry = 4.750 m", app.run3_w_entry_text.get())
 check("W_opp total", app.run3_w_opp_text.get() == "W_opp = 4.200 m", app.run3_w_opp_text.get())
 
+# --- Gap Acceptance conflict table given by the user ---
+check("Gap conflict table", m.RUN3_GAP_CONFLICT_MAP == {
+    "1-3-4": ["2-3-4"],
+    "1-3-6-7": ["2-3-4", "5-6-7", "5-6-3-1"],
+    "5-6-3-1": ["2-3-4", "1-3-6-7"],
+}, str(m.RUN3_GAP_CONFLICT_MAP))
+
 # --- settings round trip ---
 st = app.get_settings()
 for key in m.RUN3_GEOMETRY_KEYS:
