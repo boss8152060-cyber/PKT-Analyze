@@ -146,7 +146,7 @@ def make_rows(zone_plan, speed_ms=10.0, dt=1 / 60, jitter=0.0, seed=1):
     return rows
 
 
-class SpeedY6(unittest.TestCase):
+class SpeedTests(unittest.TestCase):
     def test_path_speed_known(self):
         rows = make_rows([(2, 61)])           # 1 s at 10 m/s -> 10 m -> 36 km/h
         d, t, v = CORE["path_speed"]([r["_timestamp"] for r in rows], [r["_m"] for r in rows])
@@ -209,27 +209,27 @@ class SpeedY6(unittest.TestCase):
         self.assertEqual(list(out), [0, 0, 0, 0, 0])
 
 
-class LdpY1(unittest.TestCase):
+class LdpTests(unittest.TestCase):
     ldp = staticmethod(lambda pts, w, k=1: CORE["ldp_for_zone"](pts, w, k))
 
     def test_straight_line_has_zero_deviation(self):
         pts = [(x * 0.1, 0.0) for x in range(101)]
         r = self.ldp(pts, 3.5)
         self.assertAlmostEqual(r["Delta_Y_m"], 0.0, places=9)
-        self.assertAlmostEqual(r["Y1_LDP_percent"], 0.0, places=9)
+        self.assertAlmostEqual(r["LDP_percent"], 0.0, places=9)
 
     def test_known_bump(self):
         # enters and leaves at y = 0, peak 0.35 m in the middle; W = 3.5 -> 10 %
         pts = [(x * 0.1, 0.35 * math.sin(math.pi * x / 100)) for x in range(101)]
         r = self.ldp(pts, 3.5)
         self.assertAlmostEqual(r["Delta_Y_m"], 0.35, places=6)
-        self.assertAlmostEqual(r["Y1_LDP_percent"], 10.0, places=4)
+        self.assertAlmostEqual(r["LDP_percent"], 10.0, places=4)
         self.assertEqual(r["P_in"], (0.0, 0.0))
 
     def test_offset_but_straight_is_zero(self):
         # drives straight but hugs the kerb (y = 1.2 m): LDP is about weaving, not offset
         pts = [(x * 0.1, 1.2) for x in range(101)]
-        self.assertAlmostEqual(self.ldp(pts, 3.5)["Y1_LDP_percent"], 0.0, places=9)
+        self.assertAlmostEqual(self.ldp(pts, 3.5)["LDP_percent"], 0.0, places=9)
 
     def test_diagonal_path_measured_perpendicular_to_chord(self):
         # straight diagonal path (45 deg) must give 0; a 0.2 m perpendicular bump gives 0.2
@@ -242,7 +242,7 @@ class LdpY1(unittest.TestCase):
 
     def test_denominator_is_full_width_not_half(self):
         pts = [(x * 0.1, 0.35 * math.sin(math.pi * x / 100)) for x in range(101)]
-        self.assertAlmostEqual(self.ldp(pts, 7.0)["Y1_LDP_percent"], 5.0, places=4)
+        self.assertAlmostEqual(self.ldp(pts, 7.0)["LDP_percent"], 5.0, places=4)
 
     def test_too_few_samples_or_zero_chord(self):
         self.assertIsNone(self.ldp([(0, 0), (1, 0)], 3.5))
@@ -261,7 +261,7 @@ class LdpY1(unittest.TestCase):
         self.assertLess(smooth, 0.05)
 
 
-class LateralClearanceY2(unittest.TestCase):
+class LateralClearanceTests(unittest.TestCase):
     lc = staticmethod(lambda a, h, b, la=2.0, lb=4.5, wa=0.8, wb=1.8:
                       CORE["lateral_clearance"](a, h, b, la, lb, wa, wb))
 
@@ -269,7 +269,7 @@ class LateralClearanceY2(unittest.TestCase):
         r = self.lc((0, 0), (1, 0), (1, 2))
         self.assertAlmostEqual(r["Lateral_m"], 2.0)
         self.assertAlmostEqual(r["Along_m"], 1.0)
-        self.assertAlmostEqual(r["Y2"], 2.0 - 1.3)
+        self.assertAlmostEqual(r["Clearance_m"], 2.0 - 1.3)
         self.assertTrue(r["Overlap"])
 
     def test_perpendicular_not_point_to_point(self):
@@ -293,7 +293,7 @@ class LateralClearanceY2(unittest.TestCase):
 
     def test_negative_when_boxes_overlap_sideways(self):
         r = self.lc((0, 0), (1, 0), (0, 0.9))          # 0.9 < (0.8 + 1.8) / 2
-        self.assertLess(r["Y2"], 0)
+        self.assertLess(r["Clearance_m"], 0)
 
     def test_same_direction_examples_from_the_user(self):
         sd = CORE["same_direction_in_zone"]
