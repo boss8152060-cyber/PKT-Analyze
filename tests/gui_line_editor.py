@@ -65,7 +65,8 @@ def main():
     app.zone_line_config_var.set(zpath)
     check("zone file loads", app.load_pkstudio_zones() is True)
     app.run3_site_id_var.set("8")
-    check("template mapping present before editing", "# 8|2-3-4|Line N" in app.run3_reference_text.get("1.0", "end-1c"))
+    check("mapping is pre-filled for Site 8 (Line 1-4)", "8|2-3-4|Line 1" in app.run3_reference_text.get("1.0", "end-1c").splitlines() and "8|1-3-6-7|Line 4" in app.run3_reference_text.get("1.0", "end-1c").splitlines())
+    check("preflight warns that the mapped Lines are not drawn yet", any("not drawn" in w for w in app.collect_run3_warnings()), str(app.collect_run3_warnings()))
 
     dlg = app.open_line_editor()
     check("editor opens", dlg is not None)
@@ -101,7 +102,7 @@ def main():
     print(text)
     check("mapping rows filled", all(row in text.splitlines() for row in
           ["8|2-3-4|Line 1", "8|5-6-7|Line 2", "8|5-6-3-1|Line 3", "8|1-3-6-7|Line 4"]))
-    check("commented template rows of those streams replaced", "# 8|2-3-4|Line N" not in text)
+    check("each mapping row appears exactly once", all(text.splitlines().count(r) == 1 for r in ["8|2-3-4|Line 1", "8|5-6-7|Line 2", "8|5-6-3-1|Line 3", "8|1-3-6-7|Line 4"]))
     check("header comment kept", "# Site_ID|Movement|Line N" in text)
     mapping = app._run3_parse_reference_mapping(text)
     check("mapping parses", mapping.get(("8", "5-6-3-1")) == "Line 3", str(mapping))
