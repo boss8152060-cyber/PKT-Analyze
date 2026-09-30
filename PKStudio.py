@@ -40,6 +40,7 @@ import subprocess
 import shutil
 import math
 import re
+import base64
 import numpy as np
 from collections import deque, defaultdict
 
@@ -880,6 +881,42 @@ def side_ttc(p_i, v_i, p_j, v_j, len_i, len_j, vmin, min_angle_deg=SIDE_TTC_MIN_
     ttc = {"later": max(t_i, t_j), "average": (t_i + t_j) / 2.0}.get(mode, min(t_i, t_j))
     return {"TTC": ttc, "t_i": t_i, "t_j": t_j, "d_i": s_i, "d_j": s_j,
             "window": window, "angle_deg": math.degrees(math.asin(min(1.0, abs(den))))}
+
+
+def canvas_to_video(cx, cy, scale, width, height):
+    """Canvas (screen) coordinates -> video pixel coordinates, clamped to the frame."""
+    x = int(round(cx / scale))
+    y = int(round(cy / scale))
+    return max(0, min(width - 1, x)), max(0, min(height - 1, y))
+
+
+def scale_points(points, src_w, src_h, dst_w, dst_h):
+    """Scale (x, y) points from a src_w x src_h frame to a dst_w x dst_h frame.
+    Returns the points unchanged when a size is unknown or the sizes match."""
+    pts = [(int(round(x)), int(round(y))) for x, y in points]
+    if not (src_w and src_h and dst_w and dst_h) or (src_w == dst_w and src_h == dst_h):
+        return pts
+    sx, sy = dst_w / float(src_w), dst_h / float(src_h)
+    return [(int(round(x * sx)), int(round(y * sy))) for x, y in pts]
+
+
+def update_reference_mapping_text(text, site_id, assignments):
+    """Reference Line Mapping text with `Site_ID|Movement|Line N` rows for the
+    given {movement: line_name}. Rows (active or commented-out template rows)
+    of the same site and movement are replaced; everything else is kept."""
+    site = str(site_id).strip()
+    out = []
+    for raw in str(text or "").splitlines():
+        body = raw.strip().lstrip("#").strip()
+        parts = [q.strip() for q in body.split("|")]
+        if len(parts) == 3 and parts[0] == site and parts[1] in assignments:
+            continue
+        out.append(raw)
+    while out and not out[-1].strip():
+        out.pop()
+    for movement, line_name in assignments.items():
+        out.append(f"{site}|{movement}|{line_name}")
+    return "\n".join(out)
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -892,6 +929,134 @@ RUN3_GAP_CONFLICT_MAP = {
     "5-6-3-1": ["2-3-4", "1-3-6-7"],
 }
 LINE_NAMES = [f"Line {i}" for i in range(1, 7)]
+
+
+class LineEditorDialog:
+    """Click two points on a video frame to place the Reference Lines that Gap
+    Acceptance needs (one per conflicting stream). Saves the Lines into the Zone
+    JSON file and fills the Reference Line Mapping text."""
+
+    def __init__(self, app, frame_bgr, frame_index, movements, assignments, lines):
+        self.app = app
+        self.frame_index = frame_index
+        self.h, self.w = frame_bgr.shape[:2]
+        self.movements = list(movements)
+        self.assign = dict(assignments)
+        self.points = {mv: [tuple(pt) for pt in lines.get(self.assign[mv], [])][:2] for mv in self.movements}
+        self.pending = None
+        self.current = next((mv for mv in self.movements if len(self.points[mv]) != 2), self.movements[0])
+
+        self.top = tk.Toplevel(app.root)
+        self.top.title("วาด Line สำหรับ Gap Acceptance")
+        max_w = max(640, min(1300, self.top.winfo_screenwidth() - 340))
+        max_h = max(360, min(820, self.top.winfo_screenheight() - 240))
+        self.scale = min(1.0, max_w / float(self.w), max_h / float(self.h))
+        shown = cv2.resize(frame_bgr, (int(self.w * self.scale), int(self.h * self.scale)))
+        self._draw_zones(shown)
+        ok, buf = cv2.imencode(".png", shown)
+        self.photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
+
+        side = ttk.Frame(self.top, padding=8)
+        side.grid(row=0, column=0, sticky="ns")
+        ttk.Label(side, text="1) เลือกกระแสรถ\n2) คลิก 2 จุดบนภาพ วางเส้นขวางทาง\n    ที่รถกระแสนั้นวิ่งผ่าน (ให้ยาวพอ\n    ที่รถทุกคันข้ามเส้นชัดเจน)\n3) กด \"บันทึก\"", justify="left").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        self.choice = tk.StringVar(value=self.current)
+        self.status_labels = {}
+        for i, mv in enumerate(self.movements, start=1):
+            ttk.Radiobutton(side, text=f"กระแส {mv}  →  {self.assign[mv]}", value=mv, variable=self.choice,
+                            command=lambda m=mv: self.select(m)).grid(row=i * 2 - 1, column=0, sticky="w")
+            ttk.Button(side, text="ล้าง", width=5, command=lambda m=mv: self.clear(m)).grid(row=i * 2 - 1, column=1, padx=(6, 0))
+            lab = ttk.Label(side, text="", foreground="#555555")
+            lab.grid(row=i * 2, column=0, columnspan=2, sticky="w", padx=(22, 0), pady=(0, 4))
+            self.status_labels[mv] = lab
+        nrow = len(self.movements) * 2 + 1
+        ttk.Separator(side, orient="horizontal").grid(row=nrow, column=0, columnspan=2, sticky="ew", pady=8)
+        ttk.Label(side, text=f"เฟรมที่ {frame_index} ของวิดีโอ ({self.w}×{self.h})", foreground="#555555").grid(row=nrow + 1, column=0, columnspan=2, sticky="w")
+        ttk.Button(side, text="บันทึก", command=self.save).grid(row=nrow + 2, column=0, columnspan=2, sticky="ew", pady=(10, 2))
+        ttk.Button(side, text="ปิด", command=self.top.destroy).grid(row=nrow + 3, column=0, columnspan=2, sticky="ew")
+
+        self.canvas = tk.Canvas(self.top, width=shown.shape[1], height=shown.shape[0], highlightthickness=0, cursor="crosshair")
+        self.canvas.grid(row=0, column=1, sticky="nsew")
+        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+        self.canvas.bind("<Button-1>", lambda e: self.add_point(e.x, e.y))
+        self.canvas.bind("<Button-3>", lambda e: self.clear(self.current))
+        self.redraw()
+
+    # ---- drawing ----
+    def _draw_zones(self, img):
+        overlay = img.copy()
+        for name, pts in self.app.zones.items():
+            if len(pts) < 3:
+                continue
+            arr = (np.array(pts, dtype=float) * self.scale).astype(np.int32)
+            cv2.fillPoly(overlay, [arr], (0, 200, 255))
+            cv2.polylines(img, [arr], True, (0, 120, 255), 2)
+            cx, cy = arr.mean(axis=0).astype(int)
+            cv2.putText(img, name.replace("Zone ", ""), (int(cx) - 6, int(cy) + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.addWeighted(overlay, 0.25, img, 0.75, 0, img)
+
+    def redraw(self):
+        self.canvas.delete("ov")
+        colors = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#008080"]
+        for i, mv in enumerate(self.movements):
+            col = colors[i % len(colors)]
+            pts = self.points[mv]
+            if len(pts) == 2:
+                (x1, y1), (x2, y2) = pts
+                self.canvas.create_line(x1 * self.scale, y1 * self.scale, x2 * self.scale, y2 * self.scale, fill=col, width=4, tags="ov")
+                for x, y in pts:
+                    self.canvas.create_oval(x * self.scale - 5, y * self.scale - 5, x * self.scale + 5, y * self.scale + 5, fill=col, outline="white", tags="ov")
+                self.canvas.create_text((x1 + x2) / 2 * self.scale + 6, (y1 + y2) / 2 * self.scale - 10, text=f"{mv} ({self.assign[mv]})", fill=col, anchor="w", font=("Segoe UI", 10, "bold"), tags="ov")
+                self.status_labels[mv].config(text="วาดแล้ว ✓", foreground="#0a7a0a")
+            else:
+                self.status_labels[mv].config(text="ยังไม่ได้วาด", foreground="#b00020")
+        if self.pending is not None:
+            x, y = self.pending
+            self.canvas.create_oval(x * self.scale - 6, y * self.scale - 6, x * self.scale + 6, y * self.scale + 6, outline="yellow", width=3, tags="ov")
+
+    # ---- interaction (also called directly by the tests) ----
+    def select(self, mv):
+        self.current = mv
+        self.choice.set(mv)
+        self.pending = None
+        self.redraw()
+
+    def clear(self, mv):
+        self.points[mv] = []
+        if mv == self.current:
+            self.pending = None
+        self.redraw()
+
+    def add_point(self, cx, cy):
+        x, y = canvas_to_video(cx, cy, self.scale, self.w, self.h)
+        if self.pending is None:
+            self.pending = (x, y)
+            self.points[self.current] = []
+        else:
+            if (x, y) == self.pending:
+                return
+            self.points[self.current] = [self.pending, (x, y)]
+            self.pending = None
+            nxt = next((m for m in self.movements if len(self.points[m]) != 2), None)
+            if nxt:
+                self.select(nxt)
+                return
+        self.redraw()
+
+    def save(self):
+        drawn = [mv for mv in self.movements if len(self.points[mv]) == 2]
+        if not drawn:
+            messagebox.showwarning("Line", "ยังไม่ได้วาดเส้นใดเลย", parent=self.top)
+            return False
+        missing = [mv for mv in self.movements if mv not in drawn]
+        if missing and not messagebox.askyesno(
+                "Line", "ยังไม่ได้วาดเส้นของกระแส: " + ", ".join(missing) + "\n\nบันทึกเฉพาะที่วาดแล้วหรือไม่?", parent=self.top):
+            return False
+        ok = self.app.apply_editor_lines(
+            {self.assign[mv]: self.points[mv] for mv in drawn},
+            {mv: self.assign[mv] for mv in drawn}, self.w, self.h)
+        if ok:
+            self.top.destroy()
+        return ok
 
 
 class Run1App:
@@ -1709,10 +1874,18 @@ class Run1App:
         if not loaded:
             raise ValueError("No valid Zone 1-7 definitions were found in the selected PK Studio file.")
 
-        # JSON is Zone-only in the current PK Studio format.
+        # Lines (optional): {"Line 1": [[x, y], [x, y]], ...}. They are in the frame size
+        # given by lines_frame_width/height (written by the Line editor); otherwise in the
+        # Zone file frame size. They are scaled to the real video size like the Zones.
         lines = {name: [] for name in LINE_NAMES}
         raw_lines = data.get("lines", {})
         if isinstance(raw_lines, dict):
+            try:
+                lines_w = int(data.get("lines_frame_width") or source_width or 0) or None
+                lines_h = int(data.get("lines_frame_height") or source_height or 0) or None
+            except Exception:
+                lines_w = lines_h = None
+            actual_w, actual_h = self._actual_video_size()
             for name, pts in raw_lines.items():
                 if name in lines and isinstance(pts, list):
                     cleaned = []
@@ -1722,7 +1895,7 @@ class Run1App:
                         except Exception:
                             pass
                     if len(cleaned) == 2:
-                        lines[name] = cleaned
+                        lines[name] = scale_points(cleaned, lines_w, lines_h, actual_w, actual_h)
 
         self.zones = zones
         self.lines = lines
@@ -1846,6 +2019,109 @@ class Run1App:
 
     def load_measurement_config(self):
         return self.load_pkstudio_zones()
+
+    # ========================================================
+    # LINE EDITOR (Reference Lines for Gap Acceptance)
+    # ========================================================
+
+    def open_line_editor(self):
+        """Open the dialog that draws the Reference Lines on a frame of the video."""
+        video = self.video_var.get().strip()
+        if not video or not os.path.isfile(video):
+            messagebox.showerror("วาด Line", "เลือกไฟล์วิดีโอ (Video) ก่อน — Line วาดบนเฟรมของวิดีโอ")
+            return None
+        if not any(len(v) >= 3 for v in self.zones.values()):
+            if not messagebox.askyesno("วาด Line", "ยังไม่ได้โหลดไฟล์ Zone (Line จะถูกบันทึกลงไฟล์ Zone)\n\nโหลดไฟล์ Zone ตอนนี้หรือไม่?"):
+                return None
+            if not self.load_pkstudio_zones():
+                return None
+        cap = cv2.VideoCapture(video)
+        try:
+            ok, frame = cap.read()
+        finally:
+            cap.release()
+        if not ok or frame is None:
+            messagebox.showerror("วาด Line", "อ่านเฟรมจากวิดีโอไม่ได้")
+            return None
+        movements = []
+        for streams in RUN3_GAP_CONFLICT_MAP.values():
+            for mv in streams:
+                if mv not in movements:
+                    movements.append(mv)
+        site = self.run3_site_id_var.get().strip()
+        text = self.run3_reference_text.get("1.0", "end-1c") if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
+        try:
+            existing = {mv: ln for (st, mv), ln in self._run3_parse_reference_mapping(text).items() if st == site}
+        except Exception:
+            existing = {}
+        assignments = {}
+        used = set()
+        for mv in movements:
+            if existing.get(mv) in LINE_NAMES:
+                assignments[mv] = existing[mv]
+                used.add(existing[mv])
+        free = [ln for ln in LINE_NAMES if ln not in used]
+        for mv in movements:
+            if mv not in assignments:
+                assignments[mv] = free.pop(0)
+        self.line_editor = LineEditorDialog(self, frame, 0, movements, assignments, self.lines)
+        return self.line_editor
+
+    def apply_editor_lines(self, lines_by_name, assignments, frame_w, frame_h):
+        """Store the drawn Lines, write them into the Zone JSON and fill the mapping text."""
+        try:
+            path = self.zone_line_config_var.get().strip()
+            if path.lower().endswith(".json") and os.path.isfile(path):
+                if not messagebox.askyesno(
+                        "บันทึก Line",
+                        f"เพิ่ม Line ลงในไฟล์ Zone:\n{path}\n\n(ไฟล์เดิมจะสำรองไว้เป็น .bak ครั้งแรก) ตกลงหรือไม่?"):
+                    return False
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if not os.path.isfile(path + ".bak"):
+                    shutil.copyfile(path, path + ".bak")
+            else:
+                new_path = filedialog.asksaveasfilename(
+                    title="บันทึกโซน + Line เป็นไฟล์ JSON ใหม่", defaultextension=".json",
+                    filetypes=[("JSON files", "*.json")],
+                    initialfile=(os.path.splitext(os.path.basename(path))[0] if path else "zones") + "_with_lines.json")
+                if not new_path:
+                    return False
+                path = new_path
+                zones = []
+                for index, name in enumerate(ZONE_NAMES, start=1):
+                    pts = self.zones.get(name, [])
+                    if len(pts) >= 3:
+                        zones.append({"id": index, "name": name, "points": [list(q) for q in pts]})
+                data = {"video_path": self.video_var.get().strip(),
+                        "frame_width": self.zone_source_width or frame_w,
+                        "frame_height": self.zone_source_height or frame_h,
+                        "zones": zones}
+            saved = data.get("lines") if isinstance(data.get("lines"), dict) else {}
+            for name, pts in lines_by_name.items():
+                saved[name] = [list(q) for q in pts]
+            data["lines"] = saved
+            data["lines_frame_width"] = frame_w
+            data["lines_frame_height"] = frame_h
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception as exc:
+            messagebox.showerror("บันทึก Line", f"บันทึกไม่สำเร็จ:\n{exc}")
+            return False
+
+        for name, pts in lines_by_name.items():
+            self.lines[name] = [tuple(q) for q in pts]
+        self.zone_line_config_var.set(path)
+        site = self.run3_site_id_var.get().strip()
+        old = self.run3_reference_text.get("1.0", "end-1c") if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
+        new_text = update_reference_mapping_text(old, site, assignments)
+        self.run3_reference_mapping_text = new_text
+        if hasattr(self, "run3_reference_text"):
+            self.run3_reference_text.delete("1.0", "end")
+            self.run3_reference_text.insert("1.0", new_text)
+        self.refresh_measurement_status()
+        self.status_var.set(f"บันทึก {len(lines_by_name)} Line ลง {os.path.basename(path)} และเติม Reference Line Mapping แล้ว")
+        return True
 
     def save_measurement_config(self):
         # Save the currently loaded geometry as a normalized JSON snapshot.
@@ -2341,8 +2617,11 @@ class Run1App:
             row=6, column=0, sticky="w", padx=(0, 8), pady=4
         )
         ttk.Entry(frame, textvariable=self.zone_line_config_var).grid(
-            row=6, column=1, columnspan=2, sticky="ew", pady=4
+            row=6, column=1, sticky="ew", pady=4
         )
+        ttk.Button(
+            frame, text="วาด Line…", command=self.open_line_editor
+        ).grid(row=6, column=2, padx=(5, 0))
         ttk.Button(
             frame, text="Browse", command=self.load_measurement_config
         ).grid(row=6, column=3, padx=(5, 0))
