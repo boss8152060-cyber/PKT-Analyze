@@ -447,7 +447,6 @@ RUN3_DEFAULTS = {
     "ttc_heading_max_deg": "45",            # same-direction test for rear-end / deviation
     "ttc_velocity_window_s": "0.50",        # centred window of observed samples for velocity
     "ttc_min_speed_kmh": "2.0",             # follower must be moving
-    "ldp_lane_width_m": "3.50",             # v27 only (dY/(W/2)); replaced by the lane widths below in v28(3)
     # V28: road geometry (m). Blank = not entered (never guessed).
     # W_entry = entry motorcycle lane + entry car lane (side with the side street: Zones 2-3-4)
     # W_opp   = opposite motorcycle lane + opposite car lane (Zones 5-6-7)
@@ -456,7 +455,6 @@ RUN3_DEFAULTS = {
     "lane_opp_motorcycle_m": "",
     "lane_opp_car_m": "",
     "median_m": "",                         # recorded only; not used in any indicator
-    "ldp_reference": "Initial position",    # or "Line N" drawn on the lane centreline
     "ldp_motorcycle_only": True,
     "ldp_smoothing_samples": "5",           # rolling median to suppress bbox jitter (1 = off)
     # Speed: user can select any of Zones 1–6. CSV assigns each selected zone
@@ -467,7 +465,7 @@ RUN3_DEFAULTS = {
     "pet_zone6": True,
     "pet_zones": [3, 6],
     "ttc_zones": [1, 2, 3, 4, 5, 6, 7],
-    "ldp_zones": [2, 3, 4, 5],
+    "ldp_zones": [2, 3, 4, 5, 6, 7],
     "gap_subject_134": True,
     "gap_subject_1367": True,
     "gap_subject_5631": True,
@@ -705,6 +703,43 @@ def track_speed_records(rows, speed_zones, movement_id="", movement_status="", s
         add("Movement", movement_id, [r for r in valid if r["_zone_num"] in zones],
             "Partial_Movement" if movement_status == "Partial" else "")
     return out
+
+
+LDP_MIN_CHORD_M = 1.0   # the entry->exit reference line must be at least this long
+
+
+def ldp_for_zone(points, lane_width_m, smoothing=1):
+    """Y1 LDP of ONE vehicle in ONE zone (SPEC v28 section 4).
+
+    Reference line = straight line from the point where the vehicle entered the
+    zone (first sample) to the point where it left (last sample). Lateral
+    deviation of every sample = its perpendicular distance to that line;
+    dY = the maximum. LDP = dY / W x 100 with W = full width of that side's
+    carriageway (motorcycle lane + car lane).
+    points are metric (x, y) in time order. Returns a dict or None (fewer than
+    3 samples / zero-length chord)."""
+    pts = np.asarray(points, dtype=float).reshape(-1, 2)
+    if len(pts) < 3:
+        return None
+    if smoothing and int(smoothing) > 1:
+        # shrinking window at the ends on purpose: P_in / P_out must stay at the
+        # zone entry / exit (unlike Y6, LDP is not a path-length measure)
+        pts = np.stack([rolling_median(pts[:, 0], smoothing), rolling_median(pts[:, 1], smoothing)], axis=1)
+    p_in, p_out = pts[0], pts[-1]
+    chord = p_out - p_in
+    length = float(np.hypot(chord[0], chord[1]))
+    if length < 1e-9:
+        return None
+    u = chord / length
+    rel = pts - p_in
+    dev = np.abs(rel[:, 0] * u[1] - rel[:, 1] * u[0])       # |cross(u, p - p_in)|
+    dy = float(np.max(dev))
+    return {
+        "P_in": (float(p_in[0]), float(p_in[1])), "P_out": (float(p_out[0]), float(p_out[1])),
+        "Chord_Length_m": length, "Delta_Y_m": dy, "Mean_Dev_m": float(np.mean(dev)),
+        "Samples": len(pts), "Y1_LDP_percent": dy / float(lane_width_m) * 100.0,
+        "Short_Chord": length < LDP_MIN_CHORD_M,
+    }
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -923,7 +958,6 @@ class Run1App:
         self.run3_ttc_heading_max_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_heading_max_deg"])
         self.run3_ttc_velocity_window_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_velocity_window_s"])
         self.run3_ttc_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_speed_kmh"])
-        self.run3_ldp_lane_width_var = tk.StringVar(value=RUN3_DEFAULTS["ldp_lane_width_m"])
         # V28: road geometry (lane widths per side + median)
         self.run3_geometry_vars = {
             key: tk.StringVar(value=RUN3_DEFAULTS[key]) for key in RUN3_GEOMETRY_KEYS
@@ -932,7 +966,6 @@ class Run1App:
         self.run3_w_opp_text = tk.StringVar(value="W_opp = -")
         for _var in self.run3_geometry_vars.values():
             _var.trace_add("write", lambda *_: self._update_lane_totals())
-        self.run3_ldp_reference_var = tk.StringVar(value=RUN3_DEFAULTS["ldp_reference"])
         self.run3_ldp_motorcycle_only_var = tk.BooleanVar(value=RUN3_DEFAULTS["ldp_motorcycle_only"])
         self.run3_ldp_smoothing_var = tk.StringVar(value=RUN3_DEFAULTS["ldp_smoothing_samples"])
         self.run3_gap_subject_134_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_subject_134"])
@@ -1256,8 +1289,8 @@ class Run1App:
         sw = ttk.LabelFrame(frame, text="ตัวชี้วัด (Y1–Y6)", padding=(8, 4))
         sw.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 4)); r += 1
         ttk.Label(sw, text="ด้านระยะทาง").grid(row=0, column=0, sticky="w", padx=(0, 10))
-        ttk.Checkbutton(sw, text="Y1 Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=0, column=1, sticky="w", padx=(0, 12))
-        ttk.Checkbutton(sw, text="Y2 LDP", variable=self.run3_ldp_enabled_var).grid(row=0, column=2, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(sw, text="Y2 Lateral Clearance", variable=self.run3_lc_enabled_var).grid(row=0, column=2, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(sw, text="Y1 LDP", variable=self.run3_ldp_enabled_var).grid(row=0, column=1, sticky="w", padx=(0, 12))
         ttk.Label(sw, text="ด้านเวลา").grid(row=1, column=0, sticky="w", padx=(0, 10))
         ttk.Checkbutton(sw, text="Y3 Gap Acceptance", variable=self.run3_gap_enabled_var).grid(row=1, column=1, sticky="w", padx=(0, 12))
         ttk.Checkbutton(sw, text="Y4 TTC", variable=self.run3_ttc_enabled_var).grid(row=1, column=2, sticky="w", padx=(0, 12))
@@ -1299,15 +1332,10 @@ class Run1App:
         ttk.Entry(box, textvariable=self.run3_speed_smoothing_var, width=8).grid(row=2, column=3, sticky="w", pady=2)
         zone_row("Y1 Lateral Clearance — Zones", "ใช้ observation จริงและจับคู่เวลาที่ใกล้กัน — ไม่ทำ interpolation", self.run3_lc_zone_vars)
 
-        box = zone_row("Y2 LDP — Zones", "LDP = ΔY / (W/2) × 100 — ΔY วัดจากตำแหน่งเริ่มต้นใน Zone หรือจาก Line ที่วาดเป็นเส้นกึ่งกลางช่องจราจร", self.run3_ldp_zone_vars)
-        ttk.Label(box, text="W (v27 เดิม — จะแทนด้วยความกว้างถนนด้านบนใน v28(3)) (m)").grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Entry(box, textvariable=self.run3_ldp_lane_width_var, width=8).grid(row=2, column=2, sticky="w", pady=2)
-        ttk.Label(box, text="ΔY อ้างอิง").grid(row=2, column=3, sticky="e", pady=2)
-        ttk.Combobox(box, textvariable=self.run3_ldp_reference_var, state="readonly", width=16,
-                     values=["Initial position"] + LINE_NAMES).grid(row=2, column=4, columnspan=2, sticky="w", pady=2)
-        ttk.Label(box, text="Median smoothing (samples)").grid(row=3, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Entry(box, textvariable=self.run3_ldp_smoothing_var, width=8).grid(row=3, column=2, sticky="w", pady=2)
-        ttk.Checkbutton(box, text="เฉพาะรถจักรยานยนต์", variable=self.run3_ldp_motorcycle_only_var).grid(row=3, column=3, columnspan=3, sticky="w", pady=2)
+        box = zone_row("Y1 LDP — Zones", "LDP = ΔY ÷ W × 100 — ΔY = ระยะตั้งฉากของ trajectory จากเส้นอ้างอิง (จุดเข้า→จุดออกโซน); เฉพาะรถทางหลัก 2-3-4 (W_entry) และ 5-6-7 (W_opp)", self.run3_ldp_zone_vars)
+        ttk.Label(box, text="Median smoothing (samples)").grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Entry(box, textvariable=self.run3_ldp_smoothing_var, width=8).grid(row=2, column=2, sticky="w", pady=2)
+        ttk.Checkbutton(box, text="เฉพาะรถจักรยานยนต์", variable=self.run3_ldp_motorcycle_only_var).grid(row=2, column=3, columnspan=3, sticky="w", pady=2)
 
         box = zone_row("Y4 TTC — Zones (ความขัดแย้งแบบชนท้าย / เลี้ยว-เบี่ยงทิศทางเดียวกัน)", "TTC = S / CS; S = ระยะว่างระหว่างรถ, CS = ความเร็วเข้าใกล้ (Closing speed)", self.run3_ttc_zone_vars)
         for i, (label, var) in enumerate((("บันทึกเมื่อ TTCmin ≤ (s)", self.run3_ttc_max_record_var),
@@ -2812,9 +2840,7 @@ class Run1App:
                 "ttc_heading_max_deg": self.run3_ttc_heading_max_var.get(),
                 "ttc_velocity_window_s": self.run3_ttc_velocity_window_var.get(),
                 "ttc_min_speed_kmh": self.run3_ttc_min_speed_var.get(),
-                "ldp_lane_width_m": self.run3_ldp_lane_width_var.get(),
                 **{key: self.run3_geometry_vars[key].get() for key in RUN3_GEOMETRY_KEYS},
-                "ldp_reference": self.run3_ldp_reference_var.get(),
                 "ldp_motorcycle_only": self.run3_ldp_motorcycle_only_var.get(),
                 "ldp_smoothing_samples": self.run3_ldp_smoothing_var.get(),
                 "vehicle_lengths": {name: var.get() for name, var in self.run3_length_vars.items()},
@@ -2945,9 +2971,7 @@ class Run1App:
                 ("ttc_heading_max_deg", self.run3_ttc_heading_max_var),
                 ("ttc_velocity_window_s", self.run3_ttc_velocity_window_var),
                 ("ttc_min_speed_kmh", self.run3_ttc_min_speed_var),
-                ("ldp_lane_width_m", self.run3_ldp_lane_width_var),
                 ("speed_smoothing_samples", self.run3_speed_smoothing_var),
-                ("ldp_reference", self.run3_ldp_reference_var),
                 ("ldp_motorcycle_only", self.run3_ldp_motorcycle_only_var),
                 ("ldp_smoothing_samples", self.run3_ldp_smoothing_var),
                 ("waiting_speed_threshold", self.run3_waiting_speed_threshold_var),
@@ -3618,15 +3642,13 @@ class Run1App:
             self._run3_float(self.run3_ttc_min_speed_var.get(), "TTC minimum follower speed (km/h)", positive=False)
         for key in RUN3_GEOMETRY_KEYS:
             text = str(self.run3_geometry_vars[key].get()).strip()
-            if text:   # optional until the V28 LDP consumes them; must be numeric when entered
+            if text:   # must be numeric when entered (lane widths are required when Y1 LDP is enabled)
                 self._run3_float(text, f"road geometry {key}", positive=(key != "median_m"))
         if enabled["ldp"]:
-            need_zone(self.run3_ldp_zone_vars, "Y2 LDP")
-            self._run3_float(self.run3_ldp_lane_width_var.get(), "LDP lane width W (m)")
+            need_zone(self.run3_ldp_zone_vars, "Y1 LDP")
             self._run3_float(self.run3_ldp_smoothing_var.get(), "LDP smoothing samples")
-            ref = self.run3_ldp_reference_var.get().strip()
-            if ref in LINE_NAMES and len(self.lines.get(ref, [])) != 2:
-                raise ValueError(f"LDP reference {ref} is selected but that Line is not loaded.")
+            for key in ("lane_entry_motorcycle_m", "lane_entry_car_m", "lane_opp_motorcycle_m", "lane_opp_car_m"):
+                self._run3_float(self.run3_geometry_vars[key].get(), f"road geometry {key} (required by Y1 LDP)")
         if enabled["pet"]:
             need_zone(self.run3_pet_zone_vars, "Y5 PET (Zone 3 / Zone 6)")
             self._run3_float(self.run3_pet_interaction_distance_var.get(), "PET interaction distance (m)")
@@ -3661,7 +3683,7 @@ class Run1App:
             "lc": ("Y1 Lateral Clearance", self.run3_lc_zone_vars),
             "ttc": ("Y4 TTC", self.run3_ttc_zone_vars),
             "pet": ("Y5 PET", self.run3_pet_zone_vars),
-            "ldp": ("Y2 LDP", self.run3_ldp_zone_vars),
+            "ldp": ("Y1 LDP", self.run3_ldp_zone_vars),
         }
         defined = {z for z in ZONE_IDS if len(self.zones.get(f"Zone {z}", [])) >= 3}
         any_enabled = any(bool(getattr(self, f"run3_{k}_enabled_var").get())
@@ -5796,6 +5818,11 @@ class Run1App:
             if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
         )
         pet_max = num(self.run3_pet_max_var, None)
+        geometry = {key: num(self.run3_geometry_vars[key], None) for key in RUN3_GEOMETRY_KEYS}
+        def lane_total(a, b):
+            return geometry[a] + geometry[b] if geometry[a] is not None and geometry[b] is not None else None
+        w_entry = lane_total("lane_entry_motorcycle_m", "lane_entry_car_m")
+        w_opp = lane_total("lane_opp_motorcycle_m", "lane_opp_car_m")
         return {
             "site_id": self.run3_site_id_var.get().strip(),
             "speed_enabled": bool(self.run3_speed_enabled_var.get()),
@@ -5823,9 +5850,8 @@ class Run1App:
             "ttc_heading_max_deg": num(self.run3_ttc_heading_max_var, 45.0),
             "ttc_velocity_window_s": num(self.run3_ttc_velocity_window_var, 0.5),
             "ttc_min_speed_kmh": num(self.run3_ttc_min_speed_var, 2.0),
-            "ldp_lane_width_m": num(self.run3_ldp_lane_width_var, None),
-            "geometry": {key: num(self.run3_geometry_vars[key], None) for key in RUN3_GEOMETRY_KEYS},
-            "ldp_reference": str(self.run3_ldp_reference_var.get()).strip() or "Initial position",
+            "geometry": geometry,
+            "w_entry_m": w_entry, "w_opp_m": w_opp,
             "ldp_motorcycle_only": bool(self.run3_ldp_motorcycle_only_var.get()),
             "ldp_smoothing_samples": int(num(self.run3_ldp_smoothing_var, 5) or 1),
             "gap_movements": gap_movements,
@@ -6619,80 +6645,58 @@ class Run1App:
     # LDP — Y2 (Lane / Lateral Deviation Position)
     # ========================================================
 
-    @staticmethod
-    def _rolling_median(values, k):
-        if k <= 1 or len(values) < 3:
-            return np.asarray(values, dtype=float)
-        k = int(k) if int(k) % 2 == 1 else int(k) + 1
-        h = k // 2
-        a = np.asarray(values, dtype=float)
-        return np.array([np.median(a[max(0, i - h): i + h + 1]) for i in range(len(a))])
-
-    def _run3_ldp(self, tracks, c):
-        """LDP = ΔY / (W/2) x 100 (กรมทางหลวง, 2569).
-
-        ΔY: maximum lateral deviation inside the zone, measured either from
-        the vehicle's initial lateral position in that zone ("Initial
-        position", as in the DOH worked example) or from a Line N drawn on
-        the lane centreline. W: lane width entered by the researcher.
-        """
-        W = c["ldp_lane_width_m"]
-        ref = c["ldp_reference"]
-        k = c["ldp_smoothing_samples"]
+    def _run3_ldp(self, tracks, c, movement_by_id, status_by_id):
+        """Y1 LDP (SPEC v28 section 4): main-road vehicles only (2-3-4 -> W_entry,
+        5-6-7 -> W_opp), zones selected in `ldp_zones`, metric trajectory points."""
+        widths = {"entry": c["w_entry_m"], "opposite": c["w_opp_m"]}
         mode = self._run3_calibration_mode(c)
-        centre = None
-        if ref in LINE_NAMES:
-            line = self.lines.get(ref, [])
-            if len(line) != 2:
-                raise ValueError(f"LDP reference {ref} is not drawn/loaded.")
-            centre = self._run3_to_metric(line, c)
+        k = c["ldp_smoothing_samples"]
         out = []
         for tid, rows in tracks.items():
             if not rows:
+                continue
+            movement = movement_by_id.get(str(tid), "")
+            if not movement or status_by_id.get(str(tid)) != "Exact":
+                continue
+            info = MOVEMENT_PATTERNS[movement]
+            if not info["main_road"]:
                 continue
             cls = self._run3_canonical_class(rows[0].get("class_name", ""))
             if cls.lower() == "person":
                 continue
             if c["ldp_motorcycle_only"] and cls != "Motorcycle":
                 continue
-            by_zone = defaultdict(list)
-            for r in rows:
-                if r.get("_zone_num") in c["ldp_zones"] and r.get("_m") is not None:
-                    by_zone[r["_zone_num"]].append(r)
-            for zone in sorted(by_zone):
-                zr = by_zone[zone]
-                if len(zr) < 3:
+            W = widths[info["side"]]
+            if not W:
+                raise ValueError(f"LDP needs the lane widths of the {info['side']} side (Road width inputs).")
+            for zone in info["sequence"]:
+                if zone not in c["ldp_zones"]:
                     continue
-                M = np.array([r["_m"] for r in zr])
-                if centre is None:
-                    lat = self._rolling_median(M[:, 1], k)
-                    base = float(lat[0])
-                    dev = np.abs(lat - base)
-                else:
-                    p0, p1 = centre[0], centre[1]
-                    dvec = p1 - p0; nrm = math.hypot(dvec[0], dvec[1])
-                    signed = ((M[:, 0] - p0[0]) * dvec[1] - (M[:, 1] - p0[1]) * dvec[0]) / nrm
-                    lat = self._rolling_median(signed, k)
-                    base = 0.0
-                    dev = np.abs(lat)
-                dy = float(np.max(dev))
-                ldp = dy / (W / 2.0) * 100.0
+                zr = [r for r in rows if r.get("_zone_num") == zone and r.get("_m") is not None]
+                res = ldp_for_zone([r["_m"] for r in zr], W, k)
+                if res is None:
+                    continue
+                ldp = res["Y1_LDP_percent"]
                 dt = zr[-1]["_timestamp"] - zr[0]["_timestamp"]
                 dist = self._run3_segment_distance_sum([r["_m"] for r in zr])
                 speed = dist / dt * 3.6 if dt > 0 else None
                 out.append({
-                    "Site_ID": c["site_id"], "Vehicle_ID": tid, "Vehicle_Class": cls, "Zone": f"Zone {zone}",
+                    "Site_ID": c["site_id"], "Vehicle_ID": tid, "Vehicle_Class": cls,
+                    "Movement": movement, "Zone": f"Zone {zone}", "Side": info["side"],
                     "Start_Time": f"{zr[0]['_timestamp']:.6f}", "End_Time": f"{zr[-1]['_timestamp']:.6f}",
-                    "Samples": len(zr), "Reference": ref, "Lane_Width_m": f"{W:.3f}",
-                    "Reference_Lateral_m": f"{base:.6f}", "Delta_Y_m": f"{dy:.6f}",
-                    "Y2_LDP_percent": f"{ldp:.3f}",
-                    "Mean_Speed_kmh": self._fmt(speed, 3),
+                    "Samples": res["Samples"],
+                    "P_in_x_m": f"{res['P_in'][0]:.4f}", "P_in_y_m": f"{res['P_in'][1]:.4f}",
+                    "P_out_x_m": f"{res['P_out'][0]:.4f}", "P_out_y_m": f"{res['P_out'][1]:.4f}",
+                    "Chord_Length_m": f"{res['Chord_Length_m']:.4f}",
+                    "Delta_Y_m": f"{res['Delta_Y_m']:.6f}", "Lane_Width_W_m": f"{W:.3f}",
+                    "Y1_LDP_percent": f"{ldp:.3f}",
                     "LDP_Level": self._level_ldp(ldp),
+                    "Mean_Speed_kmh": self._fmt(speed, 3),
                     "Speed_Level": self._level_ldp_speed(speed) if speed is not None else "",
                     "Calibration_Mode": mode,
                     "QC_Flag": ";".join(x for x in [
+                        "Short_Chord_Reference_Line_Unreliable" if res["Short_Chord"] else "",
                         "LDP_Above_100_Check_Lane_Width_or_Tracking" if ldp > 100 else "",
-                        "Road_Angle_Default_0_Check" if (c["perspective"] is None and abs(c["axis_deg"]) < 1e-9) else "",
                         self._run3_qc_calibration(c),
                     ] if x),
                 })
@@ -6791,19 +6795,24 @@ class Run1App:
             summary["diagnostics"]["lc"] = f"rows={len(rows)}; time-matched candidates={seen}; time_tolerance_s={tol:.6f}"
         run_step("lc", "Run_3_Y1_Lateral_Clearance.csv", do_lc)
 
-        # ---------------- Y2 LDP (distance) ----------------
+        # ---------------- Y1 LDP (distance) ----------------
         def do_ldp():
-            status("Run 3 — Y2 LDP...")
-            rows = self._run3_ldp(tracks, c)
-            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Zone","Start_Time","End_Time","Samples","Reference","Lane_Width_m","Reference_Lateral_m","Delta_Y_m","Y2_LDP_percent","Mean_Speed_kmh","LDP_Level","Speed_Level","Calibration_Mode","QC_Flag"]
-            outputs["ldp"] = write_csv("Run_3_Y2_LDP.csv", fields, rows)
-            vals = [float(r["Y2_LDP_percent"]) for r in rows]
-            s = indicator("Y2", "Lane/Lateral Deviation Position (LDP)", "Distance", "%", "All", vals,
-                          f"reference={c['ldp_reference']}; W={c['ldp_lane_width_m']} m")
-            s["Level_Counts"] = {lv: sum(1 for r in rows if r["LDP_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
-            summary["indicators"]["Y2_LDP"] = s
-            summary["diagnostics"]["ldp"] = f"rows={len(rows)}; zones={sorted(c['ldp_zones'])}; motorcycle_only={c['ldp_motorcycle_only']}"
-        run_step("ldp", "Run_3_Y2_LDP.csv", do_ldp)
+            status("Run 3 — Y1 LDP...")
+            rows = self._run3_ldp(tracks, c, movement_by_id, movement_source_by_id)
+            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","Y1_LDP_percent","LDP_Level","Mean_Speed_kmh","Speed_Level","Calibration_Mode","QC_Flag"]
+            outputs["ldp"] = write_csv("Run_3_Y1_LDP.csv", fields, rows)
+            vals = [float(r["Y1_LDP_percent"]) for r in rows]
+            note = f"W_entry={c['w_entry_m']} m; W_opp={c['w_opp_m']} m; smoothing={c['ldp_smoothing_samples']}"
+            s_ = indicator("Y1", "Lane/Lateral Deviation Position (LDP)", "Distance", "%", "All", vals, note)
+            for z in sorted(c["ldp_zones"]):
+                indicator("Y1", "Lane/Lateral Deviation Position (LDP)", "Distance", "%", f"Zone {z}",
+                          [float(r["Y1_LDP_percent"]) for r in rows if r["Zone"] == f"Zone {z}"])
+            s_["Level_Counts"] = {lv: sum(1 for r in rows if r["LDP_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
+            summary["indicators"]["Y1_LDP"] = s_
+            summary["diagnostics"]["ldp"] = (f"rows={len(rows)}; zones={sorted(c['ldp_zones'])}; "
+                                             f"motorcycle_only={c['ldp_motorcycle_only']}; main-road movements 2-3-4 / 5-6-7 only; "
+                                             "LDP_Level uses the DOH thresholds (30/50/80 %) defined for dY/(W/2) - confirm for dY/W")
+        run_step("ldp", "Run_3_Y1_LDP.csv", do_ldp)
 
         # ---------------- Y3 Gap Acceptance (time) ----------------
         def do_gap():
