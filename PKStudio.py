@@ -721,8 +721,8 @@ def ldp_for_zone(points, lane_width_m, smoothing=1):
     Reference line = straight line from the point where the vehicle entered the
     zone (first sample) to the point where it left (last sample). Lateral
     deviation of every sample = its perpendicular distance to that line;
-    dY = the maximum. LDP = dY / W x 100 with W = full width of that side's
-    carriageway (motorcycle lane + car lane).
+    dY = the maximum. LDP = dY / (W/2) x 100 with W = full width of that side's
+    carriageway (motorcycle lane + car lane), so the divisor is W / 2.
     points are metric (x, y) in time order. Returns a dict or None (fewer than
     3 samples / zero-length chord)."""
     pts = np.asarray(points, dtype=float).reshape(-1, 2)
@@ -744,7 +744,7 @@ def ldp_for_zone(points, lane_width_m, smoothing=1):
     return {
         "P_in": (float(p_in[0]), float(p_in[1])), "P_out": (float(p_out[0]), float(p_out[1])),
         "Chord_Length_m": length, "Delta_Y_m": dy, "Mean_Dev_m": float(np.mean(dev)),
-        "Samples": len(pts), "LDP_percent": dy / float(lane_width_m) * 100.0,
+        "Samples": len(pts), "LDP_percent": dy / (float(lane_width_m) / 2.0) * 100.0,
         "Short_Chord": length < LDP_MIN_CHORD_M,
     }
 
@@ -1478,7 +1478,7 @@ class Run1App:
         box = zone_row("Lateral Clearance — Zones", "คู่รถทิศทางเดียวกัน (ลำดับโซนมีช่วงร่วมกัน) ในโซนเดียวกัน; วัดตั้งฉากกับทิศที่รถ A เคลื่อนที่ เมื่อกรอบรถซ้อนกันตามแนวยาว; ถ้ามีจักรยานยนต์ในคู่ รถจักรยานยนต์คือ A", self.run3_lc_zone_vars)
         ttk.Checkbutton(box, text="เฉพาะคู่ที่มีรถจักรยานยนต์ (ไม่ติ๊ก = ทุกคู่ของยานพาหนะทุกประเภท)", variable=self.run3_lc_motorcycle_pairs_only_var).grid(row=2, column=0, columnspan=8, sticky="w", pady=2)
 
-        box = zone_row("LDP — Zones", "LDP = ΔY ÷ W × 100 — ΔY = ระยะตั้งฉากของ trajectory จากเส้นอ้างอิง (จุดเข้า→จุดออกโซน); เฉพาะรถทางหลัก 2-3-4 (W_entry) และ 5-6-7 (W_opp)", self.run3_ldp_zone_vars)
+        box = zone_row("LDP — Zones", "LDP = ΔY ÷ (W/2) × 100 — ΔY = ระยะตั้งฉากของ trajectory จากเส้นอ้างอิง (จุดเข้า→จุดออกโซน); เฉพาะรถทางหลัก 2-3-4 (W_entry) และ 5-6-7 (W_opp)", self.run3_ldp_zone_vars)
         ttk.Label(box, text="Median smoothing (samples)").grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Entry(box, textvariable=self.run3_ldp_smoothing_var, width=8).grid(row=2, column=2, sticky="w", pady=2)
         ttk.Label(box, text="ใช้กับยานพาหนะทุกประเภท", foreground="#555555").grid(row=2, column=3, columnspan=3, sticky="w", pady=2)
@@ -6139,6 +6139,21 @@ class Run1App:
         if pet <= 3.0: return "Low"
         return "None"
 
+    @staticmethod
+    def _level_ldp(ldp):
+        """Risk level of LDP (%) - Department of Highways (2026) table for dY / (W/2)."""
+        if ldp >= 80.0: return "High"
+        if ldp >= 50.0: return "Moderate"
+        if ldp >= 30.0: return "Low"
+        return "None"
+
+    @staticmethod
+    def _level_ldp_speed(speed_kmh):
+        if speed_kmh >= 80.0: return "High"
+        if speed_kmh >= 50.0: return "Moderate"
+        if speed_kmh >= 30.0: return "Low"
+        return "None"
+
     # ========================================================
     # SPEED (per Zone 1-7 and per Movement; V50, V85, Mean, SD)
     # ========================================================
@@ -6934,7 +6949,9 @@ class Run1App:
                     "Chord_Length_m": f"{res['Chord_Length_m']:.4f}",
                     "Delta_Y_m": f"{res['Delta_Y_m']:.6f}", "Lane_Width_W_m": f"{W:.3f}",
                     "LDP_percent": f"{ldp:.3f}",
+                    "LDP_Level": self._level_ldp(ldp),
                     "Mean_Speed_kmh": self._fmt(speed, 3),
+                    "Speed_Level": self._level_ldp_speed(speed) if speed is not None else "",
                     "Calibration_Mode": mode,
                     "QC_Flag": ";".join(x for x in [
                         "Short_Chord_Reference_Line_Unreliable" if res["Short_Chord"] else "",
@@ -7047,17 +7064,18 @@ class Run1App:
         def do_ldp():
             status("Run 3 — LDP...")
             rows = self._run3_ldp(tracks, c, movement_by_id, movement_source_by_id)
-            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","LDP_percent","Mean_Speed_kmh","Calibration_Mode","QC_Flag"]
+            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","LDP_percent","LDP_Level","Mean_Speed_kmh","Speed_Level","Calibration_Mode","QC_Flag"]
             outputs["ldp"] = write_csv("Run_3_LDP.csv", fields, rows)
             vals = [float(r["LDP_percent"]) for r in rows]
             note = f"W_entry={c['w_entry_m']} m; W_opp={c['w_opp_m']} m; smoothing={c['ldp_smoothing_samples']}"
             s_ = indicator("Lane/Lateral Deviation Position (LDP)", "Distance", "%", "All", vals, note)
+            s_["Level_Counts"] = {lv: sum(1 for r in rows if r["LDP_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
             for z in sorted(c["ldp_zones"]):
                 indicator("Lane/Lateral Deviation Position (LDP)", "Distance", "%", f"Zone {z}",
                           [float(r["LDP_percent"]) for r in rows if r["Zone"] == f"Zone {z}"])
             summary["indicators"]["LDP"] = s_
             summary["diagnostics"]["ldp"] = (f"rows={len(rows)}; zones={sorted(c['ldp_zones'])}; all vehicle classes; "
-                                             "main-road movements 2-3-4 / 5-6-7 only; no risk level (decision pending)")
+                                             "main-road movements 2-3-4 / 5-6-7 only; LDP = dY / (W/2) x 100; risk level = DOH table")
         run_step("ldp", "Run_3_LDP.csv", do_ldp)
 
         # ---------------- Gap Acceptance (time) ----------------
