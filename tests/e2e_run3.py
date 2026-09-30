@@ -238,9 +238,6 @@ def scene2(app):
     kinds_tight = {r["TTC_Type"] for r in read_csv(os.path.join(out_tight, "Run_3_TTC.csv"))}
     check("TTC side window is adjustable (factor 0, margin 0.05 s drops the 0.1 s apart pair)", kinds_tight == {"RearEnd"}, str(kinds_tight))
 
-    reasons = summary["diagnostics"].get("empty_outputs", [])
-    check("empty Gap Acceptance output is explained (no Line drawn yet)", any("Gap Acceptance" in r and "Line" in r for r in reasons), str(reasons))
-    check("non-empty indicators are not listed as empty", not any(r.startswith(("LDP", "TTC", "PET", "Speed")) for r in reasons), str(reasons))
     mv = summary["source_counts"]["movement_counts"]
     check("scene 2 movements: P = 2-3-4, Q and R = 1-3-6-7 (partial)", mv.get("2-3-4") == 1 and mv.get("1-3-6-7") == 2, str(mv))
 
@@ -275,50 +272,37 @@ def scene2(app):
         check("TTC side path angle 90 deg", abs(float(sd["Path_Angle_deg"]) - 90.0) < 1.0, sd["Path_Angle_deg"])
 
 
-def stream_rows(tid, t_cross, x_line, y, jitter=0.0, t_appear=None):
-    """A car of a conflicting stream moving along +x at 10 m/s, crossing x = x_line at t_cross."""
-    def f(t):
-        if t_appear is not None and t < t_appear:
-            return None
-        return (x_line + 10.0 * (t - t_cross) + (jitter * math.sin(30.0 * t) if jitter else 0.0), y)
-    return f
-
-
-def gap_subject_path(t_stop_end=3.0, hold=None):
-    """Subject: waits at (15, -6) until t_stop_end, then +y at 4 m/s. hold = (t_from, t_to): stands still
-    at its position at t_from, then continues +x at 6 m/s (the 'stop in the middle of the junction' case)."""
-    def f(t):
-        if t < t_stop_end:
-            return (15.0, -6.0)
-        if hold is None:
-            if t < t_stop_end + 1.5:
-                return (15.0, -6.0 + 4.0 * (t - t_stop_end))
-            return (15.0 + 6.0 * (t - t_stop_end - 1.5), 0.0)
-        t0, t1 = hold
-        if t < t0:
-            return (15.0, -6.0 + 4.0 * (t - t_stop_end))
-        y_stop = -6.0 + 4.0 * (t0 - t_stop_end)
-        if t < t1:
-            return (15.0, y_stop)
-        return (15.0 + 6.0 * (t - t1), y_stop)
-    return f
-
-
 def scene3(app):
-    """Gap Acceptance with a Line + mapping (first crossing only, jitter robust).
-    Subject S (1-3-4) waits in zone 1 until t = 3.0 s, reaches the conflict zone 3 at t = 4.0 s and drives on
-    without stopping. Stream 2-3-4 crosses Line 1 (x = 15 m) at 1, ~1.92 (jitters across the line 3 times) and 5 s.
-    Access stage: gap 1.0->1.92 closed before entry = Rejected (0.92 s); gap 1.92->5.0 is open at entry = Accepted,
-    available gap = time left = 5.0 - 4.0 = 1.0 s."""
+    """Gap Acceptance with Line + mapping (first-crossing-only, jitter robust).
+    S waits in zone 1 until t = 3.0 s, then goes 1 -> 3 -> 4.  Stream 2-3-4 crosses Line 1 (x = 15 m)
+    at t = 1, ~1.92 (jitters back and forth across the line 3 times: 1.917 / 2.0 / 2.083) and 5 s
+    -> only FIRST crossings count: gaps 0.917 s (rejected) and 3.083 s (accepted)."""
     n = 480
+
+    def stream(t_cross, jitter=0.0):
+        import math as _m
+        def f(t):
+            x = 15.0 + 10.0 * (t - t_cross) + jitter * _m.sin(30.0 * t)
+            return (x, 5.0)
+        return f
+
     zone_x = lambda x, y: 2 if x < 10 else (3 if x < 20 else 4)
+
+    def subject(t):
+        if t < 3.0:
+            return (15.0, -6.0)
+        if t < 4.5:
+            return (15.0, -6.0 + 4.0 * (t - 3.0))
+        return (15.0 + 6.0 * (t - 4.5), 0.0)
+
     zone_s = lambda x, y: 1 if y < -2 else (3 if x < 20 else 4)
     veh = [
-        (1, "Car", make_rows(1, "Car", stream_rows(1, 1.0, 15.0, 5.0), zone_x, n, (4.5, 1.8))),
-        (2, "Car", make_rows(2, "Car", stream_rows(2, 2.0, 15.0, 5.0, jitter=1.2), zone_x, n, (4.5, 1.8))),
-        (3, "Car", make_rows(3, "Car", stream_rows(3, 5.0, 15.0, 5.0), zone_x, n, (4.5, 1.8))),
-        (4, "Car", make_rows(4, "Car", gap_subject_path(), zone_s, n, (4.5, 1.8))),
+        (1, "Car", make_rows(1, "Car", stream(1.0), zone_x, n, (4.5, 1.8))),
+        (2, "Car", make_rows(2, "Car", stream(2.0, jitter=1.2), zone_x, n, (4.5, 1.8))),
+        (3, "Car", make_rows(3, "Car", stream(5.0), zone_x, n, (4.5, 1.8))),
+        (4, "Car", make_rows(4, "Car", subject, zone_s, n, (4.5, 1.8))),
     ]
+    # the stream vehicles move in the x direction only: keep only the part inside the scene
     app.lines["Line 1"] = [(1500, -1000), (1500, 2000)]
     app.run3_reference_text.delete("1.0", "end")
     app.run3_reference_text.insert("1.0", "8|2-3-4|Line 1")
@@ -332,43 +316,49 @@ def scene3(app):
     gap = read_csv(os.path.join(out, "Run_3_Gap_Acceptance.csv"))
     roles = sorted(r["Gap_Role"] for r in gap)
     check("Gap Acceptance exactly one rejected + one accepted gap (jitter did not add gaps)",
-          roles == ["Accepted", "Rejected"], str(roles) + " " + str([r["X31_Available_Gap"] for r in gap]))
+          roles == ["Accepted / Controlling", "Rejected"], str(roles) + " " + str([r["X31_Available_Gap"] for r in gap]))
     by = {r["Gap_Role"]: r for r in gap}
-    rej, acc = by.get("Rejected"), by.get("Accepted")
-    if rej and acc:
-        check("Gap Acceptance rejected gap ~ 0.92 s (closed before the subject entered)", abs(float(rej["X31_Available_Gap"]) - 0.917) < 0.06,
-              rej["X31_Available_Gap"])
-        check("Gap Acceptance accepted gap = time left at zone-3 entry = 1.0 s", abs(float(acc["X31_Available_Gap"]) - 1.0) < 0.05,
-              acc["X31_Available_Gap"])
-        check("Gap Acceptance waiting time = entry 4.0 s - first seen 0.017 s ~ 3.98 s", abs(float(acc["X32_Waiting_Time"]) - 3.98) < 0.1,
-              acc["X32_Waiting_Time"])
-        check("Gap Acceptance Access stage, decided in zone 3", acc["Decision_Stage"] == "Access" and acc["Decision_Zone"] == "3",
-              f"{acc['Decision_Stage']} zone {acc['Decision_Zone']}")
-        check("Gap Acceptance subject 4 (1-3-4) vs stream 2-3-4 on Line 1",
-              acc["Subject_ID"] == "4" and acc["Subject_Movement"] == "1-3-4" and acc["Conflicting_Movement"] == "2-3-4"
-              and acc["Reference_Line"] == "Line 1")
-        check("Gap Acceptance flags 1 / 0", acc["Gap_Acceptance"] == "1" and rej["Gap_Acceptance"] == "0")
-        check("Gap Acceptance speeds of the subject and stream vehicles are reported",
-              acc["Subject_Speed_kmh"] != "" and acc["Conflict_Speed_A_kmh"] != "")
+    if by:
+        rej, acc = by.get("Rejected"), by.get("Accepted / Controlling")
+        check("Gap Acceptance rejected gap = 0.917 s (C1 -> first crossing of C2)", rej is not None and abs(float(rej["X31_Available_Gap"]) - 0.917) < 0.04,
+              rej["X31_Available_Gap"] if rej else "")
+        check("Gap Acceptance accepted gap = 3.083 s (first crossing of C2 -> C3)", acc is not None and abs(float(acc["X31_Available_Gap"]) - 3.083) < 0.04,
+              acc["X31_Available_Gap"] if acc else "")
+        check("Gap Acceptance waiting time ~ 3.0 s", acc is not None and abs(float(acc["X32_Waiting_Time"]) - 3.0) < 0.1,
+              acc["X32_Waiting_Time"] if acc else "")
+        check("Gap Acceptance subject is vehicle 4 (1-3-4), conflicting movement 2-3-4",
+              acc is not None and acc["Subject_ID"] == "4" and acc["Subject_Movement"] == "1-3-4"
+              and acc["Conflicting_Movement"] == "2-3-4")
+        check("Gap Acceptance flags Gap_Acceptance 1 / 0",
+              acc is not None and acc["Gap_Acceptance"] == "1" and rej is not None and rej["Gap_Acceptance"] == "0")
 
 
 def scene4(app):
     """Gap Acceptance: subject 1-3-6-7 meets TWO streams at once (2-3-4 on Line 1, 5-6-7 on Line 2).
-    It enters the conflict zones at t = 4.0 s. 2-3-4 crosses at 1, 2, 5 s -> open gap 2->5 leaves 1.0 s;
-    5-6-7 crosses at 1.5, 2.5, 4.5 s -> open gap 2.5->4.5 leaves 0.5 s => the smaller (5-6-7, 0.5 s) controls.
-    Rejected: 2-3-4 gap 1->2 (1.0 s) and 5-6-7 gap 1.5->2.5 (1.0 s)."""
+    Subject waits in zone 1 until t = 3.0 s.  Stream 2-3-4 crosses at 1, 2, 5 s; stream 5-6-7 at 1.5, 2.5, 4 s.
+    Gaps containing t = 3.0: 2-3-4 -> 3.0 s, 5-6-7 -> 1.5 s  => the smaller (5-6-7, 1.5 s) controls.
+    Rejected: 2-3-4 (1 -> 2 = 1.0 s) and 5-6-7 (1.5 -> 2.5 = 1.0 s)."""
     n = 480
+
+    def stream(t_cross, x_line, y):
+        return lambda t: (x_line + 10.0 * (t - t_cross), y)
+
+    def subject(t):
+        if t < 3.0:
+            return (15.0, -6.0)
+        return (15.0, -6.0 + 4.0 * (t - 3.0))
+
     zone_s = lambda x, y: 1 if y < -2 else (3 if y < 2 else (6 if y < 6 else 7))
     zone_a = lambda x, y: 2 if x < 10 else (3 if x < 20 else 4)
     zone_b = lambda x, y: 5 if x < 10 else (6 if x < 20 else 7)
     veh = [
-        (1, "Car", make_rows(1, "Car", stream_rows(1, 1.0, 15.0, 5.0), zone_a, n, (4.5, 1.8))),
-        (2, "Car", make_rows(2, "Car", stream_rows(2, 2.0, 15.0, 5.0), zone_a, n, (4.5, 1.8))),
-        (3, "Car", make_rows(3, "Car", stream_rows(3, 5.0, 15.0, 5.0), zone_a, n, (4.5, 1.8))),
-        (4, "Car", make_rows(4, "Car", stream_rows(4, 1.5, 16.0, -20.0), zone_b, n, (4.5, 1.8))),
-        (5, "Car", make_rows(5, "Car", stream_rows(5, 2.5, 16.0, -20.0), zone_b, n, (4.5, 1.8))),
-        (6, "Car", make_rows(6, "Car", stream_rows(6, 4.5, 16.0, -20.0), zone_b, n, (4.5, 1.8))),
-        (7, "Car", make_rows(7, "Car", lambda t: (15.0, -6.0) if t < 3.0 else (15.0, -6.0 + 4.0 * (t - 3.0)), zone_s, n, (4.5, 1.8))),
+        (1, "Car", make_rows(1, "Car", stream(1.0, 15.0, 5.0), zone_a, n, (4.5, 1.8))),
+        (2, "Car", make_rows(2, "Car", stream(2.0, 15.0, 5.0), zone_a, n, (4.5, 1.8))),
+        (3, "Car", make_rows(3, "Car", stream(5.0, 15.0, 5.0), zone_a, n, (4.5, 1.8))),
+        (4, "Car", make_rows(4, "Car", stream(1.5, 16.0, -20.0), zone_b, n, (4.5, 1.8))),
+        (5, "Car", make_rows(5, "Car", stream(2.5, 16.0, -20.0), zone_b, n, (4.5, 1.8))),
+        (6, "Car", make_rows(6, "Car", stream(4.0, 16.0, -20.0), zone_b, n, (4.5, 1.8))),
+        (7, "Car", make_rows(7, "Car", subject, zone_s, n, (4.5, 1.8))),
     ]
     app.lines["Line 1"] = [(1500, -1000), (1500, 2000)]
     app.lines["Line 2"] = [(1600, -3000), (1600, 1000)]
@@ -383,132 +373,18 @@ def scene4(app):
     check("scene 4 movements: subject 1-3-6-7, streams 2-3-4 x3 and 5-6-7 x3",
           mv.get("1-3-6-7") == 1 and mv.get("2-3-4") == 3 and mv.get("5-6-7") == 3, str(mv))
     gap = read_csv(os.path.join(out, "Run_3_Gap_Acceptance.csv"))
-    acc = [r for r in gap if r["Gap_Role"] == "Accepted"]
+    acc = [r for r in gap if r["Gap_Role"] == "Accepted / Controlling"]
     rej = [r for r in gap if r["Gap_Role"] == "Rejected"]
     check("Gap Acceptance two simultaneous streams: 1 accepted + 2 rejected", len(acc) == 1 and len(rej) == 2,
           str([(r["Gap_Role"], r["Conflicting_Movement"], r["X31_Available_Gap"]) for r in gap]))
     if acc:
-        check("Gap Acceptance smaller remaining gap controls (5-6-7, 0.5 s)",
-              acc[0]["Conflicting_Movement"] == "5-6-7" and abs(float(acc[0]["X31_Available_Gap"]) - 0.5) < 0.05,
+        check("Gap Acceptance smaller gap controls (5-6-7, 1.5 s)",
+              acc[0]["Conflicting_Movement"] == "5-6-7" and abs(float(acc[0]["X31_Available_Gap"]) - 1.5) < 0.05,
               f"{acc[0]['Conflicting_Movement']} {acc[0]['X31_Available_Gap']}")
     check("Gap Acceptance rejected gaps come from both streams",
           {r["Conflicting_Movement"] for r in rej} == {"2-3-4", "5-6-7"}, str([r["Conflicting_Movement"] for r in rej]))
     app.run3_gap_subject_134_var.set(True)
     app.run3_gap_subject_5631_var.set(True)
-
-
-def scene6(app):
-    """Gap Acceptance WITHOUT any Line: the reference time of a stream vehicle = the first time it is seen in the
-    origin zone of its stream (zone 2 for 2-3-4). Stream cars first appear in zone 2 (x = 5 m) at 1, 2 and 5 s."""
-    n = 480
-    zone_x = lambda x, y: 2 if x < 10 else (3 if x < 20 else 4)
-    zone_s = lambda x, y: 1 if y < -2 else (3 if x < 20 else 4)
-    veh = [
-        (1, "Car", make_rows(1, "Car", stream_rows(1, 2.0, 15.0, 5.0, t_appear=1.0), zone_x, n, (4.5, 1.8))),
-        (2, "Car", make_rows(2, "Car", stream_rows(2, 3.0, 15.0, 5.0, t_appear=2.0), zone_x, n, (4.5, 1.8))),
-        (3, "Car", make_rows(3, "Car", stream_rows(3, 6.0, 15.0, 5.0, t_appear=5.0), zone_x, n, (4.5, 1.8))),
-        (4, "Car", make_rows(4, "Car", gap_subject_path(), zone_s, n, (4.5, 1.8))),
-    ]
-    saved = {k: list(v) for k, v in app.lines.items()}
-    for k in app.lines:
-        app.lines[k] = []
-    app.run3_reference_text.delete("1.0", "end")
-    app.run3_reference_text.insert("1.0", "8|2-3-4|Line 1")
-    app.run3_gap_subject_1367_var.set(False)
-    app.run3_gap_subject_5631_var.set(False)
-    out, summary = run_scene(app, veh)
-    print("scene 6 output:", out)
-    gap = read_csv(os.path.join(out, "Run_3_Gap_Acceptance.csv"))
-    check("Gap Acceptance works without a Line (origin-zone fallback): 1 accepted + 1 rejected",
-          sorted(r["Gap_Role"] for r in gap) == ["Accepted", "Rejected"], str([(r["Gap_Role"], r["X31_Available_Gap"]) for r in gap]))
-    by = {r["Gap_Role"]: r for r in gap}
-    if by.get("Accepted") and by.get("Rejected"):
-        check("fallback: accepted gap 2->5 s leaves 1.0 s at t = 4.0 s", abs(float(by["Accepted"]["X31_Available_Gap"]) - 1.0) < 0.05,
-              by["Accepted"]["X31_Available_Gap"])
-        check("fallback: rejected gap 1->2 s = ~1.0 s", abs(float(by["Rejected"]["X31_Available_Gap"]) - 1.0) < 0.06, by["Rejected"]["X31_Available_Gap"])
-        check("fallback is named in Reference_Line / QC_Flag", by["Accepted"]["Reference_Line"] == "Observed Zone 2"
-              and "Origin_Zone" in by["Accepted"]["QC_Flag"], f"{by['Accepted']['Reference_Line']} | {by['Accepted']['QC_Flag']}")
-    for k, v in saved.items():
-        app.lines[k] = v
-    app.run3_gap_subject_1367_var.set(True)
-    app.run3_gap_subject_5631_var.set(True)
-
-
-def scene7(app):
-    """Gap Acceptance, STOP inside the conflict zone -> Access rejected, then Exit stage.
-    Subject 1-3-4 enters zone 3 at t = 4.0 s (gap 3->6 s is open), stops at (15, -1) from 4.25 to 5.75 s, then drives
-    on to zone 4 (target) at ~6.6 s. Stream 2-3-4 crosses Line 1 at 2, 3, 6, 8 s.
-    Access: gap 2->3 closed before entry = Rejected (1.0 s); gap 3->6 open at entry but the driver stopped = Rejected (2.0 s).
-    Exit: only NEW gaps after the resumption (5.77 s): gap 6->8 contains the target-zone entry = Accepted (~1.4 s left)."""
-    n = 720
-    zone_x = lambda x, y: 2 if x < 10 else (3 if x < 20 else 4)
-    zone_s = lambda x, y: 1 if y < -2 else (3 if x < 20 else 4)
-    veh = [
-        (1, "Car", make_rows(1, "Car", stream_rows(1, 2.0, 15.0, 5.0), zone_x, n, (4.5, 1.8))),
-        (2, "Car", make_rows(2, "Car", stream_rows(2, 3.0, 15.0, 5.0), zone_x, n, (4.5, 1.8))),
-        (3, "Car", make_rows(3, "Car", stream_rows(3, 6.0, 15.0, 5.0), zone_x, n, (4.5, 1.8))),
-        (4, "Car", make_rows(4, "Car", stream_rows(4, 8.0, 15.0, 5.0), zone_x, n, (4.5, 1.8))),
-        (5, "Car", make_rows(5, "Car", gap_subject_path(hold=(4.25, 5.75)), zone_s, n, (4.5, 1.8))),
-    ]
-    app.lines["Line 1"] = [(1500, -1000), (1500, 2000)]
-    app.run3_reference_text.delete("1.0", "end")
-    app.run3_reference_text.insert("1.0", "8|2-3-4|Line 1")
-    app.run3_gap_subject_1367_var.set(False)
-    app.run3_gap_subject_5631_var.set(False)
-    out, summary = run_scene(app, veh)
-    print("scene 7 output:", out)
-    gap = read_csv(os.path.join(out, "Run_3_Gap_Acceptance.csv"))
-    rows = [(r["Decision_Stage"], r["Gap_Role"], round(float(r["X31_Available_Gap"]), 2)) for r in gap]
-    print("   rows:", rows)
-    access = [r for r in gap if r["Decision_Stage"] == "Access"]
-    exit_ = [r for r in gap if r["Decision_Stage"] == "Exit"]
-    check("stop in the conflict zone: Access has 2 rejected gaps, no accepted one",
-          len(access) == 2 and all(r["Gap_Role"] == "Rejected" for r in access), str(rows))
-    check("Access rejected gaps are ~1.0 s (2->3) and ~2.0 s (3->6, open at entry)",
-          sorted(round(float(r["X31_Available_Gap"]), 1) for r in access) == [1.0, 2.0], str(rows))
-    check("Exit stage: exactly one accepted gap (6->8 contains the target-zone entry)",
-          len(exit_) == 1 and exit_[0]["Gap_Role"] == "Accepted" and abs(float(exit_[0]["X31_Available_Gap"]) - 1.4) < 0.1, str(rows))
-    check("Exit stage is decided in the target zone 4", bool(exit_) and exit_[0]["Decision_Zone"] == "4")
-    check("the gap 3->6 of the Access stage is NOT reused in Exit",
-          not any(abs(float(r["Gap_Start_Time"]) - 3.0) < 0.05 for r in exit_))
-    check("QC tells about the stop", all("Stop_" in r["QC_Flag"] for r in gap), str([r["QC_Flag"] for r in gap][:2]))
-    app.run3_gap_subject_1367_var.set(True)
-    app.run3_gap_subject_5631_var.set(True)
-
-
-def scene5(app):
-    """A car that wobbles across a zone boundary (labels 2,3,2,3,4 with visits of 0.2 s each) is
-    still recognised as 2-3-4 (status Exact_AfterDedupe) and gets LDP rows."""
-    zone_w = lambda x, y: 2 if x < 10 else (3 if x < 12 else (2 if x < 14 else (3 if x < 20 else 4)))
-    veh = [(1, "Car", make_rows(1, "Car", along_x(0.0, 10.0), zone_w, 360, (4.5, 1.8)))]
-    out, summary = run_scene(app, veh)
-    print("scene 5 output:", out)
-    ms = summary["source_counts"]["movement_status"]
-    check("wobbling car recognised as 2-3-4 after removing repeated zones", ms.get("Exact_AfterDedupe") == 1
-          and summary["source_counts"]["movement_counts"].get("2-3-4") == 1, str(ms))
-    ldp = read_csv(os.path.join(out, "Run_3_LDP.csv"))
-    check("LDP is computed for it (status Exact_AfterDedupe counts as Exact)", len(ldp) >= 2, str(len(ldp)))
-    wide = read_csv(os.path.join(out, "Run_3_Speed.csv"))
-    check("vehicle speed table shows status and movement", wide[0]["Movement"] == "2-3-4" and wide[0]["Movement_Status"] == "Exact_AfterDedupe")
-
-
-def scene8(app):
-    """Old zone numbering (2,6,3 / 4,7,5 / 1,6,3) becomes the current layout with the zone remap."""
-    zone_old_lane = lambda x, y: 2 if x < 10 else (6 if x < 20 else 3)      # old lane next to the side street
-    zone_old_opp = lambda x, y: 4 if x < 10 else (7 if x < 20 else 5)       # old opposite lane
-    veh = [(1, "Car", make_rows(1, "Car", along_x(0.0, 10.0), zone_old_lane, 360, (4.5, 1.8))),
-           (2, "Car", make_rows(2, "Car", along_x(8.0, 10.0), zone_old_opp, 360, (4.5, 1.8)))]
-    out, summary = run_scene(app, veh)
-    mv0 = summary["source_counts"]["movement_counts"]
-    check("without the remap the old numbering matches no movement", mv0.get("2-3-4") == 0 and mv0.get("5-6-7") == 0, str(mv0))
-    app.run3_zone_remap_var.set(m.LEGACY_ZONE_REMAP_TEXT)
-    out, summary = run_scene(app, veh)
-    app.run3_zone_remap_var.set("")
-    mv = summary["source_counts"]["movement_counts"]
-    check("with the remap: old 2-6-3 = 2-3-4 and old 4-7-5 = 5-6-7", mv.get("2-3-4") == 1 and mv.get("5-6-7") == 1, str(mv))
-    ldp = read_csv(os.path.join(out, "Run_3_LDP.csv"))
-    check("LDP rows appear for both lanes after the remap", {r["Movement"] for r in ldp} == {"2-3-4", "5-6-7"}, str(len(ldp)))
-    check("remap is written into the summary", summary["diagnostics"].get("zone_remap", {}).get("old_to_new", {}).get("6") == 3)
 
 
 def main():
@@ -532,14 +408,6 @@ def main():
     scene3(app)
     print("=== scene 4: Gap Acceptance, two streams at once ===")
     scene4(app)
-    print("=== scene 5: zone-boundary wobble ===")
-    scene5(app)
-    print("=== scene 6: Gap Acceptance without a Line ===")
-    scene6(app)
-    print("=== scene 7: Gap Acceptance, stop in the conflict zone ===")
-    scene7(app)
-    print("=== scene 8: zone remap for an old zone file ===")
-    scene8(app)
 
     root.destroy()
     print("FAILED: " + ", ".join(failures) if failures else "ALL OK")

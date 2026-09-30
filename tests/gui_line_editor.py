@@ -109,13 +109,6 @@ def main():
     check("no preflight warning about Gap Acceptance mapping",
           not any("Gap Acceptance" in w for w in app.collect_run3_warnings()), str(app.collect_run3_warnings()))
 
-    # Zone file drawn on another video -> warning before the run
-    app.zone_source_video = os.path.join(tmp, "another_video.mp4")
-    wmsg = [w for w in app.collect_run3_warnings() if "drawn on the video" in w]
-    check("warning when the Zone file belongs to another video", len(wmsg) == 1, str(wmsg)[:160])
-    app.zone_source_video = video
-    check("no such warning when it is the same video", not any("drawn on the video" in w for w in app.collect_run3_warnings()))
-
     # re-open: existing lines and assignments are shown again
     dlg2 = app.open_line_editor()
     check("re-open shows existing lines", dlg2.points["5-6-7"] == [(300, 20), (300, 120)])

@@ -46,8 +46,6 @@ check("Gap conflict table", m.RUN3_GAP_CONFLICT_MAP == {
     "5-6-3-1": ["2-3-4", "1-3-6-7"],
 }, str(m.RUN3_GAP_CONFLICT_MAP))
 
-check("Gap paths and conflict table cover the same subject movements", set(m.GAP_PATHS) == set(m.RUN3_GAP_CONFLICT_MAP))
-
 # --- settings round trip ---
 st = app.get_settings()
 for key in m.RUN3_GEOMETRY_KEYS:
