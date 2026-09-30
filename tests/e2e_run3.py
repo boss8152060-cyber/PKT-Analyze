@@ -124,9 +124,22 @@ def scene1(app):
         (3, "Motorcycle", make_rows(3, "Motorcycle", along_x(8.0, 5.0, y_fn=bump_c), zones_by_x(5, 6, 7), n, (2.0, 0.8))),
         (4, "Car", make_rows(4, "Car", along_x(2.5, 10.0), zones_by_x(1, 3, 6), n, (4.5, 1.8))),
         (5, "Car", make_rows(5, "Car", along_x(-1.6, 10.0), zones_by_x(1, 3, 4), n, (4.5, 1.8))),
+        # 6 = the SAME car as B tracked under a second ID for 1 s (frames 100-160): must be removed
+        (6, "Car", [dict(r, track_id=6) for r in make_rows(2, "Car", along_x(1.5, 10.0), zones_by_x(2, 3, 4), n, (4.5, 1.8))
+                    if 100 <= r["frame"] <= 160]),
     ]
     out, summary = run_scene(app, veh)
     print("scene 1 output:", out)
+    dtracks = summary["diagnostics"]["duplicate_tracks"]
+    check("duplicate track (same car, second ID) detected and its frames removed",
+          dtracks["tracks_affected"] == 1 and dtracks["frames_removed"] == 61, str(dtracks))
+    dup_rows = read_csv(os.path.join(out, "Run_3_Duplicate_Tracks.csv"))
+    check("duplicate report: ID 6 is a duplicate of ID 2", len(dup_rows) == 1 and dup_rows[0]["Duplicate_ID"] == "6"
+          and dup_rows[0]["Kept_ID"] == "2", str(dup_rows))
+    lc_rows = read_csv(os.path.join(out, "Run_3_Lateral_Clearance.csv"))
+    check("no Lateral Clearance pair involves the duplicate ID 6 (it would show a fake -1.8 m)",
+          all("6" not in r["Pair_ID"].split("_") for r in lc_rows),
+          str(sorted({r["Pair_ID"] for r in lc_rows if "6" in r["Pair_ID"].split("_")})))
 
     # ---- movement ----
     mc = summary["source_counts"]["movement_counts"]
@@ -148,7 +161,7 @@ def scene1(app):
     z2 = [r for r in stats if r["Scope"] == "Zone" and r["Key"] == "Zone 2" and r["Vehicle_Class"] == "All"][0]
     check("Speed stats Zone 2: N=2, V50 ~36", z2["N"] == "2" and abs(float(z2["V50_kmh"]) - 36.0) < 0.6, str(z2))
     wide = read_csv(os.path.join(out, "Run_3_Speed.csv"))
-    check("vehicle summary rows = 5", len(wide) == 5)
+    check("vehicle summary rows = 5 (the duplicate ID 6 has no rows left)", len(wide) == 5, str(len(wide)))
     check("vehicle summary has Zone_Sequence 2-3-4", any(r["Zone_Sequence"] == "2-3-4" for r in wide))
 
     # ---- LDP ----

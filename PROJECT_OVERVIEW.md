@@ -61,6 +61,10 @@ Video ─► YOLO + ByteTrack ─► Detection_Records.csv (ต่อเฟร�
 | PET | เวลา | `Run_3_PET.csv` | โซน 3, 6 ตรรกะเดิม |
 | Speed | ความเร็ว | `Run_3_Speed.csv`, `_Speed_Detail.csv`, `Run_3_Speed_Statistics.csv` | ต่อโซน 1–7 + ภาพรวมตาม Movement; rolling median 5 ตัวอย่าง |
 
+### คุณภาพข้อมูลที่ Run 3 กรองให้อัตโนมัติ
+
+- **แทร็กซ้ำ (รถคันเดียว สองไอดี):** ถ้ากรอบของสองไอดีทับกัน (IoU ≥ 0.7) นาน ≥ 10 เฟรม ถือเป็นรถคันเดียว ตัดเฟรมที่ซ้ำของไอดีที่สั้นกว่าออกก่อนคำนวณทุกตัวชี้วัด (ไม่งั้น Lateral Clearance ติดลบ, TTC/PET ปลอม); ผลอยู่ใน `Run_3_Duplicate_Tracks.csv`
+
 ### ผลรันจริงล่าสุด (เป็นของ **v27**, ผัง 6 โซนเก่า — ใช้เทียบกับ v28 ไม่ได้)
 
 Run3, วิดีโอ 3,600 เฟรม ≈ 60 วินาที, 67 track ID, ~19 FPS บน CUDA; รหัสเดิม Lateral Clearance (LC) N=2,354 · LDP (LDP) N=73 (mean 117%) · Gap Acceptance N=0 · TTC N=11 · PET N=113 · Speed N=15–38 ต่อโซน
