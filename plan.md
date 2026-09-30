@@ -6,8 +6,8 @@
 
 ## ▶ ทำต่อจากตรงนี้
 
-- **สถานะปัจจุบัน:** ข้อ 1.1 แก้โค้ดแล้ว (รอผู้ใช้รันยืนยัน ก่อนใส่ `(PASS)`/tag)
-- **ขั้นถัดไป:** ข้อ 1.2 (Zone flicker) — commit ถัดไปใช้ `Run3 v27(2): ...`; ระหว่างนี้ผู้ใช้รันโปรแกรมกับวิดีโอสั้นเพื่อยืนยันข้อ 1.1
+- **สถานะปัจจุบัน:** ข้อ 1.1 และ 1.2 แก้โค้ดแล้ว (v27(1), v27(2)) — รอผู้ใช้รันจริงยืนยันก่อนใส่ `(PASS)`/tag
+- **ขั้นถัดไป:** ข้อ 1.3 (เตือนโซนที่ไม่มี polygon) — commit ถัดไปใช้ `Run3 v27(3): ...`; ผู้ใช้รันโปรแกรมกับวิดีโอสั้นเพื่อยืนยัน 1.1 + 1.2
 - **ไฟล์โค้ดปัจจุบัน:** `PKStudio.py` (ในโฟลเดอร์ repo `PK STUDIO/Run`; เท่ากับ v27 ล้วน ๆ ที่ tag `v27`)
 - **ตั้งค่า git แล้ว:** ประวัติ 61 commits (Run0 → Run3 v27) นำเข้าแล้ว; รูปแบบ commit message ดู `CLAUDE.md`; ไฟล์เวอร์ชันเก่าสำรองที่ `PK STUDIO/_Run_backup_before_git/`
 - **Remote (push):** `origin` = https://github.com/boss8152060-cyber/PKT-Project.git (push แล้ว: main + tag v27)
@@ -22,7 +22,7 @@
 ## เฟส 1 — แก้บั๊กที่กระทบผลลัพธ์ (โค้ด v28)
 
 - [x] 1.1 (#1) `last_exit_time` ไม่ถูกกำหนด → `Zone_Summary`/`total_zone_time` ผิด — แก้แล้วใน commit `Run3 v27(1)` (2026-09-30) **รอผู้ใช้รันจริงเพื่อยืนยัน** (ดูบันทึกด้านล่าง)
-- [ ] 1.2 (#9) Zone flicker: ใช้ confirmation ≥3 เฟรม/hysteresis และยุบ zone_sequence ซ้ำ
+- [x] 1.2 (#9) Zone flicker — แก้แล้วใน `Run3 v27(2)` (2026-09-30) แบบ "ทำความสะอาดตอนสรุปผล" (`ZONE_FLICKER_MERGE_S = 0.10` s) ไม่แตะค่า zone ดิบใน Detection_Records; **รอผู้ใช้รันจริงยืนยัน**
 - [ ] 1.3 (#4) ตรวจว่าโซนที่เลือกมี polygon จริง (Zone 7) แล้วเตือนก่อนรัน
 - [ ] 1.4 (#5) เตือนก่อนรันถ้า Y3 ไม่มี Line/Reference Mapping
 - [ ] 1.5 (#6) เตือนเมื่อไฟล์ Zone มาจากวิดีโอคนละไฟล์/ความละเอียดต่างกัน
@@ -56,5 +56,6 @@
 
 | วันที่ | สิ่งที่ทำ | ไฟล์ที่เกี่ยวข้อง | ค้างอยู่ |
 |---|---|---|---|
+| 2026-09-30 | ข้อ 1.2: เพิ่ม `collect_zone_visits`/`clean_zone_visits` — ตัดการกะพริบ A→B→A (B ≤ 0.10 s) และรวมการหลุดโซนสั้น ๆ (≤ 0.10 s); `ID_Zone_Summary` (zone_sequence, transitions, total time) และ `Zone_Summary` ใช้ visit ที่ทำความสะอาดแล้ว; ลบ `id_zone_history`; บันทึก `summary_flicker_merge_s` ใน JSON. ตรวจ: unit case 5 แบบผ่าน + จำลองจากข้อมูลจริง visits 159 → 139 (เช่น ID 49 จาก 4↔3 สลับ 8 รอบ เหลือ 2 รอบ; 1→6→5 ไม่ถูกแตะ) | `PKStudio.py` | ยังไม่ได้รันโปรแกรมจริง; Run 3 ยังใช้ zone ดิบรายเฟรม (ไม่กระทบ); ID 49 ยังสลับ 4↔3 เหลือ 2 รอบ (ช่วงนานกว่า 0.1 s) |
 | 2026-09-30 | ข้อ 1.1: เก็บ `visits` (start,end) ต่อโซนต่อ ID + `last_inside_time`; Zone_Summary นับทุกการเข้าโซน (รวมที่ยังอยู่ตอนจบ), `total_zone_time_seconds` = ผลรวมทุก visit; เวลาออก = ตัวอย่างสุดท้ายที่อยู่ในโซน. ตรวจ: py_compile ผ่าน + จำลองซ้ำจาก `Output/Run3/Run_3_Detection_Records.csv` ได้ Zone 2 = 26 IDs (เดิม 1), Zone 6 = 41 IDs (เดิม 6), ID 1 ใช้เวลาในโซน 15.4 s (เดิม 0) | `PKStudio.py` | ยังไม่ได้รันโปรแกรมจริง; entries มากกว่า IDs เพราะ zone flicker (ข้อ 1.2) |
 | 2026-09-29 | ตรวจ v27, เขียน overview, CLAUDE.md, plan.md, GIT_GUIDE.md; git init + import 61 commits (`Run0` … `Run3 v27`) + .gitignore + tag v27 | `PROJECT_OVERVIEW.md`, `CLAUDE.md`, `plan.md`, `GIT_GUIDE.md` | ยังไม่แก้โค้ด, push ขึ้น GitHub แล้ว |
