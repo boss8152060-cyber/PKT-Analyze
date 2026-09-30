@@ -610,5 +610,33 @@ class GapHoldAndIntervals(unittest.TestCase):
         self.assertEqual(set(CORE["GAP_REFERENCE_ZONE"]), {"2-3-4", "5-6-7", "5-6-3-1", "1-3-6-7"})
 
 
+class ZoneRemap(unittest.TestCase):
+    f = staticmethod(lambda text: CORE["parse_zone_remap"](text))
+
+    def test_legacy_text(self):
+        self.assertEqual(self.f(CORE["LEGACY_ZONE_REMAP_TEXT"]), {6: 3, 3: 4, 4: 5, 7: 6, 5: 7})
+
+    def test_empty_means_no_remap(self):
+        self.assertEqual(self.f(""), {})
+        self.assertEqual(self.f("  "), {})
+
+    def test_separators_and_spaces(self):
+        self.assertEqual(self.f("6=3;3=4 , 4 = 5,7=6,5=7"), {6: 3, 3: 4, 4: 5, 7: 6, 5: 7})
+
+    def test_must_stay_one_to_one(self):
+        with self.assertRaises(ValueError):
+            self.f("6=3")                   # old zone 3 is still zone 3 -> two zones become 3
+        with self.assertRaises(ValueError):
+            self.f("1=2, 2=2")
+
+    def test_bad_input(self):
+        for bad in ("6-3", "a=b", "0=3", "8=1", "6=3, 6=4"):
+            with self.assertRaises(ValueError):
+                self.f(bad)
+
+    def test_swap_is_allowed(self):
+        self.assertEqual(self.f("2=3, 3=2"), {2: 3, 3: 2})
+
+
 if __name__ == "__main__":
     unittest.main()

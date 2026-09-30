@@ -475,6 +475,8 @@ RUN3_DEFAULTS = {
     "lane_opp_motorcycle_m": "",
     "lane_opp_car_m": "",
     "median_m": "",                         # recorded only; not used in any indicator
+    # Run 3 only: renumber the zones of an OLD zone file to the current layout (blank = no change).
+    "zone_remap": "",
     "ldp_smoothing_samples": "5",           # rolling median to suppress bbox jitter (1 = off)
     # Speed: user can select any of Zones 1–6. CSV assigns each selected zone
     # to the research role: Zone 1 = access mouth, 2/4 = approach, 3/5 = exit, 6 = middle/access.
@@ -1079,6 +1081,35 @@ def build_gap_intervals(events):
                         "id_a": str(a[1]), "class_a": a[2], "id_b": str(b[1]), "class_b": b[2],
                         "reference": a[3], "qc": ";".join(dict.fromkeys(x for x in (a[4], b[4]) if x))})
     return out
+
+
+# Zone numbers of an OLD zone file -> numbers of the current layout (SPEC v28), used by Run 3 only.
+# Old camera (side street at the top): lane next to the side street 2-6-3 -> 2-3-4, opposite lane 4-7-5 -> 5-6-7.
+LEGACY_ZONE_REMAP_TEXT = "6=3, 3=4, 4=5, 7=6, 5=7"
+
+
+def parse_zone_remap(text):
+    """'6=3, 3=4' -> {6: 3, 3: 4}. Empty text = no remap. Zones not listed keep their number,
+    and the final numbering must still be one-to-one (no two old zones may end up as the same
+    new zone). Raises ValueError with a readable message."""
+    mapping = {}
+    for part in str(text or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(f"'{part}' must look like old=new (e.g. 6=3)")
+        a, b = (q.strip() for q in part.split("=", 1))
+        if not (a.isdigit() and b.isdigit() and 1 <= int(a) <= 7 and 1 <= int(b) <= 7):
+            raise ValueError(f"'{part}': zone numbers must be 1-7")
+        if int(a) in mapping:
+            raise ValueError(f"old zone {a} is listed twice")
+        mapping[int(a)] = int(b)
+    final = {z: mapping.get(z, z) for z in range(1, 8)}
+    if len(set(final.values())) != 7:
+        dup = sorted(z for z in set(final.values()) if list(final.values()).count(z) > 1)
+        raise ValueError(f"two old zones become the same new zone ({', '.join(map(str, dup))}); list every zone that moves")
+    return mapping
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -1436,6 +1467,7 @@ class Run1App:
         self.run3_geometry_vars = {
             key: tk.StringVar(value=RUN3_DEFAULTS[key]) for key in RUN3_GEOMETRY_KEYS
         }
+        self.run3_zone_remap_var = tk.StringVar(value=RUN3_DEFAULTS["zone_remap"])
         self.run3_w_entry_text = tk.StringVar(value="W_entry = -")
         self.run3_w_opp_text = tk.StringVar(value="W_opp = -")
         for _var in self.run3_geometry_vars.values():
@@ -1788,6 +1820,9 @@ class Run1App:
         ttk.Label(geo, textvariable=self.run3_w_opp_text, foreground="#0a5").grid(row=3, column=4, sticky="w")
         ttk.Label(geo, text="ความกว้างเกาะกลาง (บันทึกไว้ ไม่ใช้คำนวณ)").grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 2))
         ttk.Entry(geo, textvariable=self.run3_geometry_vars["median_m"], width=8).grid(row=4, column=2, sticky="w", padx=(4, 16))
+        ttk.Label(geo, text="แปลงเลขโซนของไฟล์ Zone เก่า → ผังใหม่ (Run 3) เช่น 6=3, 3=4 ; ว่าง = ไม่แปลง").grid(row=5, column=0, columnspan=5, sticky="w", pady=(8, 2))
+        ttk.Entry(geo, textvariable=self.run3_zone_remap_var, width=34).grid(row=6, column=0, columnspan=3, sticky="w", padx=(0, 8))
+        ttk.Button(geo, text="ใช้ค่าสำหรับวิดีโอเก่า", command=lambda: self.run3_zone_remap_var.set(LEGACY_ZONE_REMAP_TEXT)).grid(row=6, column=3, columnspan=2, sticky="w")
         self._update_lane_totals()
 
         def zone_row(title, note, var_map):
@@ -3449,6 +3484,7 @@ class Run1App:
                 "ttc_side_min_angle_deg": self.run3_ttc_side_angle_var.get(),
                 "ttc_side_mode": self.run3_ttc_side_mode_var.get(),
                 **{key: self.run3_geometry_vars[key].get() for key in RUN3_GEOMETRY_KEYS},
+                "zone_remap": self.run3_zone_remap_var.get(),
                 "ldp_smoothing_samples": self.run3_ldp_smoothing_var.get(),
                 "vehicle_lengths": {name: var.get() for name, var in self.run3_length_vars.items()},
                 "gap_subject_134": self.run3_gap_subject_134_var.get(),
@@ -3599,6 +3635,7 @@ class Run1App:
                 ("use_mle", self.run3_use_mle_var),
             ]
             mapping_pairs += [(key, self.run3_geometry_vars[key]) for key in RUN3_GEOMETRY_KEYS]
+            mapping_pairs += [("zone_remap", self.run3_zone_remap_var)]
             for key, variable in mapping_pairs:
                 if key in run3:
                     variable.set(run3[key])
@@ -4264,6 +4301,10 @@ class Run1App:
                     raise ValueError("Run 3 TTC side minimum path angle must be between 0 and 90 degrees.")
                 if float(self.run3_ttc_side_factor_var.get()) < 0 or float(self.run3_ttc_side_margin_var.get()) < 0:
                     raise ValueError("Run 3 TTC side window factor and extra time must not be negative.")
+        try:
+            parse_zone_remap(self.run3_zone_remap_var.get())
+        except ValueError as exc:
+            raise ValueError(f"Run 3 zone remap: {exc}")
         for key in RUN3_GEOMETRY_KEYS:
             text = str(self.run3_geometry_vars[key].get()).strip()
             if text:   # must be numeric when entered (lane widths are required when LDP is enabled)
@@ -4326,7 +4367,11 @@ class Run1App:
                     warnings.append(
                         f"The Zone file was drawn on {zw}x{zh} frames but the video is {aw}x{ah} (different shape): "
                         "the Zones cannot be scaled correctly.")
-        defined = {z for z in ZONE_IDS if len(self.zones.get(f"Zone {z}", [])) >= 3}
+        try:
+            remap = parse_zone_remap(self.run3_zone_remap_var.get())
+        except ValueError:
+            remap = {}
+        defined = {remap.get(z, z) for z in ZONE_IDS if len(self.zones.get(f"Zone {z}", [])) >= 3}
         any_enabled = any(bool(getattr(self, f"run3_{k}_enabled_var").get())
                           for k in ("speed", "gap", "lc", "pet", "ttc", "ldp"))
         if any_enabled and not defined:
@@ -6427,7 +6472,8 @@ class Run1App:
         med=float(np.median(intervals))
         return max(0.02, min(0.10, med*2.5))
 
-    def _run3_build_tracks(self, detection_rows, id_rows):
+    def _run3_build_tracks(self, detection_rows, id_rows, zone_remap=None):
+        zone_remap = zone_remap or {}
         tracks = defaultdict(list)
         for row in detection_rows:
             tid = str(row.get("track_id", "")).strip()
@@ -6445,7 +6491,7 @@ class Run1App:
             z = str(row.get("zone", ""))
             m = re.search(r"(\d+)", z)
             if m:
-                row2["_zone_num"] = int(m.group(1))
+                row2["_zone_num"] = zone_remap.get(int(m.group(1)), int(m.group(1)))
             tracks[tid].append(row2)
         for rows in tracks.values():
             rows.sort(key=lambda r: r["_timestamp"])
@@ -6524,6 +6570,7 @@ class Run1App:
             "ttc_side_mode": {"Later arrival": "later", "Average of arrivals": "average"}.get(
                 str(self.run3_ttc_side_mode_var.get()), "earlier"),
             "geometry": geometry,
+            "zone_remap": parse_zone_remap(self.run3_zone_remap_var.get()),
             "w_entry_m": w_entry, "w_opp_m": w_opp,
             "ldp_smoothing_samples": int(num(self.run3_ldp_smoothing_var, 5) or 1),
             "gap_movements": gap_movements,
@@ -7617,7 +7664,7 @@ class Run1App:
 
         status("Run 3 — loading Run 2 results...")
         detection_rows, id_rows, zone_rows, det_path, id_path, zone_path = self._run3_load_inputs(output_dir, run_name)
-        tracks, summaries = self._run3_build_tracks(detection_rows, id_rows)
+        tracks, summaries = self._run3_build_tracks(detection_rows, id_rows, c.get("zone_remap"))
         duplicate_report = self._run3_remove_duplicate_tracks(tracks)
         self._run3_attach_metric(tracks, c)
         outputs = {}
@@ -7652,6 +7699,9 @@ class Run1App:
             "diagnostics": {},
             "indicators": {},
         }
+        if c.get("zone_remap"):
+            summary["diagnostics"]["zone_remap"] = {"old_to_new": {str(k): v for k, v in c["zone_remap"].items()},
+                                                   "note": "Run 3 renumbered the zones of the Detection_Records before any calculation"}
         summary["diagnostics"]["duplicate_tracks"] = {
             "rule": f"boxes IoU >= {DUPLICATE_TRACK_IOU} in >= {DUPLICATE_TRACK_MIN_FRAMES} frames = one vehicle under two IDs; the shorter track's overlapping frames are removed",
             "tracks_affected": len(duplicate_report),
