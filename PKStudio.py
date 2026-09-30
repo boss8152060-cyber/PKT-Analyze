@@ -407,11 +407,8 @@ RUN3_VEHICLE_CLASSES = [
     "Bus", "Car", "Motorcycle", "Pickup", "Sidecar", "Truck", "Van"
 ]
 
-RUN3_MOVEMENTS = ["1→3", "1→5", "4→1"]
-RUN3_ALL_MOVEMENTS = ["1→3", "1→5", "4→1", "2→3", "4→5"]
-# Gap Acceptance: subject movement -> conflicting movements whose line-crossing
-# times form the available gaps (each needs a Reference Line Mapping entry).
-RUN3_GAP_CONFLICT_MAP = {"1→3": ["2→3"], "1→5": ["2→3", "4→5"], "4→1": ["2→3", "1→5"]}
+RUN3_GEOMETRY_KEYS = ("lane_entry_motorcycle_m", "lane_entry_car_m",
+                      "lane_opp_motorcycle_m", "lane_opp_car_m", "median_m")
 
 RUN3_DEFAULTS = {
     # Starter preset based on the values currently entered in the researcher UI.
@@ -450,7 +447,15 @@ RUN3_DEFAULTS = {
     "ttc_heading_max_deg": "45",            # same-direction test for rear-end / deviation
     "ttc_velocity_window_s": "0.50",        # centred window of observed samples for velocity
     "ttc_min_speed_kmh": "2.0",             # follower must be moving
-    "ldp_lane_width_m": "3.50",             # W in LDP = dY/(W/2)x100 — enter the actual lane width
+    "ldp_lane_width_m": "3.50",             # v27 only (dY/(W/2)); replaced by the lane widths below in v28(3)
+    # V28: road geometry (m). Blank = not entered (never guessed).
+    # W_entry = entry motorcycle lane + entry car lane (side with the side street: Zones 2-3-4)
+    # W_opp   = opposite motorcycle lane + opposite car lane (Zones 5-6-7)
+    "lane_entry_motorcycle_m": "",
+    "lane_entry_car_m": "",
+    "lane_opp_motorcycle_m": "",
+    "lane_opp_car_m": "",
+    "median_m": "",                         # recorded only; not used in any indicator
     "ldp_reference": "Initial position",    # or "Line N" drawn on the lane centreline
     "ldp_motorcycle_only": True,
     "ldp_smoothing_samples": "5",           # rolling median to suppress bbox jitter (1 = off)
@@ -459,19 +464,19 @@ RUN3_DEFAULTS = {
     "speed_zones": [1, 2, 3, 4, 5, 6, 7],
     "lc_zones": [1, 2, 3, 4, 5, 6, 7],
     "pet_zone6": True,
-    "pet_zones": [6, 7],
+    "pet_zones": [3, 6],
     "ttc_zones": [1, 2, 3, 4, 5, 6, 7],
     "ldp_zones": [2, 3, 4, 5],
-    "gap_movement_13": True,
-    "gap_movement_15": True,
-    "gap_movement_41": True,
+    "gap_subject_134": True,
+    "gap_subject_1367": True,
+    "gap_subject_5631": True,
     "use_raff": True,
     "use_mle": True,
     # Copy/paste template for Reference Line Mapping.
     # Lines beginning with # are ignored by the program. Replace the Line N
     # entries with the ACTUAL Line 1–6 geometry for the selected Site before
     # enabling Gap Acceptance.
-    "reference_line_mapping": "# Site_ID|Movement|Line N\n# 8|1→3|Line N\n# 8|1→5|Line N\n# 8|4→1|Line N\n# 8|2→3|Line N\n# 8|4→5|Line N",
+    "reference_line_mapping": "# Site_ID|Movement|Line N\n# 8|2-3-4|Line N\n# 8|2-3-1|Line N\n# 8|5-6-7|Line N\n# 8|5-6-3-1|Line N",
     # Starter width values entered in the current researcher UI.
     "vehicle_widths": {
         "Bus": "2.50",
@@ -501,9 +506,10 @@ RUN3_DEFAULTS = {
 # ============================================================
 
 ZONE_IDS = list(range(1, 8))            # V27: Zone 7 added (second conflict area)
-CONFLICT_ZONE_IDS = (6, 7)              # conflict/search areas — never movement endpoints
+CONFLICT_ZONE_IDS = (3, 6)              # V28: conflict zones (PET / TTC); ordinary path zones for Movement
 ZONE_NAMES = [f"Zone {i}" for i in ZONE_IDS]
 
+# ==== CORE-BEGIN (pure logic, no GUI: unit-tested by tests/test_core.py) ====
 # V27(2): zone visits shorter/closer than this are treated as boundary flicker
 # when the Run 2 summaries are built (raw Detection_Records zones are untouched).
 ZONE_FLICKER_MERGE_S = 0.10
@@ -556,6 +562,88 @@ def clean_zone_visits(visits, merge_gap_s=ZONE_FLICKER_MERGE_S):
                 merged.append(v)
         vs = merged
     return [tuple(v) for v in vs]
+
+
+# V28: Movement = the full (flicker-cleaned) zone sequence of a track.
+# "side" selects the lane-width divisor of LDP for main-road through movements.
+MOVEMENT_PATTERNS = {
+    "1-3-4":   {"sequence": (1, 3, 4),    "type": "Left",    "main_road": False, "side": None,
+                "name": "Left turn: side street -> main road"},
+    "2-3-1":   {"sequence": (2, 3, 1),    "type": "Left",    "main_road": False, "side": None,
+                "name": "Left turn: main road -> side street"},
+    "1-3-6-7": {"sequence": (1, 3, 6, 7), "type": "Right",   "main_road": False, "side": None,
+                "name": "Right turn: side street -> opposite side"},
+    "5-6-3-1": {"sequence": (5, 6, 3, 1), "type": "Right",   "main_road": False, "side": None,
+                "name": "Right turn: opposite side -> side street"},
+    "2-3-4":   {"sequence": (2, 3, 4),    "type": "Through", "main_road": True,  "side": "entry",
+                "name": "Through: entry side (Zones 2-3-4)"},
+    "5-6-7":   {"sequence": (5, 6, 7),    "type": "Through", "main_road": True,  "side": "opposite",
+                "name": "Through: opposite side (Zones 5-6-7)"},
+}
+MOVEMENT_IDS = list(MOVEMENT_PATTERNS)
+
+
+def zone_sequence_from_samples(samples, merge_gap_s=ZONE_FLICKER_MERGE_S):
+    """samples = [(timestamp, zone_number_or_None), ...] of ONE track (time order).
+    Returns the flicker-cleaned zone sequence as a list of ints with no
+    consecutive duplicates. A sample outside every zone (None) ends a visit."""
+    visits = []
+    cur = None
+    for t, z in samples:
+        if z is None:
+            cur = None
+            continue
+        if cur is not None and visits[-1][0] == z:
+            visits[-1][2] = t
+        else:
+            visits.append([z, t, t])
+            cur = z
+    seq = []
+    for z, _s, _e in clean_zone_visits(visits, merge_gap_s):
+        if not seq or seq[-1] != z:
+            seq.append(z)
+    return seq
+
+
+def classify_movement(sequence):
+    """Map a zone sequence to (movement_id, status). Never guesses.
+
+    Exact        - equals one of MOVEMENT_PATTERNS
+    Partial      - a fragment (>= 2 zones) that fits exactly ONE pattern
+    Ambiguous    - a fragment that fits several patterns (e.g. 3-4 = 1-3-4 or 2-3-4)
+    Unclassified - fits no pattern
+    Insufficient - fewer than 2 zones observed
+    """
+    seq = []
+    for z in sequence:
+        z = int(z)
+        if not seq or seq[-1] != z:
+            seq.append(z)
+    if len(seq) < 2:
+        return "", "Insufficient"
+    tup = tuple(seq)
+    for mid, info in MOVEMENT_PATTERNS.items():
+        if info["sequence"] == tup:
+            return mid, "Exact"
+    n = len(tup)
+    cands = [mid for mid, info in MOVEMENT_PATTERNS.items()
+             if any(info["sequence"][i:i + n] == tup for i in range(len(info["sequence"]) - n + 1))]
+    if len(cands) == 1:
+        return cands[0], "Partial"
+    if len(cands) > 1:
+        return "", "Ambiguous"
+    return "", "Unclassified"
+# ==== CORE-END ====
+
+RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
+# Gap Acceptance: subject movement -> conflicting movements whose line-crossing times
+# form the available gaps (each needs a Reference Line Mapping entry).
+# PROVISIONAL (SPEC v28 section 6): to be confirmed with the user in v28(6).
+RUN3_GAP_CONFLICT_MAP = {
+    "1-3-4": ["2-3-4", "2-3-1"],
+    "1-3-6-7": ["2-3-4", "2-3-1", "5-6-7", "5-6-3-1"],
+    "5-6-3-1": ["2-3-4", "2-3-1"],
+}
 LINE_NAMES = [f"Line {i}" for i in range(1, 7)]
 
 
@@ -763,12 +851,20 @@ class Run1App:
         self.run3_ttc_velocity_window_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_velocity_window_s"])
         self.run3_ttc_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_speed_kmh"])
         self.run3_ldp_lane_width_var = tk.StringVar(value=RUN3_DEFAULTS["ldp_lane_width_m"])
+        # V28: road geometry (lane widths per side + median)
+        self.run3_geometry_vars = {
+            key: tk.StringVar(value=RUN3_DEFAULTS[key]) for key in RUN3_GEOMETRY_KEYS
+        }
+        self.run3_w_entry_text = tk.StringVar(value="W_entry = -")
+        self.run3_w_opp_text = tk.StringVar(value="W_opp = -")
+        for _var in self.run3_geometry_vars.values():
+            _var.trace_add("write", lambda *_: self._update_lane_totals())
         self.run3_ldp_reference_var = tk.StringVar(value=RUN3_DEFAULTS["ldp_reference"])
         self.run3_ldp_motorcycle_only_var = tk.BooleanVar(value=RUN3_DEFAULTS["ldp_motorcycle_only"])
         self.run3_ldp_smoothing_var = tk.StringVar(value=RUN3_DEFAULTS["ldp_smoothing_samples"])
-        self.run3_gap_movement_13_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_13"])
-        self.run3_gap_movement_15_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_15"])
-        self.run3_gap_movement_41_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_movement_41"])
+        self.run3_gap_subject_134_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_subject_134"])
+        self.run3_gap_subject_1367_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_subject_1367"])
+        self.run3_gap_subject_5631_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_subject_5631"])
         self.run3_use_raff_var = tk.BooleanVar(value=RUN3_DEFAULTS["use_raff"])
         self.run3_use_mle_var = tk.BooleanVar(value=RUN3_DEFAULTS["use_mle"])
         self.run3_reference_mapping_text = RUN3_DEFAULTS["reference_line_mapping"]
@@ -1096,6 +1192,25 @@ class Run1App:
         ttk.Label(sw, text="ด้านความเร็ว").grid(row=2, column=0, sticky="w", padx=(0, 10))
         ttk.Checkbutton(sw, text="Y6 V50 (Mean, SD) + Y7 V85", variable=self.run3_speed_enabled_var).grid(row=2, column=1, columnspan=2, sticky="w")
 
+        # ---------------- V28 road geometry ----------------
+        geo = ttk.LabelFrame(frame, text="ความกว้างถนน (m) — ใช้เป็นตัวหารของ LDP", padding=(8, 4))
+        geo.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(0, 4)); r += 1
+        ttk.Label(geo, text="ฝั่งทางเข้า–ออก (Zone 2-3-4)", foreground="#555555").grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(geo, text="เลนจักรยานยนต์").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(geo, textvariable=self.run3_geometry_vars["lane_entry_motorcycle_m"], width=8).grid(row=1, column=1, sticky="w", padx=(4, 16))
+        ttk.Label(geo, text="เลนรถยนต์").grid(row=1, column=2, sticky="w")
+        ttk.Entry(geo, textvariable=self.run3_geometry_vars["lane_entry_car_m"], width=8).grid(row=1, column=3, sticky="w", padx=(4, 16))
+        ttk.Label(geo, textvariable=self.run3_w_entry_text, foreground="#0a5").grid(row=1, column=4, sticky="w")
+        ttk.Label(geo, text="ฝั่งตรงข้ามทางเชื่อม (Zone 5-6-7)", foreground="#555555").grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ttk.Label(geo, text="เลนจักรยานยนต์").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Entry(geo, textvariable=self.run3_geometry_vars["lane_opp_motorcycle_m"], width=8).grid(row=3, column=1, sticky="w", padx=(4, 16))
+        ttk.Label(geo, text="เลนรถยนต์").grid(row=3, column=2, sticky="w")
+        ttk.Entry(geo, textvariable=self.run3_geometry_vars["lane_opp_car_m"], width=8).grid(row=3, column=3, sticky="w", padx=(4, 16))
+        ttk.Label(geo, textvariable=self.run3_w_opp_text, foreground="#0a5").grid(row=3, column=4, sticky="w")
+        ttk.Label(geo, text="ความกว้างเกาะกลาง (บันทึกไว้ ไม่ใช้คำนวณ)").grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 2))
+        ttk.Entry(geo, textvariable=self.run3_geometry_vars["median_m"], width=8).grid(row=4, column=2, sticky="w", padx=(4, 16))
+        self._update_lane_totals()
+
         def zone_row(title, note, var_map):
             nonlocal r
             box = ttk.LabelFrame(frame, text=title, padding=(8, 4))
@@ -1110,7 +1225,7 @@ class Run1App:
         zone_row("Y1 Lateral Clearance — Zones", "ใช้ observation จริงและจับคู่เวลาที่ใกล้กัน — ไม่ทำ interpolation", self.run3_lc_zone_vars)
 
         box = zone_row("Y2 LDP — Zones", "LDP = ΔY / (W/2) × 100 — ΔY วัดจากตำแหน่งเริ่มต้นใน Zone หรือจาก Line ที่วาดเป็นเส้นกึ่งกลางช่องจราจร", self.run3_ldp_zone_vars)
-        ttk.Label(box, text="W ความกว้างช่องจราจร (m)").grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(box, text="W (v27 เดิม — จะแทนด้วยความกว้างถนนด้านบนใน v28(3)) (m)").grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Entry(box, textvariable=self.run3_ldp_lane_width_var, width=8).grid(row=2, column=2, sticky="w", pady=2)
         ttk.Label(box, text="ΔY อ้างอิง").grid(row=2, column=3, sticky="e", pady=2)
         ttk.Combobox(box, textvariable=self.run3_ldp_reference_var, state="readonly", width=16,
@@ -1127,7 +1242,7 @@ class Run1App:
             ttk.Label(box, text=label).grid(row=2 + i // 2, column=(i % 2) * 4, columnspan=2, sticky="w", pady=2)
             ttk.Entry(box, textvariable=var, width=8).grid(row=2 + i // 2, column=(i % 2) * 4 + 2, sticky="w", pady=2)
 
-        box = zone_row("Y5 PET — Conflict Zones", "PET คำนวณแยกในแต่ละ Conflict Zone (Zone 6 / Zone 7)", self.run3_pet_zone_vars)
+        box = zone_row("Y5 PET — Conflict Zones", "PET คำนวณแยกในแต่ละ Conflict Zone (Zone 3 / Zone 6)", self.run3_pet_zone_vars)
         for i, (label, var) in enumerate((("Interaction distance (m)", self.run3_pet_interaction_distance_var),
                                           ("PET threshold (s)", self.run3_pet_threshold_var),
                                           ("PET max (s) — ว่าง = ไม่จำกัด", self.run3_pet_max_var))):
@@ -1142,9 +1257,9 @@ class Run1App:
 
         ttk.Separator(frame, orient="horizontal").grid(row=r, column=0, columnspan=4, sticky="ew", pady=(8, 6)); r += 1
         ttk.Label(frame, text="Y3 Gap Acceptance — Subject Movement").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Checkbutton(frame, text="1 → 3", variable=self.run3_gap_movement_13_var).grid(row=r, column=1, sticky="w")
-        ttk.Checkbutton(frame, text="1 → 5", variable=self.run3_gap_movement_15_var).grid(row=r, column=2, sticky="w")
-        ttk.Checkbutton(frame, text="4 → 1", variable=self.run3_gap_movement_41_var).grid(row=r, column=3, sticky="w")
+        ttk.Checkbutton(frame, text="1-3-4", variable=self.run3_gap_subject_134_var).grid(row=r, column=1, sticky="w")
+        ttk.Checkbutton(frame, text="1-3-6-7", variable=self.run3_gap_subject_1367_var).grid(row=r, column=2, sticky="w")
+        ttk.Checkbutton(frame, text="5-6-3-1", variable=self.run3_gap_subject_5631_var).grid(row=r, column=3, sticky="w")
         r += 1
         ttk.Label(frame, text="Critical Gap").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Checkbutton(frame, text="Raff", variable=self.run3_use_raff_var).grid(row=r, column=1, sticky="w")
@@ -1178,6 +1293,18 @@ class Run1App:
     # ========================================================
     # INTEGRATED ZONE / LINE MEASUREMENT
     # ========================================================
+
+    def _update_lane_totals(self):
+        """Show W_entry / W_opp (= motorcycle lane + car lane of each side)."""
+        def total(a, b):
+            try:
+                x = float(self.run3_geometry_vars[a].get().strip())
+                y = float(self.run3_geometry_vars[b].get().strip())
+                return f"{x + y:.3f} m"
+            except Exception:
+                return "-"
+        self.run3_w_entry_text.set("W_entry = " + total("lane_entry_motorcycle_m", "lane_entry_car_m"))
+        self.run3_w_opp_text.set("W_opp = " + total("lane_opp_motorcycle_m", "lane_opp_car_m"))
 
     def update_trajectory_position_controls(self, event=None):
         """Update the trajectory-position controls.
@@ -2610,13 +2737,14 @@ class Run1App:
                 "ttc_velocity_window_s": self.run3_ttc_velocity_window_var.get(),
                 "ttc_min_speed_kmh": self.run3_ttc_min_speed_var.get(),
                 "ldp_lane_width_m": self.run3_ldp_lane_width_var.get(),
+                **{key: self.run3_geometry_vars[key].get() for key in RUN3_GEOMETRY_KEYS},
                 "ldp_reference": self.run3_ldp_reference_var.get(),
                 "ldp_motorcycle_only": self.run3_ldp_motorcycle_only_var.get(),
                 "ldp_smoothing_samples": self.run3_ldp_smoothing_var.get(),
                 "vehicle_lengths": {name: var.get() for name, var in self.run3_length_vars.items()},
-                "gap_movement_13": self.run3_gap_movement_13_var.get(),
-                "gap_movement_15": self.run3_gap_movement_15_var.get(),
-                "gap_movement_41": self.run3_gap_movement_41_var.get(),
+                "gap_subject_134": self.run3_gap_subject_134_var.get(),
+                "gap_subject_1367": self.run3_gap_subject_1367_var.get(),
+                "gap_subject_5631": self.run3_gap_subject_5631_var.get(),
                 "use_raff": self.run3_use_raff_var.get(),
                 "use_mle": self.run3_use_mle_var.get(),
                 "reference_line_mapping": self.run3_reference_text.get("1.0", "end-1c") if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text,
@@ -2750,12 +2878,13 @@ class Run1App:
                 ("lc_longitudinal_window_m", self.run3_lc_longitudinal_window_var),
                 ("pet_interaction_distance_m", self.run3_pet_interaction_distance_var),
                 ("pet_threshold_s", self.run3_pet_threshold_var),
-                ("gap_movement_13", self.run3_gap_movement_13_var),
-                ("gap_movement_15", self.run3_gap_movement_15_var),
-                ("gap_movement_41", self.run3_gap_movement_41_var),
+                ("gap_subject_134", self.run3_gap_subject_134_var),
+                ("gap_subject_1367", self.run3_gap_subject_1367_var),
+                ("gap_subject_5631", self.run3_gap_subject_5631_var),
                 ("use_raff", self.run3_use_raff_var),
                 ("use_mle", self.run3_use_mle_var),
             ]
+            mapping_pairs += [(key, self.run3_geometry_vars[key]) for key in RUN3_GEOMETRY_KEYS]
             for key, variable in mapping_pairs:
                 if key in run3:
                     variable.set(run3[key])
@@ -3409,6 +3538,10 @@ class Run1App:
             self._run3_float(self.run3_ttc_heading_max_var.get(), "TTC heading limit (deg)")
             self._run3_float(self.run3_ttc_velocity_window_var.get(), "TTC velocity window (s)")
             self._run3_float(self.run3_ttc_min_speed_var.get(), "TTC minimum follower speed (km/h)", positive=False)
+        for key in RUN3_GEOMETRY_KEYS:
+            text = str(self.run3_geometry_vars[key].get()).strip()
+            if text:   # optional until the V28 LDP consumes them; must be numeric when entered
+                self._run3_float(text, f"road geometry {key}", positive=(key != "median_m"))
         if enabled["ldp"]:
             need_zone(self.run3_ldp_zone_vars, "Y2 LDP")
             self._run3_float(self.run3_ldp_lane_width_var.get(), "LDP lane width W (m)")
@@ -3417,16 +3550,16 @@ class Run1App:
             if ref in LINE_NAMES and len(self.lines.get(ref, [])) != 2:
                 raise ValueError(f"LDP reference {ref} is selected but that Line is not loaded.")
         if enabled["pet"]:
-            need_zone(self.run3_pet_zone_vars, "Y5 PET (Zone 6 / Zone 7)")
+            need_zone(self.run3_pet_zone_vars, "Y5 PET (Zone 3 / Zone 6)")
             self._run3_float(self.run3_pet_interaction_distance_var.get(), "PET interaction distance (m)")
             self._run3_float(self.run3_pet_threshold_var.get(), "PET threshold (s)")
             if str(self.run3_pet_max_var.get()).strip():
                 self._run3_float(self.run3_pet_max_var.get(), "PET max (s)")
         if enabled["gap"]:
             if not any([
-                self.run3_gap_movement_13_var.get(),
-                self.run3_gap_movement_15_var.get(),
-                self.run3_gap_movement_41_var.get(),
+                self.run3_gap_subject_134_var.get(),
+                self.run3_gap_subject_1367_var.get(),
+                self.run3_gap_subject_5631_var.get(),
             ]):
                 raise ValueError("Select at least one Gap Acceptance subject movement.")
             self._run3_float(self.run3_waiting_speed_threshold_var.get(), "waiting detection speed threshold (km/h)")
@@ -3475,9 +3608,9 @@ class Run1App:
         # V27(4): Gap Acceptance needs a Reference Line Mapping entry (and a
         # drawn Line) for the movement(s) that conflict with each subject.
         if bool(self.run3_gap_enabled_var.get()):
-            subjects = [m for m, var in (("1→3", self.run3_gap_movement_13_var),
-                                         ("1→5", self.run3_gap_movement_15_var),
-                                         ("4→1", self.run3_gap_movement_41_var)) if var.get()]
+            subjects = [m for m, var in (("1-3-4", self.run3_gap_subject_134_var),
+                                         ("1-3-6-7", self.run3_gap_subject_1367_var),
+                                         ("5-6-3-1", self.run3_gap_subject_5631_var)) if var.get()]
             text = (self.run3_reference_text.get("1.0", "end-1c")
                     if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text)
             try:
@@ -5398,176 +5531,23 @@ class Run1App:
         with open(path, "r", newline="", encoding="utf-8-sig") as f:
             return list(csv.DictReader(f))
 
-    @staticmethod
-    def _run3_parse_zone_sequence(text):
-        """Parse a zone sequence robustly from Run 2 text.
+    def _run3_build_movement_index(self, tracks, summaries=None, mapping=None, site_id=None):
+        """One canonical Movement per Vehicle_ID (SPEC v28 section 3).
 
-        Accepts common forms such as:
-          Zone 1 > Zone 6 > Zone 5
-          1>6>5
-          1 → 6 → 5
-          [1, 6, 5]
-        Only zone numbers 1-7 are retained.
+        The Movement comes from the flicker-cleaned zone sequence built from the
+        Run 2 Detection_Records (same cleaning as the Run 2 summaries). Returns
+        (movement_by_id, status_by_id, sequence_by_id); status is one of
+        Exact / Partial / Ambiguous / Unclassified / Insufficient.
         """
-        raw = str(text or "")
-        nums = []
-        matches = re.findall(r"(?:Zone\s*)?([1-7])", raw, flags=re.I)
-        for m in matches:
-            n = int(m)
-            if not nums or nums[-1] != n:
-                nums.append(n)
-        return nums
-
-    @staticmethod
-    def _run3_movement_from_first_last(first_zone, last_zone):
-        """Identify movement directly from Run 2 ID Zone Summary endpoints.
-
-        PET uses the track-level first_zone and last_zone as the primary movement
-        source. Zone 6 is an internal conflict/search area and therefore does not
-        change the movement endpoints. For example, 1 -> 6 -> 5 is still 1->5.
-        """
-        def zone_num(value):
-            if value is None:
-                return None
-            m = re.search(r"([1-7])", str(value))
-            return int(m.group(1)) if m else None
-
-        first = zone_num(first_zone)
-        last = zone_num(last_zone)
-        supported = {
-            (1, 3): "1→3",
-            (1, 5): "1→5",
-            (4, 1): "4→1",
-            (2, 3): "2→3",
-            (4, 5): "4→5",
-        }
-        return supported.get((first, last), "")
-
-    @staticmethod
-    def _run3_movement_from_sequence(sequence):
-        """Identify an exact movement from observed Zone Sequence.
-
-        Zone 6 is the conflict/search area and is ignored for endpoint matching.
-        Returns an empty string only when the observed information is insufficient
-        to identify one of the defined movements; it never invents a movement.
-        """
-        seq = Run1App._run3_parse_zone_sequence(sequence)
-        seq_no6 = [n for n in seq if n not in CONFLICT_ZONE_IDS]
-        supported = {
-            (1, 3): "1→3",
-            (1, 5): "1→5",
-            (4, 1): "4→1",
-            (2, 3): "2→3",
-            (4, 5): "4→5",
-        }
-        # Prefer the earliest supported transition in the observed sequence.
-        for a, b in zip(seq_no6, seq_no6[1:]):
-            if (a, b) in supported:
-                return supported[(a, b)]
-        # Also support a compact sequence where only the first and last observed
-        # non-conflict zones are retained.
-        if len(seq_no6) >= 2 and (seq_no6[0], seq_no6[-1]) in supported:
-            return supported[(seq_no6[0], seq_no6[-1])]
-        return ""
-
-    @staticmethod
-    def _run3_movement_from_track_rows(rows):
-        """Infer movement from the observed Zone labels in Run 2 records.
-
-        No interpolation is used. If the track contains enough observed zones
-        to identify a defined movement, the exact movement is returned. Otherwise
-        an empty string is returned so the caller can mark the observation as
-        Movement_Not_Observed instead of fabricating a direction.
-        """
-        seq=[]
-        for r in sorted(rows or [], key=lambda x: x.get("_timestamp", 0.0)):
-            z=r.get("_zone_num")
-            if z is None or z not in ZONE_IDS:
-                continue
-            if not seq or seq[-1] != z:
-                seq.append(z)
-        if not seq:
-            return ""
-        return Run1App._run3_movement_from_sequence(" ".join(f"Zone {z}" for z in seq))
-
-    def _run3_build_movement_index(self, tracks, summaries, mapping=None, site_id=None):
-        """Build one canonical Movement index shared by Gap Acceptance and PET.
-
-        Primary source: Run 2 ID Zone Summary first_zone + last_zone.
-        Fallbacks are only used when those endpoints are unavailable or do not
-        map to one of the defined movements. The same resolver is reused by all
-        Run 3 modules so one Vehicle_ID cannot receive conflicting movement labels.
-        """
-        mapping = mapping or {}
-        movement_by_id = {}
-        movement_source_by_id = {}
+        movement_by_id, status_by_id, sequence_by_id = {}, {}, {}
         for tid, rows in tracks.items():
-            movement = ""
-            source = ""
-            summary_row = summaries.get(str(tid), {}) if isinstance(summaries, dict) else {}
-
-            first_zone = summary_row.get("first_zone", summary_row.get("First_Zone", ""))
-            last_zone = summary_row.get("last_zone", summary_row.get("Last_Zone", ""))
-            movement = self._run3_movement_from_first_last(first_zone, last_zone)
-            if movement:
-                source = "ID_Zone_Summary_FirstLastZone"
-
-            if not movement:
-                for key in ("zone_sequence", "Zone Sequence", "Zone_Sequence"):
-                    movement = self._run3_movement_from_sequence(summary_row.get(key, ""))
-                    if movement:
-                        source = "ID_Zone_Summary_Sequence"
-                        break
-
-            if not movement:
-                movement = self._run3_movement_from_track_rows(rows)
-                if movement:
-                    source = "Detection_Records_Zones"
-
-            if not movement and mapping:
-                if site_id is None:
-                    site_id = (self._run3_cfg or {}).get("site_id", "")
-                movement = self._run3_movement_from_reference_lines(rows, site_id, mapping)
-                if movement:
-                    source = "Reference_Line_Crossing"
-
-            movement_by_id[str(tid)] = movement
-            movement_source_by_id[str(tid)] = source
-        return movement_by_id, movement_source_by_id
-
-    def _run3_movement_from_reference_lines(self, rows, site_id, mapping):
-        """Optional movement inference from observed line crossings.
-
-        This uses only actual trajectory samples and the user's configured
-        Reference Line Mapping. It is a fallback when Zone Sequence alone does
-        not expose both movement endpoints.
-        """
-        if not mapping or not rows:
-            return ""
-        candidates = []
-        ordered = sorted(rows, key=lambda r: r.get("_timestamp", 0.0))
-        prev = None
-        prev_t = None
-        for r in ordered:
-            p = r.get("_point")
-            t = r.get("_timestamp")
-            if p is None or t is None:
-                continue
-            if prev is not None:
-                for (site, movement), lname in mapping.items():
-                    if str(site).strip() != str(site_id).strip():
-                        continue
-                    line = self.lines.get(lname, [])
-                    if len(line) != 2:
-                        continue
-                    if self._run3_line_crossing_time(prev, prev_t, p, t, line) is not None:
-                        candidates.append((movement, t))
-            prev, prev_t = p, t
-        if not candidates:
-            return ""
-        # If exactly one mapped movement is observed, use it.
-        uniq = sorted(set(m for m, _ in candidates))
-        return uniq[0] if len(uniq) == 1 else ""
+            seq = zone_sequence_from_samples([(r["_timestamp"], r.get("_zone_num")) for r in rows])
+            movement, status = classify_movement(seq)
+            key = str(tid)
+            movement_by_id[key] = movement
+            status_by_id[key] = status
+            sequence_by_id[key] = seq
+        return movement_by_id, status_by_id, sequence_by_id
 
     @staticmethod
     def _run3_float_safe(value):
@@ -5730,9 +5710,9 @@ class Run1App:
 
         ppm = num(self.run3_ppm_var, 0.0) or 0.0
         gap_movements = []
-        if self.run3_gap_movement_13_var.get(): gap_movements.append("1→3")
-        if self.run3_gap_movement_15_var.get(): gap_movements.append("1→5")
-        if self.run3_gap_movement_41_var.get(): gap_movements.append("4→1")
+        if self.run3_gap_subject_134_var.get(): gap_movements.append("1-3-4")
+        if self.run3_gap_subject_1367_var.get(): gap_movements.append("1-3-6-7")
+        if self.run3_gap_subject_5631_var.get(): gap_movements.append("5-6-3-1")
         mapping_text = (
             self.run3_reference_text.get("1.0", "end-1c")
             if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
@@ -5765,6 +5745,7 @@ class Run1App:
             "ttc_velocity_window_s": num(self.run3_ttc_velocity_window_var, 0.5),
             "ttc_min_speed_kmh": num(self.run3_ttc_min_speed_var, 2.0),
             "ldp_lane_width_m": num(self.run3_ldp_lane_width_var, None),
+            "geometry": {key: num(self.run3_geometry_vars[key], None) for key in RUN3_GEOMETRY_KEYS},
             "ldp_reference": str(self.run3_ldp_reference_var.get()).strip() or "Initial position",
             "ldp_motorcycle_only": bool(self.run3_ldp_motorcycle_only_var.get()),
             "ldp_smoothing_samples": int(num(self.run3_ldp_smoothing_var, 5) or 1),
@@ -6101,7 +6082,7 @@ class Run1App:
             movement = movement_by_id.get(tid, "")
             if movement not in selected:
                 continue
-            wait_zone = 1 if movement in ("1→3", "1→5") else 4
+            wait_zone = MOVEMENT_PATTERNS[movement]["sequence"][0]   # waiting zone = first zone of the movement
 
             # Waiting start = first observed step inside the waiting zone whose
             # speed is at or below the waiting threshold.
@@ -6687,7 +6668,7 @@ class Run1App:
             mapping = self._run3_parse_reference_mapping(c["mapping_text"])
         except Exception as exc:
             mapping_parse_error = str(exc)
-        movement_by_id, movement_source_by_id = self._run3_build_movement_index(tracks, summaries, mapping, c["site_id"])
+        movement_by_id, movement_source_by_id, sequence_by_id = self._run3_build_movement_index(tracks, summaries, mapping, c["site_id"])
         tracks_by_zone = defaultdict(int)
         for rows in tracks.values():
             for z in {r.get("_zone_num") for r in rows}:
@@ -6705,6 +6686,8 @@ class Run1App:
                 "detection_records": len(detection_rows), "track_ids": len(tracks),
                 "id_zone_summary_rows": len(id_rows), "tracks_by_zone": dict(tracks_by_zone),
                 "movement_counts": {m: sum(1 for t in tracks if movement_by_id.get(str(t), "") == m) for m in RUN3_ALL_MOVEMENTS},
+                "movement_status": {st: sum(1 for t in tracks if movement_source_by_id.get(str(t), "") == st)
+                                    for st in ("Exact", "Partial", "Ambiguous", "Unclassified", "Insufficient")},
                 "selected_zones": {k: sorted(c[k + "_zones"]) for k in ("speed", "lc", "pet", "ttc", "ldp")},
             },
             "diagnostics": {},
