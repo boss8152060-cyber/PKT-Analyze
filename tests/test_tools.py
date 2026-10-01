@@ -1,4 +1,5 @@
 """Unit tests of the pure helpers of tools/batch_run.py (no YOLO, no GUI)."""
+import csv
 import os
 import shutil
 import sys
@@ -59,19 +60,36 @@ class FolderMirror(unittest.TestCase):
         self.assertEqual(batch_run.run_dir_for("out", "Site8/2026-09-07", "a"), os.path.join("out", "Site8", "2026-09-07", "a"))
         self.assertEqual(batch_run.run_dir_for("out", "", "a"), os.path.join("out", "a"))
 
-    def test_combined_groups_one_per_folder_level(self):
-        runs = batch_run.plan_runs([("a.mp4", "Site8/d1"), ("b.mp4", "Site8/d1"), ("c.mp4", "Site8/d2")], {})
-        g = batch_run.combined_groups(runs)
-        self.assertEqual(g[("Site8/d1", ())], [0, 1])          # the day with 2 clips
-        self.assertNotIn(("Site8/d2", ()), g)                  # a day with 1 clip needs no combined set
-        self.assertEqual(g[("Site8", ())], [0, 1, 2])          # the place: all 3 clips
-        self.assertNotIn(("", ()), g)                          # the root would only repeat the place's set
+    def test_day_folder_keeps_the_place_from_its_parent(self):
+        day = os.path.join(self.root, "Site8", "2026-09-08")
+        found = batch_run.find_videos([day], keep_parent=True)
+        self.assertEqual([(os.path.basename(v), rel) for v, rel in found], [("c.mp4", "Site8/2026-09-08")])
+        # picking the place gives the same relative folder for the same clip
+        via_place = [(os.path.basename(v), rel) for v, rel in batch_run.find_videos([os.path.join(self.root, "Site8")]) if rel.endswith("09-08")]
+        self.assertEqual(via_place, [("c.mp4", "Site8/2026-09-08")])
 
-    def test_combined_groups_keep_sweep_values_apart(self):
-        runs = batch_run.plan_runs([("a.mp4", "S"), ("b.mp4", "S")], {"track_buffer": ["15", "60"]})
-        g = batch_run.combined_groups(runs)
-        self.assertEqual(len(g[("S", (("track_buffer", "15"),))]), 2)
-        self.assertEqual(len(g[("S", (("track_buffer", "60"),))]), 2)
+    def test_new_day_lands_next_to_the_old_day(self):
+        first = batch_run.find_videos([os.path.join(self.root, "Site8", "2026-09-07")], keep_parent=True)
+        second = batch_run.find_videos([os.path.join(self.root, "Site8", "2026-09-08")], keep_parent=True)
+        d1 = {os.path.dirname(batch_run.run_dir_for("out", rel, "x")) for _v, rel in first}
+        d2 = {os.path.dirname(batch_run.run_dir_for("out", rel, "x")) for _v, rel in second}
+        self.assertEqual({os.path.dirname(x) for x in d1}, {os.path.dirname(x) for x in d2})   # same place folder
+        self.assertNotEqual(d1, d2)                                                          # different day folder
+
+
+class Comparison(unittest.TestCase):
+    def test_comparison_table_grows_and_updates(self):
+        d = tempfile.mkdtemp(prefix="pk_cmp_")
+        try:
+            row = lambda folder, run, status: {"Run": run, "Folder": folder, "Overrides": "", "Status": status}
+            batch_run.finish_batch(d, [], [row("S/d1", "a", "completed"), row("S/d1", "b", "completed")], log=lambda *_: None)
+            batch_run.finish_batch(d, [], [row("S/d2", "c", "completed"), row("S/d1", "b", "stopped")], log=lambda *_: None)
+            with open(os.path.join(d, "Batch_Comparison.csv"), newline="", encoding="utf-8-sig") as f:
+                rows = list(csv.DictReader(f))
+            self.assertEqual([(r["Folder"], r["Run"], r["Status"]) for r in rows],
+                             [("S/d1", "a", "completed"), ("S/d1", "b", "stopped"), ("S/d2", "c", "completed")])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class ClipPlan(unittest.TestCase):

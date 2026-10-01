@@ -2,21 +2,22 @@
 
 Runs the real Run 1 + 2 + 3 pipeline (YOLO + tracker + zones + indicators) on several videos
 and/or for several values of a Run 1 setting, one output folder per run, then writes a
-comparison table (and, for several videos, the combined statistics of tools/merge_clips.py).
+comparison table.
 
     python tools/batch_run.py --settings <Research_Settings.json> --out <root_folder> \\
            --videos <video files and/or folders> [--sweep track_buffer=15,30,60] [--sweep match_threshold=0.7,0.8,0.9]
 
   Folders are searched recursively and the output MIRRORS the input structure, e.g.
-      Drone/<place>/<day>/clip1.mp4            ->  <out>/<place>/<day>/clip1/   (this clip's CSVs)
-      <out>/<place>/<day>/_Combined/           (all clips of that day together)
-      <out>/<place>/_Combined/                 (all clips of the place together)
-  so each clip keeps its own CSV files and every folder level also gets one combined set.
+      Drone/<place>/<day>/clip1.mp4            ->  <out>/<place>/<day>/clip1/   (this clip's own CSV files)
+  A later batch is ADDED to the same <out>: the same place keeps its folder, a new day only adds its
+  <day> folder, new clips of an old day only add their clip folders (old results are left alone).
 
   --settings   a <run>_Research_Settings.json saved by an earlier run in the program (it holds the model,
                zones, Lines, calibration, widths, ...). Without it the program defaults are used.
   --videos     video files and/or folders (default: the video in the settings); a folder is scanned for
-               videos in all its sub-folders and its own name is kept as the first output level
+               videos in all its sub-folders and its own name is kept as the first output level (= the place)
+  --day-folders  the folders given are DAY folders: their parent folder's name is the place (output
+               <out>/<place>/<day>/...), so a new day can be added without picking the place folder
   --plan       a batch plan .json saved by the program's Batch window: per clip the time range to analyse and
                whether / which part to record (replaces --videos; --save-video is then ignored)
   --skip-done  skip a clip whose result folder already has Run_3_Summary.json (resume an interrupted batch)
@@ -28,8 +29,8 @@ comparison table (and, for several videos, the combined statistics of tools/merg
   --out        root folder; each run goes to <out>/<same folders as the input>/<video>[__setting-value...]/
 
 Results: <out>/Batch_Comparison.csv (one row per run: IDs, ID-switch warnings, detection losses,
-untracked detections, duplicate tracks, Movement Exact count, time) and a _Combined folder (merged
-CSVs with a Clip column + Combined_Statistics.csv) at every folder level that holds 2+ clips.
+untracked detections, duplicate tracks, Movement Exact count, time); a new batch updates the rows of the clips it ran
+and keeps the rows of the other clips.
 
 How to read a sweep: fewer unique_track_ids / id_switch_warnings / detection_loss_events / duplicate
 tracks at a similar number of Exact movements = steadier tracking. This tool only reports - it does
@@ -67,16 +68,17 @@ def slug(text):
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".mts", ".m4v")
 
 
-def find_videos(inputs):
+def find_videos(inputs, keep_parent=False):
     """inputs = files and/or folders -> sorted list of (video_path, rel_dir). For a folder the rel_dir
-    starts with the folder's own name (the place) and continues with the sub-folders (the day)."""
+    starts with the folder's own name (the place) and continues with the sub-folders (the day).
+    keep_parent=True: the folders are DAY folders, the rel_dir starts with their parent's name (the place)."""
     found = []
     for item in inputs:
         item = os.path.abspath(item)
         if os.path.isfile(item):
             found.append((item, ""))
             continue
-        top = os.path.dirname(item)
+        top = os.path.dirname(os.path.dirname(item)) if keep_parent else os.path.dirname(item)
         for dirpath, dirnames, filenames in os.walk(item):
             dirnames.sort()
             for fn in sorted(filenames):
@@ -92,21 +94,6 @@ def plan_runs(videos, sweeps):
     combos = list(itertools.product(*[sweeps[k] for k in keys])) if keys else [()]
     items = [(v, "") if isinstance(v, str) else v for v in videos]
     return [(v, rel, dict(zip(keys, combo))) for v, rel in items for combo in combos]
-
-
-def combined_groups(runs):
-    """-> {(rel_dir_prefix, overrides_key): [run indices]} for every folder level that holds 2+ clips
-    with the same overrides. Prefix '' = the output root."""
-    groups = {}
-    for i, (_v, rel, ov) in enumerate(runs):
-        parts = [x for x in rel.split("/") if x]
-        for n in range(len(parts) + 1):
-            groups.setdefault(("/".join(parts[:n]), tuple(sorted(ov.items()))), []).append(i)
-    groups = {k: v for k, v in groups.items() if len(v) >= 2}
-    # a folder whose clips are exactly those of a deeper folder (e.g. the output root above a single place)
-    # would only repeat that folder's combined set
-    return {k: v for k, v in groups.items()
-            if not any(k2[1] == k[1] and v2 == v and len(k2[0]) > len(k[0]) for k2, v2 in groups.items())}
 
 
 def run_name_for(video, overrides):
@@ -222,24 +209,18 @@ def clip_label(clip):
 
 
 def finish_batch(out_root, runs, rows, log=print):
-    """Batch_Comparison.csv + a _Combined folder for every folder level with 2+ clips."""
-    write_comparison(os.path.join(out_root, "Batch_Comparison.csv"), rows)
-    log("comparison -> " + os.path.join(out_root, "Batch_Comparison.csv"))
-    import merge_clips
-    for (prefix, ov), idx in sorted(combined_groups(runs).items()):
-        dirs, labels = [], []
-        for i in idx:
-            v, rel, o = runs[i]
-            d = run_dir_for(out_root, rel, run_name_for(v, o))
-            if os.path.isdir(d) and os.path.isfile(os.path.join(d, "Run_3_Summary.json")):
-                dirs.append(d)
-                labels.append("/".join(x for x in (rel, run_name_for(v, o)) if x))
-        if len(dirs) < 2:
-            continue
-        tag = "_Combined" + ("" if not ov else "__" + "__".join(f"{slug(k)}-{slug(val)}" for k, val in ov))
-        target = os.path.join(out_root, *[x for x in prefix.split("/") if x], tag)
-        merge_clips.merge(target, dirs, labels)
-        log("combined -> " + target)
+    """Batch_Comparison.csv in the output root: the rows of the clips just run replace their old rows, the rows
+    of clips from earlier batches stay (so one table grows with the place)."""
+    path = os.path.join(out_root, "Batch_Comparison.csv")
+    old = {}
+    if os.path.isfile(path):
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                old[(r.get("Folder", ""), r.get("Run", ""), r.get("Overrides", ""))] = r
+    for r in rows:
+        old[(r.get("Folder", ""), r.get("Run", ""), r.get("Overrides", ""))] = r
+    write_comparison(path, [old[k] for k in sorted(old)])
+    log("comparison -> " + path)
 
 
 def run_batch(app, base_settings, out_root, runs, save_video=False, skip_done=False, clip_params=None, log=print):
@@ -321,6 +302,7 @@ def main(argv=None):
     ap.add_argument("--set", action="append", dest="fixed")
     ap.add_argument("--save-video", action="store_true")
     ap.add_argument("--skip-done", action="store_true")
+    ap.add_argument("--day-folders", action="store_true")
     args = ap.parse_args(argv)
 
     mod = load_pkstudio()
@@ -355,7 +337,7 @@ def main(argv=None):
         for v in inputs:
             if not os.path.exists(v):
                 raise SystemExit(f"video or folder not found: {v}")
-        videos = find_videos(inputs)
+        videos = find_videos(inputs, keep_parent=args.day_folders)
         if not videos:
             raise SystemExit("no video files found in: " + ", ".join(inputs))
     run3 = base.setdefault("run3", {})
