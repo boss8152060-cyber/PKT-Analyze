@@ -1,4 +1,4 @@
-"""Real test of the GUI batch (Batch dialog logic + start_batch worker) on two short clips.
+"""Real test of the GUI clip list (step 1) and the START button on short clips.
 
 Run from the Run folder:   py -3.12 tests/e2e_batch_gui.py     (needs YOLO + a sample video; skips otherwise)
 Tree:  Site/day1/a.mp4 (analyse 1.0-2.0 s, record 1.2-1.5 s)   Site/day1/b.mp4 (whole clip, no recording)
@@ -86,7 +86,7 @@ app.zone_line_config_var.set(zone)
 app.load_pkstudio_zones()
 
 # ---- dialog logic (no clicks needed) ----
-dlg = mod.BatchDialog(app)
+dlg = app.clips_panel                       # step 1 of the window: the clip list
 dlg.add_videos(batch_run.find_videos([os.path.join(tmp, "in", "Site")]))
 check("dialog lists both clips with place/day", [c["rel_dir"] for c in dlg.clips] == ["Site/day1", "Site/day1"] and len(dlg.tree.get_children()) == 2)
 dlg.clips[0].update({"analysis_start_s": "1.0", "analysis_end_s": "0:02", "save_video": True, "record_start_s": "1.2", "record_end_s": "1.5"})
@@ -100,17 +100,18 @@ dlg.clips[0].update({"save_video": True, "record_start_s": "1.2", "record_end_s"
 plan_path = os.path.join(tmp, "plan.json")
 filedialog.asksaveasfilename = lambda *a, **k: plan_path
 filedialog.askopenfilename = lambda *a, **k: plan_path
-dlg.out_var.set(os.path.join(tmp, "out"))
+app.output_var.set(os.path.join(tmp, "out"))
 dlg.save_plan()
 dlg.clear()
 dlg.load_plan()
-check("plan file round trip keeps clips, times and output folder", len(dlg.clips) == 2 and dlg.clips[0]["record_end_s"] == "1.5" and dlg.out_var.get() == os.path.join(tmp, "out"))
+check("plan file round trip keeps clips, times and output folder", len(dlg.clips) == 2 and dlg.clips[0]["record_end_s"] == "1.5" and app.output_var.get() == os.path.join(tmp, "out"))
 out_root, plan_clips = batch_run.load_plan(plan_path)
 check("tools/batch_run.py reads the same plan", len(plan_clips) == 2 and plan_clips[0]["analysis_end_s"] == "0:02")
 
 # ---- run it ----
-started = app.start_batch(dlg.clips, os.path.join(tmp, "out"), False)
-check("batch started", started is True, str(shown))
+dlg.skip_done_var.set(False)
+app.start_analysis()                        # the START button
+check("batch started", app.running is True, str(shown))
 wait_in_mainloop(lambda: not app.running, 600)
 wait_in_mainloop(lambda: False, 1)
 check("batch finished and the window is usable again", not app.running and str(app.start_button.cget("state")) == "normal")
@@ -138,12 +139,14 @@ deep2 = os.path.join(day2, "morning", "cam1")                                  #
 os.makedirs(deep2)
 shutil.copy(os.path.join(tree, "a.mp4"), os.path.join(deep2, "c.mp4"))
 shown.clear()
-dlg2 = mod.BatchDialog(app)
-dlg2.out_var.set(o)
+dlg2 = app.clips_panel
+dlg2.clear()
+app.output_var.set(o)
+dlg2.skip_done_var.set(True)
 dlg2.add_videos(batch_run.find_videos([day2], keep_levels=1))          # picking a sub-folder + 'levels above' = 1
 check("a picked sub-folder is placed under the folder above it (levels above = 1)", [c["rel_dir"] for c in dlg2.clips] == ["Site/day2/morning/cam1"], str([c["rel_dir"] for c in dlg2.clips]))
 dlg2.clips[0].update({"save_video": False})
-app.start_batch(dlg2.clips, o, True)
+app.start_analysis()
 wait_in_mainloop(lambda: not app.running, 600)
 wait_in_mainloop(lambda: False, 1)
 check("new folder added next to the old one: Site/day1/{a,b} and Site/day2/c", all(os.path.isdir(p) for p in (os.path.join(o, "Site", "day1", "a"), os.path.join(o, "Site", "day1", "b"), os.path.join(o, "Site", "day2", "morning", "cam1", "c"))),
@@ -156,14 +159,16 @@ check("comparison table now lists all three clips", sorted((r["Folder"], r["Run"
 
 # ---- case 2: the old day with a NEW clip -> the old clips are skipped, only the new one runs ----
 shutil.copy(os.path.join(tree, "a.mp4"), os.path.join(tree, "d.mp4"))
-dlg3 = mod.BatchDialog(app)
-dlg3.out_var.set(o)
+dlg3 = app.clips_panel
+dlg3.clear()
+app.output_var.set(o)
+dlg3.skip_done_var.set(True)
 dlg3.add_videos(batch_run.find_videos([os.path.join(tmp, "in", "Site", "day1")], keep_levels=1))
 check("the folder now lists three clips", len(dlg3.clips) == 3)
 for c in dlg3.clips:
     c["save_video"] = False
 t0 = time.time()
-app.start_batch(dlg3.clips, o, True)
+app.start_analysis()
 wait_in_mainloop(lambda: not app.running, 600)
 wait_in_mainloop(lambda: False, 1)
 check("new clip d added to day1; a and b untouched", os.path.isfile(os.path.join(o, "Site", "day1", "d", "Run_3_Summary.json")) and os.path.getmtime(os.path.join(a_dir, "Run_3_Summary.json")) == mtime_a)

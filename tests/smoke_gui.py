@@ -94,6 +94,24 @@ while time.time() < end and not seen:
 check("UI queue: callback posted by a worker thread runs on the main thread", seen == [True] and app.status_var.get() == "from worker", str(seen))
 check("default paths are relative to the program folder", m.DEFAULT_MODEL.endswith(os.path.join("PK STUDIO", "Input", "Model", "best.pt")), m.DEFAULT_MODEL)
 
+# --- window layout: four steps + a run bar with the ready-to-run list ---
+check("four steps in order", [app.notebook.tab(i, "text") for i in range(4)] == ["① คลิปวิดีโอ", "② ทางแยก", "③ ตัวชี้วัด", "④ ตรวจจับและติดตาม"])
+app.refresh_checklist()
+check("run bar lists model / clips / zones / lines / widths / output", set(app.check_labels) == {"model", "clips", "zones", "lines", "widths", "output"})
+check("no clips yet: the START text has no count", app.start_button.cget("text") == "▶ เริ่มวิเคราะห์", app.start_button.cget("text"))
+app.clips_panel.add_videos([("C:/x/a.mp4", "S/d")])
+app.refresh_checklist()
+check("one clip is a list of one", "1 คลิป" in app.start_button.cget("text"), app.start_button.cget("text"))
+app.clips_panel.clear()
+from tkinter import messagebox as _mb
+_shown = []
+_mb.showinfo = lambda *a, **k: _shown.append(a)
+app.notebook.select(2)
+app.start_analysis()
+check("START with an empty list explains what to do and goes to step 1", len(_shown) == 1 and app.notebook.index(app.notebook.select()) == 0 and not app.running, str(_shown))
+check("every indicator has its own switch in its group", all(hasattr(app, n) for n in ("run3_ldp_enabled_var", "run3_lc_enabled_var", "run3_gap_enabled_var", "run3_ttc_enabled_var", "run3_pet_enabled_var", "run3_speed_enabled_var")))
+check("reference mapping text widget exists (Gap Acceptance group)", hasattr(app, "run3_reference_text"))
+
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
 sys.exit(1 if failures else 0)
