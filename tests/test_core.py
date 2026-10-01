@@ -623,5 +623,18 @@ class ExcelSafe(unittest.TestCase):
             self.assertEqual(self.f(v), v)
 
 
+class SpeedOutlier(unittest.TestCase):
+    f = staticmethod(lambda v, m: CORE["is_speed_outlier"](v, m))
+
+    def test_flagging(self):
+        self.assertTrue(self.f(99.2, 80))
+        self.assertFalse(self.f(80, 80))
+        self.assertFalse(self.f(22, 80))
+
+    def test_zero_or_none_turns_check_off(self):
+        self.assertFalse(self.f(300, 0))
+        self.assertFalse(self.f(300, None))
+
+
 if __name__ == "__main__":
     unittest.main()
