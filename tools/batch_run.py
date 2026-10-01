@@ -7,17 +7,19 @@ comparison table.
     python tools/batch_run.py --settings <Research_Settings.json> --out <root_folder> \\
            --videos <video files and/or folders> [--sweep track_buffer=15,30,60] [--sweep match_threshold=0.7,0.8,0.9]
 
-  Folders are searched recursively and the output MIRRORS the input structure, e.g.
-      Drone/<place>/<day>/clip1.mp4            ->  <out>/<place>/<day>/clip1/   (this clip's own CSV files)
-  A later batch is ADDED to the same <out>: the same place keeps its folder, a new day only adds its
-  <day> folder, new clips of an old day only add their clip folders (old results are left alone).
+  Folders are searched recursively and the output MIRRORS the folder structure that was imported, at any
+  depth and with any folder names (nothing is assumed to be a "place" or a "day"):
+      <picked folder>/A/B/clip1.mp4   ->   <out>/<picked folder>/A/B/clip1/   (this clip's own CSV files)
+  A folder that already exists in <out> is reused, a missing one is created, so a later batch is ADDED to the
+  same tree and finished clips are skipped (--skip-done); old results are never touched.
 
   --settings   a <run>_Research_Settings.json saved by an earlier run in the program (it holds the model,
                zones, Lines, calibration, widths, ...). Without it the program defaults are used.
   --videos     video files and/or folders (default: the video in the settings); a folder is scanned for
-               videos in all its sub-folders and its own name is kept as the first output level (= the place)
-  --day-folders  the folders given are DAY folders: their parent folder's name is the place (output
-               <out>/<place>/<day>/...), so a new day can be added without picking the place folder
+               videos in all its sub-folders; its own name is the first output level
+  --keep-levels N  also keep the names of the N folders ABOVE each picked folder in the output (default 0):
+               picking <root>/A/B with N=1 gives <out>/A/B/..., so a sub-folder can be added to a tree that
+               was imported from a higher folder before
   --plan       a batch plan .json saved by the program's Batch window: per clip the time range to analyse and
                whether / which part to record (replaces --videos; --save-video is then ignored)
   --skip-done  skip a clip whose result folder already has Run_3_Summary.json (resume an interrupted batch)
@@ -68,23 +70,42 @@ def slug(text):
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".mts", ".m4v")
 
 
-def find_videos(inputs, keep_parent=False):
-    """inputs = files and/or folders -> sorted list of (video_path, rel_dir). For a folder the rel_dir
-    starts with the folder's own name (the place) and continues with the sub-folders (the day).
-    keep_parent=True: the folders are DAY folders, the rel_dir starts with their parent's name (the place)."""
+def find_videos(inputs, keep_levels=0):
+    """inputs = files and/or folders -> sorted list of (video_path, rel_dir). rel_dir is the folder structure
+    to rebuild in the output: for a picked folder it starts with the folder's own name and continues with every
+    sub-folder down to the video's folder, at any depth. keep_levels = N also keeps the names of the N folders
+    above the picked folder. A single file gets the last N folder names above it ('' when N = 0)."""
     found = []
     for item in inputs:
         item = os.path.abspath(item)
         if os.path.isfile(item):
-            found.append((item, ""))
+            parts = [x for x in os.path.dirname(item).replace("\\", "/").split("/") if x][-keep_levels:] if keep_levels > 0 else []
+            found.append((item, "/".join(parts)))
             continue
-        top = os.path.dirname(os.path.dirname(item)) if keep_parent else os.path.dirname(item)
+        top = item
+        for _ in range(int(keep_levels) + 1):
+            parent = os.path.dirname(top)
+            if parent == top:
+                break
+            top = parent
         for dirpath, dirnames, filenames in os.walk(item):
             dirnames.sort()
             for fn in sorted(filenames):
                 if fn.lower().endswith(VIDEO_EXTS):
-                    found.append((os.path.join(dirpath, fn), os.path.relpath(dirpath, top).replace("\\", "/")))
+                    rel = os.path.relpath(dirpath, top).replace("\\", "/")
+                    found.append((os.path.join(dirpath, fn), "" if rel == "." else rel))
     return found
+
+
+def duplicate_run_dirs(out_root, runs):
+    """Run folders that two clips of the plan would share (e.g. a.mp4 and a.mov in one folder) -> list of paths."""
+    seen, dup = {}, []
+    for video, rel, ov in runs:
+        d = run_dir_for(out_root, rel, run_name_for(video, ov))
+        if d in seen and seen[d] != video:
+            dup.append(d)
+        seen[d] = video
+    return dup
 
 
 def plan_runs(videos, sweeps):
@@ -302,7 +323,7 @@ def main(argv=None):
     ap.add_argument("--set", action="append", dest="fixed")
     ap.add_argument("--save-video", action="store_true")
     ap.add_argument("--skip-done", action="store_true")
-    ap.add_argument("--day-folders", action="store_true")
+    ap.add_argument("--keep-levels", type=int, default=0)
     args = ap.parse_args(argv)
 
     mod = load_pkstudio()
@@ -337,7 +358,7 @@ def main(argv=None):
         for v in inputs:
             if not os.path.exists(v):
                 raise SystemExit(f"video or folder not found: {v}")
-        videos = find_videos(inputs, keep_parent=args.day_folders)
+        videos = find_videos(inputs, keep_levels=args.keep_levels)
         if not videos:
             raise SystemExit("no video files found in: " + ", ".join(inputs))
     run3 = base.setdefault("run3", {})
