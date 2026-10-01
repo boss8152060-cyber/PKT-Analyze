@@ -36,6 +36,8 @@ import json
 import importlib.util
 import time
 import threading
+import queue
+import logging
 import subprocess
 import shutil
 import math
@@ -332,20 +334,27 @@ class _NullCSVWriter:
         pass
 
 
-DEFAULT_MODEL = (
-    r"F:\motorcycle group project\PSU Transport Project 2026"
-    r"\Test\Run1\Model\best.pt"
-)
+# Default paths are relative to this file: <PK STUDIO>\Run\PKStudio.py -> <PK STUDIO>\Input, \Output
+_PK_STUDIO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-DEFAULT_VIDEO = (
-    r"F:\motorcycle group project\PSU Transport Project 2026"
-    r"\Test\Run1\Input\20260907_073251A_.mp4"
-)
 
-DEFAULT_OUTPUT = (
-    r"F:\motorcycle group project\PSU Transport Project 2026"
-    r"\Test\Run1\Output"
-)
+def _first_video(folder):
+    try:
+        for name in sorted(os.listdir(folder)):
+            if name.lower().endswith((".mp4", ".avi", ".mov", ".mkv")):
+                return os.path.join(folder, name)
+    except OSError:
+        pass
+    return os.path.join(folder, "video.mp4")
+
+
+DEFAULT_MODEL = os.path.join(_PK_STUDIO_DIR, "Input", "Model", "best.pt")
+DEFAULT_VIDEO = _first_video(os.path.join(_PK_STUDIO_DIR, "Input", "Video"))
+DEFAULT_OUTPUT = os.path.join(_PK_STUDIO_DIR, "Output")
+
+log = logging.getLogger("pkstudio")
+if not log.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 # ============================================================
@@ -1266,9 +1275,13 @@ class Run1App:
         self.pause_event.set()
         self.worker_thread = None
 
+        # Worker threads never touch Tk: they post callables here and the main thread runs them.
+        self._ui_queue = queue.Queue()
+
         self.create_variables()
         self.build_gui()
         self.update_hardware_info()
+        self._poll_ui_queue()
 
         self.root.protocol(
             "WM_DELETE_WINDOW",
@@ -4684,6 +4697,25 @@ class Run1App:
     # UI UPDATE
     # ========================================================
 
+    def post_ui(self, fn):
+        """Thread-safe: ask the main (Tk) thread to run fn() soon."""
+        self._ui_queue.put(fn)
+
+    def _poll_ui_queue(self):
+        try:
+            while True:
+                fn = self._ui_queue.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    log.exception("UI callback failed")
+        except queue.Empty:
+            pass
+        try:
+            self.root.after(50, self._poll_ui_queue)
+        except tk.TclError:
+            pass   # window already closed
+
     def update_ui(
         self,
         status=None,
@@ -4702,10 +4734,7 @@ class Run1App:
             if timing is not None:
                 self.time_var.set(timing)
 
-        self.root.after(
-            0,
-            update
-        )
+        self.post_ui(update)
 
     # ========================================================
     # PROCESSING
@@ -4785,24 +4814,6 @@ class Run1App:
                 output_dir,
                 run_name + "_Research_Measurement_Summary.json"
             )
-
-            # Remove obsolete CSV files created by older versions of PK Studio
-            # for this same Run name. Do not touch unrelated files.
-            legacy_csv_names = [
-                run_name + "_Research_Track_Statistics.csv",
-                run_name + "_Research_ID_Switch_Warnings.csv",
-                run_name + "_Research_Detection_Loss.csv",
-                run_name + "_Research_Processing_Log.csv",
-                run_name + "_Research_Zone_Line_Events.csv",
-                run_name + "_Research_Line_Summary.csv",
-            ]
-            for legacy_name in legacy_csv_names:
-                legacy_path = os.path.join(output_dir, legacy_name)
-                try:
-                    if os.path.isfile(legacy_path):
-                        os.remove(legacy_path)
-                except OSError:
-                    pass
 
             with open(
                 output_settings,
@@ -6236,7 +6247,7 @@ class Run1App:
             # STOP means: stop video processing, then analyze the data already
             # produced by Run 2.
             if self.run3_was_requested:
-                self.root.after(0, lambda: self.status_var.set(
+                self.post_ui(lambda: self.status_var.set(
                     "Run 3 — analyzing Run 2 data" + (" (partial run after STOP)" if stopped else "")
                 ))
                 self.run3_last_outputs = self.run3_processing(settings, output_dir, run_name)
@@ -6249,10 +6260,10 @@ class Run1App:
                     with open(output_summary, "w", encoding="utf-8") as sf:
                         json.dump(integrated_summary, sf, indent=4, ensure_ascii=False)
                 except Exception:
-                    pass
+                    log.exception("Could not add the Run 3 result to %s", output_summary)
+                    print("WARNING: could not add the Run 3 result to the summary JSON:", output_summary)
 
-            self.root.after(
-                0,
+            self.post_ui(
                 lambda: self.finish_integrated_ui(
                     stopped,
                     output_video,
@@ -6309,8 +6320,7 @@ class Run1App:
             # Tkinter callbacks run after this except block exits; capture the
             # exception text now instead of closing over Python's exception variable.
             error_message = str(e)
-            self.root.after(
-                0,
+            self.post_ui(
                 lambda message=error_message: self.show_error(
                     message
                 )
@@ -7651,7 +7661,7 @@ class Run1App:
         timings = {}
 
         def status(text):
-            self.root.after(0, lambda t=text: self.status_var.set(t))
+            self.post_ui(lambda t=text: self.status_var.set(t))
 
         status("Run 3 — loading Run 2 results...")
         detection_rows, id_rows, zone_rows, det_path, id_path, zone_path = self._run3_load_inputs(output_dir, run_name)
@@ -7956,7 +7966,7 @@ class Run1App:
         self.run3_last_summary = summary
         done = [k for k in ("lc", "ldp", "gap", "ttc", "pet", "speed") if c.get(k + "_enabled")]
         msg = f"Run 3 completed in {summary['timings_s']['total']:.1f} s | " + ", ".join(done)
-        self.root.after(0, lambda m=msg: self.run3_result_text.set(m))
+        self.post_ui(lambda m=msg: self.run3_result_text.set(m))
         return outputs
 
     def finish_integrated_ui(self, stopped, output_video, output_csv, output_settings, output_summary, output_id_zone_summary=None, output_zone_summary=None):
