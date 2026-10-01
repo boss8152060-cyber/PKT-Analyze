@@ -66,14 +66,27 @@ python tools/merge_clips.py "../Output/Combined" "../Output/Run3_clip1" "../Outp
 
 ## 5. รันหลายวิดีโอ / ลองหลายค่า tracker ในคำสั่งเดียว (`tools/batch_run.py`)
 
-รันโปรแกรมจริง (YOLO + tracker + โซน + ตัวชี้วัด) แบบไม่เปิดหน้าต่าง กับหลายวิดีโอ และ/หรือหลายค่าของการตั้งค่า Run 1 แล้วทำตารางเปรียบเทียบ `Batch_Comparison.csv` (จำนวน ID, ID switch, detection loss, แทร็กซ้ำ, Movement ครบ, จำนวนแถวของแต่ละตัวชี้วัด, เวลา) ถ้ามีหลายวิดีโอจะรวมผลด้วย `merge_clips` ให้เอง (`Combined/`)
+รันโปรแกรมจริง (YOLO + tracker + โซน + ตัวชี้วัด) แบบไม่เปิดหน้าต่าง กับหลายวิดีโอ และ/หรือหลายค่าของการตั้งค่า Run 1
+
+**เลือกเป็นโฟลเดอร์ได้ — ผลลัพธ์แบ่งโฟลเดอร์ตามต้นฉบับ** (สถานที่ → วัน → คลิป) เช่น
+
+```
+Drone/ทางเข้าคณะทรัพย์/2026-09-07/clip1.mp4        ผลลัพธ์:  Output/Batch/ทางเข้าคณะทรัพย์/2026-09-07/clip1/   ← CSV ของคลิปนี้ (แยกรายคลิป)
+Drone/ทางเข้าคณะทรัพย์/2026-09-07/clip2.mp4                  Output/Batch/ทางเข้าคณะทรัพย์/2026-09-07/clip2/
+Drone/ทางเข้าคณะทรัพย์/2026-09-08/clip3.mp4                  Output/Batch/ทางเข้าคณะทรัพย์/2026-09-07/_Combined/   ← รวมทุกคลิปของวันนั้น
+                                                            Output/Batch/ทางเข้าคณะทรัพย์/_Combined/              ← รวมทุกคลิปของสถานที่นั้น
+```
+
+- ทุกระดับโฟลเดอร์ที่มี 2 คลิปขึ้นไปจะได้โฟลเดอร์ `_Combined` ของตัวเอง (ไฟล์ `Merged_*.csv` มีคอลัมน์ `Clip` บอกว่าแถวมาจากคลิปไหน + `Combined_Statistics.csv` สถิติรวม)
+- ตารางเปรียบเทียบทุกรันอยู่ที่ `Batch_Comparison.csv` ในโฟลเดอร์ out (คอลัมน์ `Folder` บอกสถานที่/วัน): จำนวน ID, ID switch, detection loss, แทร็กซ้ำ, Movement ครบ, จำนวนแถวของแต่ละตัวชี้วัด, เวลา
+- รันค้างกลางทางแล้วรันซ้ำด้วย `--skip-done` จะข้ามคลิปที่เสร็จแล้ว
 
 ```bash
-py -3.12 tools/batch_run.py --settings "../Output/Run3/Run_3_Research_Settings.json" --out "../Output/Batch"     --videos clip1.mp4 clip2.mp4 --sweep track_buffer=15,30,60
+py -3.12 tools/batch_run.py --settings "../Output/Run3/Run_3_Research_Settings.json" --out "../Output/Batch"     --videos "F:/.../Drone/ทางเข้าคณะทรัพย์" --skip-done --sweep track_buffer=15,30,60
 ```
 
 - `--settings` = ไฟล์ `<run>_Research_Settings.json` จากรันที่ตั้งค่าครบแล้ว (โมเดล โซน Line ความกว้างเลน PPM ฯลฯ); ถ้าไม่ให้ จะใช้ค่าเริ่มต้นของโปรแกรม และต้องให้ค่าที่ขาดด้วย `--set ชื่อ=ค่า` (เช่น ความกว้างเลน)
 - `--zone-file` ใช้ไฟล์ Zone อื่นแทนที่ฝังในไฟล์ settings; `--save-video` เขียนวิดีโอผลด้วย (ปกติปิดเพื่อให้เร็ว)
-- `--sweep ชื่อ=ค่า1,ค่า2` ใช้ซ้ำได้ (รันทุกการผสม) ค่า Run 1 ที่ทดลองได้: `track_buffer`, `match_threshold`, `track_high`, `track_low`, `new_track`, `confidence`, `iou`, `img_size`
+- `--videos` รับทั้งไฟล์และโฟลเดอร์ (ค้นในโฟลเดอร์ย่อยทั้งหมด); `--sweep ชื่อ=ค่า1,ค่า2` ใช้ซ้ำได้ (รันทุกการผสม) ค่า Run 1 ที่ทดลองได้: `track_buffer`, `match_threshold`, `track_high`, `track_low`, `new_track`, `confidence`, `iou`, `img_size`
 - **เครื่องมือแค่รายงาน ไม่เลือกหรือเปลี่ยนค่าให้เอง**: ค่าที่ดี = ID รวม/ID switch/detection loss/แทร็กซ้ำ น้อยลง ขณะที่ Movement ครบ (Exact) ไม่ลด
 - ใช้เวลาเท่ากับรันในโปรแกรมต่อหนึ่งวิดีโอต่อหนึ่งค่า — คลิปยาวหลายค่าควรรันตอนไม่ได้ใช้เครื่อง

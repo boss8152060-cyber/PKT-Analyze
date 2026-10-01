@@ -5,21 +5,29 @@ and/or for several values of a Run 1 setting, one output folder per run, then wr
 comparison table (and, for several videos, the combined statistics of tools/merge_clips.py).
 
     python tools/batch_run.py --settings <Research_Settings.json> --out <root_folder> \\
-           --videos clip1.mp4 clip2.mp4 [--sweep track_buffer=15,30,60] [--sweep match_threshold=0.7,0.8,0.9]
+           --videos <video files and/or folders> [--sweep track_buffer=15,30,60] [--sweep match_threshold=0.7,0.8,0.9]
+
+  Folders are searched recursively and the output MIRRORS the input structure, e.g.
+      Drone/<place>/<day>/clip1.mp4            ->  <out>/<place>/<day>/clip1/   (this clip's CSVs)
+      <out>/<place>/<day>/_Combined/           (all clips of that day together)
+      <out>/<place>/_Combined/                 (all clips of the place together)
+  so each clip keeps its own CSV files and every folder level also gets one combined set.
 
   --settings   a <run>_Research_Settings.json saved by an earlier run in the program (it holds the model,
                zones, Lines, calibration, widths, ...). Without it the program defaults are used.
-  --videos     one or more video files (default: the video in the settings)
+  --videos     video files and/or folders (default: the video in the settings); a folder is scanned for
+               videos in all its sub-folders and its own name is kept as the first output level
+  --skip-done  skip a clip whose result folder already has Run_3_Summary.json (resume an interrupted batch)
   --zone-file  Zone file to use instead of the one in the settings (e.g. for a different camera)
   --set        setting=value (repeatable) fixed for all runs, e.g. lane_entry_motorcycle_m=1.5
   --sweep      setting=v1,v2,...  (repeatable; every combination is run). Run 1 settings such as
                track_buffer, match_threshold, track_high, track_low, new_track, confidence, iou, img_size
   --save-video also write the annotated result video (off by default: much faster)
-  --out        root folder; each run goes to <out>/<video>[__setting-value...]/
+  --out        root folder; each run goes to <out>/<same folders as the input>/<video>[__setting-value...]/
 
 Results: <out>/Batch_Comparison.csv (one row per run: IDs, ID-switch warnings, detection losses,
-untracked detections, duplicate tracks, Movement Exact count, time) and, when several videos were run
-with the same settings, <out>/Combined/ (merged CSVs + Combined_Statistics.csv).
+untracked detections, duplicate tracks, Movement Exact count, time) and a _Combined folder (merged
+CSVs with a Clip column + Combined_Statistics.csv) at every folder level that holds 2+ clips.
 
 How to read a sweep: fewer unique_track_ids / id_switch_warnings / detection_loss_events / duplicate
 tracks at a similar number of Exact movements = steadier tracking. This tool only reports - it does
@@ -54,11 +62,49 @@ def slug(text):
     return re.sub(r"[^0-9A-Za-z._-]+", "_", str(text)).strip("_")
 
 
+VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".mts", ".m4v")
+
+
+def find_videos(inputs):
+    """inputs = files and/or folders -> sorted list of (video_path, rel_dir). For a folder the rel_dir
+    starts with the folder's own name (the place) and continues with the sub-folders (the day)."""
+    found = []
+    for item in inputs:
+        item = os.path.abspath(item)
+        if os.path.isfile(item):
+            found.append((item, ""))
+            continue
+        top = os.path.dirname(item)
+        for dirpath, dirnames, filenames in os.walk(item):
+            dirnames.sort()
+            for fn in sorted(filenames):
+                if fn.lower().endswith(VIDEO_EXTS):
+                    found.append((os.path.join(dirpath, fn), os.path.relpath(dirpath, top).replace("\\", "/")))
+    return found
+
+
 def plan_runs(videos, sweeps):
-    """sweeps = {setting: [values]} -> list of (video, {setting: value}) for every combination."""
+    """videos = [(video_path, rel_dir)] (plain paths are accepted too); sweeps = {setting: [values]}
+    -> list of (video, rel_dir, {setting: value}) for every combination."""
     keys = list(sweeps)
     combos = list(itertools.product(*[sweeps[k] for k in keys])) if keys else [()]
-    return [(v, dict(zip(keys, combo))) for v in videos for combo in combos]
+    items = [(v, "") if isinstance(v, str) else v for v in videos]
+    return [(v, rel, dict(zip(keys, combo))) for v, rel in items for combo in combos]
+
+
+def combined_groups(runs):
+    """-> {(rel_dir_prefix, overrides_key): [run indices]} for every folder level that holds 2+ clips
+    with the same overrides. Prefix '' = the output root."""
+    groups = {}
+    for i, (_v, rel, ov) in enumerate(runs):
+        parts = [x for x in rel.split("/") if x]
+        for n in range(len(parts) + 1):
+            groups.setdefault(("/".join(parts[:n]), tuple(sorted(ov.items()))), []).append(i)
+    groups = {k: v for k, v in groups.items() if len(v) >= 2}
+    # a folder whose clips are exactly those of a deeper folder (e.g. the output root above a single place)
+    # would only repeat that folder's combined set
+    return {k: v for k, v in groups.items()
+            if not any(k2[1] == k[1] and v2 == v and len(k2[0]) > len(k[0]) for k2, v2 in groups.items())}
 
 
 def run_name_for(video, overrides):
@@ -94,14 +140,18 @@ def count_rows(path):
         return max(0, sum(1 for _ in f) - 1)
 
 
-def collect_row(run_dir, run_name, video, overrides, error, seconds):
+def run_dir_for(out_root, rel_dir, name):
+    return os.path.join(out_root, *[x for x in rel_dir.split("/") if x], name)
+
+
+def collect_row(run_dir, run_name, video, rel_dir, overrides, error, seconds):
     run1 = read_json(os.path.join(run_dir, run_name + "_Research_Run_Summary.json"))
     run3 = read_json(os.path.join(run_dir, "Run_3_Summary.json"))
     dup = (run3.get("diagnostics", {}).get("duplicate_tracks") or {}).get("tracks_affected")
     mstat = (run3.get("source_counts", {}) or {}).get("movement_status", {}) or {}
     exact = None if not mstat else mstat.get("Exact", 0) + mstat.get("Exact_AfterDedupe", 0)
     row = {
-        "Run": run_name, "Video": os.path.basename(video),
+        "Run": run_name, "Folder": rel_dir, "Video": os.path.basename(video),
         "Overrides": "; ".join(f"{k}={v}" for k, v in overrides.items()),
         "Status": "ERROR: " + error if error else run1.get("status", "no summary"),
         "Frames": run1.get("processed_frames"),
@@ -121,16 +171,20 @@ def collect_row(run_dir, run_name, video, overrides, error, seconds):
     return row
 
 
-def run_batch(app, base_settings, out_root, runs, save_video=False, log=print):
+def run_batch(app, base_settings, out_root, runs, save_video=False, skip_done=False, log=print):
     """Runs every (video, overrides) in `runs`; returns the comparison rows."""
     errors = []
     app.show_error = lambda msg: errors.append(str(msg))
     app.finish_integrated_ui = lambda *a, **k: None
     rows = []
-    for i, (video, overrides) in enumerate(runs, 1):
+    for i, (video, rel_dir, overrides) in enumerate(runs, 1):
         name = run_name_for(video, overrides)
-        run_dir = os.path.join(out_root, name)
+        run_dir = run_dir_for(out_root, rel_dir, name)
         os.makedirs(run_dir, exist_ok=True)
+        if skip_done and os.path.isfile(os.path.join(run_dir, "Run_3_Summary.json")):
+            log(f"[{i}/{len(runs)}] {name}: already done, skipped")
+            rows.append(collect_row(run_dir, name, video, rel_dir, overrides, "", 0.0))
+            continue
         st = copy.deepcopy(base_settings)
         st.update({"video": video, "output": run_dir, "run_name": name,
                    "show_preview": False, "save_video": bool(save_video)})
@@ -164,12 +218,12 @@ def run_batch(app, base_settings, out_root, runs, save_video=False, log=print):
             except queue.Empty:
                 break
         err = errors[0] if errors else ""
-        rows.append(collect_row(run_dir, name, video, overrides, err, seconds))
+        rows.append(collect_row(run_dir, name, video, rel_dir, overrides, err, seconds))
         log(f"    -> {rows[-1]['Status']}  IDs={rows[-1]['Unique_Track_IDs']}  {seconds:.0f} s")
     return rows
 
 
-COLUMNS = ["Run", "Video", "Overrides", "Status", "Frames", "Unique_Track_IDs", "ID_Switch_Warnings",
+COLUMNS = ["Run", "Folder", "Video", "Overrides", "Status", "Frames", "Unique_Track_IDs", "ID_Switch_Warnings",
            "Detection_Loss_Events", "Untracked_Detections", "Duplicate_Tracks", "Movement_Exact",
            "Tracks_In_Run3", "Rows_LC", "Rows_LDP", "Rows_Gap", "Rows_TTC", "Rows_PET", "Rows_Speed", "Seconds"]
 
@@ -201,6 +255,7 @@ def main(argv=None):
     ap.add_argument("--sweep", action="append")
     ap.add_argument("--set", action="append", dest="fixed")
     ap.add_argument("--save-video", action="store_true")
+    ap.add_argument("--skip-done", action="store_true")
     args = ap.parse_args(argv)
 
     mod = load_pkstudio()
@@ -217,12 +272,15 @@ def main(argv=None):
     if args.zone_file:
         base["zone_file"] = args.zone_file
         base.pop("zone_snapshot", None)      # load the given Zone file instead of the embedded copy
-    videos = [os.path.abspath(v) for v in (args.videos or [base.get("video", "")]) if v]
-    if not videos:
+    inputs = args.videos or ([base["video"]] if base.get("video") else [])
+    if not inputs:
         raise SystemExit("no video given and none in the settings")
-    for v in videos:
-        if not os.path.isfile(v):
-            raise SystemExit(f"video not found: {v}")
+    for v in inputs:
+        if not os.path.exists(v):
+            raise SystemExit(f"video or folder not found: {v}")
+    videos = find_videos(inputs)
+    if not videos:
+        raise SystemExit("no video files found in: " + ", ".join(inputs))
     run3 = base.setdefault("run3", {})
     for a in args.fixed or []:
         key, _, val = a.partition("=")
@@ -235,18 +293,26 @@ def main(argv=None):
     out_root = os.path.abspath(args.out)
     os.makedirs(out_root, exist_ok=True)
     try:
-        rows = run_batch(app, base, out_root, runs, save_video=args.save_video)
+        rows = run_batch(app, base, out_root, runs, save_video=args.save_video, skip_done=args.skip_done)
     except ValueError as exc:
         raise SystemExit("settings problem: %s (give the missing value with --set name=value, or use --settings from a saved run)" % exc)
     write_comparison(os.path.join(out_root, "Batch_Comparison.csv"), rows)
     print("comparison ->", os.path.join(out_root, "Batch_Comparison.csv"))
-    if len(videos) > 1:
-        import merge_clips
-        for combo in sorted({tuple(sorted(o.items())) for _, o in runs}):
-            dirs = [os.path.join(out_root, run_name_for(v, dict(combo))) for v in videos]
-            tag = "Combined" if not combo else "Combined__" + "__".join(f"{slug(k)}-{slug(v)}" for k, v in combo)
-            merge_clips.merge(os.path.join(out_root, tag), [d for d in dirs if os.path.isdir(d)])
-            print("combined ->", os.path.join(out_root, tag))
+    import merge_clips
+    for (prefix, ov), idx in sorted(combined_groups(runs).items()):
+        dirs, labels = [], []
+        for i in idx:
+            v, rel, o = runs[i]
+            d = run_dir_for(out_root, rel, run_name_for(v, o))
+            if os.path.isdir(d):
+                dirs.append(d)
+                labels.append("/".join(x for x in (rel, run_name_for(v, o)) if x))
+        if len(dirs) < 2:
+            continue
+        tag = "_Combined" + ("" if not ov else "__" + "__".join(f"{slug(k)}-{slug(val)}" for k, val in ov))
+        target = os.path.join(out_root, *[x for x in prefix.split("/") if x], tag)
+        merge_clips.merge(target, dirs, labels)
+        print("combined ->", target)
     root.destroy()
     return 0
 
