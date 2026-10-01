@@ -74,5 +74,44 @@ class FolderMirror(unittest.TestCase):
         self.assertEqual(len(g[("S", (("track_buffer", "60"),))]), 2)
 
 
+class ClipPlan(unittest.TestCase):
+    def test_clip_settings_applies_the_clips_choices(self):
+        base = {"video": "x", "save_video": True, "analysis_start_s": "", "run3": {}}
+        clip = {"video": "a.mp4", "rel_dir": "S/d", "analysis_start_s": "0:30", "analysis_end_s": "2:15",
+                "save_video": True, "record_start_s": "1:00", "record_end_s": "1:30"}
+        st, name, run_dir = batch_run.clip_settings(base, "a.mp4", "S/d", {}, "out", clip, clip["save_video"])
+        self.assertEqual((st["analysis_start_s"], st["analysis_end_s"], st["record_start_s"], st["record_end_s"]),
+                         ("0:30", "2:15", "1:00", "1:30"))
+        self.assertTrue(st["save_video"])
+        self.assertFalse(st["show_preview"])
+        self.assertEqual(run_dir, os.path.join("out", "S", "d", "a"))
+        self.assertNotIn("rel_dir", st)              # only the known per-clip keys are copied
+        self.assertEqual(base["analysis_start_s"], "")   # the base settings are not modified
+
+    def test_no_recording_overrides_the_default(self):
+        st, _, _ = batch_run.clip_settings({"save_video": True}, "a.mp4", "", {}, "out", {"save_video": False}, False)
+        self.assertFalse(st["save_video"])
+
+    def test_labels(self):
+        self.assertEqual(batch_run.clip_label({}), ("ทั้งคลิป", "ไม่บันทึก"))
+        self.assertEqual(batch_run.clip_label({"analysis_start_s": "0:30", "save_video": True}), ("0:30 – จบ", "ตลอดช่วงวิเคราะห์"))
+        self.assertEqual(batch_run.clip_label({"analysis_end_s": "2", "save_video": True, "record_start_s": "1", "record_end_s": "1.5"}),
+                         ("เริ่ม – 2", "1 – 1.5"))
+
+    def test_plan_file_round_trip_and_validation(self):
+        d = tempfile.mkdtemp(prefix="pk_plan_")
+        try:
+            path = os.path.join(d, "p.json")
+            clips = [{"video": "a.mp4", "rel_dir": "S", "analysis_start_s": "1", "save_video": False}]
+            batch_run.save_plan(path, "out", clips)
+            self.assertEqual(batch_run.load_plan(path), ("out", clips))
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"clips": [{"no_video": 1}]}')
+            with self.assertRaises(ValueError):
+                batch_run.load_plan(path)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

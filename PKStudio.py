@@ -1544,6 +1544,178 @@ class ClipPlayerDialog:
         self.top.destroy()
 
 
+def _tools_module(name):
+    """Import a helper from the tools folder next to this file (batch_run, merge_clips)."""
+    tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    return importlib.import_module(name)
+
+
+class BatchDialog:
+    """Choose a folder (place / day / clips) or files, then set for every clip the time range to analyse and
+    whether / which part of the result video to record. Output mirrors the input folders; each clip gets its
+    own CSV files and every folder level with 2+ clips gets a _Combined set (tools/batch_run.py logic)."""
+
+    def __init__(self, app):
+        self.app = app
+        self.bt = _tools_module("batch_run")
+        self.clips = []
+        self.top = tk.Toplevel(app.root)
+        self.top.title("หลายคลิป (Batch) — เลือกคลิปและกำหนดช่วงเวลา")
+        self.out_var = tk.StringVar(value=os.path.join(app.output_var.get().strip() or DEFAULT_OUTPUT, "Batch"))
+        self.skip_done_var = tk.BooleanVar(value=True)
+
+        top_bar = ttk.Frame(self.top, padding=(8, 8, 8, 2))
+        top_bar.grid(row=0, column=0, sticky="ew")
+        ttk.Button(top_bar, text="เลือกโฟลเดอร์วิดีโอ…", command=self.add_folder).pack(side="left", padx=2)
+        ttk.Button(top_bar, text="เพิ่มไฟล์วิดีโอ…", command=self.add_files).pack(side="left", padx=2)
+        ttk.Button(top_bar, text="ลบที่เลือก", command=self.remove_selected).pack(side="left", padx=2)
+        ttk.Button(top_bar, text="ล้างรายการ", command=self.clear).pack(side="left", padx=2)
+        ttk.Button(top_bar, text="บันทึกแผน…", command=self.save_plan).pack(side="right", padx=2)
+        ttk.Button(top_bar, text="โหลดแผน…", command=self.load_plan).pack(side="right", padx=2)
+
+        out_bar = ttk.Frame(self.top, padding=(8, 2))
+        out_bar.grid(row=1, column=0, sticky="ew")
+        out_bar.columnconfigure(1, weight=1)
+        ttk.Label(out_bar, text="โฟลเดอร์ผลลัพธ์").grid(row=0, column=0, padx=(0, 6))
+        ttk.Entry(out_bar, textvariable=self.out_var).grid(row=0, column=1, sticky="ew")
+        ttk.Button(out_bar, text="Browse", command=self.browse_out).grid(row=0, column=2, padx=(6, 0))
+
+        cols = ("clip", "analysis", "record")
+        self.tree = ttk.Treeview(self.top, columns=cols, show="headings", height=14, selectmode="extended")
+        for col, text, width in (("clip", "คลิป (สถานที่ / วัน / ไฟล์)", 460), ("analysis", "ช่วงที่วิเคราะห์", 150), ("record", "บันทึกวิดีโอ", 170)):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor="w")
+        self.tree.grid(row=2, column=0, sticky="nsew", padx=8, pady=4)
+        self.tree.bind("<Double-1>", lambda e: self.edit_selected())
+        self.top.columnconfigure(0, weight=1)
+        self.top.rowconfigure(2, weight=1)
+
+        act = ttk.Frame(self.top, padding=(8, 2))
+        act.grid(row=3, column=0, sticky="ew")
+        ttk.Button(act, text="ดูวิดีโอ / กำหนดช่วงเวลา… (ดับเบิลคลิกที่คลิปก็ได้)", command=self.edit_selected).pack(side="left", padx=2)
+        ttk.Button(act, text="ทุกคลิป: ไม่บันทึกวิดีโอ", command=lambda: self.set_all_record(False)).pack(side="left", padx=2)
+        ttk.Button(act, text="ทุกคลิป: บันทึกตลอดช่วงที่วิเคราะห์", command=lambda: self.set_all_record(True)).pack(side="left", padx=2)
+
+        ttk.Label(self.top, foreground="#555555", justify="left",
+                  text="• ใช้การตั้งค่าในหน้าหลัก (โมเดล, Zone, Line, ความกว้างเลน, tracker ฯลฯ) กับทุกคลิป\n"
+                       "• เวลาใน CSV ที่ได้เป็นเวลาของวิดีโอต้นฉบับ (เช่น เริ่มวิเคราะห์ที่นาที 2 เวลาแรกใน CSV = 120 วินาที)").grid(
+            row=4, column=0, sticky="w", padx=10)
+        bottom = ttk.Frame(self.top, padding=8)
+        bottom.grid(row=5, column=0, sticky="ew")
+        ttk.Checkbutton(bottom, text="ข้ามคลิปที่ทำเสร็จแล้ว (รันต่อจากที่ค้าง)", variable=self.skip_done_var).pack(side="left")
+        ttk.Button(bottom, text="ปิด", width=8, command=self.top.destroy).pack(side="right", padx=2)
+        ttk.Button(bottom, text="▶ เริ่ม Batch", width=16, command=self.start).pack(side="right", padx=2)
+
+    # ---- list ----
+    def _new_clip(self, video, rel_dir):
+        return {"video": video, "rel_dir": rel_dir, "analysis_start_s": "", "analysis_end_s": "",
+                "save_video": bool(self.app.save_video_var.get()), "record_start_s": "", "record_end_s": ""}
+
+    def add_videos(self, found):
+        have = {c["video"] for c in self.clips}
+        for video, rel in found:
+            if video not in have:
+                self.clips.append(self._new_clip(video, rel))
+                have.add(video)
+        self.refresh()
+
+    def add_folder(self):
+        path = filedialog.askdirectory(title="เลือกโฟลเดอร์ (สถานที่) ที่มีโฟลเดอร์ย่อยของวันและวิดีโอ")
+        if path:
+            found = self.bt.find_videos([path])
+            if not found:
+                messagebox.showinfo("Batch", "ไม่พบไฟล์วิดีโอในโฟลเดอร์นี้", parent=self.top)
+            self.add_videos(found)
+
+    def add_files(self):
+        paths = filedialog.askopenfilenames(title="เลือกวิดีโอ", filetypes=[("Video", "*.mp4 *.avi *.mov *.mkv"), ("All Files", "*.*")])
+        self.add_videos([(os.path.abspath(p), "") for p in paths])
+
+    def selected_indexes(self):
+        return sorted(int(i) for i in self.tree.selection())
+
+    def remove_selected(self):
+        for i in reversed(self.selected_indexes()):
+            del self.clips[i]
+        self.refresh()
+
+    def clear(self):
+        self.clips = []
+        self.refresh()
+
+    def refresh(self):
+        self.tree.delete(*self.tree.get_children())
+        for i, c in enumerate(self.clips):
+            ana, rec = self.bt.clip_label(c)
+            name = "/".join(x for x in (c.get("rel_dir", ""), os.path.basename(c["video"])) if x)
+            self.tree.insert("", "end", iid=str(i), values=(name, ana, rec))
+
+    def edit_selected(self):
+        sel = self.selected_indexes()
+        if not sel:
+            messagebox.showinfo("Batch", "เลือกคลิปในรายการก่อน", parent=self.top)
+            return
+        clip = self.clips[sel[0]]
+        try:
+            dlg = ClipPlayerDialog(self.app, clip["video"], clip)
+        except Exception as exc:
+            messagebox.showerror("ดูวิดีโอ", str(exc), parent=self.top)
+            return
+        if dlg.result:
+            for i in sel:                      # one choice applies to every selected clip
+                self.clips[i].update(dlg.result)
+            self.refresh()
+            self.tree.selection_set([str(i) for i in sel])
+
+    def set_all_record(self, on):
+        for c in self.clips:
+            c["save_video"] = bool(on)
+            if not on:
+                c["record_start_s"] = c["record_end_s"] = ""
+        self.refresh()
+
+    # ---- plan file ----
+    def save_plan(self):
+        if not self.clips:
+            return
+        path = filedialog.asksaveasfilename(title="บันทึกแผน Batch", defaultextension=".json", filetypes=[("Batch plan", "*.json")], parent=self.top)
+        if path:
+            self.bt.save_plan(path, self.out_var.get().strip(), self.clips)
+
+    def load_plan(self):
+        path = filedialog.askopenfilename(title="โหลดแผน Batch", filetypes=[("Batch plan", "*.json")], parent=self.top)
+        if not path:
+            return
+        try:
+            out, clips = self.bt.load_plan(path)
+        except Exception as exc:
+            messagebox.showerror("Batch", f"อ่านแผนไม่ได้: {exc}", parent=self.top)
+            return
+        self.clips = []
+        for c in clips:
+            item = self._new_clip(c["video"], str(c.get("rel_dir", "") or ""))
+            item.update({k: c[k] for k in self.bt.CLIP_KEYS if k in c})
+            self.clips.append(item)
+        if out:
+            self.out_var.set(out)
+        self.refresh()
+
+    def browse_out(self):
+        path = filedialog.askdirectory(title="โฟลเดอร์ผลลัพธ์", parent=self.top)
+        if path:
+            self.out_var.set(path)
+
+    def start(self):
+        out_root = self.out_var.get().strip()
+        if not out_root:
+            messagebox.showerror("Batch", "ระบุโฟลเดอร์ผลลัพธ์", parent=self.top)
+            return
+        if self.app.start_batch(self.clips, out_root, bool(self.skip_done_var.get())):
+            self.top.destroy()
+
+
 class Run1App:
 
     def __init__(self, root):
@@ -1794,6 +1966,8 @@ class Run1App:
         self.run3_last_outputs = {}
         self.run3_last_summary = {}
         self.run3_was_requested = False
+        self._batch_mode = False
+        self._last_run_error = ""
 
         self.status_var = tk.StringVar(
             value="Ready"
@@ -2020,6 +2194,12 @@ class Run1App:
             text="▶ START RUN",
             command=self.start_run
         )
+
+        ttk.Button(
+            bottom,
+            text="หลายคลิป (Batch)…",
+            command=self.open_batch_dialog
+        ).grid(row=0, column=6, rowspan=2, padx=(10, 0), ipadx=6, ipady=8)
 
         self.start_button.grid(
             row=0,
@@ -2546,6 +2726,129 @@ class Run1App:
             self.record_start_var.set(dlg.result["record_start_s"])
             self.record_end_var.set(dlg.result["record_end_s"])
         return dlg.result
+
+    # ========================================================
+    # BATCH (many clips: time range + recording per clip, mirrored output folders)
+    # ========================================================
+
+    def open_batch_dialog(self):
+        if self.running:
+            messagebox.showinfo("Batch", "กำลังรันอยู่ — รอให้เสร็จหรือกด STOP ก่อน")
+            return
+        BatchDialog(self)
+
+    def start_batch(self, clips, out_root, skip_done):
+        """Validate like START RUN, then run all clips one after another in a worker thread.
+        Returns True when the batch was started."""
+        if self.running:
+            return False
+        if not clips:
+            messagebox.showerror("Batch", "ยังไม่ได้เลือกคลิป")
+            return False
+        for c in clips:
+            if not os.path.isfile(c["video"]):
+                messagebox.showerror("Batch", "ไม่พบไฟล์วิดีโอ\n\n" + c["video"])
+                return False
+            try:
+                for key in ("analysis_start_s", "analysis_end_s", "record_start_s", "record_end_s"):
+                    parse_clock_time(c.get(key, ""))
+            except ValueError as exc:
+                messagebox.showerror("Batch", f"{os.path.basename(c['video'])}: {exc}")
+                return False
+        self.video_var.set(clips[0]["video"])      # validate_settings wants an existing video
+        try:
+            self.validate_measurements()
+            self.validate_run3_settings()
+        except Exception as exc:
+            messagebox.showerror("Run 3 / Measurement Configuration", str(exc))
+            return False
+        if not self.validate_settings():
+            return False
+        try:
+            selected_device = self.resolve_device()
+        except Exception as e:
+            if self.offer_restart_with_cuda_python(str(e)):
+                return False
+            messagebox.showerror("CUDA / Device Error", str(e))
+            return False
+        self._run3_warnings = self.collect_run3_warnings()
+        if self._run3_warnings:
+            text = "\n\n".join(f"• {w}" for w in self._run3_warnings)
+            if not messagebox.askokcancel("Run 3 pre-flight warnings", text + "\n\nContinue anyway?", icon="warning"):
+                return False
+        settings = self.get_settings()
+        self._rt = self._runtime_snapshot(settings)
+        self._run3_cfg = self._run3_snapshot_config()
+        self._zone_poly_cache = None
+        self._overlay_cache = None
+        self.running = True
+        self._batch_mode = True
+        self._last_run_error = ""
+        self.stop_event.clear()
+        self.pause_event.set()
+        self.start_button.config(state="disabled")
+        self.pause_button.config(state="normal", text="Ⅱ PAUSE")
+        self.stop_button.config(state="normal")
+        self.status_var.set(f"Starting Batch ({len(clips)} clips) | Device = {selected_device}")
+        self.progress_var.set("")
+        self.time_var.set("")
+        self.worker_thread = threading.Thread(
+            target=self._batch_worker, args=(settings, [dict(c) for c in clips], out_root, skip_done), daemon=True)
+        self.worker_thread.start()
+        return True
+
+    def _batch_worker(self, base_settings, clips, out_root, skip_done):
+        bt = _tools_module("batch_run")
+        rows, runs = [], []
+        stopped = False
+        fatal = ""
+        n = len(clips)
+        try:
+            os.makedirs(out_root, exist_ok=True)
+            for i, c in enumerate(clips, 1):
+                rel = str(c.get("rel_dir", "") or "")
+                runs.append((c["video"], rel, {}))
+                if self.stop_event.is_set():
+                    stopped = True
+                    break
+                st, name, run_dir = bt.clip_settings(base_settings, c["video"], rel, {}, out_root, c, c.get("save_video", False))
+                os.makedirs(run_dir, exist_ok=True)
+                if skip_done and os.path.isfile(os.path.join(run_dir, "Run_3_Summary.json")):
+                    rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, "", 0.0))
+                    self.update_ui(status=f"Batch {i}/{n}: {name} — already done, skipped")
+                    continue
+                self.update_ui(status=f"Batch {i}/{n}: {name}")
+                self._last_run_error = ""
+                t0 = time.time()
+                self.run_processing(st)
+                rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, self._last_run_error, time.time() - t0))
+                if self.stop_event.is_set():
+                    stopped = True
+                    break
+            bt.finish_batch(out_root, runs, rows, log=lambda m: print(m))
+        except Exception as exc:
+            log.exception("Batch failed")
+            fatal = str(exc)
+        self.post_ui(lambda: self.finish_batch_ui(rows, n, out_root, stopped, fatal))
+
+    def finish_batch_ui(self, rows, total, out_root, stopped, fatal):
+        self.running = False
+        self._batch_mode = False
+        self._rt = None
+        self.start_button.config(state="normal")
+        self.pause_button.config(state="disabled", text="Ⅱ PAUSE")
+        self.stop_button.config(state="disabled")
+        ok = [r for r in rows if str(r["Status"]).startswith(("completed", "stopped"))]
+        bad = [r for r in rows if str(r["Status"]).startswith("ERROR") or r["Status"] == "no summary"]
+        self.status_var.set(f"Batch finished: {len(ok)}/{total} clips" + (" (stopped)" if stopped else ""))
+        self.progress_var.set("100%" if not stopped else "")
+        msg = f"Batch {'หยุดกลางทาง' if stopped else 'เสร็จ'}: {len(ok)} จาก {total} คลิป\n\nผลลัพธ์:\n{out_root}\n\n"
+        msg += "• โฟลเดอร์ของแต่ละคลิป = CSV รายคลิป\n• _Combined (ในแต่ละระดับโฟลเดอร์) = รวมทุกคลิปของระดับนั้น\n• Batch_Comparison.csv = ตารางเปรียบเทียบทุกคลิป"
+        if bad:
+            msg += "\n\nคลิปที่มีปัญหา:\n" + "\n".join(f"- {r['Run']}: {r['Status']}" for r in bad)
+        if fatal:
+            msg += "\n\nข้อผิดพลาด: " + fatal
+        messagebox.showinfo("PK Studio Batch", msg)
 
     def open_line_editor(self):
         """Open the dialog that draws the Reference Lines on a frame of the video."""
@@ -6717,6 +7020,7 @@ class Run1App:
             # Tkinter callbacks run after this except block exits; capture the
             # exception text now instead of closing over Python's exception variable.
             error_message = str(e)
+            self._last_run_error = error_message
             self.post_ui(
                 lambda message=error_message: self.show_error(
                     message
@@ -8367,6 +8671,8 @@ class Run1App:
         return outputs
 
     def finish_integrated_ui(self, stopped, output_video, output_csv, output_settings, output_summary, output_id_zone_summary=None, output_zone_summary=None):
+        if getattr(self, "_batch_mode", False):
+            return          # the batch worker reports once at the end
         self.running = False
         self._rt = None
         self.start_button.config(state="normal")
@@ -8527,6 +8833,9 @@ class Run1App:
 
     def show_error(self, error):
 
+        if getattr(self, "_batch_mode", False):
+            log.error("Clip failed inside a batch: %s", error)
+            return          # reported in the batch summary
         self.running = False
 
         self.start_button.config(
