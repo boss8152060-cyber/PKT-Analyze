@@ -177,6 +177,23 @@ def scene1(app):
     z2o = [r for r in st_o if r["Scope"] == "Zone" and r["Key"] == "Zone 2" and r["Vehicle_Class"] == "All"]
     check("flagged speeds are left out of the statistics (Zone 2 has no 18 km/h vehicle -> no row)", not z2o, str(z2o))
     check("flagged rows stay in the detail file", len(det_o) == len(det))
+    # --- tools/sensitivity.py: re-run Run 3 for several values of one setting ---
+    sys.path.insert(0, os.path.join(HERE, "..", "tools"))
+    import sensitivity
+    import merge_clips
+    sens = sensitivity.run_sensitivity(app, out, "T", {"speed_max_kmh": ["30", "80"]})
+    zs = {(r["Value"]): r for r in sens if r["Group"] == "Zone 2" and r["Indicator"].startswith("Speed")}
+    check("sensitivity: speed_max 80 -> Zone 2 N=2; 30 -> Zone 2 has no row (both 36 km/h vehicles excluded)",
+          zs.get("80", {}).get("N") == "2" and "30" not in zs, str(zs))
+    check("sensitivity leaves the source folder untouched", not os.path.exists(os.path.join(out, "Sensitivity_speed_max_kmh.csv")))
+    # --- tools/merge_clips.py: two clips -> one combined statistics file ---
+    merged_dir = tempfile.mkdtemp(prefix="pk_merge_")
+    summ, mrows = merge_clips.merge(merged_dir, [out, out_o])
+    zone2 = [r for r in mrows if r["Indicator"] == "Speed" and r["Group"] == "Zone | Zone 2 | Car"]
+    check("merge_clips: Zone 2 car speed: clip 1 has the car (36 km/h), clip 2 excluded it as above max -> N=1 from 1 clip",
+          len(zone2) == 1 and zone2[0]["N"] == 1 and abs(zone2[0]["V50_Median"] - 36.0) < 0.6 and zone2[0]["Clips"] == 1, str(zone2))
+    mm = read_csv(os.path.join(merged_dir, "Merged_Speed_Detail.csv"))
+    check("merge_clips: merged detail has a Clip column and rows of both clips", len({r["Clip"] for r in mm}) == 2 and len(mm) == 2 * len(det), str(len(mm)))
     raw_speed = read_csv(os.path.join(out, "Run_3_Speed.csv"), raw=True)
     check("CSV movement / zone-sequence cells use arrows (Excel would turn 2-3-4 into a date)",
           any(r["Zone_Sequence"] == "2→3→4" for r in raw_speed) and not any("-" in r["Zone_Sequence"] for r in raw_speed),
