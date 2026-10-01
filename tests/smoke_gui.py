@@ -79,6 +79,21 @@ if len(sys.argv) > 1:
     print("status counts  :", Counter(status.values()))
     check("every track classified", set(mv) == {str(t) for t in tracks})
 
+# --- worker threads reach the UI only through the queue (no Tk call from the thread) ---
+import threading
+import time
+seen = []
+th = threading.Thread(target=lambda: (app.update_ui(status="from worker"),
+                                      app.post_ui(lambda: seen.append(threading.current_thread() is threading.main_thread()))))
+th.start()
+th.join()
+end = time.time() + 1.0
+while time.time() < end and not seen:
+    root.update()
+    time.sleep(0.01)
+check("UI queue: callback posted by a worker thread runs on the main thread", seen == [True] and app.status_var.get() == "from worker", str(seen))
+check("default paths are relative to the program folder", m.DEFAULT_MODEL.endswith(os.path.join("PK STUDIO", "Input", "Model", "best.pt")), m.DEFAULT_MODEL)
+
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
 sys.exit(1 if failures else 0)
