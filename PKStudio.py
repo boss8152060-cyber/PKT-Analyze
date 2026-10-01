@@ -5187,9 +5187,14 @@ class Run1App:
 
                     if use_fp16:
 
-                        track_kwargs[
-                            "quantize"
-                        ] = 16
+                        # Ultralytics >= 8.4 renamed half -> quantize (half is deprecated);
+                        # older versions only know half.
+                        try:
+                            from ultralytics.cfg import DEFAULT_CFG_DICT as _ucfg
+                            _fp16_key = "quantize" if "quantize" in _ucfg else "half"
+                        except Exception:
+                            _fp16_key = "half"
+                        track_kwargs[_fp16_key] = 16 if _fp16_key == "quantize" else True
 
                     results = model.track(
                         frame,
@@ -5316,7 +5321,7 @@ class Run1App:
 
                             if track_id >= 0:
                                 # Create/update research statistics for this track.
-                                timestamp = frame_index / fps
+                                timestamp = (frame_index - 1) / fps
                                 state = track_stats.setdefault(
                                     track_id,
                                     {
@@ -5468,7 +5473,7 @@ class Run1App:
                                     # by Run 3 and are not changed by this display value.
                                     live_ppm = rt.get("live_ppm", 0.0)
                                     hist = zstate.get("live_speed_history", [])
-                                    hist.append((frame_index / fps, point[0], point[1]))
+                                    hist.append(((frame_index - 1) / fps, point[0], point[1]))
                                     if len(hist) > 6:
                                         hist = hist[-6:]
                                     zstate["live_speed_history"] = hist
@@ -5492,7 +5497,7 @@ class Run1App:
                                     if confirmed_zone:
                                         zone_assignment_summary[confirmed_zone]["confirmed_frames"] += 1
 
-                                    timestamp_now = frame_index / fps
+                                    timestamp_now = (frame_index - 1) / fps
                                     previous_zone_point = zstate.get("previous_confirmed_point")
                                     previous_confirmed_zone = zstate.get("previous_confirmed_zone")
 
@@ -5563,7 +5568,7 @@ class Run1App:
                                     # ==============================
                                     lstate = line_track_state.setdefault(track_id, {})
                                     previous_point = lstate.get("previous_point")
-                                    timestamp_now = frame_index / fps
+                                    timestamp_now = (frame_index - 1) / fps
                                     for lname in LINE_NAMES:
                                         line = self.lines.get(lname, [])
                                         if len(line) != 2:
@@ -5668,7 +5673,7 @@ class Run1App:
                             if csv_writer is not None:
 
                                 timestamp = (
-                                    frame_index / fps
+                                    (frame_index - 1) / fps
                                 )
 
                                 trajectory_point_csv = self.get_zone_reference_point(x1, y1, x2, y2)
@@ -5922,7 +5927,7 @@ class Run1App:
             if measurement_enabled:
                 for track_id in sorted(zone_track_state):
                     state_info = track_stats.get(track_id, {})
-                    last_time_final = state_info.get("last_frame", frame_index) / fps if fps > 0 else 0.0
+                    last_time_final = (state_info.get("last_frame", frame_index) - 1) / fps if fps > 0 else 0.0
                     visits = clean_zone_visits(collect_zone_visits(
                         zone_track_state[track_id].get("zone_states", {}), last_time_final
                     ))
@@ -5934,8 +5939,8 @@ class Run1App:
                         if not zones_sequence or zones_sequence[-1] != zname:
                             zones_sequence.append(zname)
                     total_zone_time = sum(max(0.0, e - s0) for _z, s0, e in visits)
-                    first_seen_final = float(state_info.get("first_frame", 0)) / fps if fps > 0 else 0.0
-                    last_seen_final = float(state_info.get("last_frame", frame_index)) / fps if fps > 0 else 0.0
+                    first_seen_final = float(state_info.get("first_frame", 1) - 1) / fps if fps > 0 else 0.0
+                    last_seen_final = float(state_info.get("last_frame", frame_index) - 1) / fps if fps > 0 else 0.0
                     unique_zones = []
                     for z in zones_sequence:
                         if z not in unique_zones:
@@ -5960,7 +5965,7 @@ class Run1App:
                 for track_id, zmap in zone_track_state.items():
                     state_info = track_stats.get(track_id, {})
                     last_frame_final = state_info.get("last_frame", frame_index)
-                    last_time_final = last_frame_final / fps if fps > 0 else 0.0
+                    last_time_final = (last_frame_final - 1) / fps if fps > 0 else 0.0
                     for zname, start_t, end_t in clean_zone_visits(
                         collect_zone_visits(zmap.get("zone_states", {}), last_time_final)
                     ):
