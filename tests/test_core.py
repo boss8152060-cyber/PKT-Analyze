@@ -636,5 +636,54 @@ class SpeedOutlier(unittest.TestCase):
         self.assertFalse(self.f(300, None))
 
 
+class TimeWindow(unittest.TestCase):
+    P = staticmethod(lambda s: CORE["parse_clock_time"](s))
+    W = staticmethod(lambda a, b, fps, n: CORE["window_frames"](a, b, fps, n))
+    F = staticmethod(lambda s: CORE["format_clock_time"](s))
+
+    def test_parse_accepts_seconds_and_clock_forms(self):
+        self.assertIsNone(self.P(""))
+        self.assertIsNone(self.P("  "))
+        self.assertEqual(self.P("75"), 75.0)
+        self.assertEqual(self.P("75.5"), 75.5)
+        self.assertEqual(self.P("1:15"), 75.0)
+        self.assertEqual(self.P("01:15.5"), 75.5)
+        self.assertEqual(self.P("1:02:03"), 3723.0)
+
+    def test_parse_rejects_bad_input(self):
+        for bad in ("abc", "-5", "1:75", "1:2:3:4", "nan", "inf", "1::2"):
+            with self.assertRaises(ValueError, msg=bad):
+                self.P(bad)
+
+    def test_format_round_trips(self):
+        for s in (0.0, 5.5, 75.0, 75.5, 3723.0):
+            self.assertAlmostEqual(self.P(self.F(s)), s, places=1)
+        self.assertEqual(self.F(75.5), "1:15.5")
+        self.assertEqual(self.F(3723.0), "1:02:03.0")
+
+    def test_window_frames_use_time_zero_for_frame_1(self):
+        # 60 fps: frame N is at (N-1)/60 s. From 1.0 s = frame 61; to 2.0 s = frame 121 (inclusive)
+        self.assertEqual(self.W(1.0, 2.0, 60.0, 3600), (61, 121))
+        self.assertEqual(self.W(None, None, 60.0, 3600), (1, 3600))
+        self.assertEqual(self.W(0.0, 0.0, 30.0, 100), (1, 1))
+
+    def test_window_between_frames_rounds_inwards(self):
+        # 30 fps frame times 0, 0.0333, 0.0667...; start 0.04 -> next frame (3), end 0.05 -> last frame at or before (2)
+        self.assertEqual(self.W(0.04, 0.2, 30.0, 100), (3, 7))
+
+    def test_window_end_clipped_to_video(self):
+        self.assertEqual(self.W(1.0, 999.0, 60.0, 600), (61, 600))
+
+    def test_window_errors(self):
+        with self.assertRaises(ValueError):
+            self.W(5.0, 3.0, 30.0, 1000)           # end before start
+        with self.assertRaises(ValueError):
+            self.W(100.0, None, 30.0, 300)         # starts after the video ends
+
+    def test_unknown_length(self):
+        self.assertEqual(self.W(1.0, None, 30.0, 0), (31, None))
+        self.assertEqual(self.W(None, 2.0, 30.0, 0), (1, 61))
+
+
 if __name__ == "__main__":
     unittest.main()

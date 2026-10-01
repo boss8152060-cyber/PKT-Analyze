@@ -370,6 +370,10 @@ DEFAULT_SETTINGS = {
     "confidence": "0.25",
     "iou": "0.50",
     "img_size": "640",
+    "analysis_start_s": "",             # analyse only from this time (blank = from the start); m:ss or seconds
+    "analysis_end_s": "",               # ... to this time (blank = to the end)
+    "record_start_s": "",               # Save Video: record only from this time (blank = start of the analysis window)
+    "record_end_s": "",
 
     "tracker": "ByteTrack",
 
@@ -1103,6 +1107,57 @@ def excel_safe_value(value):
 def is_speed_outlier(speed_kmh, max_kmh):
     """True when a Speed value is above the plausible maximum (max_kmh <= 0 = check off)."""
     return bool(max_kmh) and max_kmh > 0 and speed_kmh > max_kmh
+
+
+def parse_clock_time(text):
+    """Time typed by the user -> seconds. '' -> None; '75', '75.5' (seconds), '1:15', '01:15.5',
+    '1:02:03' (h:m:s). Raises ValueError for anything else or a negative time."""
+    s = str(text if text is not None else "").strip()
+    if not s:
+        return None
+    parts = s.split(":")
+    if len(parts) > 3:
+        raise ValueError(f"time '{s}' is not valid (use seconds, m:ss or h:mm:ss)")
+    try:
+        nums = [float(x) for x in parts]
+    except ValueError:
+        raise ValueError(f"time '{s}' is not valid (use seconds, m:ss or h:mm:ss)")
+    if any((x != x) or x < 0 or x in (float("inf"),) for x in nums):
+        raise ValueError(f"time '{s}' is not valid")
+    if len(nums) > 1 and any(x >= 60 for x in nums[1:]):
+        raise ValueError(f"time '{s}': minutes and seconds must be below 60")
+    secs = 0.0
+    for x in nums:
+        secs = secs * 60.0 + x
+    return secs
+
+
+def format_clock_time(seconds):
+    """Seconds -> 'm:ss.s' or 'h:mm:ss.s' (what the player shows and what parse_clock_time reads back)."""
+    seconds = max(0.0, float(seconds))
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = seconds - h * 3600 - m * 60
+    return f"{h}:{m:02d}:{s:04.1f}" if h else f"{m}:{s:04.1f}"
+
+
+def window_frames(start_s, end_s, fps, total_frames):
+    """Time window -> (first_frame, last_frame), 1-based and inclusive; frame N is at time (N-1)/fps
+    (SPEC: timestamps start at 0). start_s / end_s None = from the beginning / to the end.
+    last_frame is None when the end is unknown (total_frames <= 0 and no end given).
+    Raises ValueError when the window is empty or starts after the video ends."""
+    first = 1
+    if start_s is not None:
+        first = int(math.ceil(start_s * fps - 1e-6)) + 1
+    last = total_frames if total_frames and total_frames > 0 else None
+    if end_s is not None:
+        last_by_time = int(math.floor(end_s * fps + 1e-6)) + 1
+        last = last_by_time if last is None else min(last, last_by_time)
+    if total_frames and total_frames > 0 and first > total_frames:
+        raise ValueError("the start time is after the end of the video")
+    if last is not None and last < first:
+        raise ValueError("the end time is before the start time")
+    return first, last
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -1446,6 +1501,10 @@ class Run1App:
         self.run3_speed_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_zones"])) for z in ZONE_IDS}
         self.run3_speed_smoothing_var = tk.StringVar(value=RUN3_DEFAULTS["speed_smoothing_samples"])
         self.run3_speed_max_var = tk.StringVar(value=RUN3_DEFAULTS["speed_max_kmh"])
+        self.analysis_start_var = tk.StringVar(value=DEFAULT_SETTINGS["analysis_start_s"])
+        self.analysis_end_var = tk.StringVar(value=DEFAULT_SETTINGS["analysis_end_s"])
+        self.record_start_var = tk.StringVar(value=DEFAULT_SETTINGS["record_start_s"])
+        self.record_end_var = tk.StringVar(value=DEFAULT_SETTINGS["record_end_s"])
         self.run3_lc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["lc_zones"])) for z in ZONE_IDS}
         self.run3_pet_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["pet_zones"])) for z in CONFLICT_ZONE_IDS}
         self.run3_pet_zone6_var = self.run3_pet_zone_vars[6]   # backward-compatible alias
@@ -3415,6 +3474,10 @@ class Run1App:
             "draw_trail": self.draw_trail_var.get(),
             "trail_length": self.trail_length_var.get(),
             "save_video": self.save_video_var.get(),
+            "analysis_start_s": self.analysis_start_var.get(),
+            "analysis_end_s": self.analysis_end_var.get(),
+            "record_start_s": self.record_start_var.get(),
+            "record_end_s": self.record_end_var.get(),
             "save_csv": self.save_csv_var.get(),
             "csv_flush": self.csv_flush_var.get(),
             "research_mode": self.research_mode_var.get(),
@@ -3557,6 +3620,10 @@ class Run1App:
             ("draw_trail", self.draw_trail_var),
             ("trail_length", self.trail_length_var),
             ("save_video", self.save_video_var),
+            ("analysis_start_s", self.analysis_start_var),
+            ("analysis_end_s", self.analysis_end_var),
+            ("record_start_s", self.record_start_var),
+            ("record_end_s", self.record_end_var),
             ("save_csv", self.save_csv_var),
             ("csv_flush", self.csv_flush_var),
             ("research_mode", self.research_mode_var),
@@ -3755,6 +3822,12 @@ class Run1App:
 
         try:
 
+            for label, var in (("Analyse from", self.analysis_start_var), ("Analyse to", self.analysis_end_var),
+                               ("Record from", self.record_start_var), ("Record to", self.record_end_var)):
+                try:
+                    parse_clock_time(var.get())
+                except ValueError as exc:
+                    raise ValueError(f"{label}: {exc}")
             conf = float(self.conf_var.get())
             iou = float(self.iou_var.get())
             high = float(self.track_high_var.get())
@@ -4924,6 +4997,24 @@ class Run1App:
                 )
             )
 
+            # Analysis window and recording window (times are video times; frame N is at (N-1)/fps)
+            video_total_frames = total_frames
+            a_start = parse_clock_time(settings.get("analysis_start_s", ""))
+            a_end = parse_clock_time(settings.get("analysis_end_s", ""))
+            first_frame, last_frame = window_frames(a_start, a_end, fps, total_frames)
+            r_start = parse_clock_time(settings.get("record_start_s", ""))
+            r_end = parse_clock_time(settings.get("record_end_s", ""))
+            rec_first, rec_last = first_frame, last_frame
+            if r_start is not None:
+                rec_first = max(first_frame, window_frames(r_start, None, fps, 0)[0])
+            if r_end is not None:
+                rec_end_frame = window_frames(None, r_end, fps, 0)[1]
+                rec_last = rec_end_frame if rec_last is None else min(rec_last, rec_end_frame)
+            rec_last_eff = rec_last if rec_last is not None else 10 ** 12
+            window_start0 = first_frame - 1
+            if last_frame is not None:
+                total_frames = last_frame      # progress / ETA / "Frame: i/total" run to the end of the window
+
             if settings["save_video"]:
 
                 fourcc = cv2.VideoWriter_fourcc(
@@ -5119,6 +5210,15 @@ class Run1App:
             zones_available_run = any(len(self.zones.get(z, [])) >= 3 for z in ZONE_NAMES)
 
             frame_index = 0
+            if first_frame > 1:
+                # jump to the start of the analysis window (frame_index keeps the original video frame number)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, first_frame - 1)
+                if int(cap.get(cv2.CAP_PROP_POS_FRAMES)) != first_frame - 1:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)      # seeking not exact in this file: read forward instead
+                    for _skip in range(first_frame - 1):
+                        if not cap.grab():
+                            break
+                frame_index = first_frame - 1
             processed_frames = 0
             total_detections = 0
             untracked_detections = 0
@@ -5159,6 +5259,10 @@ class Run1App:
                 self.pause_event.wait()
 
                 if self.stop_event.is_set():
+                    break
+
+                if last_frame is not None and frame_index >= last_frame:
+                    input_finished = True      # end of the analysis window
                     break
 
                 # V27: skipped frames are only grabbed (not decoded) when
@@ -5743,8 +5847,8 @@ class Run1App:
                 )
 
                 percent = (
-                    frame_index
-                    / total_frames
+                    (frame_index - window_start0)
+                    / max(1, total_frames - window_start0)
                     * 100
                     if total_frames > 0
                     else 0
@@ -5819,7 +5923,7 @@ class Run1App:
 
                     y_pos += 27
 
-                if writer is not None:
+                if writer is not None and rec_first <= frame_index <= rec_last_eff:
 
                     writer.write(
                         frame
@@ -6176,7 +6280,13 @@ class Run1App:
                 "device": device,
                 "precision": "FP16" if use_fp16 else "FP32",
                 "tracker": tracker_name,
-                "total_frames": total_frames,
+                "total_frames": video_total_frames,
+                "analysis_window": {
+                    "start_s": a_start, "end_s": a_end,
+                    "first_frame": first_frame, "last_frame": last_frame,
+                    "note": "timestamps in the CSV files are the original video times",
+                },
+                "recorded_video_window": ({"first_frame": rec_first, "last_frame": rec_last} if writer is not None else None),
                 "processed_frames": processed_frames,
                 "frames_with_detection": total_frames_with_detection,
                 "total_detections": total_detections,
