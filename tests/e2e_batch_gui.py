@@ -134,30 +134,32 @@ check("comparison table has both clips, completed", [r["Status"] for r in cmp_ro
 mtime_a = os.path.getmtime(os.path.join(a_dir, "Run_3_Summary.json"))
 day2 = os.path.join(tmp, "in", "Site", "day2")
 os.makedirs(day2)
-shutil.copy(os.path.join(tree, "a.mp4"), os.path.join(day2, "c.mp4"))
+deep2 = os.path.join(day2, "morning", "cam1")                                  # an extra, deeper level: any depth is mirrored
+os.makedirs(deep2)
+shutil.copy(os.path.join(tree, "a.mp4"), os.path.join(deep2, "c.mp4"))
 shown.clear()
 dlg2 = mod.BatchDialog(app)
 dlg2.out_var.set(o)
-dlg2.add_videos(batch_run.find_videos([day2], keep_parent=True))          # the "add day folder" button
-check("a picked DAY folder knows its place from the parent folder", [c["rel_dir"] for c in dlg2.clips] == ["Site/day2"], str([c["rel_dir"] for c in dlg2.clips]))
+dlg2.add_videos(batch_run.find_videos([day2], keep_levels=1))          # picking a sub-folder + 'levels above' = 1
+check("a picked sub-folder is placed under the folder above it (levels above = 1)", [c["rel_dir"] for c in dlg2.clips] == ["Site/day2/morning/cam1"], str([c["rel_dir"] for c in dlg2.clips]))
 dlg2.clips[0].update({"save_video": False})
 app.start_batch(dlg2.clips, o, True)
 wait_in_mainloop(lambda: not app.running, 600)
 wait_in_mainloop(lambda: False, 1)
-check("new day added next to the old one: Site/day1/{a,b} and Site/day2/c", all(os.path.isdir(os.path.join(o, "Site", d, c)) for d, c in (("day1", "a"), ("day1", "b"), ("day2", "c"))),
+check("new folder added next to the old one: Site/day1/{a,b} and Site/day2/c", all(os.path.isdir(p) for p in (os.path.join(o, "Site", "day1", "a"), os.path.join(o, "Site", "day1", "b"), os.path.join(o, "Site", "day2", "morning", "cam1", "c"))),
       str(sorted(os.listdir(os.path.join(o, "Site")))))
-check("only ONE place folder exists (nothing was created anew)", sorted(os.listdir(o)) == ["Batch_Comparison.csv", "Site"], str(sorted(os.listdir(o))))
-check("the old day was not touched", os.path.getmtime(os.path.join(a_dir, "Run_3_Summary.json")) == mtime_a)
+check("only ONE top folder exists (the existing one was reused, nothing created anew)", sorted(os.listdir(o)) == ["Batch_Comparison.csv", "Site"], str(sorted(os.listdir(o))))
+check("the old folder was not touched", os.path.getmtime(os.path.join(a_dir, "Run_3_Summary.json")) == mtime_a)
 cmp_rows = list(csv.DictReader(open(os.path.join(o, "Batch_Comparison.csv"), encoding="utf-8-sig")))
-check("comparison table now lists all three clips", sorted((r["Folder"], r["Run"]) for r in cmp_rows) == [("Site/day1", "a"), ("Site/day1", "b"), ("Site/day2", "c")],
+check("comparison table now lists all three clips", sorted((r["Folder"], r["Run"]) for r in cmp_rows) == [("Site/day1", "a"), ("Site/day1", "b"), ("Site/day2/morning/cam1", "c")],
       str([(r["Folder"], r["Run"]) for r in cmp_rows]))
 
 # ---- case 2: the old day with a NEW clip -> the old clips are skipped, only the new one runs ----
 shutil.copy(os.path.join(tree, "a.mp4"), os.path.join(tree, "d.mp4"))
 dlg3 = mod.BatchDialog(app)
 dlg3.out_var.set(o)
-dlg3.add_videos(batch_run.find_videos([os.path.join(tmp, "in", "Site", "day1")], keep_parent=True))
-check("the day folder now lists three clips", len(dlg3.clips) == 3)
+dlg3.add_videos(batch_run.find_videos([os.path.join(tmp, "in", "Site", "day1")], keep_levels=1))
+check("the folder now lists three clips", len(dlg3.clips) == 3)
 for c in dlg3.clips:
     c["save_video"] = False
 t0 = time.time()

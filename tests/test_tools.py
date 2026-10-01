@@ -60,21 +60,43 @@ class FolderMirror(unittest.TestCase):
         self.assertEqual(batch_run.run_dir_for("out", "Site8/2026-09-07", "a"), os.path.join("out", "Site8", "2026-09-07", "a"))
         self.assertEqual(batch_run.run_dir_for("out", "", "a"), os.path.join("out", "a"))
 
-    def test_day_folder_keeps_the_place_from_its_parent(self):
-        day = os.path.join(self.root, "Site8", "2026-09-08")
-        found = batch_run.find_videos([day], keep_parent=True)
-        self.assertEqual([(os.path.basename(v), rel) for v, rel in found], [("c.mp4", "Site8/2026-09-08")])
-        # picking the place gives the same relative folder for the same clip
-        via_place = [(os.path.basename(v), rel) for v, rel in batch_run.find_videos([os.path.join(self.root, "Site8")]) if rel.endswith("09-08")]
-        self.assertEqual(via_place, [("c.mp4", "Site8/2026-09-08")])
+    def test_picked_folder_name_is_the_first_level_at_any_depth(self):
+        deep = os.path.join(self.root, "Site8", "x", "y", "z")
+        os.makedirs(deep)
+        open(os.path.join(deep, "deep.mp4"), "w").close()
+        found = {os.path.basename(v): rel for v, rel in batch_run.find_videos([os.path.join(self.root, "Site8")])}
+        self.assertEqual(found["deep.mp4"], "Site8/x/y/z")
+        self.assertEqual(found["a.mp4"], "Site8/2026-09-07")
 
-    def test_new_day_lands_next_to_the_old_day(self):
-        first = batch_run.find_videos([os.path.join(self.root, "Site8", "2026-09-07")], keep_parent=True)
-        second = batch_run.find_videos([os.path.join(self.root, "Site8", "2026-09-08")], keep_parent=True)
-        d1 = {os.path.dirname(batch_run.run_dir_for("out", rel, "x")) for _v, rel in first}
-        d2 = {os.path.dirname(batch_run.run_dir_for("out", rel, "x")) for _v, rel in second}
-        self.assertEqual({os.path.dirname(x) for x in d1}, {os.path.dirname(x) for x in d2})   # same place folder
-        self.assertNotEqual(d1, d2)                                                          # different day folder
+    def test_keep_levels_adds_folders_above_the_picked_one(self):
+        day = os.path.join(self.root, "Site8", "2026-09-08")
+        self.assertEqual([rel for _v, rel in batch_run.find_videos([day])], ["2026-09-08"])
+        self.assertEqual([rel for _v, rel in batch_run.find_videos([day], keep_levels=1)], ["Site8/2026-09-08"])
+        top = os.path.basename(self.root)
+        self.assertEqual([rel for _v, rel in batch_run.find_videos([day], keep_levels=2)], [top + "/Site8/2026-09-08"])
+        # picking the higher folder gives the same relative folder for the same clip
+        via_top = [rel for v, rel in batch_run.find_videos([os.path.join(self.root, "Site8")]) if v.endswith("c.mp4")]
+        self.assertEqual(via_top, ["Site8/2026-09-08"])
+
+    def test_keep_levels_stops_at_the_drive_root(self):
+        found = batch_run.find_videos([os.path.join(self.root, "Site8", "2026-09-08")], keep_levels=60)
+        self.assertEqual(len(found), 1)
+        self.assertTrue(found[0][1].endswith("Site8/2026-09-08"))
+
+    def test_single_file_levels(self):
+        f = os.path.join(self.root, "Site8", "2026-09-07", "a.mp4")
+        self.assertEqual(batch_run.find_videos([f], keep_levels=2)[0][1], "Site8/2026-09-07")
+
+    def test_a_later_import_lands_in_the_existing_folders(self):
+        first = batch_run.find_videos([os.path.join(self.root, "Site8", "2026-09-07")], keep_levels=1)
+        second = batch_run.find_videos([os.path.join(self.root, "Site8", "2026-09-08")], keep_levels=1)
+        top = lambda items: {os.path.dirname(batch_run.run_dir_for("out", rel, "x")).rsplit(os.sep, 1)[0] for _v, rel in items}
+        self.assertEqual(top(first), top(second))          # the same parent folder is reused
+        self.assertNotEqual({rel for _v, rel in first}, {rel for _v, rel in second})
+
+    def test_same_clip_folder_for_two_files_is_reported(self):
+        runs = [("C:/x/a.mp4", "S", {}), ("C:/x/a.mov", "S", {}), ("C:/x/b.mp4", "S", {})]
+        self.assertEqual(batch_run.duplicate_run_dirs("out", runs), [os.path.join("out", "S", "a")])
 
 
 class Comparison(unittest.TestCase):

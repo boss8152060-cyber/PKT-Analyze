@@ -1553,10 +1553,10 @@ def _tools_module(name):
 
 
 class BatchDialog:
-    """Choose a folder (place / day / clips) or files, then set for every clip the time range to analyse and
-    whether / which part of the result video to record. Output mirrors the input folders (place / day / clip);
-    each clip gets its own CSV files. Running again with the same output folder ADDS to the place: a new day only
-    adds its day folder, new clips only add their clip folders, finished clips are skipped."""
+    """Choose folders (any structure, any depth) or files, then set for every clip the time range to analyse and
+    whether / which part of the result video to record. The output rebuilds the imported folder structure and
+    gives every clip its own folder with its own CSV files. An existing output folder is reused, a missing one is
+    created, finished clips are skipped - so running again with the same output folder only adds what is new."""
 
     def __init__(self, app):
         self.app = app
@@ -1569,8 +1569,10 @@ class BatchDialog:
 
         top_bar = ttk.Frame(self.top, padding=(8, 8, 8, 2))
         top_bar.grid(row=0, column=0, sticky="ew")
-        ttk.Button(top_bar, text="เลือกโฟลเดอร์สถานที่…", command=lambda: self.add_folder(False)).pack(side="left", padx=2)
-        ttk.Button(top_bar, text="เพิ่มโฟลเดอร์วัน…", command=lambda: self.add_folder(True)).pack(side="left", padx=2)
+        self.keep_levels_var = tk.IntVar(value=0)
+        ttk.Button(top_bar, text="เลือกโฟลเดอร์…", command=self.add_folder).pack(side="left", padx=2)
+        ttk.Label(top_bar, text="รวมชื่อโฟลเดอร์ที่อยู่เหนือขึ้นไป").pack(side="left", padx=(8, 2))
+        ttk.Spinbox(top_bar, from_=0, to=6, width=3, textvariable=self.keep_levels_var).pack(side="left")
         ttk.Button(top_bar, text="เพิ่มไฟล์วิดีโอ…", command=self.add_files).pack(side="left", padx=2)
         ttk.Button(top_bar, text="ลบที่เลือก", command=self.remove_selected).pack(side="left", padx=2)
         ttk.Button(top_bar, text="ล้างรายการ", command=self.clear).pack(side="left", padx=2)
@@ -1586,7 +1588,7 @@ class BatchDialog:
 
         cols = ("clip", "analysis", "record")
         self.tree = ttk.Treeview(self.top, columns=cols, show="headings", height=14, selectmode="extended")
-        for col, text, width in (("clip", "คลิป (สถานที่ / วัน / ไฟล์)", 460), ("analysis", "ช่วงที่วิเคราะห์", 150), ("record", "บันทึกวิดีโอ", 170)):
+        for col, text, width in (("clip", "คลิป (โฟลเดอร์ในผลลัพธ์ / ไฟล์) — แต่ละคลิปได้โฟลเดอร์ของตัวเอง", 460), ("analysis", "ช่วงที่วิเคราะห์", 150), ("record", "บันทึกวิดีโอ", 170)):
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width, anchor="w")
         self.tree.grid(row=2, column=0, sticky="nsew", padx=8, pady=4)
@@ -1601,7 +1603,8 @@ class BatchDialog:
         ttk.Button(act, text="ทุกคลิป: บันทึกตลอดช่วงที่วิเคราะห์", command=lambda: self.set_all_record(True)).pack(side="left", padx=2)
 
         ttk.Label(self.top, foreground="#555555", justify="left",
-                  text="• ผลลัพธ์แบ่งโฟลเดอร์ตามต้นฉบับ: โฟลเดอร์ผลลัพธ์ / สถานที่ / วัน / คลิป — รันครั้งต่อไปด้วยโฟลเดอร์ผลลัพธ์เดิม = เพิ่มวันใหม่/คลิปใหม่เข้าที่เดิม\n"
+                  text="• ผลลัพธ์สร้างโครงสร้างโฟลเดอร์ตามที่นำเข้า (กี่ระดับก็ได้): โฟลเดอร์ผลลัพธ์ / ...โฟลเดอร์ต้นฉบับ... / ชื่อคลิป /\n"
+                       "  โฟลเดอร์ที่มีอยู่แล้วใช้อันเดิม ที่ยังไม่มีสร้างใหม่ คลิปที่เสร็จแล้วข้าม — รันซ้ำด้วยโฟลเดอร์ผลลัพธ์เดิมจึงเพิ่มเฉพาะของใหม่\n"
                        "• ใช้การตั้งค่าในหน้าหลัก (โมเดล, Zone, Line, ความกว้างเลน, tracker ฯลฯ) กับทุกคลิป\n"
                        "• เวลาใน CSV ที่ได้เป็นเวลาของวิดีโอต้นฉบับ (เช่น เริ่มวิเคราะห์ที่นาที 2 เวลาแรกใน CSV = 120 วินาที)").grid(
             row=4, column=0, sticky="w", padx=10)
@@ -1624,20 +1627,27 @@ class BatchDialog:
                 have.add(video)
         self.refresh()
 
-    def add_folder(self, day_folder=False):
-        """day_folder=False: the folder is the PLACE (its sub-folders are the days).
-        day_folder=True: the folder is ONE DAY; the place is the name of its parent folder."""
-        path = filedialog.askdirectory(title=("เลือกโฟลเดอร์ของวัน (ชื่อสถานที่ = โฟลเดอร์ที่อยู่เหนือขึ้นไป)" if day_folder
-                                              else "เลือกโฟลเดอร์สถานที่ (ข้างในเป็นโฟลเดอร์วัน แล้วเป็นวิดีโอ)"))
+    def add_folder(self):
+        """Import a folder with any structure. The output rebuilds it from the picked folder's name
+        (plus the names of the 'levels above' folders when that number is above 0)."""
+        path = filedialog.askdirectory(title="เลือกโฟลเดอร์ที่มีวิดีโอ (โครงสร้างโฟลเดอร์ข้างในจะถูกสร้างตามในผลลัพธ์)")
         if path:
-            found = self.bt.find_videos([path], keep_parent=day_folder)
+            try:
+                levels = max(0, int(self.keep_levels_var.get()))
+            except (tk.TclError, ValueError):
+                levels = 0
+            found = self.bt.find_videos([path], keep_levels=levels)
             if not found:
                 messagebox.showinfo("Batch", "ไม่พบไฟล์วิดีโอในโฟลเดอร์นี้", parent=self.top)
             self.add_videos(found)
 
     def add_files(self):
         paths = filedialog.askopenfilenames(title="เลือกวิดีโอ", filetypes=[("Video", "*.mp4 *.avi *.mov *.mkv"), ("All Files", "*.*")])
-        self.add_videos([(os.path.abspath(p), "") for p in paths])
+        try:
+            levels = max(0, int(self.keep_levels_var.get()))
+        except (tk.TclError, ValueError):
+            levels = 0
+        self.add_videos(self.bt.find_videos([os.path.abspath(p) for p in paths], keep_levels=levels))
 
     def selected_indexes(self):
         return sorted(int(i) for i in self.tree.selection())
@@ -2761,6 +2771,11 @@ class Run1App:
             except ValueError as exc:
                 messagebox.showerror("Batch", f"{os.path.basename(c['video'])}: {exc}")
                 return False
+        clash = _tools_module("batch_run").duplicate_run_dirs(
+            out_root, [(c["video"], str(c.get("rel_dir", "") or ""), {}) for c in clips])
+        if clash:
+            messagebox.showerror("Batch", "มีคลิปสองไฟล์ที่ได้โฟลเดอร์ผลลัพธ์ชื่อเดียวกัน (ชื่อไฟล์เหมือนกันต่างนามสกุล?)\n\n" + "\n".join(clash[:5]))
+            return False
         self.video_var.set(clips[0]["video"])      # validate_settings wants an existing video
         try:
             self.validate_measurements()
@@ -2849,7 +2864,7 @@ class Run1App:
         self.status_var.set(f"Batch finished: {len(ok)}/{total} clips" + (" (stopped)" if stopped else ""))
         self.progress_var.set("100%" if not stopped else "")
         msg = f"Batch {'หยุดกลางทาง' if stopped else 'เสร็จ'}: {len(ok)} จาก {total} คลิป\n\nผลลัพธ์:\n{out_root}\n\n"
-        msg += "• โฟลเดอร์ของแต่ละคลิป (สถานที่ / วัน / คลิป) = CSV ของคลิปนั้น\n• Batch_Comparison.csv = ตารางเปรียบเทียบทุกคลิปในโฟลเดอร์ผลลัพธ์"
+        msg += "• โฟลเดอร์ของแต่ละคลิป (ตามโครงสร้างต้นฉบับ) = CSV ของคลิปนั้น\n• Batch_Comparison.csv = ตารางเปรียบเทียบทุกคลิปในโฟลเดอร์ผลลัพธ์"
         if bad:
             msg += "\n\nคลิปที่มีปัญหา:\n" + "\n".join(f"- {r['Run']}: {r['Status']}" for r in bad)
         if fatal:
