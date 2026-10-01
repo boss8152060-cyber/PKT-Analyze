@@ -65,11 +65,12 @@ def to_float(text):
         return None
 
 
-def merge(out_dir, clip_dirs):
+def merge(out_dir, clip_dirs, labels=None):
+    """labels = optional clip names (e.g. 'day/video') for the Clip column; default = folder names."""
     os.makedirs(out_dir, exist_ok=True)
     clip_names = []
-    for d in clip_dirs:
-        name = os.path.basename(os.path.normpath(d)) or d
+    for i, d in enumerate(clip_dirs):
+        name = labels[i] if labels else (os.path.basename(os.path.normpath(d)) or d)
         while name in clip_names:
             name += "_"
         clip_names.append(name)
