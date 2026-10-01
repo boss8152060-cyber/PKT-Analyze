@@ -480,6 +480,7 @@ RUN3_DEFAULTS = {
     # to the research role: Zone 1 = access mouth, 2/4 = approach, 3/5 = exit, 6 = middle/access.
     "speed_zones": [1, 2, 3, 4, 5, 6, 7],
     "speed_smoothing_samples": "5",         # rolling-median window on positions before Speed (1 = off)
+    "speed_max_kmh": "80",                  # Speed above this is flagged Speed_Above_Max and left out of the statistics (0 = off)
     "lc_zones": [2, 3, 4, 5, 6, 7],
     "lc_motorcycle_pairs_only": False,      # False = every pair of vehicles; True = only pairs that include a motorcycle
     "pet_zone6": True,
@@ -1089,6 +1090,10 @@ def excel_safe_value(value):
     if isinstance(value, str) and re.fullmatch(r"[1-7](?:-[1-7])+", value):
         return value.replace("-", "→")
     return value
+
+def is_speed_outlier(speed_kmh, max_kmh):
+    """True when a Speed value is above the plausible maximum (max_kmh <= 0 = check off)."""
+    return bool(max_kmh) and max_kmh > 0 and speed_kmh > max_kmh
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -1427,6 +1432,7 @@ class Run1App:
         self.run3_pet_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["pet_threshold_s"])
         self.run3_speed_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_zones"])) for z in ZONE_IDS}
         self.run3_speed_smoothing_var = tk.StringVar(value=RUN3_DEFAULTS["speed_smoothing_samples"])
+        self.run3_speed_max_var = tk.StringVar(value=RUN3_DEFAULTS["speed_max_kmh"])
         self.run3_lc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["lc_zones"])) for z in ZONE_IDS}
         self.run3_pet_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["pet_zones"])) for z in CONFLICT_ZONE_IDS}
         self.run3_pet_zone6_var = self.run3_pet_zone_vars[6]   # backward-compatible alias
@@ -1813,6 +1819,8 @@ class Run1App:
         box = zone_row("Speed — Zones", "ความเร็วต่อโซน + ความเร็วภาพรวมตาม Movement (เช่น 2-3-4) — ความยาวเส้นทางเมตร ÷ เวลา", self.run3_speed_zone_vars)
         ttk.Label(box, text="Median smoothing (samples, 1 = ปิด)").grid(row=2, column=0, columnspan=3, sticky="w", pady=2)
         ttk.Entry(box, textvariable=self.run3_speed_smoothing_var, width=8).grid(row=2, column=3, sticky="w", pady=2)
+        ttk.Label(box, text="ความเร็วสูงสุดที่สมเหตุสมผล (km/h, 0 = ปิด) — เกินนี้ติดธง ไม่นับในสถิติ").grid(row=3, column=0, columnspan=3, sticky="w", pady=2)
+        ttk.Entry(box, textvariable=self.run3_speed_max_var, width=8).grid(row=3, column=3, sticky="w", pady=2)
         box = zone_row("Lateral Clearance — Zones", "คู่รถทิศทางเดียวกัน (ลำดับโซนมีช่วงร่วมกัน) ในโซนเดียวกัน; วัดตั้งฉากกับทิศที่รถ A เคลื่อนที่ เมื่อกรอบรถซ้อนกันตามแนวยาว; ถ้ามีจักรยานยนต์ในคู่ รถจักรยานยนต์คือ A", self.run3_lc_zone_vars)
         ttk.Checkbutton(box, text="เฉพาะคู่ที่มีรถจักรยานยนต์ (ไม่ติ๊ก = ทุกคู่ของยานพาหนะทุกประเภท)", variable=self.run3_lc_motorcycle_pairs_only_var).grid(row=2, column=0, columnspan=8, sticky="w", pady=2)
 
@@ -3443,6 +3451,7 @@ class Run1App:
                 "pet_threshold_s": self.run3_pet_threshold_var.get(),
                 "speed_zones": [z for z,v in self.run3_speed_zone_vars.items() if v.get()],
                 "speed_smoothing_samples": self.run3_speed_smoothing_var.get(),
+                "speed_max_kmh": self.run3_speed_max_var.get(),
                 "lc_zones": [z for z,v in self.run3_lc_zone_vars.items() if v.get()],
                 "pet_zone6": self.run3_pet_zone6_var.get(),
                 "pet_zones": [z for z, v in self.run3_pet_zone_vars.items() if v.get()],
@@ -3594,6 +3603,7 @@ class Run1App:
                 ("ttc_side_min_angle_deg", self.run3_ttc_side_angle_var),
                 ("ttc_side_mode", self.run3_ttc_side_mode_var),
                 ("speed_smoothing_samples", self.run3_speed_smoothing_var),
+                ("speed_max_kmh", self.run3_speed_max_var),
                 ("ldp_smoothing_samples", self.run3_ldp_smoothing_var),
                 ("waiting_speed_threshold", self.run3_waiting_speed_threshold_var),
                 ("gap_hold_min_duration_s", self.run3_hold_min_duration_var),
@@ -4249,6 +4259,7 @@ class Run1App:
         if enabled["speed"]:
             need_zone(self.run3_speed_zone_vars, "Speed")
             self._run3_float(self.run3_speed_smoothing_var.get(), "speed smoothing samples")
+            self._run3_float(self.run3_speed_max_var.get(), "max plausible speed (km/h)")
         if enabled["lc"]:
             need_zone(self.run3_lc_zone_vars, "Lateral Clearance")
             self._run3_float(self.run3_lc_heading_window_var.get(), "LC heading window (s)")
@@ -5099,6 +5110,7 @@ class Run1App:
             frame_index = 0
             processed_frames = 0
             total_detections = 0
+            untracked_detections = 0
 
             start_time = time.time()
 
@@ -5318,6 +5330,8 @@ class Run1App:
                             )
 
                             total_detections += 1
+                            if track_id < 0:
+                                untracked_detections += 1
 
                             if track_id >= 0:
                                 # Create/update research statistics for this track.
@@ -6105,6 +6119,7 @@ class Run1App:
             print("Total Frames    :", total_frames)
             print("Processed Frames:", processed_frames)
             print("Detections      :", total_detections)
+            print("Untracked (ID -1):", untracked_detections)
             print(
                 "Processing Time :",
                 f"{total_time:.2f} sec"
@@ -6154,6 +6169,7 @@ class Run1App:
                 "processed_frames": processed_frames,
                 "frames_with_detection": total_frames_with_detection,
                 "total_detections": total_detections,
+                "untracked_detections": untracked_detections,
                 "unique_track_ids": len(track_stats),
                 "max_active_tracks": max_active_tracks,
                 "id_switch_warnings": id_switch_warning_count,
@@ -6443,10 +6459,13 @@ class Run1App:
         return max(0.02, min(0.10, med*2.5))
 
     def _run3_build_tracks(self, detection_rows, id_rows):
+        self._run3_untracked_rows = 0
         tracks = defaultdict(list)
         for row in detection_rows:
             tid = str(row.get("track_id", "")).strip()
             if not tid or tid == "-1":
+                if tid == "-1":
+                    self._run3_untracked_rows += 1
                 continue
             ts = self._run3_float_safe(row.get("timestamp"))
             if ts is None:
@@ -6517,6 +6536,7 @@ class Run1App:
             "axis_deg": num(self.run3_lateral_axis_angle_var, 0.0) or 0.0,
             "speed_zones": zones_of(self.run3_speed_zone_vars),
             "speed_smoothing_samples": max(1, int(num(self.run3_speed_smoothing_var, 5) or 1)),
+            "speed_max_kmh": max(0.0, num(self.run3_speed_max_var, 80.0) or 0.0),
             "lc_zones": zones_of(self.run3_lc_zone_vars),
             "pet_zones": zones_of(self.run3_pet_zone_vars),
             "ttc_zones": zones_of(self.run3_ttc_zone_vars),
@@ -6706,6 +6726,7 @@ class Run1App:
         mode = self._run3_calibration_mode(c)
         qc_cal = self._run3_qc_calibration(c)
         k = c["speed_smoothing_samples"]
+        vmax = c.get("speed_max_kmh", 0)
         results = []
         for tid, rows in tracks.items():
             if not rows:
@@ -6726,7 +6747,7 @@ class Run1App:
                     "Distance_m": f"{rec['Distance_m']:.6f}", "Duration_s": f"{rec['Duration_s']:.6f}",
                     "Speed_kmh": f"{rec['Speed_kmh']:.6f}",
                     "Calibration_Mode": mode,
-                    "QC_Flag": ";".join(x for x in (rec["Flag"], qc_cal) if x),
+                    "QC_Flag": ";".join(x for x in (rec["Flag"], qc_cal, "Speed_Above_Max" if is_speed_outlier(rec["Speed_kmh"], vmax) else "") if x),
                 })
         return results
 
@@ -6771,6 +6792,8 @@ class Run1App:
         """Speed statistics (Mean, SD, V50 = median, V85 = P85) per Zone / per Movement x class."""
         groups = defaultdict(list)
         for r in speed_rows:
+            if "Speed_Above_Max" in str(r.get("QC_Flag", "")):
+                continue
             v = float(r["Speed_kmh"])
             groups[(r["Scope"], r["Key"], "All")].append(v)
             groups[(r["Scope"], r["Key"], r["Vehicle_Class"])].append(v)
@@ -7667,6 +7690,12 @@ class Run1App:
             "diagnostics": {},
             "indicators": {},
         }
+        untracked = getattr(self, "_run3_untracked_rows", 0)
+        summary["diagnostics"]["untracked_detections"] = {
+            "rows_with_track_id_minus_1": untracked,
+            "share_of_detection_records": round(untracked / len(detection_rows), 6) if detection_rows else 0.0,
+            "note": "detections the tracker gave no ID; they are not used by any indicator",
+        }
         summary["diagnostics"]["duplicate_tracks"] = {
             "rule": f"boxes IoU >= {DUPLICATE_TRACK_IOU} in >= {DUPLICATE_TRACK_MIN_FRAMES} frames = one vehicle under two IDs; the shorter track's overlapping frames are removed",
             "tracks_affected": len(duplicate_report),
@@ -7722,6 +7751,13 @@ class Run1App:
                            [float(r["Lateral_Clearance_m"]) for r in rows])
             indicator("Lateral Clearance (minimum per pair and zone)", "Distance", "m", "Pair minimum",
                       [float(r["Lateral_Clearance_Min_m"]) for r in pairs])
+            neg_rows = sum(1 for r in rows if float(r["Lateral_Clearance_m"]) < 0)
+            neg_pairs = sum(1 for r in pairs if float(r["Lateral_Clearance_Min_m"]) < 0)
+            s_["Negative_Samples"] = neg_rows
+            s_["Negative_Pairs"] = neg_pairs
+            s_["Negative_Pair_Share"] = round(neg_pairs / len(pairs), 6) if pairs else 0.0
+            indicator("Lateral Clearance (minimum per pair and zone, overlapping boxes only)", "Distance", "m", "Pair minimum < 0",
+                      [float(r["Lateral_Clearance_Min_m"]) for r in pairs if float(r["Lateral_Clearance_Min_m"]) < 0])
             summary["indicators"]["Lateral_Clearance"] = s_
             summary["diagnostics"]["lc"] = lc_diag
         run_step("lc", "Run_3_Lateral_Clearance.csv", do_lc)
@@ -7824,6 +7860,12 @@ class Run1App:
             for z in sorted(c["pet_zones"]):
                 indicator("Post-Encroachment Time", "Time", "s", f"Zone {z}",
                           [float(r["PET_s"]) for r in rows if r["Conflict_Zone"] == f"Zone {z}"])
+            for ctype in ("Crossing", "Merging", "Diverging", "Merging/Diverging"):
+                sub = [float(r["PET_s"]) for r in rows if r["Conflict_Type"] == ctype]
+                if sub:
+                    indicator("Post-Encroachment Time", "Time", "s", f"Conflict type {ctype}", sub)
+            s["Conflict_Type_Counts"] = {ct: sum(1 for r in rows if r["Conflict_Type"] == ct)
+                                         for ct in ("Crossing", "Merging", "Diverging", "Merging/Diverging")}
             summary["indicators"]["PET"] = s
             summary["diagnostics"]["pet"] = diag
         run_step("pet", "Run_3_PET.csv", do_pet)
@@ -7841,7 +7883,10 @@ class Run1App:
             outputs["speed_statistics"] = write_csv("Run_3_Speed_Statistics.csv",
                 ["Site_ID","Scope","Key","Vehicle_Class","N","Mean_kmh","SD_kmh","V50_kmh","V85_kmh","V85_minus_V50_kmh","Min_kmh","Max_kmh"], stats)
             groups = defaultdict(list)
+            n_outliers = sum(1 for r in speed_rows if "Speed_Above_Max" in str(r.get("QC_Flag", "")))
             for r in speed_rows:
+                if "Speed_Above_Max" in str(r.get("QC_Flag", "")):
+                    continue
                 groups[(r["Scope"], r["Key"])].append(float(r["Speed_kmh"]))
             spd = {}
             for (scope, key) in sorted(groups, key=lambda k: (k[0] != "Zone", MOVEMENT_IDS.index(k[1]) if k[1] in MOVEMENT_IDS else 0, k[1])):
@@ -7851,7 +7896,8 @@ class Run1App:
                 spd[f"{scope} {key}"] = {"N": s_["N"], "Mean": s_["Mean"], "SD": s_["SD"], "V50": s_["P50"], "V85": s_["P85"]}
             summary["indicators"]["Speed"] = spd
             summary["diagnostics"]["speed"] = (f"vehicle_rows={len(vs)}; detail_rows={len(speed_rows)}; "
-                                               f"zones={sorted(c['speed_zones'])}; smoothing_samples={c['speed_smoothing_samples']}")
+                                               f"zones={sorted(c['speed_zones'])}; smoothing_samples={c['speed_smoothing_samples']}; "
+                                               f"max_plausible_kmh={c.get('speed_max_kmh', 0)}; above_max_excluded_from_statistics={n_outliers}")
         run_step("speed", "Run_3_Speed.csv", do_speed)
 
         if duplicate_report:

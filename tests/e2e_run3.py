@@ -165,6 +165,18 @@ def scene1(app):
     stats = read_csv(os.path.join(out, "Run_3_Speed_Statistics.csv"))
     z2 = [r for r in stats if r["Scope"] == "Zone" and r["Key"] == "Zone 2" and r["Vehicle_Class"] == "All"][0]
     check("Speed stats Zone 2: N=2, V50 ~36", z2["N"] == "2" and abs(float(z2["V50_kmh"]) - 36.0) < 0.6, str(z2))
+    check("untracked detections diagnostic present (0 here)", summary["diagnostics"]["untracked_detections"]["rows_with_track_id_minus_1"] == 0)
+    # --- speed above the plausible maximum is flagged and left out of the statistics ---
+    app.run3_speed_max_var.set("30")
+    out_o, summary_o = run_scene(app, veh)
+    app.run3_speed_max_var.set("80")
+    det_o = read_csv(os.path.join(out_o, "Run_3_Speed_Detail.csv"))
+    flagged = {r["Vehicle_ID"] for r in det_o if "Speed_Above_Max" in r["QC_Flag"]}
+    check("max speed 30: the 36 km/h vehicles 1, 2, 4, 5 are flagged, the 18 km/h vehicle 3 is not", flagged == {"1", "2", "4", "5"}, str(flagged))
+    st_o = read_csv(os.path.join(out_o, "Run_3_Speed_Statistics.csv"))
+    z2o = [r for r in st_o if r["Scope"] == "Zone" and r["Key"] == "Zone 2" and r["Vehicle_Class"] == "All"]
+    check("flagged speeds are left out of the statistics (Zone 2 has no 18 km/h vehicle -> no row)", not z2o, str(z2o))
+    check("flagged rows stay in the detail file", len(det_o) == len(det))
     raw_speed = read_csv(os.path.join(out, "Run_3_Speed.csv"), raw=True)
     check("CSV movement / zone-sequence cells use arrows (Excel would turn 2-3-4 into a date)",
           any(r["Zone_Sequence"] == "2→3→4" for r in raw_speed) and not any("-" in r["Zone_Sequence"] for r in raw_speed),
