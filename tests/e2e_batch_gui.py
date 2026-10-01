@@ -2,8 +2,9 @@
 
 Run from the Run folder:   py -3.12 tests/e2e_batch_gui.py     (needs YOLO + a sample video; skips otherwise)
 Tree:  Site/day1/a.mp4 (analyse 1.0-2.0 s, record 1.2-1.5 s)   Site/day1/b.mp4 (whole clip, no recording)
-Checks the mirrored output folders, each clip's own CSVs, the _Combined sets, the time windows and that
-the plan file can be saved, loaded and run again by tools/batch_run.py's helpers.
+Checks the mirrored output folders, each clip's own CSVs, the time windows, the plan file and the
+"second analysis" scenarios: a new DAY is added next to the old one (same place folder) and a new CLIP is added
+to an old day - finished clips are not run again and their results are not touched.
 """
 import csv
 import json
@@ -125,20 +126,46 @@ for d, lo, hi in ((a_dir, 1.0, 2.0), (b_dir, 0.0, 3.0)):
     check(f"{os.path.basename(d)}: timestamps inside {lo}-{hi} s", ts and min(ts) >= lo - 1e-6 and max(ts) <= hi + 1e-6, f"{min(ts):.2f}..{max(ts):.2f}")
 check("clip a recorded only 1.2-1.5 s, clip b recorded nothing",
       os.path.isfile(os.path.join(a_dir, "a_Research_Tracking_Result.mp4")) and not os.path.isfile(os.path.join(b_dir, "b_Research_Tracking_Result.mp4")))
-check("combined set exists for the day (the place above has the same two clips, so no duplicate set)",
-      os.path.isfile(os.path.join(o, "Site", "day1", "_Combined", "Combined_Statistics.csv")) and not os.path.exists(os.path.join(o, "Site", "_Combined")))
-clips_in = set(json.load(open(os.path.join(o, "Site", "day1", "_Combined", "Combined_Summary.json"), encoding="utf-8"))["clips"])
-check("combined set names its clips by place/day/clip", clips_in == {"Site/day1/a", "Site/day1/b"}, str(clips_in))
 cmp_rows = list(csv.DictReader(open(os.path.join(o, "Batch_Comparison.csv"), encoding="utf-8-sig")))
+check("no combined folders are made (per-clip CSVs only)", not any(n.startswith("_Combined") for _r, ds, _f in os.walk(o) for n in ds))
 check("comparison table has both clips, completed", [r["Status"] for r in cmp_rows] == ["completed", "completed"], str([r["Status"] for r in cmp_rows]))
 
-# ---- skip-done: running again does no work ----
+# ---- second analysis, case 1: another DAY of the same place -> only a new day folder next to the old one ----
+mtime_a = os.path.getmtime(os.path.join(a_dir, "Run_3_Summary.json"))
+day2 = os.path.join(tmp, "in", "Site", "day2")
+os.makedirs(day2)
+shutil.copy(os.path.join(tree, "a.mp4"), os.path.join(day2, "c.mp4"))
 shown.clear()
-t0 = time.time()
-app.start_batch(dlg.clips, o, True)
-wait_in_mainloop(lambda: not app.running, 120)
+dlg2 = mod.BatchDialog(app)
+dlg2.out_var.set(o)
+dlg2.add_videos(batch_run.find_videos([day2], keep_parent=True))          # the "add day folder" button
+check("a picked DAY folder knows its place from the parent folder", [c["rel_dir"] for c in dlg2.clips] == ["Site/day2"], str([c["rel_dir"] for c in dlg2.clips]))
+dlg2.clips[0].update({"save_video": False})
+app.start_batch(dlg2.clips, o, True)
+wait_in_mainloop(lambda: not app.running, 600)
 wait_in_mainloop(lambda: False, 1)
-check("second run with 'skip done' is instant (< 25 s)", time.time() - t0 < 25, f"{time.time() - t0:.1f}s")
+check("new day added next to the old one: Site/day1/{a,b} and Site/day2/c", all(os.path.isdir(os.path.join(o, "Site", d, c)) for d, c in (("day1", "a"), ("day1", "b"), ("day2", "c"))),
+      str(sorted(os.listdir(os.path.join(o, "Site")))))
+check("only ONE place folder exists (nothing was created anew)", sorted(os.listdir(o)) == ["Batch_Comparison.csv", "Site"], str(sorted(os.listdir(o))))
+check("the old day was not touched", os.path.getmtime(os.path.join(a_dir, "Run_3_Summary.json")) == mtime_a)
+cmp_rows = list(csv.DictReader(open(os.path.join(o, "Batch_Comparison.csv"), encoding="utf-8-sig")))
+check("comparison table now lists all three clips", sorted((r["Folder"], r["Run"]) for r in cmp_rows) == [("Site/day1", "a"), ("Site/day1", "b"), ("Site/day2", "c")],
+      str([(r["Folder"], r["Run"]) for r in cmp_rows]))
+
+# ---- case 2: the old day with a NEW clip -> the old clips are skipped, only the new one runs ----
+shutil.copy(os.path.join(tree, "a.mp4"), os.path.join(tree, "d.mp4"))
+dlg3 = mod.BatchDialog(app)
+dlg3.out_var.set(o)
+dlg3.add_videos(batch_run.find_videos([os.path.join(tmp, "in", "Site", "day1")], keep_parent=True))
+check("the day folder now lists three clips", len(dlg3.clips) == 3)
+for c in dlg3.clips:
+    c["save_video"] = False
+t0 = time.time()
+app.start_batch(dlg3.clips, o, True)
+wait_in_mainloop(lambda: not app.running, 600)
+wait_in_mainloop(lambda: False, 1)
+check("new clip d added to day1; a and b untouched", os.path.isfile(os.path.join(o, "Site", "day1", "d", "Run_3_Summary.json")) and os.path.getmtime(os.path.join(a_dir, "Run_3_Summary.json")) == mtime_a)
+check("only the new clip was analysed (about one clip of time, not three)", time.time() - t0 < 75, f"{time.time() - t0:.0f}s")
 
 root.destroy()
 shutil.rmtree(tmp, ignore_errors=True)

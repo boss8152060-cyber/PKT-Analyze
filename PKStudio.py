@@ -1545,7 +1545,7 @@ class ClipPlayerDialog:
 
 
 def _tools_module(name):
-    """Import a helper from the tools folder next to this file (batch_run, merge_clips)."""
+    """Import a helper from the tools folder next to this file (batch_run)."""
     tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
     if tools_dir not in sys.path:
         sys.path.insert(0, tools_dir)
@@ -1554,8 +1554,9 @@ def _tools_module(name):
 
 class BatchDialog:
     """Choose a folder (place / day / clips) or files, then set for every clip the time range to analyse and
-    whether / which part of the result video to record. Output mirrors the input folders; each clip gets its
-    own CSV files and every folder level with 2+ clips gets a _Combined set (tools/batch_run.py logic)."""
+    whether / which part of the result video to record. Output mirrors the input folders (place / day / clip);
+    each clip gets its own CSV files. Running again with the same output folder ADDS to the place: a new day only
+    adds its day folder, new clips only add their clip folders, finished clips are skipped."""
 
     def __init__(self, app):
         self.app = app
@@ -1563,12 +1564,13 @@ class BatchDialog:
         self.clips = []
         self.top = tk.Toplevel(app.root)
         self.top.title("หลายคลิป (Batch) — เลือกคลิปและกำหนดช่วงเวลา")
-        self.out_var = tk.StringVar(value=os.path.join(app.output_var.get().strip() or DEFAULT_OUTPUT, "Batch"))
+        self.out_var = tk.StringVar(value=app.output_var.get().strip() or DEFAULT_OUTPUT)
         self.skip_done_var = tk.BooleanVar(value=True)
 
         top_bar = ttk.Frame(self.top, padding=(8, 8, 8, 2))
         top_bar.grid(row=0, column=0, sticky="ew")
-        ttk.Button(top_bar, text="เลือกโฟลเดอร์วิดีโอ…", command=self.add_folder).pack(side="left", padx=2)
+        ttk.Button(top_bar, text="เลือกโฟลเดอร์สถานที่…", command=lambda: self.add_folder(False)).pack(side="left", padx=2)
+        ttk.Button(top_bar, text="เพิ่มโฟลเดอร์วัน…", command=lambda: self.add_folder(True)).pack(side="left", padx=2)
         ttk.Button(top_bar, text="เพิ่มไฟล์วิดีโอ…", command=self.add_files).pack(side="left", padx=2)
         ttk.Button(top_bar, text="ลบที่เลือก", command=self.remove_selected).pack(side="left", padx=2)
         ttk.Button(top_bar, text="ล้างรายการ", command=self.clear).pack(side="left", padx=2)
@@ -1599,7 +1601,8 @@ class BatchDialog:
         ttk.Button(act, text="ทุกคลิป: บันทึกตลอดช่วงที่วิเคราะห์", command=lambda: self.set_all_record(True)).pack(side="left", padx=2)
 
         ttk.Label(self.top, foreground="#555555", justify="left",
-                  text="• ใช้การตั้งค่าในหน้าหลัก (โมเดล, Zone, Line, ความกว้างเลน, tracker ฯลฯ) กับทุกคลิป\n"
+                  text="• ผลลัพธ์แบ่งโฟลเดอร์ตามต้นฉบับ: โฟลเดอร์ผลลัพธ์ / สถานที่ / วัน / คลิป — รันครั้งต่อไปด้วยโฟลเดอร์ผลลัพธ์เดิม = เพิ่มวันใหม่/คลิปใหม่เข้าที่เดิม\n"
+                       "• ใช้การตั้งค่าในหน้าหลัก (โมเดล, Zone, Line, ความกว้างเลน, tracker ฯลฯ) กับทุกคลิป\n"
                        "• เวลาใน CSV ที่ได้เป็นเวลาของวิดีโอต้นฉบับ (เช่น เริ่มวิเคราะห์ที่นาที 2 เวลาแรกใน CSV = 120 วินาที)").grid(
             row=4, column=0, sticky="w", padx=10)
         bottom = ttk.Frame(self.top, padding=8)
@@ -1621,10 +1624,13 @@ class BatchDialog:
                 have.add(video)
         self.refresh()
 
-    def add_folder(self):
-        path = filedialog.askdirectory(title="เลือกโฟลเดอร์ (สถานที่) ที่มีโฟลเดอร์ย่อยของวันและวิดีโอ")
+    def add_folder(self, day_folder=False):
+        """day_folder=False: the folder is the PLACE (its sub-folders are the days).
+        day_folder=True: the folder is ONE DAY; the place is the name of its parent folder."""
+        path = filedialog.askdirectory(title=("เลือกโฟลเดอร์ของวัน (ชื่อสถานที่ = โฟลเดอร์ที่อยู่เหนือขึ้นไป)" if day_folder
+                                              else "เลือกโฟลเดอร์สถานที่ (ข้างในเป็นโฟลเดอร์วัน แล้วเป็นวิดีโอ)"))
         if path:
-            found = self.bt.find_videos([path])
+            found = self.bt.find_videos([path], keep_parent=day_folder)
             if not found:
                 messagebox.showinfo("Batch", "ไม่พบไฟล์วิดีโอในโฟลเดอร์นี้", parent=self.top)
             self.add_videos(found)
@@ -2843,7 +2849,7 @@ class Run1App:
         self.status_var.set(f"Batch finished: {len(ok)}/{total} clips" + (" (stopped)" if stopped else ""))
         self.progress_var.set("100%" if not stopped else "")
         msg = f"Batch {'หยุดกลางทาง' if stopped else 'เสร็จ'}: {len(ok)} จาก {total} คลิป\n\nผลลัพธ์:\n{out_root}\n\n"
-        msg += "• โฟลเดอร์ของแต่ละคลิป = CSV รายคลิป\n• _Combined (ในแต่ละระดับโฟลเดอร์) = รวมทุกคลิปของระดับนั้น\n• Batch_Comparison.csv = ตารางเปรียบเทียบทุกคลิป"
+        msg += "• โฟลเดอร์ของแต่ละคลิป (สถานที่ / วัน / คลิป) = CSV ของคลิปนั้น\n• Batch_Comparison.csv = ตารางเปรียบเทียบทุกคลิปในโฟลเดอร์ผลลัพธ์"
         if bad:
             msg += "\n\nคลิปที่มีปัญหา:\n" + "\n".join(f"- {r['Run']}: {r['Status']}" for r in bad)
         if fatal:
