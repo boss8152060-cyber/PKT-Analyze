@@ -1300,6 +1300,250 @@ class LineEditorDialog:
         return ok
 
 
+class ClipPlayerDialog:
+    """Play a video inside the program and choose, for this clip, the time range to analyse and what to
+    record. Result (self.result, None when cancelled):
+      analysis_start_s / analysis_end_s   text, '' = from the beginning / to the end
+      save_video                          False = record nothing
+      record_start_s / record_end_s       text, '' = same as the analysis window
+    Times are video times (m:ss.s); frame N is at (N-1)/fps like in every CSV file."""
+
+    SHOW_W, SHOW_H = 900, 500
+
+    def __init__(self, app, video_path, plan=None, title=None, modal=True):
+        plan = plan or {}
+        self.app = app
+        self.video_path = video_path
+        self.result = None
+        self.cap = cv2.VideoCapture(video_path)
+        if not self.cap.isOpened():
+            raise RuntimeError("Unable to open video")
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
+        if self.fps <= 0:
+            self.fps = 30.0
+        self.total = max(1, int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+        self.duration = self.total / self.fps
+        self.pos = -1
+        self.playing = False
+        self._after = None
+        self._busy = False
+
+        self.top = tk.Toplevel(app.root)
+        self.top.title(title or ("ดูวิดีโอและกำหนดช่วงเวลา — " + os.path.basename(video_path)))
+        self.top.protocol("WM_DELETE_WINDOW", self.cancel)
+
+        self.a_start = tk.StringVar(value=str(plan.get("analysis_start_s", "") or ""))
+        self.a_end = tk.StringVar(value=str(plan.get("analysis_end_s", "") or ""))
+        self.r_start = tk.StringVar(value=str(plan.get("record_start_s", "") or ""))
+        self.r_end = tk.StringVar(value=str(plan.get("record_end_s", "") or ""))
+        if not plan.get("save_video", True):
+            mode = "none"
+        elif self.r_start.get().strip() or self.r_end.get().strip():
+            mode = "range"
+        else:
+            mode = "window"
+        self.rec_mode = tk.StringVar(value=mode)
+        self.time_text = tk.StringVar(value="")
+
+        self.canvas = tk.Canvas(self.top, width=self.SHOW_W, height=self.SHOW_H, bg="#111111", highlightthickness=0)
+        self.canvas.grid(row=0, column=0, columnspan=2, padx=8, pady=(8, 4))
+        self.slider = tk.Scale(self.top, from_=0, to=self.total - 1, orient="horizontal", showvalue=False,
+                               length=self.SHOW_W, command=self._on_slider)
+        self.slider.grid(row=1, column=0, columnspan=2, padx=8, sticky="ew")
+        ttk.Label(self.top, textvariable=self.time_text, font=("Consolas", 11)).grid(row=2, column=0, columnspan=2, pady=(0, 2))
+
+        bar = ttk.Frame(self.top)
+        bar.grid(row=3, column=0, columnspan=2, pady=2)
+        for text, delta in (("◀◀ -5 วิ", -5 * self.fps), ("◀ -1 เฟรม", -1), ("+1 เฟรม ▶", 1), ("+5 วิ ▶▶", 5 * self.fps)):
+            ttk.Button(bar, text=text, command=lambda d=delta: self.step(int(round(d)))).pack(side="left", padx=2)
+        self.play_button = ttk.Button(bar, text="▶ เล่น", width=9, command=self.toggle_play)
+        self.play_button.pack(side="left", padx=(12, 2))
+
+        a_box = ttk.LabelFrame(self.top, text="ช่วงที่ให้โปรแกรมวิเคราะห์ (ว่าง = ทั้งคลิป)", padding=6)
+        a_box.grid(row=4, column=0, sticky="nsew", padx=(8, 4), pady=6)
+        self._time_row(a_box, 0, "เริ่ม", self.a_start)
+        self._time_row(a_box, 1, "สิ้นสุด", self.a_end)
+        ttk.Label(a_box, text="เลื่อนวิดีโอไปจุดที่ต้องการ แล้วกด \"ใช้เวลานี้\"", foreground="#666666").grid(row=2, column=0, columnspan=4, sticky="w")
+
+        r_box = ttk.LabelFrame(self.top, text="บันทึกวิดีโอผลลัพธ์ของคลิปนี้", padding=6)
+        r_box.grid(row=4, column=1, sticky="nsew", padx=(4, 8), pady=6)
+        ttk.Radiobutton(r_box, text="ไม่บันทึก", value="none", variable=self.rec_mode, command=self._redraw_timeline).grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Radiobutton(r_box, text="บันทึกตลอดช่วงที่วิเคราะห์", value="window", variable=self.rec_mode, command=self._redraw_timeline).grid(row=1, column=0, columnspan=4, sticky="w")
+        ttk.Radiobutton(r_box, text="บันทึกเฉพาะช่วง:", value="range", variable=self.rec_mode, command=self._redraw_timeline).grid(row=2, column=0, columnspan=4, sticky="w")
+        self._time_row(r_box, 3, "เริ่ม", self.r_start)
+        self._time_row(r_box, 4, "สิ้นสุด", self.r_end)
+
+        self.timeline = tk.Canvas(self.top, width=self.SHOW_W, height=26, bg="#dddddd", highlightthickness=0)
+        self.timeline.grid(row=5, column=0, columnspan=2, padx=8, pady=(0, 2))
+        ttk.Label(self.top, text="แถบเวลา: สีเทา = ทั้งคลิป · ฟ้า = ช่วงวิเคราะห์ · แดง = ช่วงบันทึก · ขีดดำ = ตำแหน่งปัจจุบัน",
+                  foreground="#666666").grid(row=6, column=0, columnspan=2)
+        btns = ttk.Frame(self.top)
+        btns.grid(row=7, column=0, columnspan=2, pady=8)
+        ttk.Button(btns, text="ตกลง", width=12, command=self.apply).pack(side="left", padx=6)
+        ttk.Button(btns, text="ยกเลิก", width=12, command=self.cancel).pack(side="left", padx=6)
+
+        for var in (self.a_start, self.a_end, self.r_start, self.r_end):
+            var.trace_add("write", lambda *_: self._redraw_timeline())
+        self.top.bind("<Left>", lambda e: self.step(-1))
+        self.top.bind("<Right>", lambda e: self.step(1))
+        self.top.bind("<space>", lambda e: self.toggle_play())
+
+        first = self._seconds(self.a_start.get())
+        self.show_frame(int(round(first * self.fps)) if first is not None else 0)
+        if modal:
+            self.top.transient(app.root)
+            self.top.grab_set()
+            self.top.wait_window()
+
+    # ---- building blocks ----
+    def _time_row(self, parent, row, label, var):
+        ttk.Label(parent, text=label, width=8).grid(row=row, column=0, sticky="w", pady=2)
+        ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=1, sticky="w", pady=2)
+        ttk.Button(parent, text="ใช้เวลานี้", command=lambda v=var: v.set(format_clock_time(self.current_time()))).grid(
+            row=row, column=2, padx=4)
+        ttk.Button(parent, text="ล้าง", width=5, command=lambda v=var: v.set("")).grid(row=row, column=3)
+
+    @staticmethod
+    def _seconds(text):
+        try:
+            return parse_clock_time(text)
+        except ValueError:
+            return None
+
+    def current_time(self):
+        return max(0, self.pos) / self.fps
+
+    # ---- playback ----
+    def show_frame(self, idx):
+        idx = max(0, min(self.total - 1, int(idx)))
+        if idx != self.pos + 1:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ok, frame = self.cap.read()
+        if not ok or frame is None:
+            self.playing = False
+            self.play_button.config(text="▶ เล่น")
+            return False
+        self.pos = idx
+        h, w = frame.shape[:2]
+        scale = min(self.SHOW_W / float(w), self.SHOW_H / float(h))
+        shown = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))))
+        okp, buf = cv2.imencode(".png", shown)
+        self.photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
+        self.canvas.delete("all")
+        self.canvas.create_image(self.SHOW_W // 2, self.SHOW_H // 2, image=self.photo)
+        self._busy = True
+        self.slider.set(idx)
+        self._busy = False
+        self.time_text.set(f"{format_clock_time(self.current_time())} / {format_clock_time(self.duration)}    เฟรม {idx + 1}/{self.total}")
+        self._redraw_timeline()
+        return True
+
+    def _on_slider(self, value):
+        if self._busy:
+            return
+        idx = int(float(value))
+        if idx != self.pos:
+            self.show_frame(idx)
+
+    def step(self, delta):
+        self.playing = False
+        self.play_button.config(text="▶ เล่น")
+        self.show_frame(self.pos + delta)
+
+    def toggle_play(self):
+        self.playing = not self.playing
+        self.play_button.config(text="⏸ หยุด" if self.playing else "▶ เล่น")
+        if self.playing:
+            self._tick()
+
+    def _tick(self):
+        if not self.playing:
+            return
+        skip = max(1, int(round(self.fps / 25.0)))
+        for _ in range(skip - 1):
+            self.cap.grab()
+            self.pos += 1
+        if not self.show_frame(self.pos + 1):
+            return
+        self._after = self.top.after(40, self._tick)
+
+    # ---- timeline ----
+    def _redraw_timeline(self):
+        c = self.timeline
+        c.delete("all")
+        w = self.SHOW_W
+        x = lambda t: max(0, min(w, int(w * t / self.duration)))
+        a0 = self._seconds(self.a_start.get())
+        a1 = self._seconds(self.a_end.get())
+        a0 = 0.0 if a0 is None else a0
+        a1 = self.duration if a1 is None else a1
+        c.create_rectangle(x(a0), 3, x(a1), 13, fill="#4a90e2", outline="")
+        mode = self.rec_mode.get()
+        if mode != "none":
+            r0, r1 = a0, a1
+            if mode == "range":
+                v0, v1 = self._seconds(self.r_start.get()), self._seconds(self.r_end.get())
+                r0 = a0 if v0 is None else max(a0, v0)
+                r1 = a1 if v1 is None else min(a1, v1)
+            c.create_rectangle(x(r0), 14, x(r1), 23, fill="#d9534f", outline="")
+        c.create_line(x(self.current_time()), 0, x(self.current_time()), 26, fill="black", width=2)
+
+    # ---- result ----
+    def _validated(self):
+        def get(var, label):
+            try:
+                return parse_clock_time(var.get())
+            except ValueError as exc:
+                raise ValueError(f"{label}: {exc}")
+        a0, a1 = get(self.a_start, "เริ่มวิเคราะห์"), get(self.a_end, "สิ้นสุดวิเคราะห์")
+        r0, r1 = get(self.r_start, "เริ่มบันทึก"), get(self.r_end, "สิ้นสุดบันทึก")
+        if a0 is not None and a0 >= self.duration:
+            raise ValueError("เวลาเริ่มวิเคราะห์อยู่หลังจบวิดีโอ")
+        if a0 is not None and a1 is not None and a1 <= a0:
+            raise ValueError("เวลาสิ้นสุดวิเคราะห์ต้องมากกว่าเวลาเริ่ม")
+        if self.rec_mode.get() == "range" and r0 is not None and r1 is not None and r1 <= r0:
+            raise ValueError("เวลาสิ้นสุดบันทึกต้องมากกว่าเวลาเริ่ม")
+        return a0, a1, r0, r1
+
+    def apply(self):
+        try:
+            self._validated()
+        except ValueError as exc:
+            messagebox.showerror("ช่วงเวลาไม่ถูกต้อง", str(exc), parent=self.top)
+            return False
+        mode = self.rec_mode.get()
+        self.result = {
+            "analysis_start_s": self.a_start.get().strip(),
+            "analysis_end_s": self.a_end.get().strip(),
+            "save_video": mode != "none",
+            "record_start_s": self.r_start.get().strip() if mode == "range" else "",
+            "record_end_s": self.r_end.get().strip() if mode == "range" else "",
+        }
+        self.close()
+        return True
+
+    def cancel(self):
+        self.result = None
+        self.close()
+
+    def close(self):
+        self.playing = False
+        if self._after is not None:
+            try:
+                self.top.after_cancel(self._after)
+            except Exception:
+                pass
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+        try:
+            self.top.grab_release()
+        except Exception:
+            pass
+        self.top.destroy()
+
+
 class Run1App:
 
     def __init__(self, root):
@@ -2280,6 +2524,29 @@ class Run1App:
     # LINE EDITOR (Reference Lines for Gap Acceptance)
     # ========================================================
 
+    def open_clip_player(self):
+        """Play the selected video in the program and set the analysis / recording time range."""
+        video = self.video_var.get().strip()
+        if not video or not os.path.isfile(video):
+            messagebox.showerror("ดูวิดีโอ", "เลือกไฟล์วิดีโอ (Video) ก่อน")
+            return None
+        try:
+            dlg = ClipPlayerDialog(self, video, {
+                "analysis_start_s": self.analysis_start_var.get(), "analysis_end_s": self.analysis_end_var.get(),
+                "save_video": self.save_video_var.get(),
+                "record_start_s": self.record_start_var.get(), "record_end_s": self.record_end_var.get(),
+            })
+        except Exception as exc:
+            messagebox.showerror("ดูวิดีโอ", str(exc))
+            return None
+        if dlg.result:
+            self.analysis_start_var.set(dlg.result["analysis_start_s"])
+            self.analysis_end_var.set(dlg.result["analysis_end_s"])
+            self.save_video_var.set(dlg.result["save_video"])
+            self.record_start_var.set(dlg.result["record_start_s"])
+            self.record_end_var.set(dlg.result["record_end_s"])
+        return dlg.result
+
     def open_line_editor(self):
         """Open the dialog that draws the Reference Lines on a frame of the video."""
         video = self.video_var.get().strip()
@@ -3243,6 +3510,26 @@ class Run1App:
             text="กรอบและข้อมูล ID แสดงเฉพาะเมื่อจุด Trajectory อยู่ใน Zone",
             foreground="#666666"
         ).grid(row=5, column=0, columnspan=3, sticky="w")
+
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=6, column=0, columnspan=3, sticky="ew", pady=(8, 6)
+        )
+        ttk.Label(frame, text="ช่วงเวลาวิเคราะห์ (m:ss หรือวินาที, ว่าง = ทั้งคลิป)").grid(
+            row=7, column=0, columnspan=3, sticky="w"
+        )
+        time_row = ttk.Frame(frame)
+        time_row.grid(row=8, column=0, columnspan=3, sticky="w", pady=2)
+        ttk.Label(time_row, text="จาก").pack(side="left")
+        ttk.Entry(time_row, textvariable=self.analysis_start_var, width=9).pack(side="left", padx=4)
+        ttk.Label(time_row, text="ถึง").pack(side="left")
+        ttk.Entry(time_row, textvariable=self.analysis_end_var, width=9).pack(side="left", padx=4)
+        ttk.Label(time_row, text="  บันทึกวิดีโอเฉพาะช่วง จาก").pack(side="left")
+        ttk.Entry(time_row, textvariable=self.record_start_var, width=9).pack(side="left", padx=4)
+        ttk.Label(time_row, text="ถึง").pack(side="left")
+        ttk.Entry(time_row, textvariable=self.record_end_var, width=9).pack(side="left", padx=4)
+        ttk.Button(frame, text="ดูวิดีโอ / กำหนดช่วงเวลา…", command=self.open_clip_player).grid(
+            row=9, column=0, columnspan=3, sticky="w", pady=(4, 0)
+        )
 
     # ========================================================
     # INFORMATION
