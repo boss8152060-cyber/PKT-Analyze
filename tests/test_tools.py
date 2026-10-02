@@ -202,6 +202,32 @@ class CombineClips(unittest.TestCase):
         self.assertAlmostEqual(float(st["All"]["Mean"]), 40.0)
         self.assertAlmostEqual(float(st["All"]["V50_Median"]), 40.0)
 
+    def test_ids_that_restart_in_every_clip_get_a_unique_key(self):
+        import combine_clips
+        self._clip("Site/d1/20260907_084751A_", [30, 40])
+        self._clip("Site/d1/b", [50])
+        combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
+        with open(os.path.join(self.root, "Site", "All_Clips", "All_Speed_Detail.csv"), newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            header = reader.fieldnames
+            rows = list(reader)
+        self.assertEqual(header[:5], ["Clip", "Clip_Start", "Vehicle_ID", "Vehicle_ID_Unique", "Scope"])
+        ids = [r["Vehicle_ID"] for r in rows]
+        self.assertEqual(ids, ["1", "2", "1"])                                   # the plain ID repeats ...
+        uniq = [r["Vehicle_ID_Unique"] for r in rows]
+        self.assertEqual(len(set(uniq)), 3)                                      # ... the unique key does not
+        self.assertEqual(uniq[0], "Site/d1/20260907_084751A_#1")
+        self.assertEqual(rows[0]["Clip_Start"], "2026-09-07 08:47:51")           # clock time of the clip start from its name
+        self.assertEqual(rows[2]["Clip_Start"], "")                              # no time in the name -> blank
+
+    def test_clip_start_time_parsing(self):
+        import combine_clips
+        f = combine_clips.clip_start_time
+        self.assertEqual(f("S/20260907_084751A_"), "2026-09-07 08:47:51")
+        self.assertEqual(f("S/x/20251231-235959"), "2025-12-31 23:59:59")
+        self.assertEqual(f("S/DJI_0426"), "")
+        self.assertEqual(f("S/20261399_999999"), "")                             # impossible date/time is not a time
+
     def test_old_run_3_names_are_still_read(self):
         import combine_clips
         self._clip("Site/d1/a", [30], old_names=True)

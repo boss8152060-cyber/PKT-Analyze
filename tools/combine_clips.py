@@ -14,9 +14,16 @@ import csv
 import json
 import math
 import os
+import re
 import sys
 
 COMBINED_DIR = "All_Clips"
+
+# Vehicle IDs (and event / pair numbers) restart from 1 in every clip, so in the combined files each of these columns
+# gets a companion <column>_Unique = "<Clip>#<value>" that is unique over all clips.
+ID_COLUMNS = ("track_id", "Vehicle_ID", "Vehicle_ID_A", "Vehicle_ID_B", "Vehicle_A_ID", "Vehicle_B_ID", "Subject_ID",
+              "Conflicting_ID_A", "Conflicting_ID_B", "Duplicate_ID", "Kept_ID", "Pair_ID", "Interaction_ID",
+              "Event_ID", "Decision_Event_ID")
 
 # kinds of CSV that are put together (the file of a clip is <clip>_<kind>.csv; older runs: Run_3_<kind>.csv)
 KINDS = ("Gap_Acceptance", "Critical_Gap", "LDP", "Lateral_Clearance", "Lateral_Clearance_Pairs", "TTC", "PET",
@@ -64,6 +71,18 @@ def find_clip_folders(root):
     return found
 
 
+def clip_start_time(label):
+    """Recording start time from a file name such as 20260907_084751A_ -> '2026-09-07 08:47:51' ('' when the name has none).
+    Times inside the CSV files are seconds from the start of the video, so Clip_Start + seconds = clock time."""
+    m = re.search(r"(20\d{2})(\d{2})(\d{2})[_-]?(\d{2})(\d{2})(\d{2})", os.path.basename(label))
+    if not m:
+        return ""
+    y, mo, d, h, mi, s = m.groups()
+    if not (1 <= int(mo) <= 12 and 1 <= int(d) <= 31 and int(h) < 24 and int(mi) < 60 and int(s) < 60):
+        return ""
+    return f"{y}-{mo}-{d} {h}:{mi}:{s}"
+
+
 def read_rows(path):
     with open(path, newline="", encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
@@ -109,22 +128,31 @@ def combine(clips, target_dir):
                 for k in rows[0].keys():
                     if k not in fields:
                         fields.append(k)
+            start = clip_start_time(label)
             for r in rows:
-                row = {"Clip": label}
-                row.update(r)
+                row = {"Clip": label, "Clip_Start": start}
+                for k, v in r.items():
+                    row[k] = v
+                    if k in ID_COLUMNS:
+                        row[k + "_Unique"] = f"{label}#{v}" if str(v).strip() != "" else ""
                 rows_all.append(row)
         if rows_all:
             merged[kind] = rows_all
+            header = ["Clip", "Clip_Start"]
+            for k in fields:
+                header.append(k)
+                if k in ID_COLUMNS:
+                    header.append(k + "_Unique")
             with open(os.path.join(target_dir, f"All_{kind}.csv"), "w", newline="", encoding="utf-8-sig") as f:
-                w = csv.DictWriter(f, fieldnames=["Clip"] + fields, extrasaction="ignore")
+                w = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
                 w.writeheader()
                 w.writerows(rows_all)
 
     with open(os.path.join(target_dir, "All_Clips.csv"), "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["Clip", "Folder"])
+        w.writerow(["Clip", "Clip_Start", "Folder"])
         for folder, label in clips:
-            w.writerow([label, folder])
+            w.writerow([label, clip_start_time(label), folder])
 
     out_rows = []
     for kind, (indicator, column, group_cols) in STATISTICS.items():
