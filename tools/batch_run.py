@@ -172,6 +172,7 @@ def collect_row(run_dir, run_name, video, rel_dir, overrides, error, seconds):
         "Duplicate_Tracks": dup,
         "Movement_Exact": exact,
         "Tracks_In_Run3": (run3.get("source_counts", {}) or {}).get("track_ids"),
+        "Empty_Indicators": len((run3.get("diagnostics", {}) or {}).get("empty_outputs", []) or []) if run3 else None,
         "Seconds": round(seconds, 1),
     }
     for name, fname in (("Rows_LC", "Run_3_Lateral_Clearance_Pairs.csv"), ("Rows_Gap", "Run_3_Gap_Acceptance.csv"),
@@ -184,14 +185,14 @@ def collect_row(run_dir, run_name, video, rel_dir, overrides, error, seconds):
 CLIP_KEYS = ("analysis_start_s", "analysis_end_s", "save_video", "record_start_s", "record_end_s")
 
 
-def clip_settings(base_settings, video, rel_dir, overrides, out_root, clip_params=None, save_video=False):
+def clip_settings(base_settings, video, rel_dir, overrides, out_root, clip_params=None, save_video=False, show_preview=False):
     """Settings dict of one clip -> (settings, run_name, run_dir). clip_params = the per-clip choices
     (analysis_start_s / analysis_end_s / save_video / record_start_s / record_end_s) of the batch plan."""
     name = run_name_for(video, overrides)
     run_dir = run_dir_for(out_root, rel_dir, name)
     st = copy.deepcopy(base_settings)
     st.update({"video": video, "output": run_dir, "run_name": name,
-               "show_preview": False, "save_video": bool(save_video)})
+               "show_preview": bool(show_preview), "save_video": bool(save_video)})
     for k, v in (clip_params or {}).items():
         if k in CLIP_KEYS:
             st[k] = v
@@ -291,7 +292,7 @@ def run_batch(app, base_settings, out_root, runs, save_video=False, skip_done=Fa
 
 COLUMNS = ["Run", "Folder", "Video", "Overrides", "Status", "Frames", "Unique_Track_IDs", "ID_Switch_Warnings",
            "Detection_Loss_Events", "Untracked_Detections", "Duplicate_Tracks", "Movement_Exact",
-           "Tracks_In_Run3", "Rows_LC", "Rows_LDP", "Rows_Gap", "Rows_TTC", "Rows_PET", "Rows_Speed", "Seconds"]
+           "Tracks_In_Run3", "Empty_Indicators", "Rows_LC", "Rows_LDP", "Rows_Gap", "Rows_TTC", "Rows_PET", "Rows_Speed", "Seconds"]
 
 
 def write_comparison(path, rows):

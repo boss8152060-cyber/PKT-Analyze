@@ -117,6 +117,30 @@ collect_buttons(top)
 check("calibration dialog: Apply Calibration and Cancel are visible on screen", all(v for t, mapped, v in texts if "Apply" in t or t == "Cancel") and any("Apply" in t for t, _, _ in texts), str(texts))
 check("calibration dialog fits the screen", top.winfo_height() <= root.winfo_screenheight(), f"{top.winfo_height()} / {root.winfo_screenheight()}")
 top.destroy()
+
+# ---- points of an earlier calibration come back (no need to click them again) ----
+for var, xy in zip((app.run3_perspective_p1_var, app.run3_perspective_p2_var, app.run3_perspective_p3_var, app.run3_perspective_p4_var),
+                   ("100.5,50", "500,60", "520,300", "90,310")):
+    var.set(xy)
+before = set(root.winfo_children())
+app.open_perspective_calibration()
+for _ in range(10):
+    root.update()
+    time.sleep(0.02)
+top2 = [c for c in root.winfo_children() if c not in before and isinstance(c, tk.Toplevel)][0]
+check("calibration dialog shows the four saved points again", top2.calibration_state["points"] == [(100.5, 50.0), (500.0, 60.0), (520.0, 300.0), (90.0, 310.0)],
+      str(top2.calibration_state["points"]))
+top2.destroy()
+for var in (app.run3_perspective_p1_var, app.run3_perspective_p2_var, app.run3_perspective_p3_var, app.run3_perspective_p4_var):
+    var.set("")
+before = set(root.winfo_children())
+app.open_perspective_calibration()
+for _ in range(10):
+    root.update()
+    time.sleep(0.02)
+top3 = [c for c in root.winfo_children() if c not in before and isinstance(c, tk.Toplevel)][0]
+check("with nothing saved the picture starts empty", top3.calibration_state["points"] == [])
+top3.destroy()
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
 sys.exit(1 if failures else 0)

@@ -2741,7 +2741,7 @@ class Run1App:
 
     def _batch_worker(self, base_settings, clips, out_root, skip_done):
         bt = _tools_module("batch_run")
-        rows, runs = [], []
+        rows, runs, empties = [], [], []
         stopped = False
         fatal = ""
         n = len(clips)
@@ -2753,7 +2753,8 @@ class Run1App:
                 if self.stop_event.is_set():
                     stopped = True
                     break
-                st, name, run_dir = bt.clip_settings(base_settings, c["video"], rel, {}, out_root, c, c.get("save_video", False))
+                st, name, run_dir = bt.clip_settings(base_settings, c["video"], rel, {}, out_root, c, c.get("save_video", False),
+                                                     show_preview=bool(base_settings.get("show_preview")))
                 os.makedirs(run_dir, exist_ok=True)
                 if skip_done and os.path.isfile(os.path.join(run_dir, "Run_3_Summary.json")):
                     rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, "", 0.0))
@@ -2761,8 +2762,12 @@ class Run1App:
                     continue
                 self.update_ui(status=f"Batch {i}/{n}: {name}")
                 self._last_run_error = ""
+                self.run3_last_summary = None
                 t0 = time.time()
                 self.run_processing(st)
+                reasons = ((self.run3_last_summary or {}).get("diagnostics", {}) or {}).get("empty_outputs", []) or []
+                if reasons:
+                    empties.append((name, list(reasons)))
                 rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, self._last_run_error, time.time() - t0))
                 if self.stop_event.is_set():
                     stopped = True
@@ -2771,9 +2776,9 @@ class Run1App:
         except Exception as exc:
             log.exception("Batch failed")
             fatal = str(exc)
-        self.post_ui(lambda: self.finish_batch_ui(rows, n, out_root, stopped, fatal))
+        self.post_ui(lambda: self.finish_batch_ui(rows, n, out_root, stopped, fatal, empties))
 
-    def finish_batch_ui(self, rows, total, out_root, stopped, fatal):
+    def finish_batch_ui(self, rows, total, out_root, stopped, fatal, empties=()):
         self.running = False
         self._batch_mode = False
         self._rt = None
@@ -2788,6 +2793,12 @@ class Run1App:
         msg += "• โฟลเดอร์ของแต่ละคลิป (ตามโครงสร้างต้นฉบับ) = CSV ของคลิปนั้น\n• Batch_Comparison.csv = ตารางเปรียบเทียบทุกคลิปในโฟลเดอร์ผลลัพธ์"
         if bad:
             msg += "\n\nคลิปที่มีปัญหา:\n" + "\n".join(f"- {r['Run']}: {r['Status']}" for r in bad)
+        if empties:
+            msg += "\n\nตัวชี้วัดที่ไม่มีข้อมูล (ไฟล์ CSV มีแต่หัวแถว) และสาเหตุ:"
+            for clip_name, reasons in empties[:3]:
+                msg += f"\n\n[{clip_name}]\n" + "\n".join("• " + r for r in reasons)
+            if len(empties) > 3:
+                msg += f"\n\n… และอีก {len(empties) - 3} คลิป (ดูใน Run_3_Summary.json → diagnostics.empty_outputs ของแต่ละคลิป)"
         if fatal:
             msg += "\n\nข้อผิดพลาด: " + fatal
         messagebox.showinfo("PK Studio Batch", msg)
@@ -4170,13 +4181,26 @@ class Run1App:
             "drag_index": None,
         }
 
+        # Points set by an earlier calibration come back on the picture (drag to adjust, Reset Points to start over).
+        try:
+            saved = [[float(v) for v in str(var.get()).replace(";", ",").split(",")]
+                     for var in (self.run3_perspective_p1_var, self.run3_perspective_p2_var,
+                                 self.run3_perspective_p3_var, self.run3_perspective_p4_var)]
+            if len(saved) == 4 and all(len(pt) == 2 and 0 <= pt[0] <= width and 0 <= pt[1] <= height for pt in saved):
+                state["points"] = [(pt[0], pt[1]) for pt in saved]
+        except (ValueError, TypeError):
+            pass
+        top.calibration_state = state      # (also lets the tests look at the points)
+
         controls = ttk.Frame(top, padding=8)
         controls.pack(fill="x")
         canvas_frame = ttk.Frame(top, padding=(8, 0, 8, 8))
         canvas_frame.pack(fill="both", expand=True)
 
         controls.columnconfigure(10, weight=1)
-        ttk.Label(controls, text="ลำดับจุด: P1 → P2 → P3 → P4 | คลิกบนพื้นถนนที่เป็นพื้นที่เดียวกัน แล้วลากจุดปรับได้").grid(row=0, column=0, columnspan=11, sticky="w", pady=(0, 6))
+        ttk.Label(controls, text=("ลำดับจุด: P1 → P2 → P3 → P4 | คลิกบนพื้นถนนที่เป็นพื้นที่เดียวกัน แล้วลากจุดปรับได้"
+                                  + (" | จุดที่ตั้งไว้ก่อนหน้าแสดงอยู่แล้ว — ลากแก้ได้ หรือกด Reset Points เพื่อเริ่มใหม่" if len(state["points"]) == 4 else ""))).grid(
+            row=0, column=0, columnspan=11, sticky="w", pady=(0, 6))
 
         # row 1: choose the frame, and the two buttons that finish the dialog (always visible at the top right)
         ttk.Label(controls, text="Frame").grid(row=1, column=0, sticky="e", padx=(0, 5))
@@ -4655,6 +4679,11 @@ class Run1App:
                     warnings.append(
                         f"The Zone file was drawn on {zw}x{zh} frames but the video is {aw}x{ah} (different shape): "
                         "the Zones cannot be scaled correctly.")
+        position = str(self.trajectory_position_var.get()).strip()
+        if (bool(self.run3_perspective_enabled_var.get()) or self.run3_ppm_var.get().strip()) and not position.startswith("Bottom"):
+            warnings.append(
+                f"Trajectory Position = '{position}' (ขั้น ② ทางแยก): PPM / Perspective Calibration วัดบนพื้นถนน แต่จุดนี้ไม่ใช่จุดที่ล้อแตะพื้น "
+                "(เช่น Top = หัวคนขี่) ความเร็วและระยะจะเพี้ยน (โดยทั่วไปสูงเกินจริง) — แนะนำ Bottom")
         defined = {z for z in ZONE_IDS if len(self.zones.get(f"Zone {z}", [])) >= 3}
         any_enabled = any(bool(getattr(self, f"run3_{k}_enabled_var").get())
                           for k in ("speed", "gap", "lc", "pet", "ttc", "ldp"))

@@ -128,6 +128,12 @@ class ClipPlan(unittest.TestCase):
         self.assertNotIn("rel_dir", st)              # only the known per-clip keys are copied
         self.assertEqual(base["analysis_start_s"], "")   # the base settings are not modified
 
+    def test_preview_follows_the_users_choice(self):
+        st, _, _ = batch_run.clip_settings({"show_preview": True}, "a.mp4", "", {}, "out", None, False)
+        self.assertFalse(st["show_preview"])                                  # command line: off by default
+        st, _, _ = batch_run.clip_settings({"show_preview": True}, "a.mp4", "", {}, "out", None, False, show_preview=True)
+        self.assertTrue(st["show_preview"])                                   # the window passes the tick-box value
+
     def test_no_recording_overrides_the_default(self):
         st, _, _ = batch_run.clip_settings({"save_video": True}, "a.mp4", "", {}, "out", {"save_video": False}, False)
         self.assertFalse(st["save_video"])
