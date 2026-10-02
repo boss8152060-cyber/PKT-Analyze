@@ -92,6 +92,9 @@ check("the list shows it", vals[1][3].startswith("↳") and vals[0][3] == "" and
 panel.tree.selection_set(["0"])
 panel.toggle_continue()
 check("the first clip of the list cannot continue anything", panel.clips[0]["continues_previous"] is False)
+# a time range / recording range typed for clip a must NOT cut the chain (the user's R6 problem: only 30 s were analysed)
+panel.clips[0].update({"analysis_start_s": "0:00.2", "analysis_end_s": "0:00.5", "save_video": True, "record_start_s": "0:00.1", "record_end_s": "0:00.3"})
+panel.refresh()
 panel.skip_done_var.set(False)
 app.start_analysis()
 wait_in_mainloop(lambda: not app.running, 900)
@@ -116,6 +119,10 @@ spans = {}
 for r in dc:
     spans.setdefault(r["track_id"], []).append(int(r["frame"]))
 across = [t for t, fr in spans.items() if min(fr) <= n < max(fr)]
+rv = cv2.VideoCapture(os.path.join(chain_dir, "a_to_b_Research_Tracking_Result.mp4"))
+rec_frames = int(rv.get(cv2.CAP_PROP_FRAME_COUNT))
+rv.release()
+check("typed ranges are ignored for a chain: the result video holds the whole chain (240 frames), not the typed 0.2 s", rec_frames >= 2 * n - 4, str(rec_frames))
 check("at least one vehicle crosses the cut and keeps ONE ID", len(across) >= 1, f"IDs crossing the cut: {across[:6]}")
 summ = json.load(open(os.path.join(chain_dir, "a_to_b_Research_Run_Summary.json"), encoding="utf-8"))
 check("the run summary records the chain", summ.get("video_chain") and len(summ["video_chain"]) == 2 and summ["id_offset"] == 0, str(summ.get("video_chain")))

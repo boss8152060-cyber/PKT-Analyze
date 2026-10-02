@@ -231,6 +231,9 @@ def clip_settings(base_settings, video, rel_dir, overrides, out_root, clip_param
             st["run3"][k] = v
     if chain and len(chain) > 1:
         st["video_chain"] = list(chain)          # consecutive clips processed as one continuous video
+        # a chain is simply the clips joined: every frame of every clip is analysed, whatever time range was typed for the
+        # clips; the result video is recorded whole (or not at all) following the first clip's choice
+        st.update({"analysis_start_s": "", "analysis_end_s": "", "record_start_s": "", "record_end_s": ""})
     # vehicle IDs continue after the highest ID already used in the same top folder (not for tracker sweeps,
     # whose runs must stay comparable with each other)
     import combine_clips

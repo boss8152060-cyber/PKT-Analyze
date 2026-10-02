@@ -274,6 +274,14 @@ class ChainsAndIdContinuation(unittest.TestCase):
     def test_chain_name(self):
         self.assertEqual(batch_run.chain_name(["C:/x/DJI_0426.MP4", "C:/x/DJI_0427.MP4", "C:/x/DJI_0428.MP4"]), "DJI_0426_to_DJI_0428")
 
+    def test_a_chain_ignores_the_time_range_typed_for_its_clips(self):
+        clip = {"analysis_start_s": "0:10", "analysis_end_s": "0:30", "record_start_s": "0:12", "record_end_s": "0:20", "save_video": True}
+        st, _, _ = batch_run.clip_settings({}, "C:/x/a.mp4", "S", {}, "out", clip, True, chain=["C:/x/a.mp4", "C:/x/b.mp4"])
+        self.assertEqual((st["analysis_start_s"], st["analysis_end_s"], st["record_start_s"], st["record_end_s"]), ("", "", "", ""))
+        self.assertTrue(st["save_video"])                                       # recorded whole, as the first clip chose
+        st, _, _ = batch_run.clip_settings({}, "C:/x/a.mp4", "S", {}, "out", clip, True)       # a single clip keeps its range
+        self.assertEqual((st["analysis_start_s"], st["analysis_end_s"]), ("0:10", "0:30"))
+
     def test_clip_settings_for_a_chain(self):
         st, name, run_dir = batch_run.clip_settings({"run3": {}}, "C:/x/a.mp4", "S/d", {}, "out", None, False,
                                                     chain=["C:/x/a.mp4", "C:/x/b.mp4"])
