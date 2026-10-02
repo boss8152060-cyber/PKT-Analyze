@@ -101,6 +101,7 @@ check("run bar lists model / clips / zones / lines / widths / output", set(app.c
 check("no clips yet: the START text has no count", app.start_button.cget("text") == "▶ เริ่มวิเคราะห์", app.start_button.cget("text"))
 app.clips_panel.add_videos([("C:/x/a.mp4", "S/d")])
 app.refresh_checklist()
+check("a newly added clip starts with no result video", app.clips_panel.clips[0]["save_video"] is False)
 check("one clip is a list of one", "1 คลิป" in app.start_button.cget("text"), app.start_button.cget("text"))
 app.clips_panel.clear()
 from tkinter import messagebox as _mb

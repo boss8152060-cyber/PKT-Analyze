@@ -1609,10 +1609,10 @@ class ClipListPanel(ttk.Frame):
         ttk.Button(out, text="Browse", command=app.browse_output).grid(row=0, column=2, padx=(6, 0))
         opts = ttk.Frame(self)
         opts.grid(row=4, column=0, sticky="w", pady=(4, 0))
-        ttk.Checkbutton(opts, text="ข้ามคลิปที่ทำเสร็จแล้ว (รันซ้ำแล้วเพิ่มเฉพาะของใหม่)", variable=self.skip_done_var).pack(side="left")
-        ttk.Checkbutton(opts, text="คลิปที่เพิ่มใหม่: บันทึกวิดีโอผลลัพธ์", variable=app.save_video_var).pack(side="left", padx=(16, 0))
+        ttk.Checkbutton(opts, text="ข้ามคลิปที่วิเคราะห์เสร็จแล้ว (ดูจากโฟลเดอร์ผลลัพธ์ของคลิปนั้น)", variable=self.skip_done_var).pack(side="left")
         ttk.Label(self, foreground="#555555", justify="left",
-                  text="• ดับเบิลคลิกที่คลิปเพื่อเปิดดูวิดีโอและตั้งช่วงเวลา (เลือกหลายคลิปแล้วตั้งครั้งเดียวได้) — คลิปเดียวก็ใช้รายการนี้\n"
+                  text="• ดับเบิลคลิกที่คลิปเพื่อเปิดดูวิดีโอและตั้งช่วงเวลา/การบันทึกวิดีโอ (เลือกหลายคลิปแล้วตั้งครั้งเดียวได้) — คลิปเดียวก็ใช้รายการนี้\n"
+                       "• คลิปที่เพิ่มเข้ามาตั้งเป็น \"ไม่บันทึกวิดีโอ\" ไว้ก่อน — ต้องการบันทึกให้กดปุ่ม \"ทุกคลิป: บันทึกตลอดช่วงที่วิเคราะห์\" หรือตั้งเป็นรายคลิป\n"
                        "• ผลลัพธ์สร้างโครงสร้างโฟลเดอร์ตามที่นำเข้า: โฟลเดอร์ผลลัพธ์ / ...โฟลเดอร์ต้นฉบับ... / ชื่อคลิป / (โฟลเดอร์ที่มีแล้วใช้อันเดิม)\n"
                        "• เวลาใน CSV เป็นเวลาของวิดีโอต้นฉบับ (เริ่มวิเคราะห์ที่นาที 2 → เวลาแรกใน CSV ≈ 120 วินาที)").grid(row=5, column=0, sticky="w", pady=(6, 0))
 
@@ -1625,7 +1625,7 @@ class ClipListPanel(ttk.Frame):
 
     def _new_clip(self, video, rel_dir):
         return {"video": video, "rel_dir": rel_dir, "analysis_start_s": "", "analysis_end_s": "",
-                "save_video": bool(self.app.save_video_var.get()), "record_start_s": "", "record_end_s": ""}
+                "save_video": False, "record_start_s": "", "record_end_s": ""}     # new clips: no result video (faster, smaller)
 
     def add_videos(self, found):
         have = {c["video"] for c in self.clips}
