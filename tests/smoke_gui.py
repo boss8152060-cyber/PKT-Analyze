@@ -112,6 +112,15 @@ app.draw_center_var.set(True)
 check("runtime snapshot knows about the decision-point option", app._runtime_snapshot().get("show_decision_point") is True)
 app.draw_center_var.set(False)
 check("one clip is a list of one", "1 คลิป" in app.start_button.cget("text"), app.start_button.cget("text"))
+# the list says what a chain really does: whole clips, no time range
+app.clips_panel.clear()
+app.clips_panel.add_videos([("C:/x/a.mp4", "S"), ("C:/x/b.mp4", "S"), ("C:/x/c.mp4", "S")])
+app.clips_panel.clips[0].update({"analysis_start_s": "0:10", "analysis_end_s": "0:30", "save_video": True})
+app.clips_panel.clips[1]["continues_previous"] = True
+app.clips_panel.refresh()
+_v = [app.clips_panel.tree.item(i, "values") for i in app.clips_panel.tree.get_children()]
+check("list: the clip that starts a chain shows the whole chain is analysed and recorded (its typed range is not used)",
+      _v[0][1].startswith("ทั้งชุด") and _v[0][2] == "ตลอดทั้งชุด" and _v[1][1].startswith("ทั้งคลิป") and _v[2][1] == "ทั้งคลิป", str(_v))
 app.clips_panel.clear()
 from tkinter import messagebox as _mb
 _shown = []

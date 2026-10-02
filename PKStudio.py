@@ -1775,8 +1775,11 @@ class ClipListPanel(ttk.Frame):
         for i, c in enumerate(self.clips):
             ana, rec = self.bt.clip_label(c)
             cont = bool(c.get("continues_previous")) and i > 0
+            heads_chain = (not cont) and i + 1 < len(self.clips) and bool(self.clips[i + 1].get("continues_previous"))
             if cont:
-                ana = rec = "(ตามคลิปแรกของชุด)"
+                ana, rec = "ทั้งคลิป (ต่อกับชุด)", "(ตามคลิปแรกของชุด)"
+            elif heads_chain:
+                ana, rec = "ทั้งชุด (ไม่ใช้ช่วงเวลา)", ("ตลอดทั้งชุด" if c.get("save_video") else "ไม่บันทึก")
             name = "/".join(x for x in (c.get("rel_dir", ""), os.path.basename(c["video"])) if x)
             self.tree.insert("", "end", iid=str(i), values=(name, ana, rec, "↳ ต่อจากคลิปก่อน" if cont else ""))
         if self.clips:
@@ -1789,6 +1792,12 @@ class ClipListPanel(ttk.Frame):
             messagebox.showinfo("คลิปวิดีโอ", "เลือกคลิปในรายการก่อน")
             return
         clip = self.clips[sel[0]]
+        in_chain = any(self.clips[i].get("continues_previous") and i > 0 for i in sel) or any(
+            i + 1 < len(self.clips) and self.clips[i + 1].get("continues_previous") for i in sel)
+        if in_chain:
+            messagebox.showinfo("คลิปวิดีโอ", "คลิปนี้อยู่ในชุดที่ต่อเนื่องกัน: โปรแกรมวิเคราะห์ทุกเฟรมของทุกคลิปในชุด จึงไม่ใช้ช่วงเวลาวิเคราะห์/ช่วงบันทึกที่ตั้งไว้ "
+                                "(เลือกได้เฉพาะ บันทึก/ไม่บันทึก ของคลิปแรกในชุด = บันทึกทั้งชุดหรือไม่)\n\n"
+                                "ถ้าต้องการตัดช่วงเวลา ให้เอาเครื่องหมาย \"ต่อจากคลิปก่อน\" ออกก่อน")
         try:
             dlg = ClipPlayerDialog(self.app, clip["video"], clip)
         except Exception as exc:
