@@ -159,6 +159,41 @@ d2 = top4.measure_distance((120, 140), (120, 260))
 check("test measurement: 200 px along the 4 m side = 2.00 m, 120 px along the 2 m side = 1.20 m",
       d1 is not None and abs(d1 - 2.0) < 0.01 and abs(d2 - 1.2) < 0.01, f"{d1}, {d2}")
 top4.destroy()
+
+# ---- per-zone calibration: each zone gets its own reference quad ----
+app.run3_zone_calibrations = {}
+before = set(root.winfo_children())
+app.open_perspective_calibration()
+for _ in range(10):
+    root.update()
+    time.sleep(0.02)
+top5 = [c for c in root.winfo_children() if c not in before and isinstance(c, tk.Toplevel)][0]
+api, st5 = top5.calibration_api, top5.calibration_state
+base_points = list(st5["points"])
+api["set_mode"](api["mode_labels"][3])                       # "Zone 3"
+check("choosing Zone 3 starts an empty reference quad (the base points are kept aside)", st5["points"] == [] and api["ctx"]["mode"] == "3")
+st5["points"] = [(200.0, 100.0), (400.0, 100.0), (400.0, 200.0), (200.0, 200.0)]
+for var, v in zip(api["length_vars"], ("8", "4", "8", "4")):
+    var.set(v)
+api["apply"]()
+check("Apply in zone mode stores the quad for that zone only", set(app.run3_zone_calibrations) == {"3"} and app.run3_zone_calibrations["3"]["lengths"] == [8.0, 4.0, 8.0, 4.0])
+check("the dialog stays open after a zone is saved", top5.winfo_exists())
+api["set_mode"](api["mode_labels"][0])                       # back to the base calibration
+check("back on the base calibration its own points and lengths come back", st5["points"] == base_points and [v.get() for v in api["length_vars"]] == ["4", "2", "4", "2"], str(st5["points"]))
+api["set_mode"](api["mode_labels"][3])
+check("Zone 3 shows its saved quad again", len(st5["points"]) == 4 and st5["points"][0] == (200.0, 100.0))
+st = app.get_settings()
+check("settings carry the zone calibration", st["run3"]["zone_calibrations"]["3"]["points"][0] == [200.0, 100.0])
+app.run3_zone_calibrations = {}
+app.set_settings(st)
+check("settings restore the zone calibration", set(app.run3_zone_calibrations) == {"3"})
+check("clean copy used by Run 3 has numbers and a zone number", app._run3_snapshot_config()["zone_calibrations"][3]["lengths"] == [8.0, 4.0, 8.0, 4.0])
+api["delete_zone"]()
+check("delete removes the zone calibration", app.run3_zone_calibrations == {})
+bad = []
+walk(top5, bad)
+check("calibration dialog with the new controls: still no overlapping widgets", not bad, "; ".join(bad[:4]))
+top5.destroy()
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
 sys.exit(1 if failures else 0)
