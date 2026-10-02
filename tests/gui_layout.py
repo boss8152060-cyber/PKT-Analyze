@@ -141,6 +141,24 @@ for _ in range(10):
 top3 = [c for c in root.winfo_children() if c not in before and isinstance(c, tk.Toplevel)][0]
 check("with nothing saved the picture starts empty", top3.calibration_state["points"] == [])
 top3.destroy()
+
+# ---- test measurement: a perfect 400x200 px rectangle that is 4 m x 2 m  ->  100 px/m ----
+for var, xy in zip((app.run3_perspective_p1_var, app.run3_perspective_p2_var, app.run3_perspective_p3_var, app.run3_perspective_p4_var),
+                   ("100,100", "500,100", "500,300", "100,300")):
+    var.set(xy)
+for var, v in zip((app.run3_perspective_l12_var, app.run3_perspective_l23_var, app.run3_perspective_l34_var, app.run3_perspective_l41_var), ("4", "2", "4", "2")):
+    var.set(v)
+before = set(root.winfo_children())
+app.open_perspective_calibration()
+for _ in range(10):
+    root.update()
+    time.sleep(0.02)
+top4 = [c for c in root.winfo_children() if c not in before and isinstance(c, tk.Toplevel)][0]
+d1 = top4.measure_distance((100, 100), (300, 100))
+d2 = top4.measure_distance((120, 140), (120, 260))
+check("test measurement: 200 px along the 4 m side = 2.00 m, 120 px along the 2 m side = 1.20 m",
+      d1 is not None and abs(d1 - 2.0) < 0.01 and abs(d2 - 1.2) < 0.01, f"{d1}, {d2}")
+top4.destroy()
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
 sys.exit(1 if failures else 0)

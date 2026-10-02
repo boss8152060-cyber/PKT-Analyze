@@ -389,7 +389,7 @@ DEFAULT_SETTINGS = {
     "match_threshold": "0.80",
 
     "show_preview": True,
-    "draw_center": False,  # retained for settings compatibility; reference point is never drawn
+    "draw_center": False,  # draw the point that decides the zone (Trajectory Position) on the preview / result video
     "draw_trail": False,
     "trail_length": "30",
 
@@ -2175,6 +2175,7 @@ class Run1App:
         ttk.Label(fr, text="ความจาง %").pack(side="left", padx=(8, 4))
         ttk.Spinbox(fr, from_=0, to=100, increment=5, textvariable=self.zone_overlay_opacity_var, width=6).pack(side="left")
         ttk.Label(fr, text="(0 = ไม่เห็น, 100 = ชัดสุด)", foreground=gray).pack(side="left", padx=(6, 0))
+        line("จุดตัดสินโซน", [("แสดงจุดที่ใช้ตัดสินว่ารถอยู่โซนไหน (เหลือง = อยู่ในโซน, วงแดง = ไม่อยู่ในโซนใด)", self.draw_center_var)], 6)
         line("ป้ายบนตัวรถ", [("ID", self.show_label_id_var), ("Class", self.show_label_class_var), ("Conf", self.show_label_conf_var),
                              ("Zone", self.show_label_zone_var), ("Speed", self.show_label_speed_var), ("กรอบวัตถุ", self.show_bbox_var)], 4)
         line("ใส่ชื่อกำกับหน้าค่า", [("ID", self.show_prefix_id_var), ("Class", self.show_prefix_class_var), ("Conf", self.show_prefix_conf_var),
@@ -3102,6 +3103,7 @@ class Run1App:
             "show_zone_label": b(self.show_zone_label_var),
             "show_zone_label_prefix": b(self.show_zone_label_prefix_var),
             "show_bbox": b(self.show_bbox_var),
+            "show_decision_point": b(self.draw_center_var),
             "live_ppm": live_ppm,
         }
         for name in ("id", "class", "conf", "zone", "speed"):
@@ -4209,6 +4211,9 @@ class Run1App:
         frame_entry.grid(row=1, column=1, sticky="w")
         ttk.Button(controls, text="Load Frame", command=lambda: load_frame()).grid(row=1, column=2, padx=5)
         ttk.Button(controls, text="Reset Points", command=lambda: reset_points()).grid(row=1, column=3, padx=5)
+        measure_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(controls, text="วัดระยะทดสอบ (คลิก 2 จุด)", variable=measure_var,
+                        command=lambda: render()).grid(row=1, column=4, padx=(14, 0))
         finish_bar = ttk.Frame(controls)
         finish_bar.grid(row=1, column=10, sticky="e")
         apply_button = ttk.Button(finish_bar, text="✅ Apply Calibration", command=lambda: apply_calibration())
@@ -4234,6 +4239,39 @@ class Run1App:
         ppm_calc_var = tk.StringVar(value="Calculated PPM: -")
         ttk.Label(controls, textvariable=ppm_calc_var, foreground="#155a8a").grid(row=4, column=0, columnspan=11, sticky="w", pady=(2, 0))
         ttk.Label(controls, text="ระบบคำนวณ PPM จากระยะทั้ง 4 ด้าน", foreground="#555555").grid(row=5, column=0, columnspan=11, sticky="w")
+
+        measure_text_var = tk.StringVar(value="")
+        ttk.Label(controls, textvariable=measure_text_var, foreground="#8a2be2").grid(row=6, column=0, columnspan=11, sticky="w", pady=(2, 0))
+        ttk.Label(controls, foreground="#555555", text="ตรวจความแม่น: ติ๊ก \"วัดระยะทดสอบ\" แล้ววัดของที่รู้ขนาด (ความกว้างเลน, เส้นประ, ทางม้าลาย) ทั้งใกล้และไกลกล้อง — "
+                  "ถ้าไกลกล้องคลาดมาก ให้ขยายกรอบ P1–P4 ให้คลุมพื้นที่ที่รถวิ่งให้มากที่สุด (ด้านสั้นอย่างน้อยเท่าความกว้างถนน)").grid(
+            row=7, column=0, columnspan=11, sticky="w")
+        state["measure"] = []
+
+        def current_homography():
+            """Homography of the four points with the four typed lengths (same rule as Apply), or None."""
+            if len(state["points"]) != 4:
+                return None
+            try:
+                l12, l23, l34, l41 = [float(v.get().strip()) for v in length_vars]
+                if min(l12, l23, l34, l41) <= 0:
+                    return None
+            except ValueError:
+                return None
+            length, width_m = (l12 + l34) / 2.0, (l23 + l41) / 2.0
+            try:
+                return cv2.getPerspectiveTransform(np.float32(state["points"]), np.float32([[0, 0], [length, 0], [length, width_m], [0, width_m]]))
+            except cv2.error:
+                return None
+
+        def measure_distance(p, q):
+            """Distance in metres between two image points (original-video pixels) on the road plane, or None."""
+            Hm = current_homography()
+            if Hm is None:
+                return None
+            a, b = cv2.perspectiveTransform(np.float32([[p, q]]), Hm)[0]
+            return float(math.hypot(b[0] - a[0], b[1] - a[1]))
+
+        top.measure_distance = measure_distance
 
         canvas = tk.Canvas(canvas_frame, background="#202020", highlightthickness=1)
         canvas.pack(fill="both", expand=True)
@@ -4264,6 +4302,25 @@ class Run1App:
             if len(state["points"]) == 4:
                 a = state["points"][3]; b = state["points"][0]
                 cv2.line(view, (int(a[0]*scale), int(a[1]*scale)), (int(b[0]*scale), int(b[1]*scale)), (0,255,255), 2, cv2.LINE_AA)
+
+            if state["measure"]:
+                mp = state["measure"]
+                for q in mp:
+                    cv2.circle(view, (int(q[0] * scale), int(q[1] * scale)), 6, (255, 0, 255), -1)
+                if len(mp) == 2:
+                    cv2.line(view, (int(mp[0][0] * scale), int(mp[0][1] * scale)), (int(mp[1][0] * scale), int(mp[1][1] * scale)), (255, 0, 255), 2, cv2.LINE_AA)
+                    dist = measure_distance(mp[0], mp[1])
+                    if dist is None:
+                        measure_text_var.set("วัดไม่ได้: ต้องมีจุด P1–P4 ครบ 4 จุด และกรอกระยะจริงทั้ง 4 ด้านก่อน")
+                    else:
+                        mid = (int((mp[0][0] + mp[1][0]) / 2 * scale) + 8, int((mp[0][1] + mp[1][1]) / 2 * scale) - 8)
+                        cv2.putText(view, f"{dist:.2f} m", mid, cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2, cv2.LINE_AA)
+                        px = math.hypot(mp[1][0] - mp[0][0], mp[1][1] - mp[0][1])
+                        measure_text_var.set(f"ระยะที่วัดได้ = {dist:.2f} เมตร ({px:.0f} พิกเซล, สเกลตรงนี้ ≈ {px / dist:.0f} px/m) — เทียบกับขนาดจริงของสิ่งที่วัด")
+                else:
+                    measure_text_var.set("คลิกจุดที่สองเพื่อวัด")
+            else:
+                measure_text_var.set("")
 
             ok, buf = cv2.imencode('.png', view)
             if not ok:
@@ -4320,6 +4377,7 @@ class Run1App:
 
         def reset_points():
             state["points"] = []
+            state["measure"] = []
             render()
 
         def event_to_image(event):
@@ -4333,6 +4391,12 @@ class Run1App:
         def on_click(event):
             x, y = event_to_image(event)
             if x < 0 or y < 0 or x > state["image_w"] or y > state["image_h"]:
+                return
+            if measure_var.get():
+                if len(state["measure"]) >= 2:
+                    state["measure"] = []
+                state["measure"].append((x, y))
+                render()
                 return
             if len(state["points"]) >= 4:
                 candidates = [(i, math.hypot(px-x, py-y)) for i,(px,py) in enumerate(state["points"])]
@@ -5910,6 +5974,18 @@ class Run1App:
                                 not zones_available
                                 or confirmed_label is not None
                             )
+
+                            if render_needed and rt.get("show_decision_point"):
+                                # The point that decides the zone: filled yellow = inside a zone, red ring = in no zone
+                                # (such a vehicle is not drawn at all, so this is the only way to see why).
+                                dpx, dpy = self.get_zone_reference_point(x1, y1, x2, y2)
+                                dpx, dpy = int(round(dpx)), int(round(dpy))
+                                dr = max(5, int(round(0.004 * max(frame.shape[0], frame.shape[1]))))
+                                cv2.circle(frame, (dpx, dpy), dr + 2, (255, 255, 255), -1)
+                                if confirmed_label is not None:
+                                    cv2.circle(frame, (dpx, dpy), dr, (0, 255, 255), -1)
+                                else:
+                                    cv2.circle(frame, (dpx, dpy), dr, (0, 0, 255), 2)
 
                             if show_object and render_needed:
                                 if rt.get("show_bbox", True):

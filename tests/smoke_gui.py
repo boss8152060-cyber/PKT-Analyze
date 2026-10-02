@@ -108,6 +108,9 @@ check("warning: road-plane calibration with Trajectory Position = Top", any("Tra
 app.trajectory_position_var.set("Bottom")
 check("no such warning with Bottom", not any("Trajectory Position" in w for w in app.collect_run3_warnings()))
 app.run3_perspective_enabled_var.set(False)
+app.draw_center_var.set(True)
+check("runtime snapshot knows about the decision-point option", app._runtime_snapshot().get("show_decision_point") is True)
+app.draw_center_var.set(False)
 check("one clip is a list of one", "1 คลิป" in app.start_button.cget("text"), app.start_button.cget("text"))
 app.clips_panel.clear()
 from tkinter import messagebox as _mb
