@@ -166,6 +166,16 @@ def scene1(app):
     z2 = [r for r in stats if r["Scope"] == "Zone" and r["Key"] == "Zone 2" and r["Vehicle_Class"] == "All"][0]
     check("Speed stats Zone 2: N=2, V50 ~36", z2["N"] == "2" and abs(float(z2["V50_kmh"]) - 36.0) < 0.6, str(z2))
     check("untracked detections diagnostic present (0 here)", summary["diagnostics"]["untracked_detections"]["rows_with_track_id_minus_1"] == 0)
+    # --- per-zone calibration: Zone 3 has its own reference quad measured at 50 px/m (base = 100 px/m) ---
+    app.run3_zone_calibrations = {"3": {"points": [[1000, -200], [2000, -200], [2000, 800], [1000, 800]], "lengths": [20, 20, 20, 20]}}
+    out_z, summary_z = run_scene(app, veh)
+    app.run3_zone_calibrations = {}
+    det_z = read_csv(os.path.join(out_z, "Run_3_Speed_Detail.csv"))
+    bz = {(r["Vehicle_ID"], r["Key"]): (float(r["Speed_kmh"]), r["Calibration_Mode"]) for r in det_z if r["Scope"] == "Zone"}
+    check("zone calibration: Zone 3 speed of vehicle 1 doubles (36 -> 72 km/h, own scale 50 px/m)", abs(bz[("1", "Zone 3")][0] - 72.0) < 1.5 and bz[("1", "Zone 3")][1] == "Zone_Homography", str(bz[("1", "Zone 3")]))
+    check("zone calibration: Zone 2 and Zone 4 keep the base scale (36 km/h)", abs(bz[("1", "Zone 2")][0] - 36.0) < 1.0 and abs(bz[("1", "Zone 4")][0] - 36.0) < 1.0 and bz[("1", "Zone 2")][1] != "Zone_Homography", str((bz[("1", "Zone 2")], bz[("1", "Zone 4")])))
+    zinfo = summary_z["calibration"].get("zone_calibrations", {})
+    check("zone calibration is reported in the summary with its alignment check", "Zone 3" in zinfo and zinfo["Zone 3"]["alignment_rms_m"] > 1.0, str(zinfo))
     # --- speed above the plausible maximum is flagged and left out of the statistics ---
     app.run3_speed_max_var.set("30")
     out_o, summary_o = run_scene(app, veh)

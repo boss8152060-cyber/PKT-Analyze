@@ -1158,6 +1158,47 @@ def window_frames(start_s, end_s, fps, total_frames):
     if last is not None and last < first:
         raise ValueError("the end time is before the start time")
     return first, last
+
+
+def homography_from_points(src, dst):
+    """3x3 homography mapping src -> dst (4 or more point pairs, direct linear transform)."""
+    rows = []
+    for (x, y), (u, v) in zip(src, dst):
+        rows.append([x, y, 1, 0, 0, 0, -u * x, -u * y, -u])
+        rows.append([0, 0, 0, x, y, 1, -v * x, -v * y, -v])
+    _, _, vt = np.linalg.svd(np.array(rows, dtype=float))
+    h = vt[-1].reshape(3, 3)
+    return h / h[2, 2]
+
+
+def apply_homography(h, pts):
+    p = np.asarray(pts, dtype=float).reshape(-1, 2)
+    q = np.c_[p, np.ones(len(p))] @ np.asarray(h, dtype=float).T
+    return q[:, :2] / q[:, 2:3]
+
+
+def zone_metric_transform(src_pts, lengths, base_pts):
+    """Per-zone calibration. src_pts = the 4 corners P1..P4 of the zone's own reference quadrilateral (image
+    pixels); lengths = the real sides P1-P2, P2-P3, P3-P4, P4-P1 (m); base_pts = the same 4 corners in the common
+    metric frame of the base calibration. The quadrilateral is mapped to its true rectangle with its own
+    homography (so this zone gets its own scale and perspective), and that rectangle is then moved (rotation /
+    mirror + shift, NO scaling) to the place where the base calibration puts the corners, so that positions of
+    different zones stay in one common frame. 'rms' = how far the rigidly placed rectangle is from the base
+    corners (m): a check that the zone reference and the base calibration describe the same patch of road."""
+    l12, l23, l34, l41 = [float(v) for v in lengths]
+    length, width = (l12 + l34) / 2.0, (l23 + l41) / 2.0
+    rect = np.array([[0, 0], [length, 0], [length, width], [0, width]], dtype=float)
+    h = homography_from_points(src_pts, rect)
+    g = np.asarray(base_pts, dtype=float).reshape(4, 2)
+    u, _, vt = np.linalg.svd((rect - rect.mean(0)).T @ (g - g.mean(0)))
+    q = u @ vt
+    t = g.mean(0) - rect.mean(0) @ q
+    rms = float(np.sqrt(np.mean(np.sum((rect @ q + t - g) ** 2, axis=1))))
+    return {"H": h, "Q": q, "t": t, "rms": rms, "length_m": length, "width_m": width}
+
+
+def zone_metric_points(transform, pts):
+    return apply_homography(transform["H"], pts) @ transform["Q"] + transform["t"]
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -1923,6 +1964,8 @@ class Run1App:
         self.run3_speed_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_zones"])) for z in ZONE_IDS}
         self.run3_speed_smoothing_var = tk.StringVar(value=RUN3_DEFAULTS["speed_smoothing_samples"])
         self.run3_speed_max_var = tk.StringVar(value=RUN3_DEFAULTS["speed_max_kmh"])
+        self.run3_zone_calibrations = {}          # {"4": {"points": [[x, y] x 4], "lengths": [l12, l23, l34, l41]}}: own reference quad per zone
+        self.run3_zone_cal_text = tk.StringVar(value="")
         self.analysis_start_var = tk.StringVar(value=DEFAULT_SETTINGS["analysis_start_s"])
         self.analysis_end_var = tk.StringVar(value=DEFAULT_SETTINGS["analysis_end_s"])
         self.record_start_var = tk.StringVar(value=DEFAULT_SETTINGS["record_start_s"])
@@ -2103,6 +2146,10 @@ class Run1App:
         """The ready-to-run list above the START button (re-checked every second)."""
         try:
             green, orange, gray = "#0a7a3d", "#b45309", "#666666"
+            zc = sorted(int(k) for k in self.run3_zone_calibrations if str(k).isdigit())
+            self.run3_zone_cal_text.set(
+                ("ปรับเทียบรายโซนแล้ว: " + ", ".join(f"Zone {z}" for z in zc) + " (ใช้แทนค่าฐานในโซนนั้น)") if zc else
+                "ยังไม่มีการปรับเทียบรายโซน (ใช้ค่าฐานทั้งภาพ) — เปิดหน้าต่างปรับเทียบ แล้วเลือก \"ปรับเทียบสำหรับ\" ที่โซนที่ต้องการ")
             n_clips = len(self.clips_panel.clips) if getattr(self, "clips_panel", None) else 0
             zones = sum(1 for v in self.zones.values() if len(v) >= 3)
             lines = sum(1 for v in self.lines.values() if len(v) >= 2)
@@ -2251,6 +2298,8 @@ class Run1App:
             ttk.Label(cal, text=lb).grid(row=r, column=2, sticky="e", padx=4, pady=2)
             ttk.Entry(cal, textvariable=vb, width=18).grid(row=r, column=3, sticky="w", pady=2)
             r += 1
+
+        ttk.Label(cal, textvariable=self.run3_zone_cal_text, foreground="#0a7a3d").grid(row=r, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         dims = self.section("ขนาดรถ (m) — กว้าง W / ยาว L (ใช้กับ Lateral Clearance และ TTC)")
         ttk.Label(dims, text="ชนิด").grid(row=0, column=0, sticky="w", padx=(0, 8))
@@ -3757,6 +3806,7 @@ class Run1App:
                 "speed_zones": [z for z,v in self.run3_speed_zone_vars.items() if v.get()],
                 "speed_smoothing_samples": self.run3_speed_smoothing_var.get(),
                 "speed_max_kmh": self.run3_speed_max_var.get(),
+                "zone_calibrations": json.loads(json.dumps(self.run3_zone_calibrations)),
                 "lc_zones": [z for z,v in self.run3_lc_zone_vars.items() if v.get()],
                 "pet_zone6": self.run3_pet_zone6_var.get(),
                 "pet_zones": [z for z, v in self.run3_pet_zone_vars.items() if v.get()],
@@ -3881,6 +3931,11 @@ class Run1App:
 
         run3 = settings.get("run3", {})
         if isinstance(run3, dict):
+            zc = run3.get("zone_calibrations", {})
+            self.run3_zone_calibrations = {
+                str(k): v for k, v in zc.items()
+                if isinstance(v, dict) and len(v.get("points", [])) == 4 and len(v.get("lengths", [])) == 4
+            } if isinstance(zc, dict) else {}
             mapping_pairs = [
                 ("site_id", self.run3_site_id_var),
                 ("speed_enabled", self.run3_speed_enabled_var),
@@ -4233,6 +4288,81 @@ class Run1App:
             ttk.Label(lengths_box, text=lab).grid(row=0, column=i * 2, sticky="e", padx=(0 if i == 0 else 16, 5))
             ttk.Entry(lengths_box, textvariable=var, width=10).grid(row=0, column=i * 2 + 1, sticky="w")
 
+        # per-zone calibration: each zone can get its OWN reference quadrilateral (own scale and perspective)
+        def current_data():
+            return {"points": list(state["points"]), "lengths": [v.get() for v in length_vars]}
+
+        def load_data(data):
+            state["points"] = [tuple(p) for p in data.get("points", [])]
+            for var, text in zip(length_vars, list(data.get("lengths", [])) + ["", "", "", ""]):
+                var.set(str(text))
+            state["measure"] = []
+
+        ctx = {"mode": "base", "drafts": {}}
+        base_initial = current_data()
+        mode_labels = ["ทั้งภาพ (ฐาน)"] + [f"Zone {z}" for z in ZONE_IDS]
+        mode_var = tk.StringVar(value=mode_labels[0])
+        ttk.Label(controls, text="ปรับเทียบสำหรับ").grid(row=1, column=5, sticky="e", padx=(14, 4))
+        mode_box = ttk.Combobox(controls, textvariable=mode_var, values=mode_labels, state="readonly", width=14)
+        mode_box.grid(row=1, column=6, sticky="w")
+        delete_zone_button = ttk.Button(controls, text="ลบของโซนนี้", command=lambda: delete_zone_calibration())
+        delete_zone_button.grid(row=1, column=7, padx=6)
+        delete_zone_button.state(["disabled"])
+        mode_status_var = tk.StringVar(value="")
+        ttk.Label(controls, textvariable=mode_status_var, foreground="#0a7a3d", wraplength=1200, justify="left").grid(row=8, column=0, columnspan=11, sticky="w")
+
+        def zone_summary_text():
+            zs = sorted(int(k) for k in self.run3_zone_calibrations)
+            return ("ปรับเทียบรายโซนแล้ว: " + ", ".join(f"Zone {z}" for z in zs)) if zs else "ยังไม่มีการปรับเทียบรายโซน"
+
+        def on_mode_change(event=None):
+            ctx["drafts"][ctx["mode"]] = current_data()
+            label = mode_var.get()
+            key = "base" if label == mode_labels[0] else label.split()[-1]
+            ctx["mode"] = key
+            if key in ctx["drafts"]:
+                load_data(ctx["drafts"][key])
+            elif key == "base":
+                load_data(base_initial)
+            else:
+                saved = self.run3_zone_calibrations.get(key)
+                load_data({"points": saved["points"], "lengths": saved["lengths"]} if saved else {})
+            apply_button.config(text="✅ Apply Calibration" if key == "base" else "✅ บันทึกโซนนี้")
+            delete_zone_button.state(["disabled"] if key == "base" else ["!disabled"])
+            mode_status_var.set("" if key == "base" else f"โหมด Zone {key}: คลิก P1–P4 ให้คลุมพื้นที่ถนนของโซนนี้ แล้วกรอกระยะจริง 4 ด้าน — {zone_summary_text()}")
+            render()
+
+        mode_box.bind("<<ComboboxSelected>>", on_mode_change)
+
+        def apply_zone_calibration():
+            z = ctx["mode"]
+            if len(state["points"]) != 4:
+                messagebox.showerror("Perspective Calibration", "Please click exactly 4 points in order: P1 → P2 → P3 → P4.", parent=top)
+                return
+            try:
+                lengths = [float(v.get().strip()) for v in length_vars]
+                if min(lengths) <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("Perspective Calibration", "All four Known Length values must be positive numbers in meters.", parent=top)
+                return
+            area = abs(cv2.contourArea(np.float32(state["points"]).reshape((-1, 1, 2))))
+            if area < 100.0:
+                messagebox.showerror("Perspective Calibration", "The 4 selected points are too close together.", parent=top)
+                return
+            self.run3_zone_calibrations[z] = {"points": [[float(x), float(y)] for x, y in state["points"]], "lengths": lengths}
+            ctx["drafts"].pop(z, None)
+            mode_status_var.set(f"บันทึกการปรับเทียบ Zone {z} แล้ว — {zone_summary_text()} (เลือกโซนอื่นเพื่อทำต่อ หรือกด Cancel/ปิดหน้าต่างเมื่อเสร็จ)")
+            render()
+
+        def delete_zone_calibration():
+            z = ctx["mode"]
+            self.run3_zone_calibrations.pop(z, None)
+            ctx["drafts"].pop(z, None)
+            load_data({})
+            mode_status_var.set(f"ลบการปรับเทียบ Zone {z} แล้ว — {zone_summary_text()}")
+            render()
+
         # row 3: the picked points and the calculated PPM
         point_text_var = tk.StringVar(value="ยังไม่ได้เลือกจุด")
         ttk.Label(controls, textvariable=point_text_var, foreground="#555555").grid(row=3, column=0, columnspan=11, sticky="w", pady=(6, 0))
@@ -4242,7 +4372,7 @@ class Run1App:
 
         measure_text_var = tk.StringVar(value="")
         ttk.Label(controls, textvariable=measure_text_var, foreground="#8a2be2").grid(row=6, column=0, columnspan=11, sticky="w", pady=(2, 0))
-        ttk.Label(controls, foreground="#555555", text="ตรวจความแม่น: ติ๊ก \"วัดระยะทดสอบ\" แล้ววัดของที่รู้ขนาด (ความกว้างเลน, เส้นประ, ทางม้าลาย) ทั้งใกล้และไกลกล้อง — "
+        ttk.Label(controls, foreground="#555555", wraplength=1200, justify="left", text="ตรวจความแม่น: ติ๊ก \"วัดระยะทดสอบ\" แล้ววัดของที่รู้ขนาด (ความกว้างเลน, เส้นประ, ทางม้าลาย) ทั้งใกล้และไกลกล้อง — "
                   "ถ้าไกลกล้องคลาดมาก ให้ขยายกรอบ P1–P4 ให้คลุมพื้นที่ที่รถวิ่งให้มากที่สุด (ด้านสั้นอย่างน้อยเท่าความกว้างถนน)").grid(
             row=7, column=0, columnspan=11, sticky="w")
         state["measure"] = []
@@ -4289,6 +4419,18 @@ class Run1App:
             new_h = max(1, int(round(h * scale)))
             resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
             view = resized.copy()
+            # context: zone outlines (grey) and the quadrilaterals already calibrated per zone (green)
+            for zname, zpts in self.zones.items():
+                if len(zpts) >= 3:
+                    zarr = np.array([[int(x * scale), int(y * scale)] for x, y in zpts], np.int32)
+                    cv2.polylines(view, [zarr], True, (150, 150, 150), 1, cv2.LINE_AA)
+                    cv2.putText(view, str(zname).replace("Zone ", "Z"), (int(zarr[0][0]) + 4, int(zarr[0][1]) + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (190, 190, 190), 1, cv2.LINE_AA)
+            for zkey, zdat in self.run3_zone_calibrations.items():
+                if zkey == ctx["mode"]:
+                    continue
+                zarr = np.array([[int(x * scale), int(y * scale)] for x, y in zdat["points"]], np.int32)
+                cv2.polylines(view, [zarr], True, (0, 200, 0), 2, cv2.LINE_AA)
+                cv2.putText(view, f"cal Z{zkey}", (int(zarr[0][0]) + 6, int(zarr[0][1]) - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2, cv2.LINE_AA)
             labels = ["P1", "P2", "P3", "P4"]
             for idx, (px, py) in enumerate(state["points"]):
                 vx = int(round(px * scale))
@@ -4422,6 +4564,9 @@ class Run1App:
             state["drag_index"] = None
 
         def apply_calibration():
+            if ctx["mode"] != "base":
+                apply_zone_calibration()
+                return
             if len(state["points"]) != 4:
                 messagebox.showerror("Perspective Calibration", "Please click exactly 4 points in order: P1 → P2 → P3 → P4.", parent=top)
                 return
@@ -4536,6 +4681,11 @@ class Run1App:
                     pass
                 top.destroy()
         top.protocol("WM_DELETE_WINDOW", on_close)
+        top.calibration_api = {          # (lets the tests drive the dialog without clicking)
+            "set_mode": lambda label: (mode_var.set(label), on_mode_change()),
+            "apply": apply_calibration, "delete_zone": delete_zone_calibration,
+            "length_vars": length_vars, "ctx": ctx, "mode_labels": mode_labels,
+        }
 
         # Initial render after the canvas gets its first size.
         top.after(100, render)
@@ -6905,6 +7055,7 @@ class Run1App:
             "speed_zones": zones_of(self.run3_speed_zone_vars),
             "speed_smoothing_samples": max(1, int(num(self.run3_speed_smoothing_var, 5) or 1)),
             "speed_max_kmh": max(0.0, num(self.run3_speed_max_var, 80.0) or 0.0),
+            "zone_calibrations": self._run3_clean_zone_calibrations(),
             "lc_zones": zones_of(self.run3_lc_zone_vars),
             "pet_zones": zones_of(self.run3_pet_zone_vars),
             "ttc_zones": zones_of(self.run3_ttc_zone_vars),
@@ -7010,6 +7161,36 @@ class Run1App:
                 tracks.pop(drop, None)
         return report
 
+    def _run3_clean_zone_calibrations(self):
+        """Valid per-zone calibrations -> {zone number: {"points": [(x, y) x 4], "lengths": [4 floats]}}."""
+        out = {}
+        for key, cal in self.run3_zone_calibrations.items():
+            try:
+                z = int(key)
+                pts = [(float(a), float(b)) for a, b in cal["points"]]
+                lengths = [float(v) for v in cal["lengths"]]
+            except (ValueError, TypeError, KeyError):
+                continue
+            if z in ZONE_IDS and len(pts) == 4 and len(lengths) == 4 and min(lengths) > 0:
+                out[z] = {"points": pts, "lengths": lengths}
+        return out
+
+    def _run3_apply_zone_calibrations(self, rows_all, c):
+        """Samples inside a zone that has its own calibration use that zone's homography (own scale and
+        perspective), placed in the common metric frame; all other samples keep the base calibration."""
+        info = {}
+        for z, cal in (c.get("zone_calibrations") or {}).items():
+            base_corners = self._run3_to_metric(cal["points"], c)
+            tr = zone_metric_transform(cal["points"], cal["lengths"], base_corners)
+            info[f"Zone {z}"] = {"alignment_rms_m": round(tr["rms"], 3), "length_m": tr["length_m"], "width_m": tr["width_m"]}
+            for src, dst in (("_point", "_m"), ("_center", "_mc")):
+                idx = [i for i, r in enumerate(rows_all) if r.get("_zone_num") == z and r.get(src) is not None]
+                if idx:
+                    mapped = zone_metric_points(tr, [rows_all[i][src] for i in idx])
+                    for j, i in enumerate(idx):
+                        rows_all[i][dst] = (float(mapped[j, 0]), float(mapped[j, 1]))
+        self._run3_zone_cal_info = info
+
     def _run3_attach_metric(self, tracks, c):
         """Transform every observed point ONCE (batch) instead of per use."""
         rows_all = [r for rows in tracks.values() for r in rows]
@@ -7020,6 +7201,9 @@ class Run1App:
             mapped = self._run3_to_metric([rows_all[i][src] for i in idx], c)
             for j, i in enumerate(idx):
                 rows_all[i][dst] = (float(mapped[j, 0]), float(mapped[j, 1]))
+        self._run3_zone_cal_info = {}
+        if c.get("zone_calibrations"):
+            self._run3_apply_zone_calibrations(rows_all, c)
 
     @staticmethod
     def _run3_stats(values):
@@ -7114,7 +7298,8 @@ class Run1App:
                     "Samples": rec["Samples"],
                     "Distance_m": f"{rec['Distance_m']:.6f}", "Duration_s": f"{rec['Duration_s']:.6f}",
                     "Speed_kmh": f"{rec['Speed_kmh']:.6f}",
-                    "Calibration_Mode": mode,
+                    "Calibration_Mode": ("Zone_Homography" if rec["Scope"] == "Zone" and rec["Key"].split()[-1].isdigit()
+                                         and int(rec["Key"].split()[-1]) in (c.get("zone_calibrations") or {}) else mode),
                     "QC_Flag": ";".join(x for x in (rec["Flag"], qc_cal, "Speed_Above_Max" if is_speed_outlier(rec["Speed_kmh"], vmax) else "") if x),
                 })
         return results
@@ -8045,7 +8230,8 @@ class Run1App:
             "calibration": {"mode": self._run3_calibration_mode(c), "ppm": c["ppm"],
                             "perspective_enabled": c["perspective_enabled"],
                             "perspective_configured": c["perspective"] is not None,
-                            "road_direction_angle_deg": c["axis_deg"]},
+                            "road_direction_angle_deg": c["axis_deg"],
+                            "zone_calibrations": dict(getattr(self, "_run3_zone_cal_info", {}) or {})},
             "source_counts": {
                 "detection_records": len(detection_rows), "track_ids": len(tracks),
                 "id_zone_summary_rows": len(id_rows), "tracks_by_zone": dict(tracks_by_zone),

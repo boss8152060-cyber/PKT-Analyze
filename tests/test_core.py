@@ -685,5 +685,44 @@ class TimeWindow(unittest.TestCase):
         self.assertEqual(self.W(None, 2.0, 30.0, 0), (1, 61))
 
 
+class ZoneCalibration(unittest.TestCase):
+    H = staticmethod(lambda s, d: CORE["homography_from_points"](s, d))
+    A = staticmethod(lambda h, p: CORE["apply_homography"](h, p))
+    Z = staticmethod(lambda s, l, b: CORE["zone_metric_transform"](s, l, b))
+    P = staticmethod(lambda t, p: CORE["zone_metric_points"](t, p))
+
+    def test_homography_maps_the_four_points_exactly(self):
+        src = [(10, 10), (410, 30), (380, 250), (0, 220)]
+        dst = [(0, 0), (8, 0), (8, 4), (0, 4)]
+        out = self.A(self.H(src, dst), src)
+        for o, d in zip(out, dst):
+            self.assertAlmostEqual(o[0], d[0], places=6)
+            self.assertAlmostEqual(o[1], d[1], places=6)
+
+    def test_zone_transform_gives_true_scale_and_keeps_the_common_frame(self):
+        import math as _m
+        quad = [(0, 0), (200, 0), (200, 100), (0, 100)]          # 200 x 100 px = 4 m x 2 m  ->  50 px/m
+        ang = _m.radians(30)
+        rot = lambda x, y: (x * _m.cos(ang) - y * _m.sin(ang) + 7.0, x * _m.sin(ang) + y * _m.cos(ang) - 3.0)
+        base = [rot(0, 0), rot(4, 0), rot(4, 2), rot(0, 2)]       # where the base calibration puts the same corners
+        t = self.Z(quad, [4, 2, 4, 2], base)
+        self.assertLess(t["rms"], 1e-9)
+        m = self.P(t, [(0, 0), (100, 50), (200, 100)])
+        for got, want in zip(m, (rot(0, 0), rot(2, 1), rot(4, 2))):
+            self.assertAlmostEqual(got[0], want[0], places=6)
+            self.assertAlmostEqual(got[1], want[1], places=6)
+        # 100 px along the long side = 2 m, in the common frame
+        d = float(((m[1] - m[0]) ** 2).sum() ** 0.5)
+        self.assertAlmostEqual(d, ((2 * 1) ** 2 + (1 * 1) ** 2) ** 0.5, places=6)
+
+    def test_zone_scale_replaces_a_wrong_base_scale(self):
+        quad = [(0, 0), (200, 0), (200, 100), (0, 100)]
+        wrong_base = [(0, 0), (2, 0), (2, 1), (0, 1)]             # base thinks the quad is only 2 m x 1 m (100 px/m)
+        t = self.Z(quad, [4, 2, 4, 2], wrong_base)               # but its sides were measured: 4 m x 2 m
+        self.assertGreater(t["rms"], 0.3)                         # the disagreement is reported
+        m = self.P(t, [(0, 50), (200, 50)])
+        self.assertAlmostEqual(float(((m[1] - m[0]) ** 2).sum() ** 0.5), 4.0, places=6)    # speed uses the measured scale
+
+
 if __name__ == "__main__":
     unittest.main()
