@@ -6,12 +6,12 @@ not run again, the original output folder is not touched (everything happens in 
 
     python tools/sensitivity.py <output_folder> <setting>=<v1>,<v2>,... [<setting>=...] [--out file.csv]
 
-Examples (setting names = keys of the "run3" part of <run>_Research_Settings.json, i.e. RUN3_DEFAULTS):
+Examples (setting names = keys of the "run3" part of Settings.json, i.e. RUN3_DEFAULTS):
     python tools/sensitivity.py ../Output/Run3 pet_interaction_distance_m=2,3,4
     python tools/sensitivity.py ../Output/Run3 speed_max_kmh=40,60,80 ttc_max_record_s=2,3,5
 
-The run name is taken from <run>_Detection_Records.csv in the folder; the saved
-<run>_Research_Settings.json (if present) supplies all other settings.  Needs torch/cv2/ultralytics
+The run name is the name of the folder (older results: taken from <run>_Detection_Records.csv); the saved
+Settings.json (if present) supplies all other settings.  Needs torch/cv2/ultralytics
 (it uses the real PKStudio code) and creates a hidden Tk window.
 """
 import copy
@@ -36,9 +36,11 @@ def load_pkstudio():
 
 def find_run_name(folder):
     for fn in sorted(os.listdir(folder)):
+        if fn == "Detection_Records.csv":
+            return os.path.basename(os.path.normpath(folder))
         if fn.endswith("_Detection_Records.csv"):
             return fn[: -len("_Detection_Records.csv")]
-    raise SystemExit(f"no *_Detection_Records.csv in {folder}")
+    raise SystemExit(f"no Detection_Records.csv in {folder}")
 
 
 def read_indicator_summary(path):
@@ -58,16 +60,17 @@ def run_sensitivity(app, folder, run_name, params, base_settings=None):
         for value in values:
             tmp = tempfile.mkdtemp(prefix="pk_sens_")
             try:
-                for suffix in ("_Detection_Records.csv", "_ID_Zone_Summary.csv"):
-                    src = os.path.join(folder, run_name + suffix)
-                    if os.path.isfile(src):
-                        shutil.copy(src, tmp)
+                import combine_clips
+                for plain in ("Detection_Records.csv", "ID_Zone_Summary.csv"):
+                    src = combine_clips.result_file(folder, plain, run_name)
+                    if src:
+                        shutil.copy(src, os.path.join(tmp, plain))
                 st = copy.deepcopy(base_settings)
                 st.setdefault("run3", {})[setting] = value
                 app.set_settings(st)
                 app._run3_cfg = app._run3_snapshot_config()
                 app.run3_processing({}, tmp, run_name)
-                for r in read_indicator_summary(os.path.join(tmp, run_name + "_Indicator_Summary.csv")):
+                for r in read_indicator_summary(os.path.join(tmp, "Indicator_Summary.csv")):
                     out_rows.append({
                         "Setting": setting, "Value": value, "Indicator": r.get("Indicator", ""),
                         "Group": r.get("Group", ""), "N": r.get("N", ""), "Mean": r.get("Mean", ""),
@@ -107,8 +110,9 @@ def main(argv):
     root.withdraw()
     app = mod.Run1App(root)
     base = None
-    sp = os.path.join(folder, run_name + "_Research_Settings.json")
-    if os.path.isfile(sp):
+    import combine_clips
+    sp = combine_clips.result_file(folder, "Settings.json", run_name)
+    if sp:
         with open(sp, encoding="utf-8") as f:
             base = json.load(f)
     rows = run_sensitivity(app, folder, run_name, params, base)

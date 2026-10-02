@@ -13,7 +13,7 @@ comparison table.
   A folder that already exists in <out> is reused, a missing one is created, so a later batch is ADDED to the
   same tree and finished clips are skipped (--skip-done); old results are never touched.
 
-  --settings   a <run>_Research_Settings.json saved by an earlier run in the program (it holds the model,
+  --settings   a Settings.json saved by an earlier run in the program (it holds the model,
                zones, Lines, calibration, widths, ...). Without it the program defaults are used.
   --videos     video files and/or folders (default: the video in the settings); a folder is scanned for
                videos in all its sub-folders; its own name is the first output level
@@ -22,7 +22,7 @@ comparison table.
                was imported from a higher folder before
   --plan       a batch plan .json saved by the program's Batch window: per clip the time range to analyse and
                whether / which part to record (replaces --videos; --save-video is then ignored)
-  --skip-done  skip a clip whose result folder already has its <clip>_Summary.json (resume an interrupted batch)
+  --skip-done  skip a clip whose result folder already has its Summary.json (resume an interrupted batch)
   --zone-file  Zone file to use instead of the one in the settings (e.g. for a different camera)
   --set        setting=value (repeatable) fixed for all runs, e.g. lane_entry_motorcycle_m=1.5
   --sweep      setting=v1,v2,...  (repeatable; every combination is run). Run 1 settings such as
@@ -151,7 +151,7 @@ def count_rows(path):
 
 
 def summary_path(run_dir, name):
-    """<clip>_Summary.json of a result folder (older runs: Run_3_Summary.json), or None when the clip was not analysed."""
+    """Summary.json of a result folder (older runs: <clip>_Summary.json, Run_3_Summary.json), or None when the clip was not analysed."""
     import combine_clips
     return combine_clips.summary_path(run_dir, name)
 
@@ -161,9 +161,9 @@ def run_dir_for(out_root, rel_dir, name):
 
 
 def collect_row(run_dir, run_name, video, rel_dir, overrides, error, seconds):
-    run1 = read_json(os.path.join(run_dir, run_name + "_Research_Run_Summary.json"))
     import combine_clips
-    run3 = read_json(combine_clips.summary_path(run_dir, run_name) or os.path.join(run_dir, run_name + "_Summary.json"))
+    run1 = read_json(combine_clips.result_file(run_dir, "Run_Summary.json", run_name) or "")
+    run3 = read_json(combine_clips.summary_path(run_dir, run_name) or "")
     dup = (run3.get("diagnostics", {}).get("duplicate_tracks") or {}).get("tracks_affected")
     mstat = (run3.get("source_counts", {}) or {}).get("movement_status", {}) or {}
     exact = None if not mstat else mstat.get("Exact", 0) + mstat.get("Exact_AfterDedupe", 0)
@@ -359,7 +359,7 @@ def parse_sweeps(items):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="PK Studio batch run / tracker sweep", add_help=True)
-    ap.add_argument("--settings", help="<run>_Research_Settings.json from an earlier run")
+    ap.add_argument("--settings", help="Settings.json from an earlier run")
     ap.add_argument("--out")
     ap.add_argument("--plan", help="batch plan .json saved by the program (per-clip time range and recording)")
     ap.add_argument("--videos", nargs="*")

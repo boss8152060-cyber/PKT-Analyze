@@ -107,7 +107,7 @@ chain_dir, c_dir = os.path.join(site, "a_to_b"), os.path.join(site, "c")
 
 
 def det(d, name):
-    return list(csv.DictReader(open(os.path.join(d, name + "_Detection_Records.csv"), encoding="utf-8-sig")))
+    return list(csv.DictReader(open(os.path.join(d, "Detection_Records.csv"), encoding="utf-8-sig")))
 
 
 dc = det(chain_dir, "a_to_b")
@@ -119,19 +119,19 @@ spans = {}
 for r in dc:
     spans.setdefault(r["track_id"], []).append(int(r["frame"]))
 across = [t for t, fr in spans.items() if min(fr) <= n < max(fr)]
-rv = cv2.VideoCapture(os.path.join(chain_dir, "a_to_b_Research_Tracking_Result.mp4"))
+rv = cv2.VideoCapture(os.path.join(chain_dir, "Tracking_Result.mp4"))
 rec_frames = int(rv.get(cv2.CAP_PROP_FRAME_COUNT))
 rv.release()
 check("typed ranges are ignored for a chain: the result video holds the whole chain (240 frames), not the typed 0.2 s", rec_frames >= 2 * n - 4, str(rec_frames))
 check("at least one vehicle crosses the cut and keeps ONE ID", len(across) >= 1, f"IDs crossing the cut: {across[:6]}")
-summ = json.load(open(os.path.join(chain_dir, "a_to_b_Research_Run_Summary.json"), encoding="utf-8"))
+summ = json.load(open(os.path.join(chain_dir, "Run_Summary.json"), encoding="utf-8"))
 check("the run summary records the chain", summ.get("video_chain") and len(summ["video_chain"]) == 2 and summ["id_offset"] == 0, str(summ.get("video_chain")))
 dcc = det(c_dir, "c")
 ids_chain = {int(r["track_id"]) for r in dc if int(r["track_id"]) >= 0}
 ids_c = {int(r["track_id"]) for r in dcc if int(r["track_id"]) >= 0}
 check("clip c continues the numbering: all its IDs are above the highest ID of a_to_b", ids_c and min(ids_c) > max(ids_chain), f"a_to_b max {max(ids_chain)}, c min {min(ids_c)}")
 check("so no vehicle ID is used twice in the folder", not (ids_chain & ids_c))
-csum = json.load(open(os.path.join(c_dir, "c_Research_Run_Summary.json"), encoding="utf-8"))
+csum = json.load(open(os.path.join(c_dir, "Run_Summary.json"), encoding="utf-8"))
 check("c's run summary says where its numbering started", csum["id_offset"] == max(ids_chain) and csum["max_track_id"] == max(ids_c), f"{csum['id_offset']} / {csum['max_track_id']}")
 ac = [r["Clip"] for r in csv.DictReader(open(os.path.join(site, "All_Clips", "All_Clips.csv"), encoding="utf-8-sig"))]
 check("the combined files list the chain and c", sorted(ac) == ["Site/a_to_b", "Site/c"], str(ac))

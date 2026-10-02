@@ -169,11 +169,11 @@ class CombineClips(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def _clip(self, rel, speeds, old_names=False):
+    def _clip(self, rel, speeds, old_names=False, clip_prefixed=False):
         d = os.path.join(self.root, *rel.split("/"))
         os.makedirs(d)
         name = os.path.basename(d)
-        prefix = "Run_3_" if old_names else name + "_"
+        prefix = "Run_3_" if old_names else (name + "_" if clip_prefixed else "")
         with open(os.path.join(d, prefix + "Summary.json"), "w") as f:
             f.write("{}")
         with open(os.path.join(d, prefix + "Speed_Detail.csv"), "w", newline="", encoding="utf-8-sig") as f:
@@ -232,10 +232,11 @@ class CombineClips(unittest.TestCase):
     def test_old_run_3_names_are_still_read(self):
         import combine_clips
         self._clip("Site/d1/a", [30], old_names=True)
-        self._clip("Site/d1/b", [60])
+        self._clip("Site/d1/b", [60], clip_prefixed=True)
+        self._clip("Site/d1/c", [90])
         combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
         with open(os.path.join(self.root, "Site", "All_Clips", "All_Speed_Detail.csv"), newline="", encoding="utf-8-sig") as f:
-            self.assertEqual(sorted(r["Clip"] for r in csv.DictReader(f)), ["Site/d1/a", "Site/d1/b"])
+            self.assertEqual(sorted(r["Clip"] for r in csv.DictReader(f)), ["Site/d1/a", "Site/d1/b", "Site/d1/c"])
 
     def test_a_later_clip_is_added_to_the_combined_files(self):
         import combine_clips
@@ -296,15 +297,31 @@ class ChainsAndIdContinuation(unittest.TestCase):
         d = os.path.join(root, *rel.split("/"))
         os.makedirs(d)
         name = os.path.basename(d)
-        with open(os.path.join(d, name + "_Summary.json"), "w") as f:
+        with open(os.path.join(d, "Summary.json"), "w") as f:
             f.write("{}")
         if with_summary_json:
-            with open(os.path.join(d, name + "_Research_Run_Summary.json"), "w") as f:
+            with open(os.path.join(d, "Run_Summary.json"), "w") as f:
                 json.dump({"max_track_id": max_id}, f)
         else:       # an older result: only the detection records tell the highest ID
             with open(os.path.join(d, name + "_Detection_Records.csv"), "w", newline="") as f:
                 f.write("frame,track_id" + chr(10) + "1,3" + chr(10) + "2,%d" % max_id + chr(10) + "3,-1" + chr(10))
         return d
+
+    def test_result_file_finds_plain_and_older_names(self):
+        import combine_clips
+        d = os.path.join(tempfile.mkdtemp(prefix="pk_names_"), "clip1")
+        os.makedirs(d)
+        try:
+            for fn in ("Speed.csv", "clip1_Research_Settings.json", "Run_3_TTC.csv", "clip1_Detection_Records.csv"):
+                open(os.path.join(d, fn), "w").close()
+            rf = combine_clips.result_file
+            self.assertEqual(os.path.basename(rf(d, "Speed.csv")), "Speed.csv")
+            self.assertEqual(os.path.basename(rf(d, "Settings.json")), "clip1_Research_Settings.json")
+            self.assertEqual(os.path.basename(rf(d, "TTC.csv")), "Run_3_TTC.csv")
+            self.assertEqual(os.path.basename(rf(d, "Detection_Records.csv")), "clip1_Detection_Records.csv")
+            self.assertIsNone(rf(d, "PET.csv"))
+        finally:
+            shutil.rmtree(os.path.dirname(d), ignore_errors=True)
 
     def test_ids_continue_after_the_previous_clips_of_the_same_top_folder(self):
         root = tempfile.mkdtemp(prefix="pk_ids_")
