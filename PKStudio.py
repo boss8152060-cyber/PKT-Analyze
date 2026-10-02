@@ -1593,6 +1593,71 @@ class ClipPlayerDialog:
         self.top.destroy()
 
 
+class ChainedCapture:
+    """Consecutive video files read as ONE continuous video (same interface as cv2.VideoCapture for what the run
+    uses: isOpened / get / set / read / grab / release). Used for clips that are the parts of one recording, so that the
+    tracker, the vehicle IDs, the time line and the analysis do not break at the cut."""
+
+    def __init__(self, paths):
+        self.paths = list(paths)
+        self.caps = [cv2.VideoCapture(p) for p in self.paths]
+        self.idx = 0
+        if not all(c.isOpened() for c in self.caps):
+            bad = [p for p, c in zip(self.paths, self.caps) if not c.isOpened()]
+            self.release()
+            raise RuntimeError("Unable to open video: " + ", ".join(bad))
+        w = [int(c.get(cv2.CAP_PROP_FRAME_WIDTH)) for c in self.caps]
+        h = [int(c.get(cv2.CAP_PROP_FRAME_HEIGHT)) for c in self.caps]
+        f = [float(c.get(cv2.CAP_PROP_FPS) or 0.0) for c in self.caps]
+        if len(set(w)) > 1 or len(set(h)) > 1 or (f and max(f) - min(f) > 0.01 * max(f[0], 1.0)):
+            self.release()
+            raise RuntimeError("Clips joined as one video must have the same image size and fps: "
+                               + ", ".join(f"{os.path.basename(p)} {a}x{b} {c:.2f} fps" for p, a, b, c in zip(self.paths, w, h, f)))
+        self.counts = [max(0, int(c.get(cv2.CAP_PROP_FRAME_COUNT))) for c in self.caps]
+        self.starts = [sum(self.counts[:i]) for i in range(len(self.counts))]
+
+    def isOpened(self):
+        return bool(self.caps) and all(c.isOpened() for c in self.caps)
+
+    def get(self, prop):
+        if prop == cv2.CAP_PROP_FRAME_COUNT:
+            return float(sum(self.counts))
+        if prop == cv2.CAP_PROP_POS_FRAMES:
+            return float(self.starts[self.idx] + self.caps[self.idx].get(cv2.CAP_PROP_POS_FRAMES))
+        return self.caps[0].get(prop)
+
+    def set(self, prop, value):
+        if prop != cv2.CAP_PROP_POS_FRAMES:
+            return all(c.set(prop, value) for c in self.caps)
+        value = max(0, int(value))
+        k = 0
+        for i, start in enumerate(self.starts):
+            if value >= start:
+                k = i
+        self.idx = k
+        for i, cap in enumerate(self.caps):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, (value - self.starts[i]) if i == k else 0)
+        return True
+
+    def _next(self, take):
+        ok, frame = take(self.caps[self.idx])
+        while not ok and self.idx + 1 < len(self.caps):
+            self.idx += 1
+            self.caps[self.idx].set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame = take(self.caps[self.idx])
+        return ok, frame
+
+    def read(self):
+        return self._next(lambda c: c.read())
+
+    def grab(self):
+        return self._next(lambda c: (c.grab(), None))[0]
+
+    def release(self):
+        for c in self.caps:
+            c.release()
+
+
 def _tools_module(name):
     """Import a helper from the tools folder next to this file (batch_run)."""
     tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
@@ -1625,8 +1690,8 @@ class ClipListPanel(ttk.Frame):
         ttk.Button(bar, text="บันทึกรายการ…", command=self.save_plan).pack(side="right", padx=2)
         ttk.Button(bar, text="โหลดรายการ…", command=self.load_plan).pack(side="right", padx=2)
 
-        self.tree = ttk.Treeview(self, columns=("clip", "analysis", "record"), show="headings", height=9, selectmode="extended")
-        for col, text, width in (("clip", "คลิป (โฟลเดอร์ในผลลัพธ์ / ไฟล์)", 420), ("analysis", "ช่วงที่วิเคราะห์", 140), ("record", "บันทึกวิดีโอ", 170)):
+        self.tree = ttk.Treeview(self, columns=("clip", "analysis", "record", "chain"), show="headings", height=9, selectmode="extended")
+        for col, text, width in (("clip", "คลิป (โฟลเดอร์ในผลลัพธ์ / ไฟล์)", 420), ("analysis", "ช่วงที่วิเคราะห์", 140), ("record", "บันทึกวิดีโอ", 170), ("chain", "ต่อเนื่อง", 130)):
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width, anchor="w")
         self.tree.grid(row=1, column=0, sticky="nsew")
@@ -1637,6 +1702,7 @@ class ClipListPanel(ttk.Frame):
         act = ttk.Frame(self)
         act.grid(row=2, column=0, sticky="ew", pady=(4, 2))
         ttk.Button(act, text="ดูวิดีโอ / กำหนดช่วงเวลา…", command=self.edit_selected).pack(side="left", padx=2)
+        ttk.Button(act, text="ต่อจากคลิปก่อน (ติ๊ก/เอาออก)", command=self.toggle_continue).pack(side="left", padx=2)
         ttk.Button(act, text="ลบที่เลือก", command=self.remove_selected).pack(side="left", padx=2)
         ttk.Button(act, text="ล้างรายการ", command=self.clear).pack(side="left", padx=2)
         ttk.Button(act, text="ทุกคลิป: ไม่บันทึกวิดีโอ", command=lambda: self.set_all_record(False)).pack(side="right", padx=2)
@@ -1653,6 +1719,8 @@ class ClipListPanel(ttk.Frame):
         ttk.Checkbutton(opts, text="ข้ามคลิปที่วิเคราะห์เสร็จแล้ว (ดูจากโฟลเดอร์ผลลัพธ์ของคลิปนั้น)", variable=self.skip_done_var).pack(side="left")
         ttk.Label(self, foreground="#555555", justify="left",
                   text="• ดับเบิลคลิกที่คลิปเพื่อเปิดดูวิดีโอและตั้งช่วงเวลา/การบันทึกวิดีโอ (เลือกหลายคลิปแล้วตั้งครั้งเดียวได้) — คลิปเดียวก็ใช้รายการนี้\n"
+                       "• คลิปที่เป็นส่วนต่อเนื่องของวิดีโอเดียวกัน (เช่น โดรนแบ่งไฟล์) → เลือกคลิปที่สอง/ถัดไป แล้วกด \"ต่อจากคลิปก่อน\": วิเคราะห์เป็นวิดีโอเดียว รถคันเดิมได้ ID เดิมข้ามรอยตัด (ผลอยู่ในโฟลเดอร์เดียว ชื่อ <คลิปแรก>_to_<คลิปสุดท้าย>)\n"
+                       "• เลข ID ต่อจากคลิปก่อนหน้าในโฟลเดอร์เดียวกันเสมอ (ไม่ซ้ำกันทั้งชุด)\n"
                        "• คลิปที่เพิ่มเข้ามาตั้งเป็น \"ไม่บันทึกวิดีโอ\" ไว้ก่อน — ต้องการบันทึกให้กดปุ่ม \"ทุกคลิป: บันทึกตลอดช่วงที่วิเคราะห์\" หรือตั้งเป็นรายคลิป\n"
                        "• ผลลัพธ์สร้างโครงสร้างโฟลเดอร์ตามที่นำเข้า: โฟลเดอร์ผลลัพธ์ / ...โฟลเดอร์ต้นฉบับ... / ชื่อคลิป / (โฟลเดอร์ที่มีแล้วใช้อันเดิม)\n"
                        "• เวลาใน CSV เป็นเวลาของวิดีโอต้นฉบับ (เริ่มวิเคราะห์ที่นาที 2 → เวลาแรกใน CSV ≈ 120 วินาที)").grid(row=5, column=0, sticky="w", pady=(6, 0))
@@ -1666,7 +1734,7 @@ class ClipListPanel(ttk.Frame):
 
     def _new_clip(self, video, rel_dir):
         return {"video": video, "rel_dir": rel_dir, "analysis_start_s": "", "analysis_end_s": "",
-                "save_video": False, "record_start_s": "", "record_end_s": ""}     # new clips: no result video (faster, smaller)
+                "save_video": False, "record_start_s": "", "record_end_s": "", "continues_previous": False}     # new clips: no result video (faster, smaller)
 
     def add_videos(self, found):
         have = {c["video"] for c in self.clips}
@@ -1706,8 +1774,11 @@ class ClipListPanel(ttk.Frame):
         self.tree.delete(*self.tree.get_children())
         for i, c in enumerate(self.clips):
             ana, rec = self.bt.clip_label(c)
+            cont = bool(c.get("continues_previous")) and i > 0
+            if cont:
+                ana = rec = "(ตามคลิปแรกของชุด)"
             name = "/".join(x for x in (c.get("rel_dir", ""), os.path.basename(c["video"])) if x)
-            self.tree.insert("", "end", iid=str(i), values=(name, ana, rec))
+            self.tree.insert("", "end", iid=str(i), values=(name, ana, rec, "↳ ต่อจากคลิปก่อน" if cont else ""))
         if self.clips:
             self.app.video_var.set(self.clips[0]["video"])
         self.app.refresh_checklist()
@@ -1728,6 +1799,19 @@ class ClipListPanel(ttk.Frame):
                 self.clips[i].update(dlg.result)
             self.refresh()
             self.tree.selection_set([str(i) for i in sel])
+
+    def toggle_continue(self):
+        """Mark the selected clips as the continuation of the clip above them in the list (consecutive parts of one
+        recording): they are analysed together as one video. Clears the mark when it is already set."""
+        sel = [i for i in self.selected_indexes() if i > 0]
+        if not sel:
+            messagebox.showinfo("คลิปวิดีโอ", "เลือกคลิปที่ต่อจากคลิปก่อนหน้า (ไม่ใช่คลิปแรกของรายการ)")
+            return
+        turn_on = not all(self.clips[i].get("continues_previous") for i in sel)
+        for i in sel:
+            self.clips[i]["continues_previous"] = turn_on
+        self.refresh()
+        self.tree.selection_set([str(i) for i in sel])
 
     def set_all_record(self, on):
         for c in self.clips:
@@ -1756,7 +1840,7 @@ class ClipListPanel(ttk.Frame):
         self.clips = []
         for c in clips:
             item = self._new_clip(c["video"], str(c.get("rel_dir", "") or ""))
-            item.update({k: c[k] for k in self.bt.CLIP_KEYS if k in c})
+            item.update({k: c[k] for k in self.bt.PLAN_KEYS if k in c})
             self.clips.append(item)
         if out:
             self.app.output_var.set(out)
@@ -2794,17 +2878,20 @@ class Run1App:
         rows, runs, empties = [], [], []
         stopped = False
         fatal = ""
-        n = len(clips)
+        units = bt.group_units(clips)
+        n = len(units)
         try:
             os.makedirs(out_root, exist_ok=True)
-            for i, c in enumerate(clips, 1):
+            for i, unit in enumerate(units, 1):
+                c = unit[0]
+                chain = [x["video"] for x in unit] if len(unit) > 1 else None
                 rel = str(c.get("rel_dir", "") or "")
                 runs.append((c["video"], rel, {}))
                 if self.stop_event.is_set():
                     stopped = True
                     break
                 st, name, run_dir = bt.clip_settings(base_settings, c["video"], rel, {}, out_root, c, c.get("save_video", False),
-                                                     show_preview=bool(base_settings.get("show_preview")))
+                                                     show_preview=bool(base_settings.get("show_preview")), chain=chain)
                 os.makedirs(run_dir, exist_ok=True)
                 if skip_done and bt.summary_path(run_dir, name) is not None:
                     rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, "", 0.0))
@@ -5347,9 +5434,9 @@ class Run1App:
                 model_path
             )
 
-            cap = cv2.VideoCapture(
-                video_path
-            )
+            chain_paths = [p for p in (settings.get("video_chain") or []) if p]
+            id_offset = int(settings.get("id_offset", 0) or 0)       # vehicle IDs continue after the previous clips
+            cap = (ChainedCapture(chain_paths) if len(chain_paths) > 1 else cv2.VideoCapture(video_path))
 
             if not cap.isOpened():
 
@@ -5793,6 +5880,8 @@ class Run1App:
                                 if i < len(track_ids)
                                 else -1
                             )
+                            if track_id >= 0:
+                                track_id += id_offset
 
                             try:
 
@@ -6690,6 +6779,9 @@ class Run1App:
                 "total_detections": total_detections,
                 "untracked_detections": untracked_detections,
                 "unique_track_ids": len(track_stats),
+                "max_track_id": (max(track_stats) if track_stats else id_offset),
+                "id_offset": id_offset,
+                "video_chain": chain_paths or None,
                 "max_active_tracks": max_active_tracks,
                 "id_switch_warnings": id_switch_warning_count,
                 "detection_loss_events": detection_loss_count,

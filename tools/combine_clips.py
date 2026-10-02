@@ -83,6 +83,43 @@ def clip_start_time(label):
     return f"{y}-{mo}-{d} {h}:{mi}:{s}"
 
 
+def clip_max_id(folder):
+    """Highest vehicle ID used in a clip folder (0 when unknown): from its run summary, else from the detection records."""
+    name = os.path.basename(os.path.normpath(folder))
+    try:
+        with open(os.path.join(folder, f"{name}_Research_Run_Summary.json"), encoding="utf-8") as f:
+            value = json.load(f).get("max_track_id")
+        if isinstance(value, int):
+            return value
+    except (OSError, ValueError):
+        pass
+    best = 0
+    path = os.path.join(folder, f"{name}_Detection_Records.csv")
+    if os.path.isfile(path):
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                try:
+                    best = max(best, int(row.get("track_id", 0)))
+                except (TypeError, ValueError):
+                    pass
+    return best
+
+
+def max_track_id(out_root, top, exclude_dir=None):
+    """Highest vehicle ID already used by the clips of a top folder ('' = clips straight in out_root), so that a new
+    clip can continue the numbering after it. exclude_dir = the clip being (re)analysed."""
+    src = os.path.join(out_root, top) if top else out_root
+    if not os.path.isdir(src):
+        return 0
+    if top:
+        clips = find_clip_folders(src)
+    else:
+        clips = [(os.path.join(src, d), d) for d in sorted(os.listdir(src))
+                 if d != COMBINED_DIR and os.path.isdir(os.path.join(src, d)) and summary_path(os.path.join(src, d))]
+    skip = os.path.normcase(os.path.abspath(exclude_dir)) if exclude_dir else None
+    return max([clip_max_id(folder) for folder, _label in clips if os.path.normcase(os.path.abspath(folder)) != skip] or [0])
+
+
 def read_rows(path):
     with open(path, newline="", encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))

@@ -1,5 +1,6 @@
 """Unit tests of the pure helpers of tools/batch_run.py (no YOLO, no GUI)."""
 import csv
+import json
 import os
 import shutil
 import sys
@@ -260,6 +261,61 @@ class CombineClips(unittest.TestCase):
         combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
         with open(os.path.join(self.root, "Site", "All_Clips", "All_Speed_Detail.csv"), newline="", encoding="utf-8-sig") as f:
             self.assertEqual(len(list(csv.DictReader(f))), 2)
+
+
+class ChainsAndIdContinuation(unittest.TestCase):
+    def test_group_units(self):
+        clips = [{"video": "a"}, {"video": "b", "continues_previous": True}, {"video": "c", "continues_previous": True}, {"video": "d"}]
+        units = batch_run.group_units(clips)
+        self.assertEqual([[c["video"] for c in u] for u in units], [["a", "b", "c"], ["d"]])
+        # a "continues" mark on the very first clip has nothing to continue
+        self.assertEqual([[c["video"] for c in u] for u in batch_run.group_units([{"video": "a", "continues_previous": True}])], [["a"]])
+
+    def test_chain_name(self):
+        self.assertEqual(batch_run.chain_name(["C:/x/DJI_0426.MP4", "C:/x/DJI_0427.MP4", "C:/x/DJI_0428.MP4"]), "DJI_0426_to_DJI_0428")
+
+    def test_clip_settings_for_a_chain(self):
+        st, name, run_dir = batch_run.clip_settings({"run3": {}}, "C:/x/a.mp4", "S/d", {}, "out", None, False,
+                                                    chain=["C:/x/a.mp4", "C:/x/b.mp4"])
+        self.assertEqual(name, "a_to_b")
+        self.assertEqual(st["video_chain"], ["C:/x/a.mp4", "C:/x/b.mp4"])
+        self.assertEqual(run_dir, os.path.join("out", "S", "d", "a_to_b"))
+        st1, name1, _ = batch_run.clip_settings({"run3": {}}, "C:/x/a.mp4", "S/d", {}, "out")
+        self.assertNotIn("video_chain", st1)
+        self.assertEqual(name1, "a")
+
+    def _fake_clip(self, root, rel, max_id, with_summary_json=True):
+        d = os.path.join(root, *rel.split("/"))
+        os.makedirs(d)
+        name = os.path.basename(d)
+        with open(os.path.join(d, name + "_Summary.json"), "w") as f:
+            f.write("{}")
+        if with_summary_json:
+            with open(os.path.join(d, name + "_Research_Run_Summary.json"), "w") as f:
+                json.dump({"max_track_id": max_id}, f)
+        else:       # an older result: only the detection records tell the highest ID
+            with open(os.path.join(d, name + "_Detection_Records.csv"), "w", newline="") as f:
+                f.write("frame,track_id" + chr(10) + "1,3" + chr(10) + "2,%d" % max_id + chr(10) + "3,-1" + chr(10))
+        return d
+
+    def test_ids_continue_after_the_previous_clips_of_the_same_top_folder(self):
+        root = tempfile.mkdtemp(prefix="pk_ids_")
+        try:
+            self._fake_clip(root, "Site/d1/a", 57)
+            self._fake_clip(root, "Site/d1/b", 120, with_summary_json=False)
+            self._fake_clip(root, "Other/x", 999)
+            st, _, _ = batch_run.clip_settings({}, "C:/v/c.mp4", "Site/d2", {}, root)
+            self.assertEqual(st["id_offset"], 120)                              # highest of Site only (not of Other)
+            st, _, _ = batch_run.clip_settings({}, "C:/v/new.mp4", "Brand_new", {}, root)
+            self.assertEqual(st["id_offset"], 0)                                # nothing there yet
+            # a clip that is analysed again does not count itself
+            st, _, _ = batch_run.clip_settings({}, "C:/v/b.mp4", "Site/d1", {}, root)
+            self.assertEqual(st["id_offset"], 57)
+            # tracker sweeps stay comparable: no offset
+            st, _, _ = batch_run.clip_settings({}, "C:/v/c.mp4", "Site/d2", {"track_buffer": "15"}, root)
+            self.assertEqual(st["id_offset"], 0)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":
