@@ -1331,6 +1331,11 @@ class ClipPlayerDialog:
         self.top = tk.Toplevel(app.root)
         self.top.title(title or ("ดูวิดีโอและกำหนดช่วงเวลา — " + os.path.basename(video_path)))
         self.top.protocol("WM_DELETE_WINDOW", self.cancel)
+        # The picture shrinks to fit the screen so that the OK / Cancel buttons at the bottom are always visible.
+        sw, sh = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
+        self.SHOW_H = max(220, min(500, sh - 540))
+        self.SHOW_W = max(480, min(900, sw - 80, int(self.SHOW_H * 1.8)))
+        self.top.geometry("+10+10")
 
         self.a_start = tk.StringVar(value=str(plan.get("analysis_start_s", "") or ""))
         self.a_end = tk.StringVar(value=str(plan.get("analysis_end_s", "") or ""))
@@ -1379,14 +1384,17 @@ class ClipPlayerDialog:
                   foreground="#666666").grid(row=6, column=0, columnspan=2)
         btns = ttk.Frame(self.top)
         btns.grid(row=7, column=0, columnspan=2, pady=8)
-        ttk.Button(btns, text="ตกลง", width=12, command=self.apply).pack(side="left", padx=6)
-        ttk.Button(btns, text="ยกเลิก", width=12, command=self.cancel).pack(side="left", padx=6)
+        self.ok_button = ttk.Button(btns, text="✔ บันทึกช่วงเวลานี้", width=20, command=self.apply)
+        self.ok_button.pack(side="left", padx=6)
+        ttk.Button(btns, text="ยกเลิก (ไม่บันทึก)", width=18, command=self.cancel).pack(side="left", padx=6)
 
         for var in (self.a_start, self.a_end, self.r_start, self.r_end):
             var.trace_add("write", lambda *_: self._redraw_timeline())
         self.top.bind("<Left>", lambda e: self.step(-1))
         self.top.bind("<Right>", lambda e: self.step(1))
         self.top.bind("<space>", lambda e: self.toggle_play())
+        self.top.bind("<Return>", lambda e: self.apply())
+        self.top.bind("<Escape>", lambda e: self.cancel())
 
         first = self._seconds(self.a_start.get())
         self.show_frame(int(round(first * self.fps)) if first is not None else 0)
