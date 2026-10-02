@@ -131,6 +131,63 @@ check("START with an empty list explains what to do and goes to step 1", len(_sh
 check("every indicator has its own switch in its group", all(hasattr(app, n) for n in ("run3_ldp_enabled_var", "run3_lc_enabled_var", "run3_gap_enabled_var", "run3_ttc_enabled_var", "run3_pet_enabled_var", "run3_speed_enabled_var")))
 check("reference mapping text widget exists (Gap Acceptance group)", hasattr(app, "run3_reference_text"))
 
+# --- background reading / writing gives exactly the same frames, in order ---
+import tempfile as _tf
+import numpy as _np
+_cv2 = m.cv2
+_d = _tf.mkdtemp(prefix="pk_bg_")
+_src = os.path.join(_d, "src.avi")
+_w = _cv2.VideoWriter(_src, _cv2.VideoWriter_fourcc(*"MJPG"), 10.0, (64, 48))
+for _i in range(20):
+    _w.write(_np.full((48, 64, 3), 10 * _i + 5, dtype=_np.uint8))
+_w.release()
+_direct = []
+_c = _cv2.VideoCapture(_src)
+while True:
+    _ok, _f = _c.read()
+    if not _ok:
+        break
+    _direct.append(int(_f.mean()))
+_c.release()
+_c = _cv2.VideoCapture(_src)
+_r = m.BackgroundFrameReader(_c, lambda n: True, 0, None)
+_bg = []
+while True:
+    _ok, _f = _r.next()
+    if not _ok:
+        break
+    _bg.append(int(_f.mean()))
+_r.close()
+_c.release()
+check("background reader: same frames in the same order as reading directly", _bg == _direct and len(_bg) == 20, str(_bg[:5]))
+_c = _cv2.VideoCapture(_src)
+_r = m.BackgroundFrameReader(_c, lambda n: n % 2 == 0, 0, 10)       # decode every 2nd frame, stop after frame 10
+_got = []
+while True:
+    _ok, _f = _r.next()
+    if not _ok:
+        break
+    _got.append(None if _f is None else int(_f.mean()))
+_r.close()
+_c.release()
+check("background reader: skipped frames come as None, stops at the last frame of the window", len(_got) == 10 and _got[1] is None and _got[0] == _direct[0] and _got[2] == _direct[2], str(_got))
+_out = os.path.join(_d, "out.avi")
+_bw = m.BackgroundVideoWriter(_cv2.VideoWriter(_out, _cv2.VideoWriter_fourcc(*"MJPG"), 10.0, (64, 48)))
+for _i in range(15):
+    _bw.write(_np.full((48, 64, 3), 15 * _i + 5, dtype=_np.uint8))
+_bw.release()
+_bw.release()                                                    # a second release is harmless
+_c = _cv2.VideoCapture(_out)
+_vals = []
+while True:
+    _ok, _f = _c.read()
+    if not _ok:
+        break
+    _vals.append(int(_f.mean()))
+_c.release()
+check("background writer: every frame written, in order", len(_vals) == 15 and all(b2 > a2 for a2, b2 in zip(_vals, _vals[1:])), str(_vals[:5]))
+check("Auto precision: FP16 is not used on the GTX 16 series", (not m.torch.cuda.is_available()) or ("GTX 16" not in m.torch.cuda.get_device_name(0)) or m.fp16_is_faster(0) is False)
+
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
 sys.exit(1 if failures else 0)

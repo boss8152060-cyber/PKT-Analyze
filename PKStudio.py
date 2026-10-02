@@ -1593,6 +1593,126 @@ class ClipPlayerDialog:
         self.top.destroy()
 
 
+class BackgroundFrameReader:
+    """Reads the next frames of a cv2.VideoCapture in a background thread while the main loop runs detection on the GPU
+    (decoding a 1080p frame takes ~9 ms of CPU). The frames come out in exactly the same order and are exactly the same
+    as reading them directly. decode(n) says whether the frame after n frames already read must be decoded (read) or
+    only skipped (grab), the same rule the main loop uses."""
+
+    _END = object()
+
+    def __init__(self, cap, decode, frames_read, last_frame=None, maxsize=6):
+        self.cap = cap
+        self.decode = decode
+        self.n = frames_read
+        self.last_frame = last_frame
+        self.error = None
+        self.q = queue.Queue(maxsize=maxsize)
+        self._stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _put(self, item):
+        while not self._stop.is_set():
+            try:
+                self.q.put(item, timeout=0.2)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _run(self):
+        try:
+            while not self._stop.is_set():
+                if self.last_frame is not None and self.n >= self.last_frame:
+                    break
+                if self.decode(self.n):
+                    ok, frame = self.cap.read()
+                else:
+                    ok, frame = self.cap.grab(), None
+                self.n += 1
+                if not ok:
+                    break
+                if not self._put(frame):
+                    return
+        except Exception as exc:          # reported to the main loop
+            self.error = exc
+        self._put(self._END)
+
+    def next(self):
+        """-> (ok, frame); frame is None for a frame that was only skipped."""
+        item = self.q.get()
+        if item is self._END:
+            if self.error is not None:
+                raise self.error
+            self.q.put(self._END)         # keep answering 'end'
+            return False, None
+        return True, item
+
+    def close(self):
+        self._stop.set()
+        try:
+            while True:
+                self.q.get_nowait()
+        except queue.Empty:
+            pass
+        self.thread.join(timeout=5)
+
+
+class BackgroundVideoWriter:
+    """cv2.VideoWriter whose write() hands the frame to a background thread (encoding a 1080p frame takes ~25 ms of CPU),
+    so the main loop does not wait for it. Frames are written in the same order; release() waits until all are written."""
+
+    _END = object()
+
+    def __init__(self, writer, maxsize=8):
+        self.writer = writer
+        self.error = None
+        self.q = queue.Queue(maxsize=maxsize)
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        self._released = False
+
+    def _run(self):
+        while True:
+            frame = self.q.get()
+            if frame is self._END:
+                break
+            try:
+                self.writer.write(frame)
+            except Exception as exc:
+                self.error = exc
+
+    def isOpened(self):
+        return self.writer.isOpened()
+
+    def write(self, frame):
+        if self.error is not None:
+            raise self.error
+        self.q.put(frame)
+
+    def release(self):
+        if self._released:
+            return
+        self._released = True
+        self.q.put(self._END)
+        self.thread.join()
+        self.writer.release()
+
+
+def fp16_is_faster(device_index=0):
+    """FP16 is only faster on GPUs with tensor cores. On the GTX 16 series (and older cards) it is SLOWER: measured on the
+    GTX 1650 with this model, 170 ms instead of 62 ms per frame. Auto precision uses FP16 only where it helps."""
+    try:
+        props = torch.cuda.get_device_properties(device_index)
+    except Exception:
+        return False
+    name = str(props.name).upper()
+    if "GTX 16" in name or "MX" in name:
+        return False
+    return props.major >= 7
+
+
 def _tools_module(name):
     """Import a helper from the tools folder next to this file (batch_run)."""
     tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
@@ -3512,7 +3632,7 @@ class Run1App:
 
         ttk.Label(
             frame,
-            text="GPU 0 = NVIDIA GeForce GTX 1650"
+            text="GPU 0 = NVIDIA GeForce GTX 1650 — บนการ์ดรุ่นนี้ FP16 ช้ากว่า FP32 (~2.7 เท่า) ใช้ Auto หรือ FP32"
         ).grid(
             row=3,
             column=0,
@@ -5230,6 +5350,7 @@ class Run1App:
 
         cap = None
         writer = None
+        reader = None
         csv_file = None
 
         try:
@@ -5338,7 +5459,11 @@ class Run1App:
             elif precision == "Auto":
 
                 if device.startswith("cuda"):
-                    use_fp16 = True
+                    try:
+                        dev_index = int(device.split(":")[1]) if ":" in device else 0
+                    except ValueError:
+                        dev_index = 0
+                    use_fp16 = fp16_is_faster(dev_index)       # FP32 on the GTX 16 series, where FP16 is much slower
 
             if precision == "FP16" and not device.startswith("cuda"):
 
@@ -5457,6 +5582,8 @@ class Run1App:
                     raise RuntimeError(
                         "Unable to create output video"
                     )
+
+                writer = BackgroundVideoWriter(writer)      # encoding runs beside the detection
 
             tracker_name = settings["tracker"]
 
@@ -5648,6 +5775,14 @@ class Run1App:
             total_detections = 0
             untracked_detections = 0
 
+            # decoding runs beside the detection; a frame is only skipped (not decoded) when nothing uses it
+            reader = BackgroundFrameReader(
+                cap,
+                lambda n: not (frame_skip > 1 and not render_needed and (n % frame_skip) != 0),
+                frame_index,
+                last_frame,
+            )
+
             start_time = time.time()
 
             print()
@@ -5693,7 +5828,7 @@ class Run1App:
                 # V27: skipped frames are only grabbed (not decoded) when
                 # nothing has to be drawn/saved for them.
                 if frame_skip > 1 and not render_needed and (frame_index % frame_skip) != 0:
-                    if not cap.grab():
+                    if not reader.next()[0]:
                         input_finished = True
                         break
                     frame_index += 1
@@ -5701,7 +5836,7 @@ class Run1App:
                         self.update_ui(progress=f"{frame_index}/{total_frames}")
                     continue
 
-                success, frame = cap.read()
+                success, frame = reader.next()
 
                 if not success:
                     input_finished = True
@@ -6434,6 +6569,9 @@ class Run1App:
             # closing them here first would cause:
             #     I/O operation on closed file.
 
+            if reader is not None:
+                reader.close()
+
             if cap is not None:
                 cap.release()
 
@@ -6833,6 +6971,8 @@ class Run1App:
 
             try:
                 if cap is not None:
+                    if reader is not None:
+                        reader.close()
                     cap.release()
             except Exception:
                 pass
