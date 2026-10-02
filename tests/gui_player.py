@@ -44,6 +44,10 @@ errors = []
 messagebox.showerror = lambda *a, **k: errors.append(a)
 
 dlg = m.ClipPlayerDialog(app, path, {"analysis_start_s": "1.0", "analysis_end_s": "4", "save_video": True}, modal=False)
+root.update()
+check("the dialog fits on the screen, OK button visible", dlg.top.winfo_reqheight() <= root.winfo_screenheight() - 60
+      and dlg.ok_button.winfo_rooty() + dlg.ok_button.winfo_height() <= root.winfo_screenheight(),
+      f"dialog {dlg.top.winfo_reqheight()} px, screen {root.winfo_screenheight()} px, OK bottom {dlg.ok_button.winfo_rooty() + dlg.ok_button.winfo_height()}")
 check("video info read: 150 frames at 30 fps = 5 s", dlg.total == 150 and abs(dlg.fps - 30) < 0.01 and abs(dlg.duration - 5.0) < 0.01)
 check("opens at the analysis start (1.0 s = frame index 30)", dlg.pos == 30, str(dlg.pos))
 dlg.step(1)
