@@ -501,9 +501,11 @@ class DuplicateTracks(unittest.TestCase):
         self.assertEqual(CORE["find_duplicate_tracks"](self.boxes({"1": a, "2": b}), {"1": 59, "2": 59}), {})
 
     def test_short_overlap_is_not_enough(self):
+        # a 40-frame track that lies on top of the other vehicle for only 5 of its frames is another vehicle that crossed
         a = {fr: (100, 50, 130, 70) for fr in range(1, 50)}
-        b = {fr: (100, 50, 130, 70) for fr in range(1, 6)}                     # only 5 frames
-        self.assertEqual(CORE["find_duplicate_tracks"](self.boxes({"1": a, "2": b}), {"1": 49, "2": 5}), {})
+        b = {fr: (100, 50, 130, 70) for fr in range(1, 6)}
+        b.update({fr: (400, 50, 430, 70) for fr in range(6, 41)})
+        self.assertEqual(CORE["find_duplicate_tracks"](self.boxes({"1": a, "2": b}), {"1": 49, "2": 40}), {})
 
     def test_partial_overlap_removes_only_the_overlapping_frames(self):
         a = {fr: (100, 50, 130, 70) for fr in range(1, 101)}
@@ -722,6 +724,46 @@ class ZoneCalibration(unittest.TestCase):
         self.assertGreater(t["rms"], 0.3)                         # the disagreement is reported
         m = self.P(t, [(0, 50), (200, 50)])
         self.assertAlmostEqual(float(((m[1] - m[0]) ** 2).sum() ** 0.5), 4.0, places=6)    # speed uses the measured scale
+
+
+class ShortDuplicateTracks(unittest.TestCase):
+    F = staticmethod(lambda fb, ln: CORE["find_duplicate_tracks"](fb, ln))
+    BOX = (100, 100, 200, 300)
+
+    def test_a_short_blip_on_the_same_vehicle_is_a_duplicate(self):
+        # real vehicle 1 for 60 frames; a 3-frame "Van" box (ID 9) sits on top of it in all 3 of its frames
+        fb = {f: [(1, self.BOX)] for f in range(60)}
+        for f in (20, 21, 22):
+            fb[f].append((9, (101, 101, 201, 301)))
+        out = self.F(fb, {1: 60, 9: 3})
+        self.assertEqual(set(out), {9})
+        self.assertEqual(out[9]["keep"], 1)
+        self.assertEqual(out[9]["frames"], {20, 21, 22})
+
+    def test_a_one_frame_blip_is_a_duplicate_too(self):
+        fb = {f: [(1, self.BOX)] for f in range(30)}
+        fb[5].append((7, self.BOX))
+        self.assertEqual(set(self.F(fb, {1: 30, 7: 1})), {7})
+
+    def test_a_short_track_that_only_partly_overlaps_is_kept(self):
+        # 5 frames long, only 2 of them on top of vehicle 1 (40 %): another vehicle that happens to cross -> not a duplicate
+        fb = {f: [(1, self.BOX)] for f in range(40)}
+        for f in (10, 11):
+            fb[f].append((8, self.BOX))
+        for f in (12, 13, 14):
+            fb[f].append((8, (300, 100, 400, 300)))
+        self.assertEqual(self.F(fb, {1: 40, 8: 5}), {})
+
+    def test_a_short_track_beside_another_vehicle_is_kept(self):
+        fb = {f: [(1, self.BOX), (6, (210, 100, 310, 300))] for f in range(4)}      # side by side, no overlap
+        self.assertEqual(self.F(fb, {1: 4, 6: 4}), {})
+
+    def test_the_original_rule_for_long_tracks_is_unchanged(self):
+        fb = {f: [(1, self.BOX), (2, self.BOX)] for f in range(12)}
+        out = self.F(fb, {1: 50, 2: 12})
+        self.assertEqual(set(out), {2})
+        fb = {f: [(1, self.BOX), (2, self.BOX)] for f in range(9)}                   # 9 shared frames of a long track: kept
+        self.assertEqual(self.F(fb, {1: 50, 2: 40}), {})
 
 
 if __name__ == "__main__":

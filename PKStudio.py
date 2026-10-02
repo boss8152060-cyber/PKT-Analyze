@@ -948,6 +948,7 @@ def update_reference_mapping_text(text, site_id, assignments):
 
 DUPLICATE_TRACK_IOU = 0.70          # two track IDs whose boxes overlap this much are one vehicle
 DUPLICATE_TRACK_MIN_FRAMES = 10     # ... for at least this many frames
+DUPLICATE_SHORT_SHARE = 0.80        # a SHORT track (< min frames) is also a duplicate when this share of its frames overlaps a longer track
 
 
 def bbox_iou(a, b):
@@ -960,13 +961,16 @@ def bbox_iou(a, b):
 
 
 def find_duplicate_tracks(frame_boxes, track_length, iou_min=DUPLICATE_TRACK_IOU,
-                          min_frames=DUPLICATE_TRACK_MIN_FRAMES):
+                          min_frames=DUPLICATE_TRACK_MIN_FRAMES, short_share=DUPLICATE_SHORT_SHARE):
     """Detect one vehicle tracked under two IDs at the same time (an ID switch where the
     old ID does not die). frame_boxes = {frame: [(track_id, (x1, y1, x2, y2)), ...]},
     track_length = {track_id: number of rows}.
 
     Two IDs are duplicates when their boxes overlap with IoU >= iou_min in at least
-    min_frames frames. The track with fewer rows (ties: the later ID) is the duplicate.
+    min_frames frames. A track that is shorter than min_frames (a 1-9 frame blip, often a second box
+    with another class such as Van / Car on the same vehicle) is a duplicate when at least short_share
+    of ITS frames overlap the other track that strongly. The track with fewer rows (ties: the later ID)
+    is the duplicate.
     Returns {duplicate_id: {"keep": kept_id, "frames": set_of_frames_to_remove}}."""
     shared = {}
     for frame, items in frame_boxes.items():
@@ -977,10 +981,11 @@ def find_duplicate_tracks(frame_boxes, track_length, iou_min=DUPLICATE_TRACK_IOU
                     shared.setdefault((ta, tb) if str(ta) < str(tb) else (tb, ta), set()).add(frame)
     out = {}
     for (ta, tb), frames in shared.items():
-        if len(frames) < min_frames:
-            continue
         la, lb = track_length.get(ta, 0), track_length.get(tb, 0)
         keep, drop = (ta, tb) if (la, str(tb)) > (lb, str(ta)) else (tb, ta)
+        drop_len = max(1, track_length.get(drop, 0))
+        if len(frames) < min_frames and not (drop_len < min_frames and len(frames) >= short_share * drop_len):
+            continue
         entry = out.setdefault(drop, {"keep": keep, "frames": set()})
         entry["frames"] |= frames
     return out
@@ -8439,7 +8444,8 @@ class Run1App:
             "note": "detections the tracker gave no ID; they are not used by any indicator",
         }
         summary["diagnostics"]["duplicate_tracks"] = {
-            "rule": f"boxes IoU >= {DUPLICATE_TRACK_IOU} in >= {DUPLICATE_TRACK_MIN_FRAMES} frames = one vehicle under two IDs; the shorter track's overlapping frames are removed",
+            "rule": (f"boxes IoU >= {DUPLICATE_TRACK_IOU} in >= {DUPLICATE_TRACK_MIN_FRAMES} frames (or, for a track shorter than that, in "
+                     f"{int(DUPLICATE_SHORT_SHARE * 100)}% of its frames) = one vehicle under two IDs; the shorter track's overlapping frames are removed"),
             "tracks_affected": len(duplicate_report),
             "frames_removed": sum(r["Frames_Removed"] for r in duplicate_report),
         }
