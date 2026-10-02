@@ -85,7 +85,7 @@ Drone/ทางเข้าวิศวะ/2026_09_01/เช้า/cam1/x.mp4   
 **เรื่องเวลา:** ใส่เป็น `1:15`, `1:02:03` หรือวินาที (`75`); ว่าง = ทั้งคลิป. เวลาใน CSV เป็นเวลาของวิดีโอต้นฉบับเสมอ (เริ่มวิเคราะห์ที่นาที 2 → เวลาแรกใน CSV ≈ 120 วินาที, เลขเฟรมก็เป็นเลขเฟรมของวิดีโอต้นฉบับ) ส่วน Gap/PET/TTC/ความเร็วคิดจากผลต่างเวลา จึงไม่ได้รับผลกระทบ
 
 ```bash
-py -3.12 tools/batch_run.py --settings "../Output/Test/R5/คลิป/คลิป_Research_Settings.json" --out "../Output/Batch"     --videos "F:/.../Drone/ทางเข้าคณะทรัพย์" --skip-done --sweep track_buffer=15,30,60
+py -3.12 tools/batch_run.py --settings "../Output/Test/R5/คลิป/Settings.json" --out "../Output/Batch"     --videos "F:/.../Drone/ทางเข้าคณะทรัพย์" --skip-done --sweep track_buffer=15,30,60
 ```
 
 - `--settings` = ไฟล์ `<run>_Research_Settings.json` จากรันที่ตั้งค่าครบแล้ว (โมเดล โซน Line ความกว้างเลน PPM ฯลฯ); ถ้าไม่ให้ จะใช้ค่าเริ่มต้นของโปรแกรม และต้องให้ค่าที่ขาดด้วย `--set ชื่อ=ค่า` (เช่น ความกว้างเลน)
@@ -111,18 +111,21 @@ py -3.12 tools/batch_run.py --settings "../Output/Test/R5/คลิป/คลิ
 
 ## 6. ไฟล์ผลลัพธ์: ของแต่ละคลิป และไฟล์รวมทุกคลิป
 
-**ของแต่ละคลิป** (โฟลเดอร์ `ผลลัพธ์/<โฟลเดอร์ต้นฉบับ>/<ชื่อคลิป>/`) — ทุกไฟล์ขึ้นต้นด้วยชื่อคลิป (เดิมเรียก `Run_3_...` ตามขั้นตอนเก่าของโปรแกรม ตอนนี้เลิกใช้แล้ว):
+**ของแต่ละคลิป** (โฟลเดอร์ `ผลลัพธ์/<โฟลเดอร์ต้นฉบับ>/<ชื่อคลิป>/`) — **ชื่อไฟล์บอกแค่ว่าเป็นอะไร ไม่มีชื่อคลิป** (ชื่อคลิปอยู่ที่ชื่อโฟลเดอร์; เดิมเคยเรียก `Run_3_...` หรือขึ้นต้นด้วยชื่อคลิป ตอนนี้เลิกแล้ว):
 
 | ไฟล์ | เนื้อหา |
 |---|---|
-| `<คลิป>_Detection_Records.csv`, `_ID_Zone_Summary.csv`, `_Zone_Summary.csv` | กรอบรถต่อเฟรม, เส้นทางโซนต่อ ID, สรุปต่อโซน |
-| `<คลิป>_Gap_Acceptance.csv`, `_Critical_Gap.csv` | Gap Acceptance |
-| `<คลิป>_LDP.csv` | LDP |
-| `<คลิป>_Lateral_Clearance.csv`, `_Lateral_Clearance_Pairs.csv` | Lateral Clearance (ทุกตัวอย่าง / ค่าต่ำสุดต่อคู่) |
-| `<คลิป>_TTC.csv`, `<คลิป>_PET.csv` | TTC, PET |
-| `<คลิป>_Speed.csv`, `_Speed_Detail.csv`, `_Speed_Statistics.csv` | Speed (ต่อคัน / ต่อโซนและ Movement / สถิติ) |
-| `<คลิป>_Indicator_Summary.csv`, `<คลิป>_Summary.json`, `<คลิป>_Duplicate_Tracks.csv` | สรุปตัวชี้วัด, สรุปการรัน (รวมเหตุผลที่ตัวชี้วัดว่าง, การปรับเทียบ), แทร็กซ้ำที่ตัดออก |
-| `<คลิป>_Research_Settings.json`, `_Research_Run_Summary.json`, `_Research_ByteTrack.yaml` | การตั้งค่าที่ใช้ (ทำซ้ำได้), สรุปการตรวจจับ, ค่า tracker |
+| `Detection_Records.csv`, `ID_Zone_Summary.csv`, `Zone_Summary.csv` | กรอบรถต่อเฟรม, เส้นทางโซนต่อ ID, สรุปต่อโซน |
+| `Gap_Acceptance.csv`, `Critical_Gap.csv` | Gap Acceptance |
+| `LDP.csv` | LDP |
+| `Lateral_Clearance.csv`, `Lateral_Clearance_Pairs.csv` | Lateral Clearance (ทุกตัวอย่าง / ค่าต่ำสุดต่อคู่) |
+| `TTC.csv`, `PET.csv` | TTC, PET |
+| `Speed.csv`, `Speed_Detail.csv`, `Speed_Statistics.csv` | Speed (ต่อคัน / ต่อโซนและ Movement / สถิติ) |
+| `Indicator_Summary.csv`, `Summary.json`, `Duplicate_Tracks.csv` | สรุปตัวชี้วัด, สรุปการรัน (รวมเหตุผลที่ตัวชี้วัดว่าง, การปรับเทียบ), แทร็กซ้ำที่ตัดออก |
+| `Tracking_Result.mp4` | วิดีโอผลลัพธ์ที่บันทึก (ถ้าเลือกบันทึก) |
+| `Settings.json`, `Run_Summary.json`, `Measurement_Summary.json`, `ByteTrack.yaml` | การตั้งค่าที่ใช้ (ทำซ้ำได้), สรุปการตรวจจับ, สรุปโซน/Line, ค่า tracker |
+
+ผลของรอบเก่า (ไฟล์ชื่อ `<คลิป>_Speed.csv`, `Run_3_Speed.csv`, `<คลิป>_Research_Settings.json` ฯลฯ) ยังเปิดอ่านได้ และเครื่องมือ/ไฟล์รวมอ่านชื่อเก่าได้ด้วย (ไม่แก้ไฟล์เก่า) — ถ้าคัดลอกไฟล์จากหลายคลิปไปไว้โฟลเดอร์เดียว ชื่อจะซ้ำกัน ให้ใช้ไฟล์รวม `All_Clips/` แทน
 
 **รวมทุกคลิป:** หลังรันทุกครั้ง โปรแกรมสร้าง/อัปเดตโฟลเดอร์ **`All_Clips`** ในโฟลเดอร์ชั้นบนสุดที่นำเข้า (เช่น `ผลลัพธ์/ทางเข้าวิศวะ/All_Clips/`) จากทุกคลิปที่อยู่ในนั้น ทุกระดับ **รวมคลิปจากรอบก่อน ๆ ด้วย** (เพิ่มคลิป/วันใหม่แล้วไฟล์รวมโตตาม):
 - `All_<ชนิด>.csv` (เช่น `All_Gap_Acceptance.csv`, `All_Speed_Detail.csv`) — แถวของทุกคลิป โดยคอลัมน์แรก **`Clip`** บอกว่ามาจากคลิปไหน (เช่น `ทางเข้าวิศวะ/2026_09_01/clip1`) — Vehicle_ID ซ้ำกันข้ามคลิปได้ จึงต้องอ่านคู่กับ Clip เสมอ; ชนิดที่ไม่มีข้อมูลเลยจะไม่มีไฟล์

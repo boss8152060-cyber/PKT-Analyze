@@ -1,6 +1,7 @@
 """Combined CSV files over many clips.
 
-Every clip has its own folder with its own CSV files (<clip>_Gap_Acceptance.csv, <clip>_Speed.csv, ...).
+Every clip has its own folder with its own CSV files (Gap_Acceptance.csv, Speed.csv, ...; results of older versions
+were named <clip>_Speed.csv or Run_3_Speed.csv and are still found).
 This module puts the same kind of file from all clips together into one CSV per kind (All_<kind>.csv), with the
 first column `Clip` saying which clip a row comes from (vehicle IDs are only unique inside a clip, so always read
 an ID together with Clip), plus All_Clips.csv (the list of clips) and All_Statistics.csv (Mean, SD, V50, V85 ...
@@ -40,23 +41,26 @@ STATISTICS = {
 }
 
 
-def summary_path(clip_dir, clip_name=None):
-    """The Summary.json of a clip folder (new name <clip>_Summary.json, older Run_3_Summary.json) or None."""
-    clip_name = clip_name or os.path.basename(os.path.normpath(clip_dir))
-    for name in (f"{clip_name}_Summary.json", "Run_3_Summary.json"):
-        p = os.path.join(clip_dir, name)
+def result_file(folder, new_name, clip_name=None):
+    """Path of a result file inside a clip folder, or None. New results have plain names (Speed.csv, Summary.json,
+    Tracking_Result.mp4 ...); results of older versions are found too (<clip>_Speed.csv, <clip>_Research_Settings.json,
+    Run_3_Speed.csv ...)."""
+    clip_name = clip_name or os.path.basename(os.path.normpath(folder))
+    for name in (new_name, f"{clip_name}_{new_name}", f"{clip_name}_Research_{new_name}", f"Run_3_{new_name}",
+                 f"Run_1_Research_{new_name}"):
+        p = os.path.join(folder, name)
         if os.path.isfile(p):
             return p
     return None
+
+
+def summary_path(clip_dir, clip_name=None):
+    """The Summary.json of a clip folder (None when the clip has not been analysed)."""
+    return result_file(clip_dir, "Summary.json", clip_name)
 
 
 def kind_file(clip_dir, kind, clip_name=None):
-    clip_name = clip_name or os.path.basename(os.path.normpath(clip_dir))
-    for name in (f"{clip_name}_{kind}.csv", f"Run_3_{kind}.csv"):
-        p = os.path.join(clip_dir, name)
-        if os.path.isfile(p):
-            return p
-    return None
+    return result_file(clip_dir, f"{kind}.csv", clip_name)
 
 
 def find_clip_folders(root):
@@ -85,17 +89,16 @@ def clip_start_time(label):
 
 def clip_max_id(folder):
     """Highest vehicle ID used in a clip folder (0 when unknown): from its run summary, else from the detection records."""
-    name = os.path.basename(os.path.normpath(folder))
     try:
-        with open(os.path.join(folder, f"{name}_Research_Run_Summary.json"), encoding="utf-8") as f:
+        with open(result_file(folder, "Run_Summary.json") or "", encoding="utf-8") as f:
             value = json.load(f).get("max_track_id")
         if isinstance(value, int):
             return value
     except (OSError, ValueError):
         pass
     best = 0
-    path = os.path.join(folder, f"{name}_Detection_Records.csv")
-    if os.path.isfile(path):
+    path = result_file(folder, "Detection_Records.csv")
+    if path:
         with open(path, newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
                 try:

@@ -62,7 +62,7 @@ base.update({"analysis_start_s": "1.0", "analysis_end_s": "0:02", "record_start_
 rows = batch_run.run_batch(app, base, os.path.join(tmp, "out"), [(clip, "", {})], save_video=True, log=lambda *_: None)
 check("run completed", rows[0]["Status"] == "completed", rows[0]["Status"])
 run_dir = os.path.join(tmp, "out", "clip")
-det = list(csv.DictReader(open(os.path.join(run_dir, "clip_Detection_Records.csv"), encoding="utf-8-sig")))
+det = list(csv.DictReader(open(os.path.join(run_dir, "Detection_Records.csv"), encoding="utf-8-sig")))
 frames = sorted({int(r["frame"]) for r in det})
 stamps = [float(r["timestamp"]) for r in det]
 import math
@@ -71,12 +71,12 @@ last_exp = int(math.floor(2.0 * fps + 1e-6)) + 1
 check(f"detections only inside frames {first_exp}..{last_exp} (1.0 s - 2.0 s)", frames and frames[0] >= first_exp and frames[-1] <= last_exp, f"{frames[:1]}..{frames[-1:]}")
 check("first timestamp is the video time 1.0 s (not restarted at 0)", abs(min(stamps) - 1.0) < 0.03, f"{min(stamps):.3f}")
 check("last timestamp <= 2.0 s", max(stamps) <= 2.0 + 1e-6, f"{max(stamps):.3f}")
-v = cv2.VideoCapture(os.path.join(run_dir, "clip_Research_Tracking_Result.mp4"))
+v = cv2.VideoCapture(os.path.join(run_dir, "Tracking_Result.mp4"))
 n = int(v.get(cv2.CAP_PROP_FRAME_COUNT))
 v.release()
 check("recorded video = frames 73..91 only (1.2 s - 1.5 s) = 19 frames", abs(n - 19) <= 1, str(n))
 import json
-summ = json.load(open(os.path.join(run_dir, "clip_Research_Run_Summary.json"), encoding="utf-8"))
+summ = json.load(open(os.path.join(run_dir, "Run_Summary.json"), encoding="utf-8"))
 check("run summary states the analysis window", summ.get("analysis_window", {}).get("first_frame") == first_exp and summ["analysis_window"]["last_frame"] == last_exp, str(summ.get("analysis_window")))
 root.destroy()
 shutil.rmtree(tmp, ignore_errors=True)
