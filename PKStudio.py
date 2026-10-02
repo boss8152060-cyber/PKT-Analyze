@@ -4151,8 +4151,8 @@ class Run1App:
 
         top = tk.Toplevel(self.root)
         top.title("PK Studio — Perspective Calibration")
-        top.geometry("1280x900")
-        top.minsize(900, 700)
+        top.geometry("%dx%d+10+10" % (min(1280, top.winfo_screenwidth() - 40), min(900, top.winfo_screenheight() - 110)))
+        top.minsize(900, 600)
         top.transient(self.root)
         top.grab_set()
 
@@ -4175,33 +4175,41 @@ class Run1App:
         canvas_frame = ttk.Frame(top, padding=(8, 0, 8, 8))
         canvas_frame.pack(fill="both", expand=True)
 
-        ttk.Label(controls, text="ลำดับจุด: P1 → P2 → P3 → P4 | คลิกบนพื้นถนนที่เป็นพื้นที่เดียวกัน").grid(row=0, column=0, columnspan=6, sticky="w", pady=(0,6))
-        ttk.Label(controls, text="Frame").grid(row=1, column=0, sticky="e", padx=(0,5))
+        controls.columnconfigure(10, weight=1)
+        ttk.Label(controls, text="ลำดับจุด: P1 → P2 → P3 → P4 | คลิกบนพื้นถนนที่เป็นพื้นที่เดียวกัน แล้วลากจุดปรับได้").grid(row=0, column=0, columnspan=11, sticky="w", pady=(0, 6))
+
+        # row 1: choose the frame, and the two buttons that finish the dialog (always visible at the top right)
+        ttk.Label(controls, text="Frame").grid(row=1, column=0, sticky="e", padx=(0, 5))
         frame_var = tk.StringVar(value=str(default_frame + 1))
         frame_entry = ttk.Entry(controls, textvariable=frame_var, width=10)
         frame_entry.grid(row=1, column=1, sticky="w")
         ttk.Button(controls, text="Load Frame", command=lambda: load_frame()).grid(row=1, column=2, padx=5)
         ttk.Button(controls, text="Reset Points", command=lambda: reset_points()).grid(row=1, column=3, padx=5)
+        finish_bar = ttk.Frame(controls)
+        finish_bar.grid(row=1, column=10, sticky="e")
+        apply_button = ttk.Button(finish_bar, text="✅ Apply Calibration", command=lambda: apply_calibration())
+        apply_button.pack(side="left", padx=5)
+        ttk.Button(finish_bar, text="Cancel", command=lambda: (cap.release(), top.grab_release(), top.destroy())).pack(side="left", padx=5)
+
+        # row 2: the four known real lengths in one row (the sides of the quadrilateral P1-P2-P3-P4)
         length_vars = [
             tk.StringVar(value=str(self.run3_perspective_l12_var.get() or "")),
             tk.StringVar(value=str(self.run3_perspective_l23_var.get() or "")),
             tk.StringVar(value=str(self.run3_perspective_l34_var.get() or "")),
             tk.StringVar(value=str(self.run3_perspective_l41_var.get() or "")),
         ]
-        labels = ["Known Length P1→P2 (m)", "Known Length P2→P3 (m)", "Known Length P3→P4 (m)", "Known Length P4→P1 (m)"]
-        for i, (lab, var) in enumerate(zip(labels, length_vars), start=1):
-            col = 4 if i % 2 == 1 else 0
-            val_col = col + 1
-            row = 1 + (i - 1) // 2
-            ttk.Label(controls, text=lab).grid(row=row, column=col, sticky="e", padx=(15,5) if col == 4 else (0,5), pady=(0 if row == 1 else 6,0))
-            ttk.Entry(controls, textvariable=var, width=10).grid(row=row, column=val_col, sticky="w", pady=(0 if row == 1 else 6,0))
+        lengths_box = ttk.LabelFrame(controls, text="ระยะจริงของแต่ละด้าน (เมตร)", padding=(8, 4))
+        lengths_box.grid(row=2, column=0, columnspan=11, sticky="w", pady=(8, 0))
+        for i, (lab, var) in enumerate(zip(("P1→P2", "P2→P3", "P3→P4", "P4→P1"), length_vars)):
+            ttk.Label(lengths_box, text=lab).grid(row=0, column=i * 2, sticky="e", padx=(0 if i == 0 else 16, 5))
+            ttk.Entry(lengths_box, textvariable=var, width=10).grid(row=0, column=i * 2 + 1, sticky="w")
 
-        ppm_calc_var = tk.StringVar(value="Calculated PPM: -")
-        ttk.Label(controls, textvariable=ppm_calc_var, foreground="#155a8a").grid(row=3, column=4, columnspan=2, sticky="w", pady=(6,0))
-        ttk.Label(controls, text="เลือก P1→P2→P3→P4 แล้วลากจุดปรับได้ | ระบบคำนวณ PPM จากระยะทั้ง 4 ด้าน", foreground="#555555").grid(row=3, column=0, columnspan=4, sticky="w", pady=(6,0))
-
+        # row 3: the picked points and the calculated PPM
         point_text_var = tk.StringVar(value="ยังไม่ได้เลือกจุด")
-        ttk.Label(controls, textvariable=point_text_var, foreground="#555555").grid(row=2, column=0, columnspan=4, sticky="w", pady=(6,0))
+        ttk.Label(controls, textvariable=point_text_var, foreground="#555555").grid(row=3, column=0, columnspan=11, sticky="w", pady=(6, 0))
+        ppm_calc_var = tk.StringVar(value="Calculated PPM: -")
+        ttk.Label(controls, textvariable=ppm_calc_var, foreground="#155a8a").grid(row=4, column=0, columnspan=11, sticky="w", pady=(2, 0))
+        ttk.Label(controls, text="ระบบคำนวณ PPM จากระยะทั้ง 4 ด้าน", foreground="#555555").grid(row=5, column=0, columnspan=11, sticky="w")
 
         canvas = tk.Canvas(canvas_frame, background="#202020", highlightthickness=1)
         canvas.pack(fill="both", expand=True)
@@ -4429,8 +4437,6 @@ class Run1App:
         canvas.bind("<B1-Motion>", on_drag)
         canvas.bind("<ButtonRelease-1>", on_release)
         canvas.bind("<Configure>", on_resize)
-        ttk.Button(controls, text="✅ Apply Calibration", command=apply_calibration).grid(row=2, column=2, padx=5, pady=(6,0))
-        ttk.Button(controls, text="Cancel", command=lambda: (cap.release(), top.grab_release(), top.destroy())).grid(row=2, column=3, padx=5, pady=(6,0))
 
         def on_close():
             try:
