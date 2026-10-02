@@ -1,9 +1,12 @@
-"""Real test: consecutive clips analysed as ONE video, and vehicle IDs that continue over the clips of a folder.
+"""Real test: "continues the previous clip" - the tracker (vehicle IDs) carries on from one clip to the next while the time
+range, the recording and the result files stay separate for each clip. Also: IDs of a not-continued clip continue after the
+IDs of the folder.
 
 Run from the Run folder:   py -3.12 tests/e2e_chain.py     (needs YOLO + a sample video; skips otherwise)
-List:  Site/a.mp4, Site/b.mp4 (continues a: frames 1-120 and 121-240 of the same recording), Site/c.mp4 (another place in time)
-Expected: Site/a_to_b/ (one result, continuous frames/time, a vehicle that crosses the cut keeps its ID),
-Site/c/ (its IDs start after the highest ID of a_to_b), Site/All_Clips/ lists both.
+List:  Site/a.mp4, Site/b.mp4 (continues a: b starts right where a ends), Site/c.mp4 (another moment, not continued)
+  a: whole clip, no recording     b: analysed from 0.05 s, records 0.5-1.0 s only     c: whole clip
+Expected: three result folders a, b, c; a vehicle that is in view at the cut keeps ONE ID in a and b; b has its own time range
+and its own short video, a has none; c's IDs start after the highest ID used by a and b.
 """
 import csv
 import json
@@ -87,14 +90,14 @@ check("three clips listed in order a, b, c", [os.path.basename(c["video"]) for c
 panel.tree.selection_set(["1"])
 panel.toggle_continue()
 check("b is marked as the continuation of a", panel.clips[1]["continues_previous"] is True and panel.clips[0]["continues_previous"] is False)
-vals = [panel.tree.item(i, "values") for i in panel.tree.get_children()]
-check("the list shows it", vals[1][3].startswith("↳") and vals[0][3] == "" and vals[2][3] == "", str(vals))
 panel.tree.selection_set(["0"])
 panel.toggle_continue()
 check("the first clip of the list cannot continue anything", panel.clips[0]["continues_previous"] is False)
-# a time range / recording range typed for clip a must NOT cut the chain (the user's R6 problem: only 30 s were analysed)
-panel.clips[0].update({"analysis_start_s": "0:00.2", "analysis_end_s": "0:00.5", "save_video": True, "record_start_s": "0:00.1", "record_end_s": "0:00.3"})
+panel.clips[0].update({"save_video": False})
+panel.clips[1].update({"analysis_start_s": "0:00.05", "save_video": True, "record_start_s": "0:00.5", "record_end_s": "0:01.0"})
 panel.refresh()
+vals = [panel.tree.item(i, "values") for i in panel.tree.get_children()]
+check("the list shows b's own time range and recording and the continue mark", vals[1][1].startswith("0:00.05") and vals[1][3].startswith("↳") and vals[0][3] == "" and vals[2][3] == "", str(vals))
 panel.skip_done_var.set(False)
 app.start_analysis()
 wait_in_mainloop(lambda: not app.running, 900)
@@ -102,39 +105,33 @@ wait_in_mainloop(lambda: False, 1)
 check("batch finished", not app.running)
 
 site = os.path.join(o, "Site")
-check("a and b are ONE result folder a_to_b; c has its own; no separate a / b", sorted(d for d in os.listdir(site) if d != "All_Clips") == ["a_to_b", "c"], str(sorted(os.listdir(site))))
-chain_dir, c_dir = os.path.join(site, "a_to_b"), os.path.join(site, "c")
+check("every clip has its own result folder: a, b, c (nothing is joined)", sorted(d for d in os.listdir(site) if d != "All_Clips") == ["a", "b", "c"], str(sorted(os.listdir(site))))
+a_dir, b_dir, c_dir = (os.path.join(site, x) for x in ("a", "b", "c"))
 
 
-def det(d, name):
+def det(d):
     return list(csv.DictReader(open(os.path.join(d, "Detection_Records.csv"), encoding="utf-8-sig")))
 
 
-dc = det(chain_dir, "a_to_b")
-frames = sorted({int(r["frame"]) for r in dc})
-check("the chain has one continuous frame numbering 1..%d (no restart at the cut)" % (2 * n), frames[0] >= 1 and frames[-1] > n and frames[-1] <= 2 * n, f"{frames[0]}..{frames[-1]}")
-stamps = [float(r["timestamp"]) for r in dc]
-check("time runs on past the first clip (no restart)", max(stamps) > n / fps - 0.05 and max(stamps) <= 2 * n / fps, f"max {max(stamps):.2f} s, first clip is {n / fps:.2f} s")
-spans = {}
-for r in dc:
-    spans.setdefault(r["track_id"], []).append(int(r["frame"]))
-across = [t for t, fr in spans.items() if min(fr) <= n < max(fr)]
-rv = cv2.VideoCapture(os.path.join(chain_dir, "Tracking_Result.mp4"))
+da, db, dc = det(a_dir), det(b_dir), det(c_dir)
+fb = sorted({int(r["frame"]) for r in db})
+first_exp = int(__import__("math").ceil(0.05 * fps - 1e-6)) + 1
+check("b keeps its own time range: it starts at 0.05 s, not at the first frame", fb[0] >= first_exp, f"first frame {fb[0]} (expected >= {first_exp})")
+check("a has no result video, b has its own short one (0.5-1.0 s = about 30 frames)",
+      not os.path.isfile(os.path.join(a_dir, "Tracking_Result.mp4")) and os.path.isfile(os.path.join(b_dir, "Tracking_Result.mp4")))
+rv = cv2.VideoCapture(os.path.join(b_dir, "Tracking_Result.mp4"))
 rec_frames = int(rv.get(cv2.CAP_PROP_FRAME_COUNT))
 rv.release()
-check("typed ranges are ignored for a chain: the result video holds the whole chain (240 frames), not the typed 0.2 s", rec_frames >= 2 * n - 4, str(rec_frames))
-check("at least one vehicle crosses the cut and keeps ONE ID", len(across) >= 1, f"IDs crossing the cut: {across[:6]}")
-summ = json.load(open(os.path.join(chain_dir, "Run_Summary.json"), encoding="utf-8"))
-check("the run summary records the chain", summ.get("video_chain") and len(summ["video_chain"]) == 2 and summ["id_offset"] == 0, str(summ.get("video_chain")))
-dcc = det(c_dir, "c")
-ids_chain = {int(r["track_id"]) for r in dc if int(r["track_id"]) >= 0}
-ids_c = {int(r["track_id"]) for r in dcc if int(r["track_id"]) >= 0}
-check("clip c continues the numbering: all its IDs are above the highest ID of a_to_b", ids_c and min(ids_c) > max(ids_chain), f"a_to_b max {max(ids_chain)}, c min {min(ids_c)}")
-check("so no vehicle ID is used twice in the folder", not (ids_chain & ids_c))
-csum = json.load(open(os.path.join(c_dir, "Run_Summary.json"), encoding="utf-8"))
-check("c's run summary says where its numbering started", csum["id_offset"] == max(ids_chain) and csum["max_track_id"] == max(ids_c), f"{csum['id_offset']} / {csum['max_track_id']}")
+check("b's video holds only the 0.5 s that was asked for", 0.4 * fps <= rec_frames <= 0.6 * fps + 2, f"{rec_frames} frames")
+ids = {k: {int(r["track_id"]) for r in rows if int(r["track_id"]) >= 0} for k, rows in (("a", da), ("b", db), ("c", dc))}
+check("a vehicle in view at the cut keeps ONE ID in a and in b (the tracker continued)", len(ids["a"] & ids["b"]) >= 1, f"IDs in both: {sorted(ids['a'] & ids['b'])[:8]}")
+sa, sb, sc = (json.load(open(os.path.join(d, "Run_Summary.json"), encoding="utf-8")) for d in (a_dir, b_dir, c_dir))
+check("the run summaries say what happened: only b continued the tracker", (sa["tracker_continued_from_previous_clip"], sb["tracker_continued_from_previous_clip"], sc["tracker_continued_from_previous_clip"]) == (False, True, False))
+check("b keeps a's numbering (same offset), c starts after the highest ID of the folder", sb["id_offset"] == sa["id_offset"] and sc["id_offset"] == max(sa["max_track_id"], sb["max_track_id"]),
+      f"offsets a {sa['id_offset']} b {sb['id_offset']} c {sc['id_offset']}; max IDs a {sa['max_track_id']} b {sb['max_track_id']}")
+check("c's IDs are all above the others (no ID used twice in the folder)", ids["c"] and min(ids["c"]) > max(ids["a"] | ids["b"]) and not (ids["c"] & (ids["a"] | ids["b"])), f"c min {min(ids['c'])} / a,b max {max(ids['a'] | ids['b'])}")
 ac = [r["Clip"] for r in csv.DictReader(open(os.path.join(site, "All_Clips", "All_Clips.csv"), encoding="utf-8-sig"))]
-check("the combined files list the chain and c", sorted(ac) == ["Site/a_to_b", "Site/c"], str(ac))
+check("the combined files list a, b and c", sorted(ac) == ["Site/a", "Site/b", "Site/c"], str(ac))
 
 root.destroy()
 shutil.rmtree(tmp, ignore_errors=True)

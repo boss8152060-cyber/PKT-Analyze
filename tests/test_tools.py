@@ -264,34 +264,13 @@ class CombineClips(unittest.TestCase):
             self.assertEqual(len(list(csv.DictReader(f))), 2)
 
 
-class ChainsAndIdContinuation(unittest.TestCase):
-    def test_group_units(self):
-        clips = [{"video": "a"}, {"video": "b", "continues_previous": True}, {"video": "c", "continues_previous": True}, {"video": "d"}]
-        units = batch_run.group_units(clips)
-        self.assertEqual([[c["video"] for c in u] for u in units], [["a", "b", "c"], ["d"]])
-        # a "continues" mark on the very first clip has nothing to continue
-        self.assertEqual([[c["video"] for c in u] for u in batch_run.group_units([{"video": "a", "continues_previous": True}])], [["a"]])
-
-    def test_chain_name(self):
-        self.assertEqual(batch_run.chain_name(["C:/x/DJI_0426.MP4", "C:/x/DJI_0427.MP4", "C:/x/DJI_0428.MP4"]), "DJI_0426_to_DJI_0428")
-
-    def test_a_chain_ignores_the_time_range_typed_for_its_clips(self):
-        clip = {"analysis_start_s": "0:10", "analysis_end_s": "0:30", "record_start_s": "0:12", "record_end_s": "0:20", "save_video": True}
-        st, _, _ = batch_run.clip_settings({}, "C:/x/a.mp4", "S", {}, "out", clip, True, chain=["C:/x/a.mp4", "C:/x/b.mp4"])
-        self.assertEqual((st["analysis_start_s"], st["analysis_end_s"], st["record_start_s"], st["record_end_s"]), ("", "", "", ""))
-        self.assertTrue(st["save_video"])                                       # recorded whole, as the first clip chose
-        st, _, _ = batch_run.clip_settings({}, "C:/x/a.mp4", "S", {}, "out", clip, True)       # a single clip keeps its range
-        self.assertEqual((st["analysis_start_s"], st["analysis_end_s"]), ("0:10", "0:30"))
-
-    def test_clip_settings_for_a_chain(self):
-        st, name, run_dir = batch_run.clip_settings({"run3": {}}, "C:/x/a.mp4", "S/d", {}, "out", None, False,
-                                                    chain=["C:/x/a.mp4", "C:/x/b.mp4"])
-        self.assertEqual(name, "a_to_b")
-        self.assertEqual(st["video_chain"], ["C:/x/a.mp4", "C:/x/b.mp4"])
-        self.assertEqual(run_dir, os.path.join("out", "S", "d", "a_to_b"))
-        st1, name1, _ = batch_run.clip_settings({"run3": {}}, "C:/x/a.mp4", "S/d", {}, "out")
-        self.assertNotIn("video_chain", st1)
-        self.assertEqual(name1, "a")
+class IdContinuation(unittest.TestCase):
+    def test_the_continue_mark_is_kept_in_a_plan_but_is_not_a_run_setting(self):
+        self.assertIn("continues_previous", batch_run.PLAN_KEYS)
+        self.assertNotIn("continues_previous", batch_run.CLIP_KEYS)
+        st, _, _ = batch_run.clip_settings({}, "C:/x/a.mp4", "S", {}, "out", {"continues_previous": True, "analysis_end_s": "0:30"}, False)
+        self.assertNotIn("continues_previous", st)
+        self.assertEqual(st["analysis_end_s"], "0:30")                       # time range stays per clip
 
     def _fake_clip(self, root, rel, max_id, with_summary_json=True):
         d = os.path.join(root, *rel.split("/"))

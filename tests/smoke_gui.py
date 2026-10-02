@@ -112,15 +112,15 @@ app.draw_center_var.set(True)
 check("runtime snapshot knows about the decision-point option", app._runtime_snapshot().get("show_decision_point") is True)
 app.draw_center_var.set(False)
 check("one clip is a list of one", "1 คลิป" in app.start_button.cget("text"), app.start_button.cget("text"))
-# the list says what a chain really does: whole clips, no time range
+# "continues the previous clip" only marks the tracking / IDs: each clip keeps its own time range and recording
 app.clips_panel.clear()
-app.clips_panel.add_videos([("C:/x/a.mp4", "S"), ("C:/x/b.mp4", "S"), ("C:/x/c.mp4", "S")])
-app.clips_panel.clips[0].update({"analysis_start_s": "0:10", "analysis_end_s": "0:30", "save_video": True})
-app.clips_panel.clips[1]["continues_previous"] = True
+app.clips_panel.add_videos([("C:/x/a.mp4", "S"), ("C:/x/b.mp4", "S")])
+app.clips_panel.clips[0].update({"analysis_start_s": "0:00", "analysis_end_s": "0:30", "save_video": True})
+app.clips_panel.clips[1].update({"analysis_start_s": "0:30.01", "analysis_end_s": "0:59.99", "save_video": True, "continues_previous": True})
 app.clips_panel.refresh()
 _v = [app.clips_panel.tree.item(i, "values") for i in app.clips_panel.tree.get_children()]
-check("list: the clip that starts a chain shows the whole chain is analysed and recorded (its typed range is not used)",
-      _v[0][1].startswith("ทั้งชุด") and _v[0][2] == "ตลอดทั้งชุด" and _v[1][1].startswith("ทั้งคลิป") and _v[2][1] == "ทั้งคลิป", str(_v))
+check("list: a continued clip still shows its own time range and recording, plus the continue mark",
+      _v[0][1] == "0:00 – 0:30" and _v[1][1] == "0:30.01 – 0:59.99" and _v[1][2] == "ตลอดช่วงวิเคราะห์" and _v[1][3].startswith("↳") and _v[0][3] == "", str(_v))
 app.clips_panel.clear()
 from tkinter import messagebox as _mb
 _shown = []
@@ -130,47 +130,6 @@ app.start_analysis()
 check("START with an empty list explains what to do and goes to step 1", len(_shown) == 1 and app.notebook.index(app.notebook.select()) == 0 and not app.running, str(_shown))
 check("every indicator has its own switch in its group", all(hasattr(app, n) for n in ("run3_ldp_enabled_var", "run3_lc_enabled_var", "run3_gap_enabled_var", "run3_ttc_enabled_var", "run3_pet_enabled_var", "run3_speed_enabled_var")))
 check("reference mapping text widget exists (Gap Acceptance group)", hasattr(app, "run3_reference_text"))
-
-# --- ChainedCapture: consecutive clips read as one continuous video ---
-import tempfile
-import numpy as np
-cv2 = m.cv2
-_tmp = tempfile.mkdtemp(prefix="pk_chain_")
-_paths = []
-for _k, _n in enumerate((5, 4)):
-    _p = os.path.join(_tmp, f"part{_k}.mp4")
-    _w = cv2.VideoWriter(_p, cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (64, 48))
-    for _i in range(_n):
-        _w.write(np.full((48, 64, 3), 20 * (_k * 5 + _i) + 10, dtype=np.uint8))
-    _w.release()
-    _paths.append(_p)
-_cc = m.ChainedCapture(_paths)
-check("chained clips: frame count = sum, size and fps of the first", _cc.get(cv2.CAP_PROP_FRAME_COUNT) == 9 and int(_cc.get(cv2.CAP_PROP_FRAME_WIDTH)) == 64 and abs(_cc.get(cv2.CAP_PROP_FPS) - 10.0) < 0.01)
-_seen = []
-while True:
-    _ok, _fr = _cc.read()
-    if not _ok:
-        break
-    _seen.append(int(_fr.mean()))
-check("chained clips: all 9 frames come out in order across the cut (brightness rises steadily)", len(_seen) == 9 and all(b > a for a, b in zip(_seen, _seen[1:])), str(_seen))
-_cc.set(cv2.CAP_PROP_POS_FRAMES, 6)
-_ok, _fr = _cc.read()
-check("chained clips: jumping to frame 6 lands in the second clip", _ok and abs(int(_fr.mean()) - (20 * 6 + 10)) <= 6 and int(_cc.get(cv2.CAP_PROP_POS_FRAMES)) == 7, str(int(_fr.mean())))
-_cc.set(cv2.CAP_PROP_POS_FRAMES, 4)
-_n_grab = 0
-while _cc.grab():
-    _n_grab += 1
-check("chained clips: grab() also crosses the cut (5 frames left from frame 4)", _n_grab == 5, str(_n_grab))
-_cc.release()
-_bad = os.path.join(_tmp, "other_size.mp4")
-_w = cv2.VideoWriter(_bad, cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (32, 24))
-_w.write(np.zeros((24, 32, 3), dtype=np.uint8))
-_w.release()
-try:
-    m.ChainedCapture([_paths[0], _bad])
-    check("clips of different sizes cannot be joined", False)
-except RuntimeError:
-    check("clips of different sizes cannot be joined", True)
 
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")

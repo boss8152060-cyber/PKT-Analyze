@@ -1593,71 +1593,6 @@ class ClipPlayerDialog:
         self.top.destroy()
 
 
-class ChainedCapture:
-    """Consecutive video files read as ONE continuous video (same interface as cv2.VideoCapture for what the run
-    uses: isOpened / get / set / read / grab / release). Used for clips that are the parts of one recording, so that the
-    tracker, the vehicle IDs, the time line and the analysis do not break at the cut."""
-
-    def __init__(self, paths):
-        self.paths = list(paths)
-        self.caps = [cv2.VideoCapture(p) for p in self.paths]
-        self.idx = 0
-        if not all(c.isOpened() for c in self.caps):
-            bad = [p for p, c in zip(self.paths, self.caps) if not c.isOpened()]
-            self.release()
-            raise RuntimeError("Unable to open video: " + ", ".join(bad))
-        w = [int(c.get(cv2.CAP_PROP_FRAME_WIDTH)) for c in self.caps]
-        h = [int(c.get(cv2.CAP_PROP_FRAME_HEIGHT)) for c in self.caps]
-        f = [float(c.get(cv2.CAP_PROP_FPS) or 0.0) for c in self.caps]
-        if len(set(w)) > 1 or len(set(h)) > 1 or (f and max(f) - min(f) > 0.01 * max(f[0], 1.0)):
-            self.release()
-            raise RuntimeError("Clips joined as one video must have the same image size and fps: "
-                               + ", ".join(f"{os.path.basename(p)} {a}x{b} {c:.2f} fps" for p, a, b, c in zip(self.paths, w, h, f)))
-        self.counts = [max(0, int(c.get(cv2.CAP_PROP_FRAME_COUNT))) for c in self.caps]
-        self.starts = [sum(self.counts[:i]) for i in range(len(self.counts))]
-
-    def isOpened(self):
-        return bool(self.caps) and all(c.isOpened() for c in self.caps)
-
-    def get(self, prop):
-        if prop == cv2.CAP_PROP_FRAME_COUNT:
-            return float(sum(self.counts))
-        if prop == cv2.CAP_PROP_POS_FRAMES:
-            return float(self.starts[self.idx] + self.caps[self.idx].get(cv2.CAP_PROP_POS_FRAMES))
-        return self.caps[0].get(prop)
-
-    def set(self, prop, value):
-        if prop != cv2.CAP_PROP_POS_FRAMES:
-            return all(c.set(prop, value) for c in self.caps)
-        value = max(0, int(value))
-        k = 0
-        for i, start in enumerate(self.starts):
-            if value >= start:
-                k = i
-        self.idx = k
-        for i, cap in enumerate(self.caps):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, (value - self.starts[i]) if i == k else 0)
-        return True
-
-    def _next(self, take):
-        ok, frame = take(self.caps[self.idx])
-        while not ok and self.idx + 1 < len(self.caps):
-            self.idx += 1
-            self.caps[self.idx].set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ok, frame = take(self.caps[self.idx])
-        return ok, frame
-
-    def read(self):
-        return self._next(lambda c: c.read())
-
-    def grab(self):
-        return self._next(lambda c: (c.grab(), None))[0]
-
-    def release(self):
-        for c in self.caps:
-            c.release()
-
-
 def _tools_module(name):
     """Import a helper from the tools folder next to this file (batch_run)."""
     tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools")
@@ -1719,7 +1654,7 @@ class ClipListPanel(ttk.Frame):
         ttk.Checkbutton(opts, text="ข้ามคลิปที่วิเคราะห์เสร็จแล้ว (ดูจากโฟลเดอร์ผลลัพธ์ของคลิปนั้น)", variable=self.skip_done_var).pack(side="left")
         ttk.Label(self, foreground="#555555", justify="left",
                   text="• ดับเบิลคลิกที่คลิปเพื่อเปิดดูวิดีโอและตั้งช่วงเวลา/การบันทึกวิดีโอ (เลือกหลายคลิปแล้วตั้งครั้งเดียวได้) — คลิปเดียวก็ใช้รายการนี้\n"
-                       "• คลิปที่เป็นส่วนต่อเนื่องของวิดีโอเดียวกัน (เช่น โดรนแบ่งไฟล์) → เลือกคลิปที่สอง/ถัดไป แล้วกด \"ต่อจากคลิปก่อน\": วิเคราะห์เป็นวิดีโอเดียว รถคันเดิมได้ ID เดิมข้ามรอยตัด (ผลอยู่ในโฟลเดอร์เดียว ชื่อ <คลิปแรก>_to_<คลิปสุดท้าย>)\n"
+                       "• คลิปที่เป็นส่วนต่อเนื่องของคลิปก่อนหน้า (เช่น โดรนแบ่งไฟล์) → เลือกคลิปแล้วกด \"ต่อจากคลิปก่อน\": การติดตามต่อเนื่อง รถคันเดิมได้ ID เดิมข้ามรอยตัด เลขใหม่นับต่อกัน — แต่ช่วงวิเคราะห์ การบันทึกวิดีโอ และ CSV ยังแยกต่อคลิป\n"
                        "• เลข ID ต่อจากคลิปก่อนหน้าในโฟลเดอร์เดียวกันเสมอ (ไม่ซ้ำกันทั้งชุด)\n"
                        "• คลิปที่เพิ่มเข้ามาตั้งเป็น \"ไม่บันทึกวิดีโอ\" ไว้ก่อน — ต้องการบันทึกให้กดปุ่ม \"ทุกคลิป: บันทึกตลอดช่วงที่วิเคราะห์\" หรือตั้งเป็นรายคลิป\n"
                        "• ผลลัพธ์สร้างโครงสร้างโฟลเดอร์ตามที่นำเข้า: โฟลเดอร์ผลลัพธ์ / ...โฟลเดอร์ต้นฉบับ... / ชื่อคลิป / (โฟลเดอร์ที่มีแล้วใช้อันเดิม)\n"
@@ -1775,11 +1710,6 @@ class ClipListPanel(ttk.Frame):
         for i, c in enumerate(self.clips):
             ana, rec = self.bt.clip_label(c)
             cont = bool(c.get("continues_previous")) and i > 0
-            heads_chain = (not cont) and i + 1 < len(self.clips) and bool(self.clips[i + 1].get("continues_previous"))
-            if cont:
-                ana, rec = "ทั้งคลิป (ต่อกับชุด)", "(ตามคลิปแรกของชุด)"
-            elif heads_chain:
-                ana, rec = "ทั้งชุด (ไม่ใช้ช่วงเวลา)", ("ตลอดทั้งชุด" if c.get("save_video") else "ไม่บันทึก")
             name = "/".join(x for x in (c.get("rel_dir", ""), os.path.basename(c["video"])) if x)
             self.tree.insert("", "end", iid=str(i), values=(name, ana, rec, "↳ ต่อจากคลิปก่อน" if cont else ""))
         if self.clips:
@@ -1792,12 +1722,6 @@ class ClipListPanel(ttk.Frame):
             messagebox.showinfo("คลิปวิดีโอ", "เลือกคลิปในรายการก่อน")
             return
         clip = self.clips[sel[0]]
-        in_chain = any(self.clips[i].get("continues_previous") and i > 0 for i in sel) or any(
-            i + 1 < len(self.clips) and self.clips[i + 1].get("continues_previous") for i in sel)
-        if in_chain:
-            messagebox.showinfo("คลิปวิดีโอ", "คลิปนี้อยู่ในชุดที่ต่อเนื่องกัน: โปรแกรมวิเคราะห์ทุกเฟรมของทุกคลิปในชุด จึงไม่ใช้ช่วงเวลาวิเคราะห์/ช่วงบันทึกที่ตั้งไว้ "
-                                "(เลือกได้เฉพาะ บันทึก/ไม่บันทึก ของคลิปแรกในชุด = บันทึกทั้งชุดหรือไม่)\n\n"
-                                "ถ้าต้องการตัดช่วงเวลา ให้เอาเครื่องหมาย \"ต่อจากคลิปก่อน\" ออกก่อน")
         try:
             dlg = ClipPlayerDialog(self.app, clip["video"], clip)
         except Exception as exc:
@@ -1810,8 +1734,8 @@ class ClipListPanel(ttk.Frame):
             self.tree.selection_set([str(i) for i in sel])
 
     def toggle_continue(self):
-        """Mark the selected clips as the continuation of the clip above them in the list (consecutive parts of one
-        recording): they are analysed together as one video. Clears the mark when it is already set."""
+        """Mark the selected clips as the continuation of the clip above them in the list (the tracking and vehicle IDs
+        carry on from that clip; time range, recording and results stay separate). Clears the mark when it is already set."""
         sel = [i for i in self.selected_indexes() if i > 0]
         if not sel:
             messagebox.showinfo("คลิปวิดีโอ", "เลือกคลิปที่ต่อจากคลิปก่อนหน้า (ไม่ใช่คลิปแรกของรายการ)")
@@ -2110,6 +2034,7 @@ class Run1App:
         self.run3_was_requested = False
         self._batch_mode = False
         self._last_run_error = ""
+        self._carry = None
 
         self.status_var = tk.StringVar(
             value="Ready"
@@ -2887,22 +2812,22 @@ class Run1App:
         rows, runs, empties = [], [], []
         stopped = False
         fatal = ""
-        units = bt.group_units(clips)
-        n = len(units)
+        n = len(clips)
+        self._carry = None
         try:
             os.makedirs(out_root, exist_ok=True)
-            for i, unit in enumerate(units, 1):
-                c = unit[0]
-                chain = [x["video"] for x in unit] if len(unit) > 1 else None
+            for i, c in enumerate(clips, 1):
                 rel = str(c.get("rel_dir", "") or "")
                 runs.append((c["video"], rel, {}))
                 if self.stop_event.is_set():
                     stopped = True
                     break
                 st, name, run_dir = bt.clip_settings(base_settings, c["video"], rel, {}, out_root, c, c.get("save_video", False),
-                                                     show_preview=bool(base_settings.get("show_preview")), chain=chain)
+                                                     show_preview=bool(base_settings.get("show_preview")))
+                st["continue_tracker"] = bool(c.get("continues_previous")) and i > 1
                 os.makedirs(run_dir, exist_ok=True)
                 if skip_done and bt.summary_path(run_dir, name) is not None:
+                    self._carry = None          # nothing was run, so there is no tracker to continue
                     rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, "", 0.0))
                     self.update_ui(status=f"Batch {i}/{n}: {name} — already done, skipped")
                     continue
@@ -5164,6 +5089,13 @@ class Run1App:
     # BYTE TRACK YAML
     # ========================================================
 
+    @staticmethod
+    def _tracker_signature(settings):
+        """Settings that must be the same for a tracker to be carried over to the next clip."""
+        keys = ("model", "tracker", "confidence", "iou", "img_size", "track_high", "track_low", "new_track",
+                "track_buffer", "match_threshold", "precision", "device", "frame_skip")
+        return tuple(str(settings.get(k)) for k in keys)
+
     def create_bytetrack_yaml(self, output_dir, run_name="Run"):
 
         yaml_path = os.path.join(
@@ -5306,6 +5238,17 @@ class Run1App:
             video_path = settings["video"]
             output_dir = settings["output"]
 
+            # "Continues the previous clip": the tracker of the clip analysed right before this one is carried on, so a
+            # vehicle that was being tracked keeps its ID, and new vehicles get the next numbers. The time range, the
+            # recording and every result file stay separate for each clip.
+            carry = self._carry if settings.get("continue_tracker") else None
+            self._carry = None                  # only the clip run right before can be continued
+            tracker_sig = self._tracker_signature(settings)
+            if carry is not None and carry.get("sig") != tracker_sig:
+                carry = None                    # the tracker / detection settings changed: start a new tracker
+            # vehicle IDs continue after the previous clips of the folder (a continued clip keeps its predecessor's numbering)
+            id_offset = carry["id_offset"] if carry else int(settings.get("id_offset", 0) or 0)
+
             os.makedirs(
                 output_dir,
                 exist_ok=True
@@ -5439,13 +5382,13 @@ class Run1App:
             )
             print()
 
-            model = YOLO(
+            model = carry["model"] if carry else YOLO(
                 model_path
             )
 
-            chain_paths = [p for p in (settings.get("video_chain") or []) if p]
-            id_offset = int(settings.get("id_offset", 0) or 0)       # vehicle IDs continue after the previous clips
-            cap = (ChainedCapture(chain_paths) if len(chain_paths) > 1 else cv2.VideoCapture(video_path))
+            cap = cv2.VideoCapture(
+                video_path
+            )
 
             if not cap.isOpened():
 
@@ -6548,6 +6491,8 @@ class Run1App:
                     status,
                 ])
 
+            self._carry = {"model": model, "id_offset": id_offset, "sig": tracker_sig}     # the next clip may continue this tracker
+
             # Finalize a compact per-ID route summary before closing any files.
             if measurement_enabled:
                 for track_id in sorted(zone_track_state):
@@ -6790,7 +6735,7 @@ class Run1App:
                 "unique_track_ids": len(track_stats),
                 "max_track_id": (max(track_stats) if track_stats else id_offset),
                 "id_offset": id_offset,
-                "video_chain": chain_paths or None,
+                "tracker_continued_from_previous_clip": carry is not None,
                 "max_active_tracks": max_active_tracks,
                 "id_switch_warnings": id_switch_warning_count,
                 "detection_loss_events": detection_loss_count,
