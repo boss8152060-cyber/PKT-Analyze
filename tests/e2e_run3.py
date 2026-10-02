@@ -114,7 +114,7 @@ def run_scene(app, vehicles):
     app._run3_cfg = app._run3_snapshot_config()
     app.run3_processing({}, out, "T")
     app.root.update_idletasks()
-    with open(os.path.join(out, "Run_3_Summary.json"), encoding="utf-8") as f:
+    with open(os.path.join(out, "T_Summary.json"), encoding="utf-8") as f:
         summary = json.load(f)
     return out, summary
 
@@ -138,10 +138,10 @@ def scene1(app):
     dtracks = summary["diagnostics"]["duplicate_tracks"]
     check("duplicate track (same car, second ID) detected and its frames removed",
           dtracks["tracks_affected"] == 1 and dtracks["frames_removed"] == 61, str(dtracks))
-    dup_rows = read_csv(os.path.join(out, "Run_3_Duplicate_Tracks.csv"))
+    dup_rows = read_csv(os.path.join(out, "T_Duplicate_Tracks.csv"))
     check("duplicate report: ID 6 is a duplicate of ID 2", len(dup_rows) == 1 and dup_rows[0]["Duplicate_ID"] == "6"
           and dup_rows[0]["Kept_ID"] == "2", str(dup_rows))
-    lc_rows = read_csv(os.path.join(out, "Run_3_Lateral_Clearance.csv"))
+    lc_rows = read_csv(os.path.join(out, "T_Lateral_Clearance.csv"))
     check("no Lateral Clearance pair involves the duplicate ID 6 (it would show a fake -1.8 m)",
           all("6" not in r["Pair_ID"].split("_") for r in lc_rows),
           str(sorted({r["Pair_ID"] for r in lc_rows if "6" in r["Pair_ID"].split("_")})))
@@ -153,7 +153,7 @@ def scene1(app):
     check("movement 1-3-4 = 1 vehicle (E)", mc.get("1-3-4") == 1, str(mc))
 
     # ---- Speed ----
-    det = read_csv(os.path.join(out, "Run_3_Speed_Detail.csv"))
+    det = read_csv(os.path.join(out, "T_Speed_Detail.csv"))
     by = {(r["Vehicle_ID"], r["Scope"], r["Key"]): float(r["Speed_kmh"]) for r in det}
     for vid, kmh in (("1", 36.0), ("2", 36.0), ("3", 18.0)):
         zs = [k for (v, sc, k) in by if v == vid and sc == "Zone"]
@@ -162,7 +162,7 @@ def scene1(app):
               all(abs(by[(vid, 'Zone', k)] - kmh) < 0.6 for k in zs), str({k: round(by[(vid, 'Zone', k)], 2) for k in zs}))
     check("vehicle 1 Movement 2-3-4 speed ~36", abs(by.get(("1", "Movement", "2-3-4"), 0) - 36.0) < 0.6)
     check("vehicle 3 Movement 5-6-7 speed ~18", abs(by.get(("3", "Movement", "5-6-7"), 0) - 18.0) < 0.6)
-    stats = read_csv(os.path.join(out, "Run_3_Speed_Statistics.csv"))
+    stats = read_csv(os.path.join(out, "T_Speed_Statistics.csv"))
     z2 = [r for r in stats if r["Scope"] == "Zone" and r["Key"] == "Zone 2" and r["Vehicle_Class"] == "All"][0]
     check("Speed stats Zone 2: N=2, V50 ~36", z2["N"] == "2" and abs(float(z2["V50_kmh"]) - 36.0) < 0.6, str(z2))
     check("untracked detections diagnostic present (0 here)", summary["diagnostics"]["untracked_detections"]["rows_with_track_id_minus_1"] == 0)
@@ -170,7 +170,7 @@ def scene1(app):
     app.run3_zone_calibrations = {"3": {"points": [[1000, -200], [2000, -200], [2000, 800], [1000, 800]], "lengths": [20, 20, 20, 20]}}
     out_z, summary_z = run_scene(app, veh)
     app.run3_zone_calibrations = {}
-    det_z = read_csv(os.path.join(out_z, "Run_3_Speed_Detail.csv"))
+    det_z = read_csv(os.path.join(out_z, "T_Speed_Detail.csv"))
     bz = {(r["Vehicle_ID"], r["Key"]): (float(r["Speed_kmh"]), r["Calibration_Mode"]) for r in det_z if r["Scope"] == "Zone"}
     check("zone calibration: Zone 3 speed of vehicle 1 doubles (36 -> 72 km/h, own scale 50 px/m)", abs(bz[("1", "Zone 3")][0] - 72.0) < 1.5 and bz[("1", "Zone 3")][1] == "Zone_Homography", str(bz[("1", "Zone 3")]))
     check("zone calibration: Zone 2 and Zone 4 keep the base scale (36 km/h)", abs(bz[("1", "Zone 2")][0] - 36.0) < 1.0 and abs(bz[("1", "Zone 4")][0] - 36.0) < 1.0 and bz[("1", "Zone 2")][1] != "Zone_Homography", str((bz[("1", "Zone 2")], bz[("1", "Zone 4")])))
@@ -180,10 +180,10 @@ def scene1(app):
     app.run3_speed_max_var.set("30")
     out_o, summary_o = run_scene(app, veh)
     app.run3_speed_max_var.set("80")
-    det_o = read_csv(os.path.join(out_o, "Run_3_Speed_Detail.csv"))
+    det_o = read_csv(os.path.join(out_o, "T_Speed_Detail.csv"))
     flagged = {r["Vehicle_ID"] for r in det_o if "Speed_Above_Max" in r["QC_Flag"]}
     check("max speed 30: the 36 km/h vehicles 1, 2, 4, 5 are flagged, the 18 km/h vehicle 3 is not", flagged == {"1", "2", "4", "5"}, str(flagged))
-    st_o = read_csv(os.path.join(out_o, "Run_3_Speed_Statistics.csv"))
+    st_o = read_csv(os.path.join(out_o, "T_Speed_Statistics.csv"))
     z2o = [r for r in st_o if r["Scope"] == "Zone" and r["Key"] == "Zone 2" and r["Vehicle_Class"] == "All"]
     check("flagged speeds are left out of the statistics (Zone 2 has no 18 km/h vehicle -> no row)", not z2o, str(z2o))
     check("flagged rows stay in the detail file", len(det_o) == len(det))
@@ -195,16 +195,16 @@ def scene1(app):
     check("sensitivity: speed_max 80 -> Zone 2 N=2; 30 -> Zone 2 has no row (both 36 km/h vehicles excluded)",
           zs.get("80", {}).get("N") == "2" and "30" not in zs, str(zs))
     check("sensitivity leaves the source folder untouched", not os.path.exists(os.path.join(out, "Sensitivity_speed_max_kmh.csv")))
-    raw_speed = read_csv(os.path.join(out, "Run_3_Speed.csv"), raw=True)
+    raw_speed = read_csv(os.path.join(out, "T_Speed.csv"), raw=True)
     check("CSV movement / zone-sequence cells use arrows (Excel would turn 2-3-4 into a date)",
           any(r["Zone_Sequence"] == "2→3→4" for r in raw_speed) and not any("-" in r["Zone_Sequence"] for r in raw_speed),
           str([r["Zone_Sequence"] for r in raw_speed][:5]))
-    wide = read_csv(os.path.join(out, "Run_3_Speed.csv"))
+    wide = read_csv(os.path.join(out, "T_Speed.csv"))
     check("vehicle summary rows = 5 (the duplicate ID 6 has no rows left)", len(wide) == 5, str(len(wide)))
     check("vehicle summary has Zone_Sequence 2-3-4", any(r["Zone_Sequence"] == "2-3-4" for r in wide))
 
     # ---- LDP ----
-    ldp = read_csv(os.path.join(out, "Run_3_LDP.csv"))
+    ldp = read_csv(os.path.join(out, "T_LDP.csv"))
     lz = {(r["Vehicle_ID"], r["Zone"]): r for r in ldp}
     check("LDP rows for every main-road vehicle A, B, C (any class); D, E are not main-road", {v for v, _ in lz} == {"1", "2", "3"}, str(sorted(lz)))
     check("LDP car B (straight) ~ 0 %", float(lz[("2", "Zone 3")]["LDP_percent"]) < 0.5)
@@ -219,7 +219,7 @@ def scene1(app):
     check("LDP zone 1 never reported", all(r["Zone"] != "Zone 1" for r in ldp))
 
     # ---- Lateral Clearance ----
-    lc = read_csv(os.path.join(out, "Run_3_Lateral_Clearance.csv"))
+    lc = read_csv(os.path.join(out, "T_Lateral_Clearance.csv"))
     pairs_seen = {r["Pair_ID"] for r in lc}
     check("Lateral Clearance pairs (all classes): A-B, A-E, B-E, D-E; crossing A-D / B-D excluded",
           pairs_seen == {"1_2", "1_5", "2_5", "4_5"}, str(sorted(pairs_seen)))
@@ -238,15 +238,15 @@ def scene1(app):
     ae = [float(r["Lateral_Clearance_m"]) for r in lc if r["Pair_ID"] == "1_5" and r["Zone"] == "Zone 4"]
     check("Lateral Clearance A-E zone 4 = 1.6 - 1.3 = 0.30 m", bool(ae) and all(abs(v - 0.30) < 0.03 for v in ae),
           f"n={len(ae)}" + (f" mean={sum(ae)/len(ae):.3f}" if ae else ""))
-    pr = read_csv(os.path.join(out, "Run_3_Lateral_Clearance_Pairs.csv"))
+    pr = read_csv(os.path.join(out, "T_Lateral_Clearance_Pairs.csv"))
     check("Lateral Clearance pair summary rows (A-B x3, A-E x2, B-E x2, D-E x1)", len(pr) == 8, str([(r['Pair_ID'], r['Zone']) for r in pr]))
     # motorcycle-pairs-only switch: only the pairs that include a motorcycle remain
     app.run3_lc_motorcycle_pairs_only_var.set(True)
     out_m, _ = run_scene(app, veh)
     app.run3_lc_motorcycle_pairs_only_var.set(False)
-    only_m = {r["Pair_ID"] for r in read_csv(os.path.join(out_m, "Run_3_Lateral_Clearance.csv"))}
+    only_m = {r["Pair_ID"] for r in read_csv(os.path.join(out_m, "T_Lateral_Clearance.csv"))}
     check("Lateral Clearance motorcycle-pairs-only option keeps A-B and A-E only", only_m == {"1_2", "1_5"}, str(sorted(only_m)))
-    ind = read_csv(os.path.join(out, "Run_3_Indicator_Summary.csv"))
+    ind = read_csv(os.path.join(out, "T_Indicator_Summary.csv"))
     check("indicator summary lists LDP, Lateral Clearance, Speed", any("LDP" in r["Indicator"] for r in ind) and any("Lateral Clearance" in r["Indicator"] for r in ind) and any("Speed" in r["Indicator"] for r in ind))
 
 
@@ -268,13 +268,13 @@ def scene2(app):
     app.run3_ttc_side_enabled_var.set(False)
     out_off, _ = run_scene(app, veh)
     app.run3_ttc_side_enabled_var.set(True)
-    kinds_off = {r["TTC_Type"] for r in read_csv(os.path.join(out_off, "Run_3_TTC.csv"))}
+    kinds_off = {r["TTC_Type"] for r in read_csv(os.path.join(out_off, "T_TTC.csv"))}
     check("TTC side collision can be switched off (only RearEnd remains)", kinds_off == {"RearEnd"}, str(kinds_off))
     # a tighter window rule (factor 0, margin 0.05 s): P-R arrive 0.1 s apart -> no longer a collision course
     app.run3_ttc_side_factor_var.set("0"); app.run3_ttc_side_margin_var.set("0.05")
     out_tight, _ = run_scene(app, veh)
     app.run3_ttc_side_factor_var.set("1.0"); app.run3_ttc_side_margin_var.set("0.0")
-    kinds_tight = {r["TTC_Type"] for r in read_csv(os.path.join(out_tight, "Run_3_TTC.csv"))}
+    kinds_tight = {r["TTC_Type"] for r in read_csv(os.path.join(out_tight, "T_TTC.csv"))}
     check("TTC side window is adjustable (factor 0, margin 0.05 s drops the 0.1 s apart pair)", kinds_tight == {"RearEnd"}, str(kinds_tight))
 
     reasons = summary["diagnostics"].get("empty_outputs", [])
@@ -284,7 +284,7 @@ def scene2(app):
     check("scene 2 movements: P = 2-3-4, Q and R = 1-3-6-7 (partial)", mv.get("2-3-4") == 1 and mv.get("1-3-6-7") == 2, str(mv))
 
     # ---- PET ----
-    pet = read_csv(os.path.join(out, "Run_3_PET.csv"))
+    pet = read_csv(os.path.join(out, "T_PET.csv"))
     pairs = {(r["Vehicle_ID_A"], r["Vehicle_ID_B"]): r for r in pet}
     check("PET exactly one PET event: P-Q (P-R overlaps in time, Q-R same movement, F/L no movement)",
           set(pairs) == {("1", "2")}, str(sorted(pairs)))
@@ -295,7 +295,7 @@ def scene2(app):
               f"{r['Conflict_Type']} {r['Conflict_Zone']}")
 
     # ---- TTC ----
-    ttc = read_csv(os.path.join(out, "Run_3_TTC.csv"))
+    ttc = read_csv(os.path.join(out, "T_TTC.csv"))
     kinds = {(r["TTC_Type"], frozenset((r["Vehicle_A_ID"], r["Vehicle_B_ID"]))): r for r in ttc}
     check("TTC event set = RearEnd F->L and Side P-R",
           set(kinds) == {("RearEnd", frozenset(("4", "5"))), ("Side", frozenset(("1", "3")))},
@@ -368,7 +368,7 @@ def scene3(app):
 
     mv = summary["source_counts"]["movement_counts"]
     check("scene 3 movements: S = 1-3-4, stream = 2-3-4 x3", mv.get("1-3-4") == 1 and mv.get("2-3-4") == 3, str(mv))
-    gap = read_csv(os.path.join(out, "Run_3_Gap_Acceptance.csv"))
+    gap = read_csv(os.path.join(out, "T_Gap_Acceptance.csv"))
     roles = sorted(r["Gap_Role"] for r in gap)
     check("Gap Acceptance exactly one rejected + one accepted gap (jitter did not add gaps)",
           roles == ["Accepted", "Rejected"], str(roles) + " " + str([r["X31_Available_Gap"] for r in gap]))
@@ -421,7 +421,7 @@ def scene4(app):
     mv = summary["source_counts"]["movement_counts"]
     check("scene 4 movements: subject 1-3-6-7, streams 2-3-4 x3 and 5-6-7 x3",
           mv.get("1-3-6-7") == 1 and mv.get("2-3-4") == 3 and mv.get("5-6-7") == 3, str(mv))
-    gap = read_csv(os.path.join(out, "Run_3_Gap_Acceptance.csv"))
+    gap = read_csv(os.path.join(out, "T_Gap_Acceptance.csv"))
     acc = [r for r in gap if r["Gap_Role"] == "Accepted"]
     rej = [r for r in gap if r["Gap_Role"] == "Rejected"]
     check("Gap Acceptance two simultaneous streams: 1 accepted + 2 rejected", len(acc) == 1 and len(rej) == 2,
@@ -457,7 +457,7 @@ def scene6(app):
     app.run3_gap_subject_5631_var.set(False)
     out, summary = run_scene(app, veh)
     print("scene 6 output:", out)
-    gap = read_csv(os.path.join(out, "Run_3_Gap_Acceptance.csv"))
+    gap = read_csv(os.path.join(out, "T_Gap_Acceptance.csv"))
     check("Gap Acceptance works without a Line (origin-zone fallback): 1 accepted + 1 rejected",
           sorted(r["Gap_Role"] for r in gap) == ["Accepted", "Rejected"], str([(r["Gap_Role"], r["X31_Available_Gap"]) for r in gap]))
     by = {r["Gap_Role"]: r for r in gap}
@@ -496,7 +496,7 @@ def scene7(app):
     app.run3_gap_subject_5631_var.set(False)
     out, summary = run_scene(app, veh)
     print("scene 7 output:", out)
-    gap = read_csv(os.path.join(out, "Run_3_Gap_Acceptance.csv"))
+    gap = read_csv(os.path.join(out, "T_Gap_Acceptance.csv"))
     rows = [(r["Decision_Stage"], r["Gap_Role"], round(float(r["X31_Available_Gap"]), 2)) for r in gap]
     print("   rows:", rows)
     access = [r for r in gap if r["Decision_Stage"] == "Access"]
@@ -525,9 +525,9 @@ def scene5(app):
     ms = summary["source_counts"]["movement_status"]
     check("wobbling car recognised as 2-3-4 after removing repeated zones", ms.get("Exact_AfterDedupe") == 1
           and summary["source_counts"]["movement_counts"].get("2-3-4") == 1, str(ms))
-    ldp = read_csv(os.path.join(out, "Run_3_LDP.csv"))
+    ldp = read_csv(os.path.join(out, "T_LDP.csv"))
     check("LDP is computed for it (status Exact_AfterDedupe counts as Exact)", len(ldp) >= 2, str(len(ldp)))
-    wide = read_csv(os.path.join(out, "Run_3_Speed.csv"))
+    wide = read_csv(os.path.join(out, "T_Speed.csv"))
     check("vehicle speed table shows status and movement", wide[0]["Movement"] == "2-3-4" and wide[0]["Movement_Status"] == "Exact_AfterDedupe")
 
 

@@ -2806,7 +2806,7 @@ class Run1App:
                 st, name, run_dir = bt.clip_settings(base_settings, c["video"], rel, {}, out_root, c, c.get("save_video", False),
                                                      show_preview=bool(base_settings.get("show_preview")))
                 os.makedirs(run_dir, exist_ok=True)
-                if skip_done and os.path.isfile(os.path.join(run_dir, "Run_3_Summary.json")):
+                if skip_done and bt.summary_path(run_dir, name) is not None:
                     rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, "", 0.0))
                     self.update_ui(status=f"Batch {i}/{n}: {name} — already done, skipped")
                     continue
@@ -2840,7 +2840,7 @@ class Run1App:
         self.status_var.set(f"Batch finished: {len(ok)}/{total} clips" + (" (stopped)" if stopped else ""))
         self.progress_var.set("100%" if not stopped else "")
         msg = f"Batch {'หยุดกลางทาง' if stopped else 'เสร็จ'}: {len(ok)} จาก {total} คลิป\n\nผลลัพธ์:\n{out_root}\n\n"
-        msg += "• โฟลเดอร์ของแต่ละคลิป (ตามโครงสร้างต้นฉบับ) = CSV ของคลิปนั้น\n• Batch_Comparison.csv = ตารางเปรียบเทียบทุกคลิปในโฟลเดอร์ผลลัพธ์"
+        msg += "• โฟลเดอร์ของแต่ละคลิป (ตามโครงสร้างต้นฉบับ) = CSV ของคลิปนั้น (ชื่อไฟล์ขึ้นต้นด้วยชื่อคลิป)\n• All_Clips (ในโฟลเดอร์ชั้นบนสุดที่นำเข้า) = CSV รวมทุกคลิป มีคอลัมน์ Clip บอกว่าแถวมาจากคลิปไหน (รวมคลิปรอบก่อน ๆ ที่อยู่ในโฟลเดอร์เดียวกัน)\n• Batch_Comparison.csv = ตารางเปรียบเทียบทุกคลิปในโฟลเดอร์ผลลัพธ์"
         if bad:
             msg += "\n\nคลิปที่มีปัญหา:\n" + "\n".join(f"- {r['Run']}: {r['Status']}" for r in bad)
         if empties:
@@ -2848,7 +2848,7 @@ class Run1App:
             for clip_name, reasons in empties[:3]:
                 msg += f"\n\n[{clip_name}]\n" + "\n".join("• " + r for r in reasons)
             if len(empties) > 3:
-                msg += f"\n\n… และอีก {len(empties) - 3} คลิป (ดูใน Run_3_Summary.json → diagnostics.empty_outputs ของแต่ละคลิป)"
+                msg += f"\n\n… และอีก {len(empties) - 3} คลิป (ดูใน <ชื่อคลิป>_Summary.json → diagnostics.empty_outputs ของแต่ละคลิป)"
         if fatal:
             msg += "\n\nข้อผิดพลาด: " + fatal
         messagebox.showinfo("PK Studio Batch", msg)
@@ -5068,11 +5068,11 @@ class Run1App:
     # BYTE TRACK YAML
     # ========================================================
 
-    def create_bytetrack_yaml(self, output_dir):
+    def create_bytetrack_yaml(self, output_dir, run_name="Run"):
 
         yaml_path = os.path.join(
             output_dir,
-            "Run_1_Research_ByteTrack.yaml"
+            run_name + "_Research_ByteTrack.yaml"
         )
 
         text = (
@@ -5425,7 +5425,8 @@ class Run1App:
 
                 tracker_path = (
                     self.create_bytetrack_yaml(
-                        output_dir
+                        output_dir,
+                        run_name
                     )
                 )
 
@@ -8297,10 +8298,10 @@ class Run1App:
             rows, lc_diag = self._run3_lateral_clearance(tracks, c, sequence_by_id)
             fields = ["Site_ID","Pair_ID","Timestamp","Zone","Vehicle_A_ID","Vehicle_A_Class","Vehicle_B_ID","Vehicle_B_Class","Zone_Sequence_A","Zone_Sequence_B","Along_m","LS_Meter","Signed_Lateral_m","Width_A_m","Width_B_m","Length_A_m","Length_B_m","Lateral_Clearance_m","QC_Flag"]
             row_counts["lc"] = len(rows)
-            outputs["lateral_clearance"] = write_csv("Run_3_Lateral_Clearance.csv", fields, rows)
+            outputs["lateral_clearance"] = write_csv(f"{run_name}_Lateral_Clearance.csv", fields, rows)
             pairs = self._run3_lc_pair_summary(rows)
             pair_fields = ["Site_ID","Pair_ID","Zone","Vehicle_A_ID","Vehicle_A_Class","Vehicle_B_ID","Vehicle_B_Class","Zone_Sequence_A","Zone_Sequence_B","Start_Time","End_Time","Samples","Lateral_Clearance_Min_m","Lateral_Clearance_Mean_m","QC_Flag"]
-            outputs["lateral_clearance_pairs"] = write_csv("Run_3_Lateral_Clearance_Pairs.csv", pair_fields, pairs)
+            outputs["lateral_clearance_pairs"] = write_csv(f"{run_name}_Lateral_Clearance_Pairs.csv", pair_fields, pairs)
             s_ = indicator("Lateral Clearance (all measured samples)", "Distance", "m", "All samples",
                            [float(r["Lateral_Clearance_m"]) for r in rows])
             indicator("Lateral Clearance (minimum per pair and zone)", "Distance", "m", "Pair minimum",
@@ -8314,7 +8315,7 @@ class Run1App:
                       [float(r["Lateral_Clearance_Min_m"]) for r in pairs if float(r["Lateral_Clearance_Min_m"]) < 0])
             summary["indicators"]["Lateral_Clearance"] = s_
             summary["diagnostics"]["lc"] = lc_diag
-        run_step("lc", "Run_3_Lateral_Clearance.csv", do_lc)
+        run_step("lc", f"{run_name}_Lateral_Clearance.csv", do_lc)
 
         # ---------------- LDP (distance) ----------------
         def do_ldp():
@@ -8322,7 +8323,7 @@ class Run1App:
             rows = self._run3_ldp(tracks, c, movement_by_id, movement_source_by_id)
             fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","LDP_percent","LDP_Level","Mean_Speed_kmh","Speed_Level","Calibration_Mode","QC_Flag"]
             row_counts["ldp"] = len(rows)
-            outputs["ldp"] = write_csv("Run_3_LDP.csv", fields, rows)
+            outputs["ldp"] = write_csv(f"{run_name}_LDP.csv", fields, rows)
             vals = [float(r["LDP_percent"]) for r in rows]
             note = f"W_entry={c['w_entry_m']} m; W_opp={c['w_opp_m']} m; smoothing={c['ldp_smoothing_samples']}"
             s_ = indicator("Lane/Lateral Deviation Position (LDP)", "Distance", "%", "All", vals, note)
@@ -8333,7 +8334,7 @@ class Run1App:
             summary["indicators"]["LDP"] = s_
             summary["diagnostics"]["ldp"] = (f"rows={len(rows)}; zones={sorted(c['ldp_zones'])}; all vehicle classes; "
                                              "main-road movements 2-3-4 / 5-6-7 only; LDP = dY / (W/2) x 100; risk level = DOH table")
-        run_step("ldp", "Run_3_LDP.csv", do_ldp)
+        run_step("ldp", f"{run_name}_LDP.csv", do_ldp)
 
         # ---------------- Gap Acceptance (time) ----------------
         def do_gap():
@@ -8341,7 +8342,7 @@ class Run1App:
             gap_rows = self._run3_gap(tracks, c, mapping, movement_by_id)
             fields = ["Site_ID","Decision_Event_ID","Opportunity_No","Subject_ID","Subject_Class","Subject_Movement","Decision_Stage","Decision_Zone","Gap_Evaluation_Time","X32_Waiting_Time","Conflicting_Movement","Conflicting_ID_A","Conflicting_Class_A","Conflicting_ID_B","Conflicting_Class_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","Subject_Speed_kmh","Conflict_Speed_A_kmh","Conflict_Speed_B_kmh","Gap_Role","Gap_Acceptance","Decision_Time","QC_Flag"]
             row_counts["gap"] = len(gap_rows)
-            outputs["gap_acceptance"] = write_csv("Run_3_Gap_Acceptance.csv", fields, gap_rows)
+            outputs["gap_acceptance"] = write_csv(f"{run_name}_Gap_Acceptance.csv", fields, gap_rows)
             rejected = defaultdict(list); accepted = defaultdict(list)
             for r in gap_rows:
                 key = (r["Subject_Class"], r["Subject_Movement"], r["Subject_ID"])
@@ -8364,7 +8365,7 @@ class Run1App:
                     "MLE_mu": self._fmt(mle["mu"] if mle else None), "MLE_sigma": self._fmt(mle["sigma"] if mle else None),
                 })
             if critical:
-                outputs["critical_gap"] = write_csv("Run_3_Critical_Gap.csv", list(critical[0].keys()), critical)
+                outputs["critical_gap"] = write_csv(f"{run_name}_Critical_Gap.csv", list(critical[0].keys()), critical)
             acc_vals = [float(r["X31_Available_Gap"]) for r in gap_rows if r["Gap_Acceptance"] == 1]
             rej_vals = [float(r["X31_Available_Gap"]) for r in gap_rows if r["Gap_Acceptance"] == 0]
             indicator("Gap Acceptance — accepted gaps", "Time", "s", "Accepted", acc_vals)
@@ -8377,7 +8378,7 @@ class Run1App:
             }
             summary["diagnostics"]["gap"] = dict(getattr(self, "_run3_gap_diag", {}), rows=len(gap_rows),
                                                  rule="two-stage Access/Exit (v26 5.14.11); Line optional (origin-zone entry fallback)")
-        run_step("gap", "Run_3_Gap_Acceptance.csv", do_gap)
+        run_step("gap", f"{run_name}_Gap_Acceptance.csv", do_gap)
 
         # ---------------- TTC (time) ----------------
         def do_ttc():
@@ -8385,7 +8386,7 @@ class Run1App:
             rows, diag = self._run3_ttc(tracks, c, movement_by_id)
             fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","S_Conflict_Distance_m","CS_Closing_Speed_kmh","Speed_A_kmh","Speed_B_kmh","Dist_A_to_Crossing_m","Dist_B_to_Crossing_m","Arrival_Diff_s","Path_Angle_deg","TTC_s","TTC_Level","Speed_Level","QC_Flag"]
             row_counts["ttc"] = len(rows)
-            outputs["ttc"] = write_csv("Run_3_TTC.csv", fields, rows)
+            outputs["ttc"] = write_csv(f"{run_name}_TTC.csv", fields, rows)
             vals = [float(r["TTC_s"]) for r in rows]
             s_ = indicator("Time-to-Collision (TTCmin per event)", "Time", "s", "All", vals,
                            f"events with TTCmin <= {c['ttc_max_record_s']} s")
@@ -8398,7 +8399,7 @@ class Run1App:
                                  "margin_s": c["ttc_side_margin_s"], "min_angle_deg": c["ttc_side_min_angle_deg"],
                                  "ttc_is": c["ttc_side_mode"]}
             summary["diagnostics"]["ttc"] = diag
-        run_step("ttc", "Run_3_TTC.csv", do_ttc)
+        run_step("ttc", f"{run_name}_TTC.csv", do_ttc)
 
         # ---------------- PET (time) ----------------
         def do_pet():
@@ -8406,7 +8407,7 @@ class Run1App:
             rows, diag = self._run3_pet(tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
             fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","PET_s","PET_Risk_Level","QC_Flag"]
             row_counts["pet"] = len(rows)
-            outputs["pet"] = write_csv("Run_3_PET.csv", fields, rows)
+            outputs["pet"] = write_csv(f"{run_name}_PET.csv", fields, rows)
             vals = [float(r["PET_s"]) for r in rows]
             s = indicator("Post-Encroachment Time", "Time", "s", "All", vals)
             s["At_or_Below_Threshold"] = sum(v <= c["pet_threshold"] for v in vals)
@@ -8422,7 +8423,7 @@ class Run1App:
                                          for ct in ("Crossing", "Merging", "Diverging", "Merging/Diverging")}
             summary["indicators"]["PET"] = s
             summary["diagnostics"]["pet"] = diag
-        run_step("pet", "Run_3_PET.csv", do_pet)
+        run_step("pet", f"{run_name}_PET.csv", do_pet)
 
         # ---------------- Speed (V50, V85, Mean, SD) ----------------
         def do_speed():
@@ -8430,11 +8431,11 @@ class Run1App:
             speed_rows = self._run3_speed(tracks, c, movement_by_id, movement_source_by_id)
             fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Scope","Key","Movement","Movement_Status","Start_Time","End_Time","Start_Frame","End_Frame","Samples","Distance_m","Duration_s","Speed_kmh","Calibration_Mode","QC_Flag"]
             row_counts["speed"] = len(speed_rows)
-            outputs["speed_detail"] = write_csv("Run_3_Speed_Detail.csv", fields, speed_rows)
+            outputs["speed_detail"] = write_csv(f"{run_name}_Speed_Detail.csv", fields, speed_rows)
             vs = self._run3_speed_vehicle_summary(speed_rows, tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
-            outputs["speed"] = write_csv("Run_3_Speed.csv", self._run3_speed_vehicle_summary_fields(), vs)
+            outputs["speed"] = write_csv(f"{run_name}_Speed.csv", self._run3_speed_vehicle_summary_fields(), vs)
             stats = self._run3_speed_statistics(speed_rows, c)
-            outputs["speed_statistics"] = write_csv("Run_3_Speed_Statistics.csv",
+            outputs["speed_statistics"] = write_csv(f"{run_name}_Speed_Statistics.csv",
                 ["Site_ID","Scope","Key","Vehicle_Class","N","Mean_kmh","SD_kmh","V50_kmh","V85_kmh","V85_minus_V50_kmh","Min_kmh","Max_kmh"], stats)
             groups = defaultdict(list)
             n_outliers = sum(1 for r in speed_rows if "Speed_Above_Max" in str(r.get("QC_Flag", "")))
@@ -8452,17 +8453,17 @@ class Run1App:
             summary["diagnostics"]["speed"] = (f"vehicle_rows={len(vs)}; detail_rows={len(speed_rows)}; "
                                                f"zones={sorted(c['speed_zones'])}; smoothing_samples={c['speed_smoothing_samples']}; "
                                                f"max_plausible_kmh={c.get('speed_max_kmh', 0)}; above_max_excluded_from_statistics={n_outliers}")
-        run_step("speed", "Run_3_Speed.csv", do_speed)
+        run_step("speed", f"{run_name}_Speed.csv", do_speed)
 
         if duplicate_report:
             outputs["duplicate_tracks"] = write_csv(
-                "Run_3_Duplicate_Tracks.csv",
+                f"{run_name}_Duplicate_Tracks.csv",
                 ["Duplicate_ID", "Kept_ID", "Vehicle_Class", "Frames_Removed", "First_Frame", "Last_Frame", "Remaining_Rows_Of_Duplicate_ID"],
                 duplicate_report)
 
         if indicator_rows:
             outputs["indicator_summary"] = write_csv(
-                "Run_3_Indicator_Summary.csv",
+                f"{run_name}_Indicator_Summary.csv",
                 ["Site_ID","Indicator","Domain","Unit","Group","N","Mean","SD","Median","Min","Max","P85","Note"],
                 indicator_rows)
 
@@ -8502,7 +8503,7 @@ class Run1App:
         }
         summary["timings_s"] = dict(timings, total=round(time.time() - t_start, 3))
         summary["outputs"] = outputs
-        summary_path = os.path.join(output_dir, "Run_3_Summary.json")
+        summary_path = os.path.join(output_dir, f"{run_name}_Summary.json")
         with open(summary_path, "w", encoding="utf-8") as f:
             json.dump(self._json_safe(summary), f, indent=4, ensure_ascii=False)
         outputs["summary"] = summary_path
