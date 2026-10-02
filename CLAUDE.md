@@ -50,6 +50,7 @@
   3. `python tests/e2e_run3.py` — รัน Run 3 จริงบนฉากสังเคราะห์ที่รู้คำตอบ (เพิ่มการตรวจของตัวชี้วัดใหม่ทุกตัวในไฟล์นี้)
   4. `python tests/gui_line_editor.py` — ทดสอบหน้าต่างวาด Line (สร้างวิดีโอสังเคราะห์เอง)
   5. `python tests/smoke_gui.py` — สร้างหน้าต่างโปรแกรมแบบซ่อน ทดสอบ settings/validation (ต้องมี torch; ใส่พาธ `Detection_Records.csv` เป็นอาร์กิวเมนต์เพื่อทดสอบตัวจับ Movement กับข้อมูลจริง)
+  8. ถ้าแก้ส่วนต่อคลิป/ID ต่อเนื่อง รัน `py -3.12 tests/e2e_chain.py` (YOLO จริง ~2 นาที)
   7. `python tests/gui_layout.py` — ตรวจว่าไม่มี widget ซ้อนช่องกริดเดียวกัน (หน้าต่างหลัก + Perspective Calibration); เพิ่มหน้าต่างใหม่ต้องเพิ่มเข้าไฟล์นี้
   6. `python tests/gui_player.py` — เครื่องเล่นวิดีโอ/กำหนดช่วงเวลา; ถ้าแก้ส่วนช่วงเวลา/บันทึกวิดีโอ/Batch ให้รัน `py -3.12 tests/e2e_window.py` และ `py -3.12 tests/e2e_batch_gui.py` ด้วย (ใช้ YOLO จริงกับคลิปสั้นตัดจาก `Input/Video` ไม่ใช่ DJI_0426; ใช้เวลาราว 1–2 นาที)
   - ตัวชี้วัดใหม่ทุกตัวต้องมี unit test ด้วยข้อมูลสังเคราะห์ที่รู้คำตอบ

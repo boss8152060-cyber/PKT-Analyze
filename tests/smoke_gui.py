@@ -122,6 +122,47 @@ check("START with an empty list explains what to do and goes to step 1", len(_sh
 check("every indicator has its own switch in its group", all(hasattr(app, n) for n in ("run3_ldp_enabled_var", "run3_lc_enabled_var", "run3_gap_enabled_var", "run3_ttc_enabled_var", "run3_pet_enabled_var", "run3_speed_enabled_var")))
 check("reference mapping text widget exists (Gap Acceptance group)", hasattr(app, "run3_reference_text"))
 
+# --- ChainedCapture: consecutive clips read as one continuous video ---
+import tempfile
+import numpy as np
+cv2 = m.cv2
+_tmp = tempfile.mkdtemp(prefix="pk_chain_")
+_paths = []
+for _k, _n in enumerate((5, 4)):
+    _p = os.path.join(_tmp, f"part{_k}.mp4")
+    _w = cv2.VideoWriter(_p, cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (64, 48))
+    for _i in range(_n):
+        _w.write(np.full((48, 64, 3), 20 * (_k * 5 + _i) + 10, dtype=np.uint8))
+    _w.release()
+    _paths.append(_p)
+_cc = m.ChainedCapture(_paths)
+check("chained clips: frame count = sum, size and fps of the first", _cc.get(cv2.CAP_PROP_FRAME_COUNT) == 9 and int(_cc.get(cv2.CAP_PROP_FRAME_WIDTH)) == 64 and abs(_cc.get(cv2.CAP_PROP_FPS) - 10.0) < 0.01)
+_seen = []
+while True:
+    _ok, _fr = _cc.read()
+    if not _ok:
+        break
+    _seen.append(int(_fr.mean()))
+check("chained clips: all 9 frames come out in order across the cut (brightness rises steadily)", len(_seen) == 9 and all(b > a for a, b in zip(_seen, _seen[1:])), str(_seen))
+_cc.set(cv2.CAP_PROP_POS_FRAMES, 6)
+_ok, _fr = _cc.read()
+check("chained clips: jumping to frame 6 lands in the second clip", _ok and abs(int(_fr.mean()) - (20 * 6 + 10)) <= 6 and int(_cc.get(cv2.CAP_PROP_POS_FRAMES)) == 7, str(int(_fr.mean())))
+_cc.set(cv2.CAP_PROP_POS_FRAMES, 4)
+_n_grab = 0
+while _cc.grab():
+    _n_grab += 1
+check("chained clips: grab() also crosses the cut (5 frames left from frame 4)", _n_grab == 5, str(_n_grab))
+_cc.release()
+_bad = os.path.join(_tmp, "other_size.mp4")
+_w = cv2.VideoWriter(_bad, cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (32, 24))
+_w.write(np.zeros((24, 32, 3), dtype=np.uint8))
+_w.release()
+try:
+    m.ChainedCapture([_paths[0], _bad])
+    check("clips of different sizes cannot be joined", False)
+except RuntimeError:
+    check("clips of different sizes cannot be joined", True)
+
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
 sys.exit(1 if failures else 0)

@@ -189,12 +189,35 @@ def collect_row(run_dir, run_name, video, rel_dir, overrides, error, seconds):
 
 
 CLIP_KEYS = ("analysis_start_s", "analysis_end_s", "save_video", "record_start_s", "record_end_s")
+PLAN_KEYS = CLIP_KEYS + ("continues_previous",)       # saved in a plan; continues_previous is not a run setting
 
 
-def clip_settings(base_settings, video, rel_dir, overrides, out_root, clip_params=None, save_video=False, show_preview=False):
+def group_units(clips):
+    """Clips -> units of analysis. A clip marked continues_previous is the next part of the same continuous video as
+    the clip before it, so the two are analysed as ONE video (same vehicle keeps its ID across the cut)."""
+    units = []
+    for c in clips:
+        if c.get("continues_previous") and units:
+            units[-1].append(c)
+        else:
+            units.append([c])
+    return units
+
+
+def chain_name(chain, overrides=None):
+    """Folder / run name of a chain of consecutive clips: <first>_to_<last>."""
+    first = slug(os.path.splitext(os.path.basename(chain[0]))[0])
+    last = slug(os.path.splitext(os.path.basename(chain[-1]))[0])
+    name = f"{first}_to_{last}"
+    if overrides:
+        name += "__" + "__".join(f"{slug(k)}-{slug(v)}" for k, v in overrides.items())
+    return name
+
+
+def clip_settings(base_settings, video, rel_dir, overrides, out_root, clip_params=None, save_video=False, show_preview=False, chain=None):
     """Settings dict of one clip -> (settings, run_name, run_dir). clip_params = the per-clip choices
     (analysis_start_s / analysis_end_s / save_video / record_start_s / record_end_s) of the batch plan."""
-    name = run_name_for(video, overrides)
+    name = chain_name(chain, overrides) if chain and len(chain) > 1 else run_name_for(video, overrides)
     run_dir = run_dir_for(out_root, rel_dir, name)
     st = copy.deepcopy(base_settings)
     st.update({"video": video, "output": run_dir, "run_name": name,
@@ -206,6 +229,13 @@ def clip_settings(base_settings, video, rel_dir, overrides, out_root, clip_param
         st[k] = v
         if isinstance(st.get("run3"), dict) and k in st["run3"]:
             st["run3"][k] = v
+    if chain and len(chain) > 1:
+        st["video_chain"] = list(chain)          # consecutive clips processed as one continuous video
+    # vehicle IDs continue after the highest ID already used in the same top folder (not for tracker sweeps,
+    # whose runs must stay comparable with each other)
+    import combine_clips
+    top = ([x for x in rel_dir.split("/") if x] or [""])[0]
+    st["id_offset"] = 0 if overrides else combine_clips.max_track_id(out_root, top, exclude_dir=run_dir)
     return st, name, run_dir
 
 
@@ -255,7 +285,7 @@ def finish_batch(out_root, runs, rows, log=print):
     combine_clips.combine_top_folders(out_root, tops, log=log)
 
 
-def run_batch(app, base_settings, out_root, runs, save_video=False, skip_done=False, clip_params=None, log=print):
+def run_batch(app, base_settings, out_root, runs, save_video=False, skip_done=False, clip_params=None, log=print, chains=None):
     """Runs every (video, overrides) in `runs`; returns the comparison rows."""
     errors = []
     app.show_error = lambda msg: errors.append(str(msg))
@@ -263,7 +293,7 @@ def run_batch(app, base_settings, out_root, runs, save_video=False, skip_done=Fa
     rows = []
     for i, (video, rel_dir, overrides) in enumerate(runs, 1):
         st, name, run_dir = clip_settings(base_settings, video, rel_dir, overrides, out_root,
-                                          (clip_params or {}).get(video), save_video)
+                                          (clip_params or {}).get(video), save_video, chain=(chains or {}).get(video))
         os.makedirs(run_dir, exist_ok=True)
         import combine_clips
         if skip_done and combine_clips.summary_path(run_dir, name) is not None:
@@ -353,16 +383,21 @@ def main(argv=None):
         base["zone_file"] = args.zone_file
         base.pop("zone_snapshot", None)      # load the given Zone file instead of the embedded copy
     clip_params = {}
+    chains = {}
     plan_out = ""
     if args.plan:
         plan_out, plan_clips = load_plan(args.plan)
         videos = []
-        for c in plan_clips:
-            v = os.path.abspath(c["video"])
-            if not os.path.isfile(v):
-                raise SystemExit(f"video not found: {v}")
-            videos.append((v, str(c.get("rel_dir", "") or "")))
-            clip_params[v] = {k: c[k] for k in CLIP_KEYS if k in c}
+        for unit in group_units(plan_clips):
+            paths = [os.path.abspath(c["video"]) for c in unit]
+            for v in paths:
+                if not os.path.isfile(v):
+                    raise SystemExit(f"video not found: {v}")
+            first = unit[0]
+            videos.append((paths[0], str(first.get("rel_dir", "") or "")))
+            clip_params[paths[0]] = {k: first[k] for k in CLIP_KEYS if k in first}
+            if len(paths) > 1:
+                chains[paths[0]] = paths
     else:
         inputs = args.videos or ([base["video"]] if base.get("video") else [])
         if not inputs:
@@ -388,7 +423,7 @@ def main(argv=None):
     os.makedirs(out_root, exist_ok=True)
     try:
         rows = run_batch(app, base, out_root, runs, save_video=args.save_video, skip_done=args.skip_done,
-                         clip_params=clip_params)
+                         clip_params=clip_params, chains=chains)
     except ValueError as exc:
         raise SystemExit("settings problem: %s (give the missing value with --set name=value, or use --settings from a saved run)" % exc)
     finish_batch(out_root, runs, rows)
