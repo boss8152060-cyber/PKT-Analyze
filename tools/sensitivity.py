@@ -67,7 +67,7 @@ def run_sensitivity(app, folder, run_name, params, base_settings=None):
                 app.set_settings(st)
                 app._run3_cfg = app._run3_snapshot_config()
                 app.run3_processing({}, tmp, run_name)
-                for r in read_indicator_summary(os.path.join(tmp, "Run_3_Indicator_Summary.csv")):
+                for r in read_indicator_summary(os.path.join(tmp, run_name + "_Indicator_Summary.csv")):
                     out_rows.append({
                         "Setting": setting, "Value": value, "Indicator": r.get("Indicator", ""),
                         "Group": r.get("Group", ""), "N": r.get("N", ""), "Mean": r.get("Mean", ""),

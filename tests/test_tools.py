@@ -159,5 +159,82 @@ class ClipPlan(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class CombineClips(unittest.TestCase):
+    """Per-clip CSV files are put together into All_<kind>.csv with a Clip column."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="pk_comb_")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _clip(self, rel, speeds, old_names=False):
+        d = os.path.join(self.root, *rel.split("/"))
+        os.makedirs(d)
+        name = os.path.basename(d)
+        prefix = "Run_3_" if old_names else name + "_"
+        with open(os.path.join(d, prefix + "Summary.json"), "w") as f:
+            f.write("{}")
+        with open(os.path.join(d, prefix + "Speed_Detail.csv"), "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(["Vehicle_ID", "Scope", "Key", "Vehicle_Class", "Speed_kmh", "QC_Flag"])
+            for i, v in enumerate(speeds, 1):
+                w.writerow([i, "Zone", "Zone 2", "Car", v, ""])
+        with open(os.path.join(d, prefix + "Gap_Acceptance.csv"), "w", newline="", encoding="utf-8-sig") as f:
+            f.write("Subject_ID,Gap_Role" + chr(10))           # a file with only a header row (an empty indicator)
+        return d
+
+    def test_combined_files_have_a_clip_column_and_all_rows(self):
+        import combine_clips
+        self._clip("Site/d1/a", [30, 40])
+        self._clip("Site/d2/b", [50])
+        out = combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
+        self.assertEqual(sorted(out["Site"]["clips"]), ["Site/d1/a", "Site/d2/b"])
+        target = os.path.join(self.root, "Site", "All_Clips")
+        with open(os.path.join(target, "All_Speed_Detail.csv"), newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual([(r["Clip"], r["Vehicle_ID"], r["Speed_kmh"]) for r in rows],
+                         [("Site/d1/a", "1", "30"), ("Site/d1/a", "2", "40"), ("Site/d2/b", "1", "50")])
+        self.assertFalse(os.path.exists(os.path.join(target, "All_Gap_Acceptance.csv")))    # nothing but headers -> no file
+        with open(os.path.join(target, "All_Statistics.csv"), newline="", encoding="utf-8-sig") as f:
+            st = {r["Group"]: r for r in csv.DictReader(f)}
+        self.assertEqual(st["All"]["N"], "3")
+        self.assertAlmostEqual(float(st["All"]["Mean"]), 40.0)
+        self.assertAlmostEqual(float(st["All"]["V50_Median"]), 40.0)
+
+    def test_old_run_3_names_are_still_read(self):
+        import combine_clips
+        self._clip("Site/d1/a", [30], old_names=True)
+        self._clip("Site/d1/b", [60])
+        combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
+        with open(os.path.join(self.root, "Site", "All_Clips", "All_Speed_Detail.csv"), newline="", encoding="utf-8-sig") as f:
+            self.assertEqual(sorted(r["Clip"] for r in csv.DictReader(f)), ["Site/d1/a", "Site/d1/b"])
+
+    def test_a_later_clip_is_added_to_the_combined_files(self):
+        import combine_clips
+        self._clip("Site/d1/a", [30])
+        self._clip("Site/d1/b", [40])
+        combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
+        self._clip("Site/d2/c", [50])
+        combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)      # rebuilt from every clip folder
+        with open(os.path.join(self.root, "Site", "All_Clips", "All_Clips.csv"), newline="", encoding="utf-8-sig") as f:
+            self.assertEqual([r["Clip"] for r in csv.DictReader(f)], ["Site/d1/a", "Site/d1/b", "Site/d2/c"])
+
+    def test_one_clip_is_not_combined_with_itself(self):
+        import combine_clips
+        self._clip("Site/d1/a", [30])
+        self.assertEqual(combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None), {})
+        self.assertFalse(os.path.exists(os.path.join(self.root, "Site", "All_Clips")))
+
+    def test_the_combined_folder_is_never_read_as_a_clip(self):
+        import combine_clips
+        self._clip("Site/d1/a", [30])
+        self._clip("Site/d1/b", [40])
+        combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
+        combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
+        with open(os.path.join(self.root, "Site", "All_Clips", "All_Speed_Detail.csv"), newline="", encoding="utf-8-sig") as f:
+            self.assertEqual(len(list(csv.DictReader(f))), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

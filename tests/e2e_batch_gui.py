@@ -120,7 +120,7 @@ check("final report shown once, no error box", [k for k, _ in shown] == ["info"]
 o = os.path.join(tmp, "out")
 a_dir, b_dir = os.path.join(o, "Site", "day1", "a"), os.path.join(o, "Site", "day1", "b")
 check("each clip has its own folder mirroring Site/day1/", os.path.isdir(a_dir) and os.path.isdir(b_dir))
-check("each clip has its own CSV files", all(os.path.isfile(os.path.join(d, f)) for d in (a_dir, b_dir) for f in (os.path.basename(d) + "_Detection_Records.csv", "Run_3_Speed.csv", "Run_3_Summary.json")))
+check("each clip has its own CSV files", all(os.path.isfile(os.path.join(d, os.path.basename(d) + suffix)) for d in (a_dir, b_dir) for suffix in ("_Detection_Records.csv", "_Speed.csv", "_Summary.json", "_Gap_Acceptance.csv", "_TTC.csv")))
 for d, lo, hi in ((a_dir, 1.0, 2.0), (b_dir, 0.0, 3.0)):
     det = list(csv.DictReader(open(os.path.join(d, os.path.basename(d) + "_Detection_Records.csv"), encoding="utf-8-sig")))
     ts = [float(r["timestamp"]) for r in det]
@@ -128,11 +128,15 @@ for d, lo, hi in ((a_dir, 1.0, 2.0), (b_dir, 0.0, 3.0)):
 check("clip a recorded only 1.2-1.5 s, clip b recorded nothing",
       os.path.isfile(os.path.join(a_dir, "a_Research_Tracking_Result.mp4")) and not os.path.isfile(os.path.join(b_dir, "b_Research_Tracking_Result.mp4")))
 cmp_rows = list(csv.DictReader(open(os.path.join(o, "Batch_Comparison.csv"), encoding="utf-8-sig")))
-check("no combined folders are made (per-clip CSVs only)", not any(n.startswith("_Combined") for _r, ds, _f in os.walk(o) for n in ds))
+ac = os.path.join(o, "Site", "All_Clips")
+check("combined CSV folder All_Clips exists in the imported top folder after a 2-clip batch", os.path.isfile(os.path.join(ac, "All_Clips.csv")) and os.path.isfile(os.path.join(ac, "All_Statistics.csv")))
+ac_clips = [r["Clip"] for r in csv.DictReader(open(os.path.join(ac, "All_Clips.csv"), encoding="utf-8-sig"))]
+check("it lists both clips by their path", sorted(ac_clips) == ["Site/day1/a", "Site/day1/b"], str(ac_clips))
+check("every combined file starts with the Clip column", all(open(os.path.join(ac, f), encoding="utf-8-sig").readline().startswith("Clip,") for f in os.listdir(ac) if f.startswith("All_") and f.endswith(".csv") and f not in ("All_Clips.csv", "All_Statistics.csv")))
 check("comparison table has both clips, completed", [r["Status"] for r in cmp_rows] == ["completed", "completed"], str([r["Status"] for r in cmp_rows]))
 
 # ---- second analysis, case 1: another DAY of the same place -> only a new day folder next to the old one ----
-mtime_a = os.path.getmtime(os.path.join(a_dir, "Run_3_Summary.json"))
+mtime_a = os.path.getmtime(os.path.join(a_dir, "a_Summary.json"))
 day2 = os.path.join(tmp, "in", "Site", "day2")
 os.makedirs(day2)
 deep2 = os.path.join(day2, "morning", "cam1")                                  # an extra, deeper level: any depth is mirrored
@@ -152,8 +156,10 @@ wait_in_mainloop(lambda: False, 1)
 check("new folder added next to the old one: Site/day1/{a,b} and Site/day2/c", all(os.path.isdir(p) for p in (os.path.join(o, "Site", "day1", "a"), os.path.join(o, "Site", "day1", "b"), os.path.join(o, "Site", "day2", "morning", "cam1", "c"))),
       str(sorted(os.listdir(os.path.join(o, "Site")))))
 check("only ONE top folder exists (the existing one was reused, nothing created anew)", sorted(os.listdir(o)) == ["Batch_Comparison.csv", "Site"], str(sorted(os.listdir(o))))
-check("the old folder was not touched", os.path.getmtime(os.path.join(a_dir, "Run_3_Summary.json")) == mtime_a)
+check("the old folder was not touched", os.path.getmtime(os.path.join(a_dir, "a_Summary.json")) == mtime_a)
 cmp_rows = list(csv.DictReader(open(os.path.join(o, "Batch_Comparison.csv"), encoding="utf-8-sig")))
+ac_clips = sorted(r["Clip"] for r in csv.DictReader(open(os.path.join(o, "Site", "All_Clips", "All_Clips.csv"), encoding="utf-8-sig")))
+check("combined CSV now includes the clip of the new day too (old clips kept)", ac_clips == ["Site/day1/a", "Site/day1/b", "Site/day2/morning/cam1/c"], str(ac_clips))
 check("comparison table now lists all three clips", sorted((r["Folder"], r["Run"]) for r in cmp_rows) == [("Site/day1", "a"), ("Site/day1", "b"), ("Site/day2/morning/cam1", "c")],
       str([(r["Folder"], r["Run"]) for r in cmp_rows]))
 
@@ -171,7 +177,7 @@ t0 = time.time()
 app.start_analysis()
 wait_in_mainloop(lambda: not app.running, 600)
 wait_in_mainloop(lambda: False, 1)
-check("new clip d added to day1; a and b untouched", os.path.isfile(os.path.join(o, "Site", "day1", "d", "Run_3_Summary.json")) and os.path.getmtime(os.path.join(a_dir, "Run_3_Summary.json")) == mtime_a)
+check("new clip d added to day1; a and b untouched", os.path.isfile(os.path.join(o, "Site", "day1", "d", "d_Summary.json")) and os.path.getmtime(os.path.join(a_dir, "a_Summary.json")) == mtime_a)
 check("only the new clip was analysed (about one clip of time, not three)", time.time() - t0 < 75, f"{time.time() - t0:.0f}s")
 
 root.destroy()

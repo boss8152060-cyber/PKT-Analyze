@@ -22,7 +22,7 @@ comparison table.
                was imported from a higher folder before
   --plan       a batch plan .json saved by the program's Batch window: per clip the time range to analyse and
                whether / which part to record (replaces --videos; --save-video is then ignored)
-  --skip-done  skip a clip whose result folder already has Run_3_Summary.json (resume an interrupted batch)
+  --skip-done  skip a clip whose result folder already has its <clip>_Summary.json (resume an interrupted batch)
   --zone-file  Zone file to use instead of the one in the settings (e.g. for a different camera)
   --set        setting=value (repeatable) fixed for all runs, e.g. lane_entry_motorcycle_m=1.5
   --sweep      setting=v1,v2,...  (repeatable; every combination is run). Run 1 settings such as
@@ -150,13 +150,20 @@ def count_rows(path):
         return max(0, sum(1 for _ in f) - 1)
 
 
+def summary_path(run_dir, name):
+    """<clip>_Summary.json of a result folder (older runs: Run_3_Summary.json), or None when the clip was not analysed."""
+    import combine_clips
+    return combine_clips.summary_path(run_dir, name)
+
+
 def run_dir_for(out_root, rel_dir, name):
     return os.path.join(out_root, *[x for x in rel_dir.split("/") if x], name)
 
 
 def collect_row(run_dir, run_name, video, rel_dir, overrides, error, seconds):
     run1 = read_json(os.path.join(run_dir, run_name + "_Research_Run_Summary.json"))
-    run3 = read_json(os.path.join(run_dir, "Run_3_Summary.json"))
+    import combine_clips
+    run3 = read_json(combine_clips.summary_path(run_dir, run_name) or os.path.join(run_dir, run_name + "_Summary.json"))
     dup = (run3.get("diagnostics", {}).get("duplicate_tracks") or {}).get("tracks_affected")
     mstat = (run3.get("source_counts", {}) or {}).get("movement_status", {}) or {}
     exact = None if not mstat else mstat.get("Exact", 0) + mstat.get("Exact_AfterDedupe", 0)
@@ -175,10 +182,9 @@ def collect_row(run_dir, run_name, video, rel_dir, overrides, error, seconds):
         "Empty_Indicators": len((run3.get("diagnostics", {}) or {}).get("empty_outputs", []) or []) if run3 else None,
         "Seconds": round(seconds, 1),
     }
-    for name, fname in (("Rows_LC", "Run_3_Lateral_Clearance_Pairs.csv"), ("Rows_Gap", "Run_3_Gap_Acceptance.csv"),
-                        ("Rows_TTC", "Run_3_TTC.csv"), ("Rows_PET", "Run_3_PET.csv"),
-                        ("Rows_Speed", "Run_3_Speed.csv"), ("Rows_LDP", "Run_3_LDP.csv")):
-        row[name] = count_rows(os.path.join(run_dir, fname))
+    for name, kind in (("Rows_LC", "Lateral_Clearance_Pairs"), ("Rows_Gap", "Gap_Acceptance"), ("Rows_TTC", "TTC"),
+                       ("Rows_PET", "PET"), ("Rows_Speed", "Speed"), ("Rows_LDP", "LDP")):
+        row[name] = count_rows(combine_clips.kind_file(run_dir, kind, run_name) or "")
     return row
 
 
@@ -231,8 +237,9 @@ def clip_label(clip):
 
 
 def finish_batch(out_root, runs, rows, log=print):
-    """Batch_Comparison.csv in the output root: the rows of the clips just run replace their old rows, the rows
-    of clips from earlier batches stay (so one table grows with the place)."""
+    """Batch_Comparison.csv in the output root (the rows of the clips just run replace their old rows, the rows of
+    clips from earlier batches stay), then the combined CSV files (All_Clips folder) of every top folder that was
+    imported - they are rebuilt from all clip folders found there, so earlier clips are included."""
     path = os.path.join(out_root, "Batch_Comparison.csv")
     old = {}
     if os.path.isfile(path):
@@ -243,6 +250,9 @@ def finish_batch(out_root, runs, rows, log=print):
         old[(r.get("Folder", ""), r.get("Run", ""), r.get("Overrides", ""))] = r
     write_comparison(path, [old[k] for k in sorted(old)])
     log("comparison -> " + path)
+    import combine_clips
+    tops = {([x for x in rel.split("/") if x] or [""])[0] for (_v, rel, _o) in runs}
+    combine_clips.combine_top_folders(out_root, tops, log=log)
 
 
 def run_batch(app, base_settings, out_root, runs, save_video=False, skip_done=False, clip_params=None, log=print):
@@ -255,7 +265,8 @@ def run_batch(app, base_settings, out_root, runs, save_video=False, skip_done=Fa
         st, name, run_dir = clip_settings(base_settings, video, rel_dir, overrides, out_root,
                                           (clip_params or {}).get(video), save_video)
         os.makedirs(run_dir, exist_ok=True)
-        if skip_done and os.path.isfile(os.path.join(run_dir, "Run_3_Summary.json")):
+        import combine_clips
+        if skip_done and combine_clips.summary_path(run_dir, name) is not None:
             log(f"[{i}/{len(runs)}] {name}: already done, skipped")
             rows.append(collect_row(run_dir, name, video, rel_dir, overrides, "", 0.0))
             continue
