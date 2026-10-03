@@ -2005,10 +2005,12 @@ class LensLineDialog:
         use = self.usable_lines()
         if len(use) < 2:
             self.msg_var.set("ต้องมีอย่างน้อย 2 เส้น (แนะนำ 3 เส้นขึ้นไป) เส้นละ 3 จุดขึ้นไป")
+            messagebox.showinfo("แก้เลนส์", self.msg_var.get(), parent=self.top)
             return None
         res = estimate_lens_from_lines(use, self.size, bool(self.k2_var.get()))
         if res is None:
             self.msg_var.set("ไม่พบเลนส์ที่ทำให้เส้นตรงขึ้นชัดเจน — เส้นอาจตรงอยู่แล้ว ผ่านกลางภาพมากเกินไป หรือคลิกไม่ตรงแนว ลองเพิ่มเส้นใกล้ขอบภาพ")
+            messagebox.showinfo("แก้เลนส์", self.msg_var.get(), parent=self.top)
             return None
         self.lens, self.result_info = res["lens"], res
         self.msg_var.set(f"ประมาณเลนส์ได้: f = {res['lens'][0]:.3f}×ความกว้างภาพ, k1 = {res['lens'][1]:.3f}" + (f", k2 = {res['lens'][2]:.3f}" if self.k2_var.get() else "")
