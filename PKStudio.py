@@ -466,6 +466,8 @@ RUN3_DEFAULTS = {
     "gap_hold_min_duration_s": "0.30",      # ... for at least this long (s)
     "lateral_axis_angle_deg": "0.00",       # implementation starter value; verify per video
     "lc_heading_window_s": "0.50",          # centred window (s) used to get the heading of vehicle A
+    "lc_along_limit_m": "0",                # side-by-side window along the heading (m); 0 = auto (L_A + L_B) / 2
+    "lc_max_lateral_m": "3.50",             # pairs further apart sideways than this (m) are unrelated; 0 = no limit
     "pet_interaction_distance_m": "3.00",   # implementation starter value
     "pet_threshold_s": "1.00",
     # V27 implementation starter values (editable; verify per site):
@@ -812,20 +814,24 @@ def track_headings(times, points, window_s, min_speed_ms):
     return out
 
 
-def lateral_clearance(center_a, heading_a, center_b, len_a, len_b, w_a, w_b):
+def lateral_clearance(center_a, heading_a, center_b, len_a, len_b, w_a, w_b, along_limit=None, max_lateral=None):
     """Lateral clearance for one time sample (SPEC v28 section 5). Axes come from vehicle A's
     heading: `along` = separation along the heading, `lateral` = perpendicular
-    separation. The boxes overlap along the direction of travel when
-    |along| <= (L_A + L_B) / 2 - only then the clearance is measurable.
+    separation. The vehicles are side by side when |along| <= along_limit, which is
+    (L_A + L_B) / 2 unless a fixed limit (m) is given - only then the clearance is measurable.
+    `max_lateral` (m, None/0 = off): a pair further apart sideways than this is not related
+    (`Too_Far`), e.g. two vehicles far apart inside one large zone.
     clearance = lateral - (W_A + W_B) / 2 (edge to edge; negative = boxes overlap)."""
     dx, dy = center_b[0] - center_a[0], center_b[1] - center_a[1]
     hx, hy = heading_a
     along = dx * hx + dy * hy
     signed = hx * dy - hy * dx
     lateral = abs(signed)
+    limit = along_limit if along_limit else (len_a + len_b) / 2.0
     return {
         "Along_m": along, "Lateral_m": lateral, "Signed_Lateral_m": signed,
-        "Overlap": abs(along) <= (len_a + len_b) / 2.0,
+        "Overlap": abs(along) <= limit,
+        "Too_Far": bool(max_lateral) and lateral > max_lateral,
         "Clearance_m": lateral - (w_a + w_b) / 2.0,
     }
 
@@ -2100,6 +2106,8 @@ class Run1App:
         self.run3_hold_min_duration_var = tk.StringVar(value=RUN3_DEFAULTS["gap_hold_min_duration_s"])
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
         self.run3_lc_heading_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_heading_window_s"])
+        self.run3_lc_along_limit_var = tk.StringVar(value=RUN3_DEFAULTS["lc_along_limit_m"])
+        self.run3_lc_max_lateral_var = tk.StringVar(value=RUN3_DEFAULTS["lc_max_lateral_m"])
         self.run3_lc_motorcycle_pairs_only_var = tk.BooleanVar(value=RUN3_DEFAULTS["lc_motorcycle_pairs_only"])
         self.run3_pet_interaction_distance_var = tk.StringVar(value=RUN3_DEFAULTS["pet_interaction_distance_m"])
         self.run3_pet_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["pet_threshold_s"])
@@ -2493,6 +2501,8 @@ class Run1App:
         self._zone_checks(box, self.run3_lc_zone_vars, 1)
         ttk.Checkbutton(box, text="เฉพาะคู่ที่มีรถจักรยานยนต์ (ไม่ติ๊ก = ทุกคู่ของยานพาหนะทุกประเภท)", variable=self.run3_lc_motorcycle_pairs_only_var).grid(row=2, column=0, columnspan=8, sticky="w", pady=2)
         self._entry_row(box, 3, "หน้าต่างหาทิศ heading ของรถ A (s)", self.run3_lc_heading_window_var)
+        self._entry_row(box, 4, "ช่วงเคียงข้างตามแนวยาว ±(m) — 0 = อัตโนมัติ (L_A+L_B)/2", self.run3_lc_along_limit_var)
+        self._entry_row(box, 5, "ระยะด้านข้างไกลสุดที่ถือว่าเกี่ยวข้องกัน (m) — 0 = ไม่จำกัด", self.run3_lc_max_lateral_var)
 
         box = self._indicator_box("Gap Acceptance", self.run3_gap_enabled_var,
                                   "รถที่รอ (ดูกระแสที่ต้องให้ทางตามตาราง) ยอมรับ/ปฏิเสธช่องว่างสองขั้น Access/Exit; Line เป็นตัวเลือก (ไม่มี Line ใช้เวลาเข้าโซนต้นทางของกระแสนั้น)")
@@ -3946,6 +3956,8 @@ class Run1App:
                 "gap_hold_min_duration_s": self.run3_hold_min_duration_var.get(),
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
                 "lc_heading_window_s": self.run3_lc_heading_window_var.get(),
+                "lc_along_limit_m": self.run3_lc_along_limit_var.get(),
+                "lc_max_lateral_m": self.run3_lc_max_lateral_var.get(),
                 "lc_motorcycle_pairs_only": self.run3_lc_motorcycle_pairs_only_var.get(),
                 "pet_interaction_distance_m": self.run3_pet_interaction_distance_var.get(),
                 "pet_threshold_s": self.run3_pet_threshold_var.get(),
@@ -4119,6 +4131,8 @@ class Run1App:
                 ("gap_hold_min_duration_s", self.run3_hold_min_duration_var),
                 ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
                 ("lc_heading_window_s", self.run3_lc_heading_window_var),
+                ("lc_along_limit_m", self.run3_lc_along_limit_var),
+                ("lc_max_lateral_m", self.run3_lc_max_lateral_var),
                 ("lc_motorcycle_pairs_only", self.run3_lc_motorcycle_pairs_only_var),
                 ("pet_interaction_distance_m", self.run3_pet_interaction_distance_var),
                 ("pet_threshold_s", self.run3_pet_threshold_var),
@@ -7256,6 +7270,8 @@ class Run1App:
             "waiting_threshold": num(self.run3_waiting_speed_threshold_var, GAP_HOLD_SPEED_KMH),
             "hold_min_duration_s": num(self.run3_hold_min_duration_var, GAP_HOLD_MIN_S),
             "lc_heading_window_s": num(self.run3_lc_heading_window_var, 0.5),
+            "lc_along_limit_m": max(0.0, num(self.run3_lc_along_limit_var, 0.0) or 0.0),
+            "lc_max_lateral_m": max(0.0, num(self.run3_lc_max_lateral_var, 3.5) or 0.0),
             "lc_motorcycle_pairs_only": bool(self.run3_lc_motorcycle_pairs_only_var.get()),
             "pet_interaction": num(self.run3_pet_interaction_distance_var, 3.0),
             "pet_threshold": num(self.run3_pet_threshold_var, 1.0),
@@ -7895,14 +7911,17 @@ class Run1App:
         import bisect
         zones = c["lc_zones"]
         moto_pairs_only = c["lc_motorcycle_pairs_only"]
+        along_limit = c.get("lc_along_limit_m") or None          # None = (L_A + L_B) / 2
+        max_lateral = c.get("lc_max_lateral_m") or None          # None = no sideways limit
         widths = {k: v for k, v in c["widths"].items() if v is not None}
         lengths = {k: v for k, v in c["lengths"].items() if v is not None}
         tol = self._run3_time_tolerance(tracks)
         order = {tid: i for i, tid in enumerate(tracks)}
         perspective = c["perspective"] is not None
         diag = {"a_samples": 0, "a_no_heading": 0, "pairs_same_direction": 0, "pairs_other_direction": 0,
-                "time_matched": 0, "no_box_overlap": 0, "rows": 0, "missing_dimension_class": set(),
-                "motorcycle_pairs_only": moto_pairs_only}
+                "time_matched": 0, "no_box_overlap": 0, "too_far_sideways": 0, "rows": 0, "missing_dimension_class": set(),
+                "motorcycle_pairs_only": moto_pairs_only,
+                "along_limit_m": along_limit if along_limit else "auto (L_A+L_B)/2", "max_lateral_m": max_lateral}
 
         # zone -> tid -> (timestamps, rows) ; zone -> sorted list of (start, end, tid)
         obs = defaultdict(dict); spans = defaultdict(list)
@@ -7996,9 +8015,13 @@ class Run1App:
                     diag["time_matched"] += 1
                     cls_b = classes[tid_b]
                     res = lateral_clearance(r_a["_mc"], r_a["_h"], r_b["_mc"],
-                                            lengths[cls_a], lengths[cls_b], widths[cls_a], widths[cls_b])
+                                            lengths[cls_a], lengths[cls_b], widths[cls_a], widths[cls_b],
+                                            along_limit, max_lateral)
                     if not res["Overlap"]:
                         diag["no_box_overlap"] += 1
+                        continue
+                    if res["Too_Far"]:
+                        diag["too_far_sideways"] += 1
                         continue
                     pair_rows[tid_b].append({
                         "Site_ID": c["site_id"], "Pair_ID": f"{tid_a}_{tid_b}",

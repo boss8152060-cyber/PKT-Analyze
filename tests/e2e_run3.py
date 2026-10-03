@@ -246,6 +246,12 @@ def scene1(app):
     app.run3_lc_motorcycle_pairs_only_var.set(False)
     only_m = {r["Pair_ID"] for r in read_csv(os.path.join(out_m, "Lateral_Clearance.csv"))}
     check("Lateral Clearance motorcycle-pairs-only option keeps A-B and A-E only", only_m == {"1_2", "1_5"}, str(sorted(only_m)))
+    # sideways limit: D-E (4.1 m apart) is dropped at 3.5 m, the pairs closer than that stay
+    app.run3_lc_max_lateral_var.set("3.5")
+    out_l, _ = run_scene(app, veh)
+    app.run3_lc_max_lateral_var.set("0")
+    lim = {r["Pair_ID"] for r in read_csv(os.path.join(out_l, "Lateral_Clearance.csv"))}
+    check("Lateral Clearance sideways limit 3.5 m drops D-E (4.1 m) and keeps the closer pairs", "4_5" not in lim and {"1_2", "1_5", "2_5"} <= lim, str(sorted(lim)))
     ind = read_csv(os.path.join(out, "Indicator_Summary.csv"))
     check("indicator summary lists LDP, Lateral Clearance, Speed", any("LDP" in r["Indicator"] for r in ind) and any("Lateral Clearance" in r["Indicator"] for r in ind) and any("Speed" in r["Indicator"] for r in ind))
 
@@ -535,6 +541,7 @@ def main():
     root = tk.Tk()
     root.withdraw()
     app = m.Run1App(root)
+    app.run3_lc_max_lateral_var.set("0")          # the scene's D-E pair is 4.1 m apart sideways; the default limit (3.5 m) is tested below
     app.run3_site_id_var.set("8")
     app.run3_ppm_var.set(str(PPM))
     app.run3_perspective_enabled_var.set(False)

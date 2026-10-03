@@ -292,6 +292,22 @@ class LateralClearanceTests(unittest.TestCase):
         r = self.lc((0, 0), (1, 0), (8, 2))            # 8 m ahead > (2 + 4.5) / 2
         self.assertFalse(r["Overlap"])
 
+    def test_fixed_along_limit_replaces_the_automatic_one(self):
+        f = CORE["lateral_clearance"]
+        near = f((0, 0), (1, 0), (5, 2), 2.0, 4.5, 0.8, 1.8)                     # 5 m ahead > (2 + 4.5) / 2
+        wide = f((0, 0), (1, 0), (5, 2), 2.0, 4.5, 0.8, 1.8, along_limit=6.0)
+        self.assertFalse(near["Overlap"])
+        self.assertTrue(wide["Overlap"])
+
+    def test_max_lateral_drops_unrelated_pairs(self):
+        f = CORE["lateral_clearance"]
+        far = f((0, 0), (1, 0), (0.5, 8.0), 2.0, 4.5, 0.8, 1.8, max_lateral=3.5)  # 8 m sideways
+        near = f((0, 0), (1, 0), (0.5, 3.0), 2.0, 4.5, 0.8, 1.8, max_lateral=3.5)
+        off = f((0, 0), (1, 0), (0.5, 8.0), 2.0, 4.5, 0.8, 1.8, max_lateral=0)    # 0 = no limit
+        self.assertTrue(far["Too_Far"])
+        self.assertFalse(near["Too_Far"])
+        self.assertFalse(off["Too_Far"])
+
     def test_negative_when_boxes_overlap_sideways(self):
         r = self.lc((0, 0), (1, 0), (0, 0.9))          # 0.9 < (0.8 + 1.8) / 2
         self.assertLess(r["Clearance_m"], 0)
