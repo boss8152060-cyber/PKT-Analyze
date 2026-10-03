@@ -260,6 +260,34 @@ vid_id = app._run3_write_topview_video(tr_bb, dict(base_cfg, lens=LENS, lens_siz
 d_lab = np.abs(frame_of(vid_id) - frame_of(vid_off)).sum(axis=2)
 check("the labels and the trajectory of the Topview follow the display settings", int((d_lab > 60).sum()) > 100, f"{int((d_lab > 60).sum())} pixels differ")
 check("with every label off nothing but the point is drawn on the vehicle (no box, no text)", int((np.abs(frame_of(vid_off) - frame_of(vid_bb)).sum(axis=2) > 60).sum()) > 0)
+# ---- map-style Topview: empty grid + road lines clicked on the camera picture
+def to_rec(gm):
+    return m.lens_distort(cv2.perspectiveTransform(np.asarray(gm, float).reshape(-1, 1, 2) * 20.0, h_ground_to_cam).reshape(-1, 2), (CW, CH), LENS)
+
+
+road_ground = [np.array([[14.0, 14.0], [36.0, 14.0]]), np.array([[14.0, 18.0], [36.0, 18.0]])]    # two straight road edges, 4 m apart
+dlg = m.RoadLineDialog(app, video, app.set_road_lines)
+for k_, g_ in enumerate(road_ground):
+    for pt_ in to_rec(g_):                                   # only the two end points are clicked: the road is straight
+        dlg.add_point(*pt_)
+    if k_ == 0:
+        dlg.new_line()
+check("the road line tool keeps the clicked lines", len([l for l in dlg.lines if len(l) >= 2]) == 2)
+check("the road lines are applied and read back", dlg.apply() and len(app.get_road_lines()) == 2)
+cfg_map = dict(base_cfg, lens=LENS, lens_size=(CW, CH), topview_map=True, road_lines=app.get_road_lines())
+vid_map = app._run3_write_topview_video(tr, cfg_map, tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video)
+fm = frame_of(vid_map).astype(np.uint8)
+hit = []
+for g_ in road_ground:
+    for fr_ in (0.2, 0.5, 0.8):                              # points along the real road edge, between the two clicks
+        pxm = m.topview_px(cvs, [g_[0] + (g_[1] - g_[0]) * fr_])[0]
+        x_, y_ = int(round(pxm[0])), int(round(pxm[1]))
+        if np.hypot(x_ - car[0], y_ - car[1]) < 120:         # the vehicle and its label are drawn over the line there
+            continue
+        hit.append(fm[max(0, y_ - 2):y_ + 3, max(0, x_ - 2):x_ + 3].mean(axis=(0, 1)).min() > 150)
+check("the road lines land on the right metres (even bent by the lens between the clicks)", all(hit), f"{sum(hit)}/{len(hit)}")
+check("the map-style Topview has no camera photo (plain background away from the lines)", float(np.abs(fm[5:25, 5:60].astype(float) - 38).mean()) < 40)
+
 check("the Topview has the video's shape", abs(Wf / Hf - CW / CH) < 0.02, f"{Wf}x{Hf}")
 check("the vehicle picture is pasted at its footprint (and only there)", int((diff > 60).sum()) > 500 and int((np.hypot(xs_ - car[0], ys_ - car[1]) > 250)[diff > 60].sum()) == 0, f"{int((diff > 60).sum())} changed pixels")
 vid_b = app._run3_write_topview_video(tr, dict(base_cfg, lens=None, lens_size=None), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video)
