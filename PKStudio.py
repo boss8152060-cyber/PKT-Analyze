@@ -474,6 +474,7 @@ RUN3_DEFAULTS = {
     "refmap_lens": "",                      # JSON [f_ratio, k1, width, height]: lens (radial) distortion of the camera; empty = none
     "refmap_refine": "",                    # JSON 3x3 (flattened) automatic correction in map pixels; empty = none
     "refmap_distances": "{}",               # JSON {"Z3.1|Z3.2": real distance in m between two zone corners, ...}
+    "topview_background": "camera",         # Topview video background: camera (the video flattened onto the ground, lens corrected) / map / grid
     "topview_video": True,                  # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points)
     "lc_along_limit_m": "0",                # side-by-side window along the heading (m); 0 = auto (L_A + L_B) / 2
     "lc_max_lateral_m": "3.50",             # pairs further apart sideways than this (m) are unrelated; 0 = no limit
@@ -1378,6 +1379,8 @@ def zone_metric_points(transform, pts):
     return apply_homography(transform["H"], pts) @ transform["Q"] + transform["t"]
 
 # ---------------- Topview (road-plane) drawing helpers ----------------
+TOPVIEW_BG_LABELS = {"camera": "ภาพกล้องที่ทำให้แบนราบกับพื้น (แก้เลนส์) — แนะนำ", "map": "ภาพแผนที่โดรน", "grid": "ตารางเปล่า"}
+TOPVIEW_BG_BY_LABEL = {v: k for k, v in TOPVIEW_BG_LABELS.items()}
 TOPVIEW_CLASS_COLORS = {            # BGR
     "Motorcycle": (0, 165, 255), "Car": (255, 160, 40), "Pickup": (200, 120, 255), "Bus": (60, 60, 255),
     "Truck": (60, 200, 60), "Van": (200, 200, 60), "Sidecar": (0, 220, 220),
@@ -3991,6 +3994,7 @@ class Run1App:
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
         self.run3_lc_heading_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_heading_window_s"])
         self.run3_topview_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["topview_video"])
+        self.run3_topview_bg_var = tk.StringVar(value=TOPVIEW_BG_LABELS.get(RUN3_DEFAULTS["topview_background"], TOPVIEW_BG_LABELS["camera"]))
         self.run3_refmap_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["refmap_enabled"])
         self.run3_refmap_path_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_path"])
         self.run3_refmap_scale_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_scale"])
@@ -4327,6 +4331,10 @@ class Run1App:
         r += 1
         ttk.Checkbutton(cal, text="สร้างวิดีโอ Topview (Tracking_Topview.mp4)", variable=self.run3_topview_video_var).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(cal, text="วาดจากพิกัดเมตรเดียวกับที่ตัวชี้วัดใช้ (ไฟล์ Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
+        r += 1
+        ttk.Label(cal, text="พื้นหลังวิดีโอ Topview").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Combobox(cal, textvariable=self.run3_topview_bg_var, state="readonly", width=44,
+                     values=list(TOPVIEW_BG_LABELS.values())).grid(row=r, column=1, columnspan=2, sticky="w", pady=2)
         r += 1
         ttk.Checkbutton(cal, text="ใช้แผนที่อ้างอิง (ภาพ Topview จากโดรน) แทน Perspective", variable=self.run3_refmap_enabled_var,
                         command=self.refresh_refmap_status).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
@@ -5859,6 +5867,7 @@ class Run1App:
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
                 "lc_heading_window_s": self.run3_lc_heading_window_var.get(),
                 "topview_video": self.run3_topview_video_var.get(),
+                "topview_background": TOPVIEW_BG_BY_LABEL.get(self.run3_topview_bg_var.get(), "camera"),
                 "refmap_enabled": self.run3_refmap_enabled_var.get(),
                 "refmap_path": self.run3_refmap_path_var.get(),
                 "refmap_scale": self.run3_refmap_scale_var.get(),
@@ -6043,6 +6052,7 @@ class Run1App:
                 ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
                 ("lc_heading_window_s", self.run3_lc_heading_window_var),
                 ("topview_video", self.run3_topview_video_var),
+                ("topview_background", self.run3_topview_bg_var),
                 ("refmap_enabled", self.run3_refmap_enabled_var),
                 ("refmap_path", self.run3_refmap_path_var),
                 ("refmap_scale", self.run3_refmap_scale_var),
@@ -9329,6 +9339,7 @@ class Run1App:
             "hold_min_duration_s": num(self.run3_hold_min_duration_var, GAP_HOLD_MIN_S),
             "lc_heading_window_s": num(self.run3_lc_heading_window_var, 0.5),
             "topview_video": bool(self.run3_topview_video_var.get()),
+            "topview_background": TOPVIEW_BG_BY_LABEL.get(self.run3_topview_bg_var.get(), "camera"),
             "lc_along_limit_m": max(0.0, num(self.run3_lc_along_limit_var, 0.0) or 0.0),
             "lc_max_lateral_m": max(0.0, num(self.run3_lc_max_lateral_var, 3.5) or 0.0),
             "lc_motorcycle_pairs_only": bool(self.run3_lc_motorcycle_pairs_only_var.get()),
@@ -9475,11 +9486,23 @@ class Run1App:
         base = np.full((H, W, 3), 38, np.uint8)
         t_all = [it[2] for items in per_frame.values() for it in items]
         persp = c.get("perspective") or {}
+        mode = c.get("topview_background", "camera")
+        flat_maps = None
+        if mode == "camera" and video_path and os.path.isfile(video_path):
+            # every canvas pixel -> metres -> where it is in the camera picture (homography^-1 + the lens): one remap per frame
+            xs, ys = np.meshgrid(np.arange(W, dtype=np.float64), np.arange(H, dtype=np.float64))
+            metres = np.stack([xs.ravel() / cv["scale"] + cv["xmin"], ys.ravel() / cv["scale"] + cv["ymin"]], axis=1)
+            campx = self._run3_from_metric(metres, c).reshape(H, W, 2).astype(np.float32)
+            flat_maps = (campx[..., 0].copy(), campx[..., 1].copy())
         map_img = None
-        if persp.get("map"):                                  # a true top-view picture: use it as the map
+        if flat_maps is None and mode in ("map", "camera") and persp.get("map"):     # a true top-view picture used as the map
             map_img = load_reference_map_image(persp["map"]["path"], persp["map"].get("frame"))
-        bg = map_img if map_img is not None else self._run3_topview_background(video_path, min(t_all), max(t_all))
+        if flat_maps is not None or mode == "grid":
+            bg = None
+        else:
+            bg = map_img if map_img is not None else self._run3_topview_background(video_path, min(t_all), max(t_all))
         bg_used = False
+        plain = base.copy()
         if bg is not None:
             try:
                 if map_img is not None:
@@ -9520,8 +9543,27 @@ class Run1App:
             cv2.polylines(base, [q], True, (120, 220, 120), 1, cv2.LINE_AA)
             cx, cy = q.reshape(-1, 2).mean(axis=0)
             cv2.putText(base, zname.replace("Zone ", "Z"), (int(cx) - 8, int(cy) + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (120, 220, 120), 1, cv2.LINE_AA)
-        cv2.putText(base, f"metres (x right, y down)  {cv['scale']:.1f} px/m  " + (("map + points" if map_img is not None else "road photo + points") if bg_used else "grid + points"),
+        cv2.putText(base, f"metres (x right, y down)  {cv['scale']:.1f} px/m  " + ("camera flattened onto the ground + points" if flat_maps is not None else (("map + points" if map_img is not None else "road photo + points") if bg_used else "grid + points")),
                     (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+        deco = (base != plain).any(axis=2) if flat_maps is not None else None         # grid / zones / text laid over each flat frame
+        cap_f = cv2.VideoCapture(video_path) if flat_maps is not None else None
+        pos_f = [-1]
+
+        def flat_frame(fr):
+            idx = fr - 1                                                                 # 'frame' is 1-based in the records
+            if idx != pos_f[0] + 1:
+                if pos_f[0] >= 0 and 0 < idx - pos_f[0] <= 30:
+                    for _ in range(idx - pos_f[0] - 1):
+                        cap_f.grab()
+                else:
+                    cap_f.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, im = cap_f.read()
+            pos_f[0] = idx
+            if not ok or im is None:
+                return None
+            out_ = cv2.remap(im, flat_maps[0], flat_maps[1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(38, 38, 38))
+            out_[deco] = (0.6 * out_[deco] + 0.4 * base[deco]).astype(np.uint8)
+            return out_
         frames = sorted(per_frame)
         times = sorted({per_frame[f][0][2] for f in frames})
         dts = np.diff(times)
@@ -9537,7 +9579,10 @@ class Run1App:
         trails = defaultdict(deque)
         try:
             for fr in frames:
-                img = base.copy()
+                img = None
+                if flat_maps is not None:
+                    img = flat_frame(fr)
+                img = base.copy() if img is None else img
                 now = per_frame[fr][0][2]
                 drawn = []
                 for tid, cls, t, m, h in per_frame[fr]:
@@ -9567,7 +9612,21 @@ class Run1App:
                 writer.write(img)
         finally:
             writer.release()
+            if cap_f is not None:
+                cap_f.release()
         return out_path
+
+    def _run3_from_metric(self, pts_m, c):
+        """Road-plane metres -> camera pixels (the inverse of _run3_to_metric: homography^-1, then the lens bends it again)."""
+        m = np.asarray(pts_m, dtype=np.float64).reshape(-1, 2)
+        persp = c["perspective"]
+        if persp is not None:
+            p = cv2.perspectiveTransform(m.reshape(-1, 1, 2), np.linalg.inv(np.asarray(persp["H"], dtype=np.float64))).reshape(-1, 2)
+            return lens_distort(p, persp["size"], persp["lens"]) if persp.get("lens") is not None else p
+        th = math.radians(c["axis_deg"])
+        road_u = np.array([math.cos(th), math.sin(th)])
+        lat_u = np.array([-math.sin(th), math.cos(th)])
+        return (m[:, 0:1] * road_u + m[:, 1:2] * lat_u) * c["ppm"]
 
     def _run3_remove_duplicate_tracks(self, tracks):
         """Remove the frames of a track that duplicates another track (same vehicle, two IDs).

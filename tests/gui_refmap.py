@@ -666,6 +666,72 @@ dlgF.clear_lens()
 check("clear lens", dlgF.lens is None and "ยังไม่แก้เลนส์" in dlgF.lens_msg_var.get())
 dlgF.close()
 
+# ---- the Topview video = the camera video itself, lens-corrected and laid flat on the ground (no drone picture)
+LENS_T = (0.85, -0.45)
+CW, CH = 1280, 720
+und_img = cv2.warpPerspective(tex, h_map_to_cam, (CW, CH))                    # the ground (texture, 20 px/m) seen by an ideal camera
+yy_, xx_ = np.mgrid[0:CH, 0:CW].astype(np.float64)
+srcm = m.lens_undistort(np.stack([xx_.ravel(), yy_.ravel()], 1), (CW, CH), LENS_T).reshape(CH, CW, 2).astype(np.float32)
+cam_flat_img = cv2.remap(und_img, srcm[..., 0], srcm[..., 1], cv2.INTER_LINEAR)       # what a wide-angle lens records (barrel)
+flat_video = os.path.join(tmp, "cam_flat.mp4")
+vw = cv2.VideoWriter(flat_video, cv2.VideoWriter_fourcc(*"mp4v"), 10, (CW, CH))
+for _ in range(30):
+    vw.write(cam_flat_img)
+vw.release()
+H_c2m = np.diag([1 / 20.0, 1 / 20.0, 1.0]) @ np.linalg.inv(h_map_to_cam)             # undistorted camera px -> metres
+tr_f = {"1": []}
+for k_ in range(30):
+    pm_ = (12.0 + k_ * 0.9, 12.0 + k_ * 0.45)
+    tr_f["1"].append({"frame": str(k_ + 1), "timestamp": f"{k_ / 10.0:.6f}", "class_name": "Car", "zone": "", "_timestamp": k_ / 10.0,
+                      "_m": pm_, "_mc": pm_, "_point": None, "_center": None, "_zone_num": None})
+old_zones = app.zones
+app.zones = {name: [] for name in m.ZONE_NAMES}
+cfg_f = {"ppm": 1.0, "axis_deg": 0.0, "lengths": {"Car": 4.5}, "widths": {"Car": 1.8}, "topview_background": "camera",
+         "perspective": {"H": H_c2m, "lens": LENS_T, "size": (CW, CH)}}
+out_f = tempfile.mkdtemp(prefix="pk_flat_", dir=tmp)
+vid_f = app._run3_write_topview_video(tr_f, cfg_f, out_f, flat_video)
+cvf = m.topview_canvas([r["_m"] for r in tr_f["1"]], 1280)
+Wf, Hf = cvf["w"], cvf["h"]
+xs_, ys_ = np.meshgrid(np.arange(Wf, dtype=np.float64), np.arange(Hf, dtype=np.float64))
+met_ = np.stack([xs_ / cvf["scale"] + cvf["xmin"], ys_ / cvf["scale"] + cvf["ymin"]], axis=-1)           # metres of every canvas pixel
+expected = cv2.remap(tex, (met_[..., 0] * 20.0).astype(np.float32), (met_[..., 1] * 20.0).astype(np.float32), cv2.INTER_LINEAR)
+cam_und_px = m.apply_homography(np.linalg.inv(H_c2m), met_.reshape(-1, 2))
+cam_d_px = m.lens_distort(cam_und_px, (CW, CH), LENS_T)
+seen = ((cam_d_px[:, 0] > 5) & (cam_d_px[:, 0] < CW - 5) & (cam_d_px[:, 1] > 5) & (cam_d_px[:, 1] < CH - 5)).reshape(Hf, Wf)
+inside_tex = ((met_[..., 0] * 20 > 5) & (met_[..., 0] * 20 < 1195) & (met_[..., 1] * 20 > 5) & (met_[..., 1] * 20 < 795))
+car_px = m.topview_px(cvf, [tr_f["1"][14]["_m"]])[0]
+away = (np.hypot(xs_ - car_px[0], ys_ - car_px[1]) > 120) & (ys_ > 30) & (ys_ < Hf - 30)
+valid_ = seen & inside_tex & away
+
+
+def flat_ncc(video):
+    cap_ = cv2.VideoCapture(video)
+    cap_.set(cv2.CAP_PROP_POS_FRAMES, 14)
+    ok_, fr_ = cap_.read()
+    cap_.release()
+    g1 = cv2.cvtColor(fr_, cv2.COLOR_BGR2GRAY).astype(np.float64)[valid_]
+    g2 = cv2.cvtColor(expected, cv2.COLOR_BGR2GRAY).astype(np.float64)[valid_]
+    g1, g2 = g1 - g1.mean(), g2 - g2.mean()
+    return float((g1 * g2).sum() / np.sqrt((g1 ** 2).sum() * (g2 ** 2).sum() + 1e-9)), fr_.shape
+
+
+ncc_flat, shp_ = flat_ncc(vid_f)
+check("the Topview video is the camera video laid flat: it matches the ground texture seen from above", ncc_flat > 0.80, f"NCC {ncc_flat:.3f}, {shp_}, valid pixels {int(valid_.sum())}")
+cfg_nolens = dict(cfg_f)
+cfg_nolens["perspective"] = {"H": H_c2m, "lens": None, "size": (CW, CH)}
+out_nl = tempfile.mkdtemp(prefix="pk_flat_nl_", dir=tmp)
+ncc_nolens, _ = flat_ncc(app._run3_write_topview_video(tr_f, cfg_nolens, out_nl, flat_video))
+check("without the lens correction the picture stays curved (clearly worse match)", ncc_nolens < ncc_flat - 0.08, f"with lens {ncc_flat:.3f}, without {ncc_nolens:.3f}")
+cfg_grid = dict(cfg_f)
+cfg_grid["topview_background"] = "grid"
+ncc_grid, _ = flat_ncc(app._run3_write_topview_video(tr_f, cfg_grid, tempfile.mkdtemp(prefix="pk_flat_g_", dir=tmp), flat_video))
+check("background 'grid' shows no camera picture", ncc_grid < 0.3, f"{ncc_grid:.3f}")
+check("the inverse mapping (metres -> camera) undoes the forward one (lens + homography)",
+      np.allclose(app._run3_to_metric(app._run3_from_metric(np.array([[15.0, 12.0], [30.0, 22.0]]), cfg_f), cfg_f), [[15.0, 12.0], [30.0, 22.0]], atol=1e-6))
+cfg_ppm = {"ppm": 40.0, "axis_deg": 12.0, "perspective": None}
+check("the inverse mapping also works for PPM-only calibration", np.allclose(app._run3_to_metric(app._run3_from_metric([[3.0, 4.0]], cfg_ppm), cfg_ppm), [[3.0, 4.0]], atol=1e-9))
+app.zones = old_zones
+
 # ---- the map can also be a VIDEO (a drone clip): one chosen frame is the map
 map_video = os.path.join(tmp, "drone_ไทย.mp4")                       # (non-ASCII name on purpose)
 vw = cv2.VideoWriter(map_video, cv2.VideoWriter_fourcc(*"mp4v"), 10, (1200, 800))
