@@ -526,6 +526,7 @@ def scene5(app):
     still recognised as 2-3-4 (status Exact_AfterDedupe) and gets LDP rows."""
     zone_w = lambda x, y: 2 if x < 10 else (3 if x < 12 else (2 if x < 14 else (3 if x < 20 else 4)))
     veh = [(1, "Car", make_rows(1, "Car", along_x(0.0, 10.0), zone_w, 360, (4.5, 1.8)))]
+    app.zone_flicker_merge_var.set("0.10")          # the old merge window: the 0.2 s wobble stays and is removed later as a repeated zone
     out, summary = run_scene(app, veh)
     print("scene 5 output:", out)
     ms = summary["source_counts"]["movement_status"]
@@ -535,6 +536,11 @@ def scene5(app):
     check("LDP is computed for it (status Exact_AfterDedupe counts as Exact)", len(ldp) >= 2, str(len(ldp)))
     wide = read_csv(os.path.join(out, "Speed.csv"))
     check("vehicle speed table shows status and movement", wide[0]["Movement"] == "2-3-4" and wide[0]["Movement_Status"] == "Exact_AfterDedupe")
+    # the program default (0.30 s) already treats the 0.2 s dip into zone 3 as boundary flicker: plain Exact
+    app.zone_flicker_merge_var.set("0.30")
+    out_f, summary_f = run_scene(app, veh)
+    msf = summary_f["source_counts"]["movement_status"]
+    check("flicker merge 0.30 s turns the wobbling car into a plain Exact 2-3-4", msf.get("Exact") == 1 and not msf.get("Exact_AfterDedupe"), str(msf))
 
 
 def main():

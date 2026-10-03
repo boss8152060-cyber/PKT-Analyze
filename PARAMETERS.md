@@ -26,6 +26,8 @@
 | `waiting_speed_threshold` (km/h) | 5.0 | Gap (หยุดค้างกลางแยก) | มาก = นับว่าหยุดง่ายขึ้น → Access/Exit เปลี่ยน | 2, 5, 8 |
 | `gap_hold_min_duration_s` | 0.30 | Gap | | 0.2, 0.3, 0.5 |
 | `lc_heading_window_s` | 0.50 | Lateral Clearance | ทิศ heading ของรถ A | 0.25, 0.5, 1.0 |
+| `zone_flicker_merge_s` | 0.30 (เดิม 0.10) | Movement / ลำดับโซน / Zone_Summary | A→B→A ที่ B สั้นกว่านี้ถือเป็นการกะพริบที่ขอบโซน ตัดออก (ไม่แก้ Detection_Records) — ทดลองกับ R9/R10 พบว่าค่า 0.1–1.2 ให้ Exact เท่ากัน | 0.1, 0.3, 0.6 |
+| `trajectory_position` / `trajectory_offset` | Bottom / 0 (เดิม Center / 0) | จุดตัดสินโซน | Bottom คือจุดที่ล้อแตะพื้น (calibration ใช้ได้เฉพาะจุดนี้); offset > 0 ยกจุดขึ้นลอยจากพื้น รถสลับโซนที่รอยต่อมากขึ้น (โปรแกรมเตือน) | Bottom + 0 |
 | `lc_along_limit_m` | 0 (อัตโนมัติ = (L_A+L_B)/2) | Lateral Clearance | ช่วงเคียงข้างตามแนวยาว ±m; มาก = เก็บคู่ที่เหลื่อมกันได้มากขึ้น | 0, 4, 6 |
 | `lc_max_lateral_m` | 3.5 (0 = ไม่จำกัด) | Lateral Clearance | ระยะด้านข้างไกลสุดที่ถือว่ารถสองคันเกี่ยวข้องกัน (ตัดคู่ที่ไกลกันในโซนใหญ่ เช่น R10 พบ 8–10 ม. ใน Zone 3) | 0, 3.5, 5 |
 | `pet_interaction_distance_m` | 3.0 | PET (กรณีเส้นทางไม่ตัดกัน) | จำนวน/ประเภทของเหตุการณ์ | 2, 3, 4 |
