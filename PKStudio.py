@@ -7497,7 +7497,9 @@ class Run1App:
         times = sorted({per_frame[f][0][2] for f in frames})
         dts = np.diff(times)
         dts = dts[dts > 0]
-        fps_out = float(min(30.0, 1.0 / float(np.median(dts)))) if len(dts) else 30.0
+        # one picture per processed frame, played at the rate the frames were sampled (60 fps video -> 60 fps here),
+        # so the Topview video lasts as long as the analysed part of the real video
+        fps_out = float(min(120.0, max(1.0, 1.0 / float(np.median(dts))))) if len(dts) else 30.0
         out_path = os.path.join(output_dir, "Tracking_Topview.mp4")
         writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps_out, (W, H))
         if not writer.isOpened():
