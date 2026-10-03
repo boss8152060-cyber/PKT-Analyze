@@ -9493,23 +9493,28 @@ class Run1App:
                     hm = cv2.getPerspectiveTransform(src, self._run3_to_metric(src, c).astype(np.float32))
                 mm = np.array([[cv["scale"], 0, -cv["scale"] * cv["xmin"]], [0, cv["scale"], -cv["scale"] * cv["ymin"]], [0, 0, 1]])
                 warped = cv2.warpPerspective(bg, mm @ hm, (W, H))
-                base = cv2.addWeighted(warped, 0.85 if map_img is not None else 0.55, base, 0.15 if map_img is not None else 0.45, 0)
+                base = warped if map_img is not None else cv2.addWeighted(warped, 0.55, base, 0.45, 0)     # a true top view: shown as it is
                 bg_used = True
             except Exception:
                 log.exception("Topview background could not be warped; using a plain grid")
         step = 5.0 if max(W, H) / cv["scale"] <= 80 else 10.0
+        grid = base.copy()                                         # the metre grid is faint, so a map still looks like a map
+        labels = []
         x = math.ceil(cv["xmin"] / step) * step
         while (x - cv["xmin"]) * cv["scale"] < W:
             px = int(round((x - cv["xmin"]) * cv["scale"]))
-            cv2.line(base, (px, 0), (px, H - 1), (90, 90, 90), 1)
-            cv2.putText(base, f"{x:g}", (px + 2, H - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (170, 170, 170), 1, cv2.LINE_AA)
+            cv2.line(grid, (px, 0), (px, H - 1), (255, 255, 255), 1)
+            labels.append((f"{x:g}", (px + 2, H - 4)))
             x += step
         y = math.ceil(cv["ymin"] / step) * step
         while (y - cv["ymin"]) * cv["scale"] < H:
             py = int(round((y - cv["ymin"]) * cv["scale"]))
-            cv2.line(base, (0, py), (W - 1, py), (90, 90, 90), 1)
-            cv2.putText(base, f"{y:g}", (2, py - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (170, 170, 170), 1, cv2.LINE_AA)
+            cv2.line(grid, (0, py), (W - 1, py), (255, 255, 255), 1)
+            labels.append((f"{y:g}", (2, py - 3)))
             y += step
+        base = cv2.addWeighted(grid, 0.22, base, 0.78, 0)
+        for text_, org_ in labels:
+            cv2.putText(base, text_, org_, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (235, 235, 235), 1, cv2.LINE_AA)
         for zname, pts in zone_m:
             q = np.round(topview_px(cv, pts)).astype(np.int32).reshape(-1, 1, 2)
             cv2.polylines(base, [q], True, (120, 220, 120), 1, cv2.LINE_AA)
@@ -9534,21 +9539,30 @@ class Run1App:
             for fr in frames:
                 img = base.copy()
                 now = per_frame[fr][0][2]
+                drawn = []
                 for tid, cls, t, m, h in per_frame[fr]:
                     pt = topview_px(cv, [m])[0]
                     trails[tid].append((t, pt))
                     while trails[tid] and trails[tid][0][0] < t - trail_s:
                         trails[tid].popleft()
                     col = TOPVIEW_CLASS_COLORS.get(cls, TOPVIEW_DEFAULT_COLOR)
-                    if len(trails[tid]) > 1:
-                        cv2.polylines(img, [np.round(np.array([q for _, q in trails[tid]])).astype(np.int32).reshape(-1, 1, 2)],
-                                      False, col, 1, cv2.LINE_AA)
                     ln = lengths.get(cls) or 4.5
                     wd = widths.get(cls) or 1.8
                     box = np.round(topview_px(cv, oriented_rect(m, h, ln, wd))).astype(np.int32).reshape(-1, 1, 2)
+                    nose = topview_px(cv, [np.asarray(m, dtype=float) + np.asarray(h if h else (1.0, 0.0), dtype=float) * (ln * 0.5)])[0]
+                    drawn.append((tid, col, box, pt, nose))
+                fill = img.copy()                                     # vehicles as translucent footprints, like cars on a map
+                for tid, col, box, pt, nose in drawn:
+                    cv2.fillPoly(fill, [box], col)
+                img = cv2.addWeighted(fill, 0.35, img, 0.65, 0)
+                for tid, col, box, pt, nose in drawn:
+                    if len(trails[tid]) > 1:
+                        cv2.polylines(img, [np.round(np.array([q for _, q in trails[tid]])).astype(np.int32).reshape(-1, 1, 2)],
+                                      False, col, 1, cv2.LINE_AA)
                     cv2.polylines(img, [box], True, col, 2, cv2.LINE_AA)
+                    cv2.line(img, (int(round(pt[0])), int(round(pt[1]))), (int(round(nose[0])), int(round(nose[1]))), (255, 255, 255), 1, cv2.LINE_AA)
                     cv2.circle(img, (int(round(pt[0])), int(round(pt[1]))), 2, (255, 255, 255), -1)
-                    cv2.putText(img, str(tid), (int(pt[0]) + 5, int(pt[1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
+                    cv2.putText(img, str(tid), (int(pt[0]) + 5, int(pt[1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
                 cv2.putText(img, f"t = {now:.2f} s   frame {fr}", (6, H - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
                 writer.write(img)
         finally:
