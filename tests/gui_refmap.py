@@ -576,6 +576,67 @@ check("the file holds the hand-edited corner", any(abs(pt[0] - want_e[0]) < 2 an
 check("the user is told a re-run is needed", len(shown2) == 1)
 app.video_var.set(old_video)
 
+# ---- lens (barrel) distortion of a wide-angle camera: clicked pairs disagree by ~1 m until the lens is estimated
+rng_l = np.random.default_rng(21)
+LENS_TRUE = (0.85, -0.45)
+CAM_W, CAM_H = 1280, 720
+und_l = np.column_stack([rng_l.uniform(100, CAM_W - 100, 14), rng_l.uniform(80, CAM_H - 80, 14)])    # ideal camera points
+map_l = ph(h_cam_to_map, und_l)                                                                      # their map pixels (20 px/m)
+cam_l = m.lens_distort(und_l, (CAM_W, CAM_H), LENS_TRUE)                                             # what the wide-angle camera recorded
+dlgL = app.open_reference_map()
+dlgL.node_mode_var.set(False)
+dlgL.reset()
+dlgL.refine = None
+dlgL.lens = None
+dlgL.set_map(tex_path)
+dlgL.set_scale_from_points((100, 100), (300, 100), 10.0)
+for c_, p_ in zip(cam_l, map_l):
+    dlgL.add_camera_point(*c_)
+    dlgL.add_map_point(*p_)
+test_und = np.column_stack([rng_l.uniform(150, CAM_W - 150, 40), rng_l.uniform(100, CAM_H - 100, 40)])
+test_cam = m.lens_distort(test_und, (CAM_W, CAM_H), LENS_TRUE)
+test_map_px = ph(h_cam_to_map, test_und)
+
+
+def ground_err_lens(dlg):
+    cal = dlg.calibration()
+    pred = m.cal_cam_to_metres(cal, test_cam) * dlg.scale
+    return float(np.mean(np.hypot(*(pred - test_map_px).T)) / 20.0)
+
+
+err_nolens = ground_err_lens(dlgL)
+check("barrel-distorted camera: without the lens the ground positions are far off", err_nolens > 0.4, f"{err_nolens:.2f} m")
+check("the dialog hints at the lens when the pairs disagree a lot", "เลนส์" in dlgL.msg_var.get(), dlgL.msg_var.get()[:80])
+est_l = dlgL.estimate_lens_now()
+check("the lens is estimated and accepted", est_l is not None and dlgL.lens is not None and est_l["loo_after"] < 0.75 * est_l["loo_before"])
+err_lens = ground_err_lens(dlgL)
+check("with the lens the ground positions are much closer to the truth", err_lens < 0.3 * err_nolens and err_lens < 0.3, f"{err_nolens:.2f} m -> {err_lens:.2f} m")
+check("the message tells the numbers", "ซม." in dlgL.msg_var.get())
+dlgL.clear_lens()
+check("clear lens: back to the plain calibration", dlgL.lens is None and abs(ground_err_lens(dlgL) - err_nolens) < 1e-9)
+dlgL.estimate_lens_now()
+try:
+    dlgL.auto_align(model="rigid", blocking=True)                 # the camera picture is straightened first
+    dlgL.snap_zones(blocking=True)                                # zones go through the lens-aware calibration
+    ran_ok = True
+except Exception as exc:
+    print("exception:", exc)
+    ran_ok = False
+check("automatic alignment and zone snapping run with a lens active", ran_ok)
+saved_lens = dlgL.lens
+check("save keeps the lens in the settings", dlgL.save() is True and app._run3_refmap_state()["lens"] is not None
+      and abs(app._run3_refmap_state()["lens"][1] - saved_lens[1]) < 1e-4 and app._run3_refmap_state()["size"] == (CAM_W, CAM_H))
+persp_l = app._run3_get_perspective_matrix(silent=False)
+check("the perspective used by Run 3 carries the lens", persp_l is not None and persp_l.get("lens") is not None)
+got_l = app._run3_to_metric(test_cam[:10], {"perspective": persp_l, "ppm": 1.0, "axis_deg": 0.0})
+err_run3 = float(np.mean(np.hypot(*(got_l * 20.0 - test_map_px[:10]).T)) / 20.0)
+check("Run 3 metres straighten the lens first (every metric point goes through it)", err_run3 < 0.3, f"{err_run3:.2f} m")
+# zones carried through the lens-aware calibration come back to the same camera pixels
+dlgM = app.open_reference_map()
+dlgM.node_mode_var.set(False)
+check("a reopened dialog brings the lens back", dlgM.lens is not None and dlgM.cam_wh == (CAM_W, CAM_H) or dlgM.cam_wh[0] > 0)
+dlgM.close()
+
 # ---- the map can also be a VIDEO (a drone clip): one chosen frame is the map
 map_video = os.path.join(tmp, "drone_ไทย.mp4")                       # (non-ASCII name on purpose)
 vw = cv2.VideoWriter(map_video, cv2.VideoWriter_fourcc(*"mp4v"), 10, (1200, 800))

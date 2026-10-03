@@ -861,5 +861,66 @@ class ReferenceMapTests(unittest.TestCase):
             self.f(self.cam, self.map_px, 0)
 
 
+class LensTests(unittest.TestCase):
+    SIZE = (1920, 1080)
+
+    def setUp(self):
+        self.h_true = np.array([[1.1, 0.12, 40.0], [0.04, 1.7, -30.0], [0.0003, 0.0011, 1.0]])
+        rng = np.random.default_rng(7)
+        self.und = rng.uniform([150, 100], [1770, 980], size=(14, 2))                     # ideal (undistorted) camera pixels, in the picture
+        self.map_pts = CORE["apply_homography"](self.h_true, self.und)                    # their map pixels (20 px per metre)
+
+    def test_distort_undistort_round_trip(self):
+        pts = np.array([[100.0, 80], [960, 540], [1850, 1000], [300, 900]])
+        for lens in ((0.8, -0.4), (1.0, -0.2), (1.2, 0.05)):
+            d = CORE["lens_distort"](pts, self.SIZE, lens)
+            u = CORE["lens_undistort"](d, self.SIZE, lens)
+            np.testing.assert_allclose(u, pts, atol=1e-6)
+
+    def test_centre_stays_and_barrel_pulls_the_edges_in(self):
+        c = CORE["lens_distort"]([[960.0, 540.0]], self.SIZE, (0.8, -0.4))[0]
+        np.testing.assert_allclose(c, [960, 540], atol=1e-9)
+        edge = CORE["lens_distort"]([[1800.0, 540.0]], self.SIZE, (0.8, -0.4))[0]
+        self.assertLess(edge[0], 1800.0)                                                  # barrel: points move toward the centre
+
+    def test_calibration_with_the_right_lens_is_exact(self):
+        lens = (0.8, -0.4)
+        cam = CORE["lens_distort"](self.und, self.SIZE, lens)                             # what the camera really recorded
+        bad = CORE["reference_map_calibration"](cam, self.map_pts, 20.0)                  # ignoring the lens
+        good = CORE["reference_map_calibration"](cam, self.map_pts, 20.0, lens=lens, size=self.SIZE)
+        self.assertGreater(bad["rms_m"], 0.3)
+        self.assertLess(good["rms_m"], 1e-6)
+        back = CORE["cal_metres_to_cam"](good, CORE["cal_cam_to_metres"](good, cam))
+        np.testing.assert_allclose(back, cam, atol=1e-5)                                  # the two helpers are inverses
+
+    def test_estimate_lens_finds_the_distortion(self):
+        lens = (0.8, -0.4)
+        cam = CORE["lens_distort"](self.und, self.SIZE, lens) + np.random.default_rng(1).normal(0, 0.8, (14, 2))
+        est = CORE["estimate_lens"](cam, self.map_pts, 20.0, self.SIZE)
+        self.assertIsNotNone(est)
+        self.assertLess(est["rms_after"], 0.35 * est["rms_before"])
+        self.assertLess(est["loo_after"], 0.75 * est["loo_before"])
+        # f and k1 trade off against each other, so judge the result by where held-out points land, not by k1 itself
+        rng = np.random.default_rng(99)
+        und_t = rng.uniform([150, 100], [1770, 980], size=(60, 2))
+        truth_m = CORE["apply_homography"](self.h_true, und_t) / 20.0
+        cam_t = CORE["lens_distort"](und_t, self.SIZE, lens)
+        cal = CORE["reference_map_calibration"](cam, self.map_pts, 20.0, lens=est["lens"], size=self.SIZE)
+        err = np.hypot(*(CORE["cal_cam_to_metres"](cal, cam_t) - truth_m).T)
+        plain = CORE["reference_map_calibration"](cam, self.map_pts, 20.0)
+        err0 = np.hypot(*(CORE["cal_cam_to_metres"](plain, cam_t) - truth_m).T)
+        self.assertLess(err.mean(), 0.5 * err0.mean())                                  # clearly better than ignoring the lens
+        self.assertLess(err.mean(), 0.35)
+
+    def test_no_lens_is_proposed_for_an_undistorted_camera(self):
+        cam = self.und + np.random.default_rng(2).normal(0, 0.8, (14, 2))
+        self.assertIsNone(CORE["estimate_lens"](cam, self.map_pts, 20.0, self.SIZE))
+
+    def test_too_few_pairs_or_an_invalid_lens_are_refused(self):
+        self.assertIsNone(CORE["estimate_lens"](self.und[:5], self.map_pts[:5], 20.0, self.SIZE))
+        with self.assertRaises(ValueError):
+            CORE["reference_map_calibration"](self.und, self.map_pts, 20.0, lens=(0.4, -0.9), size=self.SIZE)
+
+
 if __name__ == "__main__":
     unittest.main()

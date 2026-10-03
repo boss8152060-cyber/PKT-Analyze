@@ -471,6 +471,7 @@ RUN3_DEFAULTS = {
     "refmap_frame": "",                     # when the map is a VIDEO: the frame number used (1-based, empty = middle)
     "refmap_scale": "",                     # map picture pixels per metre
     "refmap_pairs": "[]",                   # JSON [[cam_x, cam_y, map_x, map_y], ...]
+    "refmap_lens": "",                      # JSON [f_ratio, k1, width, height]: lens (radial) distortion of the camera; empty = none
     "refmap_refine": "",                    # JSON 3x3 (flattened) automatic correction in map pixels; empty = none
     "refmap_distances": "{}",               # JSON {"Z3.1|Z3.2": real distance in m between two zone corners, ...}
     "topview_video": True,                  # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points)
@@ -1190,16 +1191,58 @@ def homography_from_points(src, dst):
     return h / h[2, 2]
 
 
-def reference_map_calibration(cam_pts, map_pts, px_per_m, refine=None):
+def lens_distort(pts, size, lens):
+    """Undistorted camera pixels -> distorted camera pixels (what the lens really records).
+    lens = (f_ratio, k1): focal length f = f_ratio x image width, centre = image centre, radial model
+    x_d = x_u (1 + k1 r_u^2) in normalised coordinates (the OpenCV convention). size = (width, height)."""
+    p = np.asarray(pts, dtype=float).reshape(-1, 2)
+    c = np.array([size[0] / 2.0, size[1] / 2.0])
+    f = float(lens[0]) * size[0]
+    x = (p - c) / f
+    r2 = (x ** 2).sum(axis=1, keepdims=True)
+    return x * (1.0 + float(lens[1]) * r2) * f + c
+
+
+def lens_undistort(pts, size, lens):
+    """Distorted camera pixels -> undistorted ones (inverse of lens_distort; Newton on the radius)."""
+    p = np.asarray(pts, dtype=float).reshape(-1, 2)
+    c = np.array([size[0] / 2.0, size[1] / 2.0])
+    f = float(lens[0]) * size[0]
+    k1 = float(lens[1])
+    x = (p - c) / f
+    rd = np.sqrt((x ** 2).sum(axis=1))
+    ru = rd.copy()
+    for _ in range(30):
+        g = ru * (1.0 + k1 * ru ** 2) - rd
+        d = 1.0 + 3.0 * k1 * ru ** 2
+        ru = ru - g / np.where(np.abs(d) < 1e-6, 1e-6, d)
+    scale = np.where(rd > 1e-12, ru / np.where(rd > 1e-12, rd, 1.0), 1.0)
+    return x * scale[:, None] * f + c
+
+
+def lens_is_valid(size, lens, margin=0.25):
+    """The radial model must stay monotonic over the whole picture (no folding at the corners)."""
+    f = float(lens[0]) * size[0]
+    rmax = math.hypot(size[0] / 2.0, size[1] / 2.0) / f
+    return f > 0 and 1.0 + 3.0 * float(lens[1]) * rmax ** 2 > margin and 1.0 + float(lens[1]) * rmax ** 2 > 0.2
+
+
+def reference_map_calibration(cam_pts, map_pts, px_per_m, refine=None, lens=None, size=None):
     """Camera pixels -> metres on a REFERENCE MAP (a true top-view picture such as a drone frame).
     cam_pts / map_pts = the same ground points clicked on the camera picture and on the map (>= 4 pairs, not all on one
     line); px_per_m = scale of the map picture. Returns {"H": 3x3 camera pixel -> metre (x right, y down like the map),
     "errors_m": distance between each camera point carried onto the map and its clicked map point, "rms_m"}.
+    lens = (f_ratio, k1) with size = (w, h): the camera points are first corrected for the lens (see lens_distort);
+    use cal_cam_to_metres / cal_metres_to_cam to carry other points through the same calibration.
     refine (3x3, optional) = a correction in MAP PIXELS found by the automatic alignment (map px -> better map px);
     it is applied after the clicked pairs' fit. The errors are then measured against the clicked points, which the
     alignment says may themselves be off."""
     cam = np.asarray(cam_pts, dtype=float).reshape(-1, 2)
     mp = np.asarray(map_pts, dtype=float).reshape(-1, 2)
+    if lens is not None:
+        if size is None or not lens_is_valid(size, lens):
+            raise ValueError("lens model is not valid for this picture")
+        cam = lens_undistort(cam, size, lens)
     if not px_per_m or float(px_per_m) <= 0:
         raise ValueError("map scale (px per metre) must be > 0")
     mp = mp / float(px_per_m)
@@ -1224,7 +1267,85 @@ def reference_map_calibration(cam_pts, map_pts, px_per_m, refine=None):
         h = np.linalg.inv(sm) @ np.asarray(refine, dtype=float) @ sm @ h
         h = h / h[2, 2]
     err = np.hypot(*(apply_homography(h, cam) - mp).T)
-    return {"H": h, "errors_m": [float(e) for e in err], "rms_m": float(np.sqrt(np.mean(err ** 2)))}
+    return {"H": h, "errors_m": [float(e) for e in err], "rms_m": float(np.sqrt(np.mean(err ** 2))),
+            "lens": None if lens is None else (float(lens[0]), float(lens[1])), "size": None if size is None else (int(size[0]), int(size[1]))}
+
+
+def cal_cam_to_metres(cal, pts):
+    """Camera pixels -> metres through a reference_map_calibration result (lens correction included)."""
+    p = np.asarray(pts, dtype=float).reshape(-1, 2)
+    if cal.get("lens") is not None:
+        p = lens_undistort(p, cal["size"], cal["lens"])
+    return apply_homography(cal["H"], p)
+
+
+def cal_metres_to_cam(cal, pts_m):
+    """Metres -> camera pixels (the inverse of cal_cam_to_metres)."""
+    p = apply_homography(np.linalg.inv(cal["H"]), np.asarray(pts_m, dtype=float).reshape(-1, 2))
+    if cal.get("lens") is not None:
+        p = lens_distort(p, cal["size"], cal["lens"])
+    return p
+
+
+def estimate_lens(cam_pts, map_pts, px_per_m, size, min_gain=0.25):
+    """Estimate the lens (f_ratio, k1) that makes the clicked point pairs fit one homography best.
+    A wide-angle camera bends straight lines; a homography cannot model that, so the pairs seem to disagree by up to
+    a metre (the 'calibration error'). A search over (f_ratio, k1), judged by LEAVE-ONE-OUT error (so that it cannot
+    simply memorise the clicks), keeps the lens only when it lowers that error by at least `min_gain` (25 %).
+    Returns {"lens", "rms_before", "rms_after", "loo_before", "loo_after"} or None (no distortion worth correcting)."""
+    cam = np.asarray(cam_pts, dtype=float).reshape(-1, 2)
+    mp = np.asarray(map_pts, dtype=float).reshape(-1, 2)
+    n = len(cam)
+    if n < 6:
+        return None
+
+    def fit_rms(lens):
+        try:
+            return reference_map_calibration(cam, mp, px_per_m, lens=lens, size=size)["rms_m"]
+        except ValueError:
+            return None
+
+    def loo(lens):
+        errs = []
+        for i in range(n):
+            keep = [j for j in range(n) if j != i]
+            try:
+                c = reference_map_calibration(cam[keep], mp[keep], px_per_m, lens=lens, size=size)
+            except ValueError:
+                return None
+            q = cam[i:i + 1] if lens is None else lens_undistort(cam[i:i + 1], size, lens)
+            errs.append(float(np.hypot(*(apply_homography(c["H"], q)[0] - mp[i] / float(px_per_m)))))
+        return float(np.sqrt(np.mean(np.square(errs))))
+
+    base_rms, base_loo = fit_rms(None), loo(None)
+    if base_rms is None or base_loo is None:
+        return None
+    best = (base_rms, None)
+    for f in np.arange(0.5, 1.61, 0.1):
+        for k1 in np.arange(-0.8, 0.21, 0.05):
+            lens = (float(f), float(k1))
+            if not lens_is_valid(size, lens):
+                continue
+            r = fit_rms(lens)
+            if r is not None and r < best[0]:
+                best = (r, lens)
+    if best[1] is None:
+        return None
+    f0, k0 = best[1]                                              # finer search around the best coarse value
+    for df, dk in ((0.05, 0.025), (0.02, 0.01)):
+        for f in np.arange(f0 - 2 * df, f0 + 2.01 * df, df):
+            for k1 in np.arange(k0 - 2 * dk, k0 + 2.01 * dk, dk):
+                lens = (float(f), float(k1))
+                if f <= 0.3 or not lens_is_valid(size, lens):
+                    continue
+                r = fit_rms(lens)
+                if r is not None and r < best[0]:
+                    best, f0, k0 = (r, lens), lens[0], lens[1]
+    lens = best[1]
+    after_loo = loo(lens)
+    if after_loo is None or after_loo > (1.0 - min_gain) * base_loo:
+        return None
+    return {"lens": lens, "rms_before": base_rms, "rms_after": best[0], "loo_before": base_loo, "loo_after": after_loo}
 
 
 def apply_homography(h, pts):
@@ -1809,6 +1930,14 @@ def refine_reference_map(cam_img, map_img, h_px, mask_polys=None, model="affine"
             "before": cv2.addWeighted(map_s, 0.5, warp0, 0.5, 0), "after": cv2.addWeighted(map_s, 0.5, warp1, 0.5, 0)}
 
 
+def lens_undistort_image(img, lens):
+    """The camera picture with the lens (radial) distortion removed (same model as lens_distort)."""
+    h, w = img.shape[:2]
+    f = float(lens[0]) * w
+    k = np.array([[f, 0, w / 2.0], [0, f, h / 2.0], [0, 0, 1.0]])
+    return cv2.undistort(img, k, np.array([float(lens[1]), 0, 0, 0]))
+
+
 SNAP_COLORS = {"Zone 1": (255, 200, 0), "Zone 2": (0, 255, 255), "Zone 3": (0, 165, 255), "Zone 4": (255, 0, 255),
                "Zone 5": (0, 255, 0), "Zone 6": (255, 255, 0), "Zone 7": (0, 0, 255)}
 
@@ -1919,6 +2048,7 @@ class ReferenceMapDialog:
         self.zone_nodes = {}                             # zone name -> [node index of each vertex]
         self.edges = []                                  # [{"a": node, "b": node, "key": "Z3.1|Z3.2", "label": "Z3.1 – Z3.2"}]
         self.refine = state.get("refine")                # automatic correction in map pixels (3x3) or None
+        self.lens = state.get("lens")                    # (f_ratio, k1): lens distortion of the camera, or None
         self.snapped_map = None                          # zone name -> polygon in map pixels after the automatic snap to the road
         self._snap_job = None
         self._refine_job = None
@@ -1947,6 +2077,7 @@ class ReferenceMapDialog:
         self._slider_busy = False
         self._seek_after = {}
         self.cam_cap = cv2.VideoCapture(video_path)
+        self.cam_wh = (int(self.cam_cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0), int(self.cam_cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0))
         self.cam_total = max(1, int(self.cam_cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
         self.cam_fps = float(self.cam_cap.get(cv2.CAP_PROP_FPS) or 30.0) or 30.0
         self.cam_idx = None
@@ -2025,6 +2156,8 @@ class ReferenceMapDialog:
         ttk.Label(auto, text="rigid = เลื่อน+หมุน · affine = +ย่อขยาย (แนะนำ) · homography = เต็มรูป (เสี่ยงเพี้ยนที่ขอบ)",
                   foreground="#666666").pack(side="left")
         ttk.Button(auto, text="ล้างการปรับอัตโนมัติ", command=self.clear_refine).pack(side="left", padx=10)
+        ttk.Button(auto, text="🔍 ประมาณความโก่งของเลนส์", command=self.estimate_lens_now).pack(side="left", padx=(16, 4))
+        ttk.Button(auto, text="ล้างเลนส์", command=self.clear_lens).pack(side="left")
         self.snap_button = ttk.Button(auto, text="⚡ ปรับโซนให้ชิดถนนอัตโนมัติ", command=self.snap_zones)
         self.snap_button.pack(side="left", padx=(16, 4))
         ttk.Button(auto, text="คืนโซนเดิม", command=self.clear_snapped).pack(side="left")
@@ -2475,7 +2608,7 @@ class ReferenceMapDialog:
                 if name == "cam":
                     q = np.asarray(poly, dtype=float)
                 elif cal is not None:
-                    q = apply_homography(cal["H"], np.asarray(poly, dtype=float)) * self.scale
+                    q = cal_cam_to_metres(cal, poly) * self.scale
                 else:
                     continue
                 qc = np.round(q * k + np.array([ox, oy])).astype(np.int32).reshape(-1, 1, 2)
@@ -2591,7 +2724,7 @@ class ReferenceMapDialog:
     def _model_prediction(self, i):
         cam = self.nodes[i]["cam"]
         if self._cal is not None and self.map_img is not None:
-            q = tuple(apply_homography(self._cal["H"], [cam])[0] * self.scale)
+            q = tuple(cal_cam_to_metres(self._cal, [cam])[0] * self.scale)
             h, w = self.map_img.shape[:2]
             if -0.5 * w <= q[0] <= 1.5 * w and -0.5 * h <= q[1] <= 1.5 * h:            # a wild extrapolation is not trusted
                 return q
@@ -2943,22 +3076,47 @@ class ReferenceMapDialog:
             return None
         try:
             return reference_map_calibration([p[:2] for p in self.pairs], [p[2:] for p in self.pairs], self.scale,
-                                             self.refine if use_refine else None)
+                                             self.refine if use_refine else None,
+                                             self.lens, self.cam_wh if self.lens is not None else None)
         except ValueError:
             return None
 
+    # ----- lens (radial) distortion of the camera -----
+    def estimate_lens_now(self):
+        """A wide-angle lens bends the picture, which a homography cannot model: the clicked pairs then seem to disagree
+        by up to a metre. Estimate the lens from the pairs (accepted only if it clearly helps on held-out points)."""
+        if len(self.pairs) < 6 or not self.scale:
+            self.msg_var.set("ต้องมีคู่จุดอย่างน้อย 6 คู่และมาตราส่วนก่อน จึงประมาณความโก่งของเลนส์ได้ (ยิ่งกระจายทั่วภาพยิ่งดี)")
+            return None
+        est = estimate_lens([p[:2] for p in self.pairs], [p[2:] for p in self.pairs], self.scale, self.cam_wh)
+        if est is None:
+            self.msg_var.set("ไม่พบความโก่งของเลนส์ที่ควรแก้ (แก้แล้วไม่ดีขึ้นชัดเจนเมื่อลองกับจุดที่กันไว้) — จุดคู่อาจคลิกคลาดเอง ลองเพิ่มจุดหรือคลิกให้แม่นขึ้น")
+            return None
+        self.lens = est["lens"]
+        self.refine = None                                    # (a correction found for the old mapping no longer applies)
+        self._pred_cache.clear()
+        self.refresh()
+        self.msg_var.set(f"แก้ความโก่งของเลนส์แล้ว (f = {est['lens'][0]:.2f}×กว้างภาพ, k1 = {est['lens'][1]:.2f}): "
+                         f"ความคลาดเคลื่อนเฉลี่ย {est['rms_before'] * 100:.0f} → {est['rms_after'] * 100:.0f} ซม.; "
+                         f"ทดสอบกับจุดที่กันไว้ {est['loo_before'] * 100:.0f} → {est['loo_after'] * 100:.0f} ซม. · ล้างเลนส์ = กลับไปแบบเดิม")
+        return est
+
+    def clear_lens(self):
+        self.lens = None
+        self.refine = None
+        self._pred_cache.clear()
+        self.refresh()
+
     # ----- zones fitted to the road surface of the map -----
     def _cal_h(self):
-        cal = self.calibration()
-        return None if cal is None else cal["H"]
+        return self.calibration()
 
     def zones_in_camera(self):
         """The snapped zones as camera-picture pixels {name: [(x, y), ...]} (None when not snapped / no calibration)."""
-        h = self._cal_h()
-        if self.snapped_map is None or h is None:
+        cal = self._cal_h()
+        if self.snapped_map is None or cal is None:
             return None
-        inv = np.linalg.inv(h)
-        return {n: [(int(round(x)), int(round(y))) for x, y in apply_homography(inv, np.asarray(q, dtype=float) / self.scale)]
+        return {n: [(int(round(x)), int(round(y))) for x, y in cal_metres_to_cam(cal, np.asarray(q, dtype=float) / self.scale)]
                 for n, q in self.snapped_map.items()}
 
     def snap_zones(self, blocking=False, grow_m=1.2, thr=12.0):
@@ -2969,7 +3127,7 @@ class ReferenceMapDialog:
         if h is None or self.map_img is None:
             self.msg_var.set("ต้องมีคู่จุดครบ 4 คู่ มาตราส่วน และแผนที่ก่อน จึงปรับโซนให้ชิดถนนได้")
             return None
-        zp = {z: apply_homography(h, np.asarray(poly, dtype=float)) * self.scale for z, poly in self._zone_polys()}
+        zp = {z: cal_cam_to_metres(h, poly) * self.scale for z, poly in self._zone_polys()}
         if not zp:
             self.msg_var.set("ยังไม่ได้โหลดไฟล์โซน (แท็บ ② ทางแยก)")
             return None
@@ -3041,7 +3199,7 @@ class ReferenceMapDialog:
             self.msg_var.set("ต้องมีคู่จุดครบ 4 คู่และมาตราส่วนก่อน จึงแก้โซนบนแผนที่ได้")
             return False
         if self.snapped_map is None:
-            self.snapped_map = {z: apply_homography(cal["H"], np.asarray(poly, dtype=float)) * self.scale for z, poly in self._zone_polys()}
+            self.snapped_map = {z: cal_cam_to_metres(cal, poly) * self.scale for z, poly in self._zone_polys()}
         if not self.snapped_map:
             self.snapped_map = None
             self.zone_edit_var.set(False)
@@ -3149,6 +3307,10 @@ class ReferenceMapDialog:
         h_px = np.diag([self.scale, self.scale, 1.0]) @ cal0["H"]
         polys = [poly for _, poly in self._zone_polys()] or None
         cam, mp = self.cam_img.copy(), self.map_img.copy()
+        if self.lens is not None:                               # the homography is for the straightened picture: align that one
+            cam = lens_undistort_image(cam, self.lens)
+            if polys:
+                polys = [lens_undistort(np.asarray(q, dtype=float), self.cam_wh, self.lens) for q in polys]
         if blocking:
             return refine_reference_map(cam, mp, h_px, polys, model)
         if self._refine_job is not None:
@@ -3230,7 +3392,7 @@ class ReferenceMapDialog:
     def result(self):
         return {"map_path": self.map_path, "map_frame": self.map_frame, "scale": self.scale, "pairs": [list(p) for p in self.pairs],
                 "distances": dict(self.distances), "refine": None if self.refine is None else np.asarray(self.refine, dtype=float),
-                "zones": self.zones_in_camera()}
+                "zones": self.zones_in_camera(), "lens": self.lens, "size": self.cam_wh if self.lens is not None else None}
 
     def refresh(self):
         cal = self._cal = self.calibration()
@@ -3248,11 +3410,13 @@ class ReferenceMapDialog:
         if cal is not None:
             worst = max(cal["errors_m"])
             near = [p[1] for p in self.pairs]
+            hint = (" · ถ้าคลาดเกิน ~50 ซม. ทั้งที่คลิกแม่น ลองปุ่ม 🔍 ประมาณความโก่งของเลนส์ (กล้องมุมกว้างทำให้ภาพโก่ง)"
+                    if self.lens is None and cal["rms_m"] > 0.5 and n >= 6 else "")
             self.msg_var.set(("[ปรับอัตโนมัติ: เปิด — ค่าด้านล่างเทียบกับจุดที่คลิก] " if self.refine is not None else "")
                              + f"{n} คู่จุด · ความคลาดเคลื่อนเฉลี่ย {cal['rms_m'] * 100:.1f} ซม. · แย่สุด {worst * 100:.1f} ซม. "
                              f"(จุดที่ {cal['errors_m'].index(worst) + 1}) · จุดเขียว <15 ซม., ส้ม <40 ซม., แดง ≥40 ซม. — "
                              "ควรเฉลี่ยไม่เกิน ~20–30 ซม.; ลบ/คลิปจุดสีแดงใหม่ (ช่อง ลบจุดเลขที่) และเพิ่มจุดให้กระจายทั่วภาพ "
-                             f"รวมส่วนใกล้กล้อง (ตอนนี้จุดอยู่ช่วงแถว y = {min(near):.0f}–{max(near):.0f} พิกเซล)")
+                             f"รวมส่วนใกล้กล้อง (ตอนนี้จุดอยู่ช่วงแถว y = {min(near):.0f}–{max(near):.0f} พิกเซล)" + hint)
         else:
             need_ = []
             if self.map_img is None:
@@ -3799,6 +3963,7 @@ class Run1App:
         self.run3_refmap_pairs_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_pairs"])
         self.run3_refmap_distances_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_distances"])
         self.run3_refmap_refine_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_refine"])
+        self.run3_refmap_lens_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_lens"])
         self.run3_refmap_status_var = tk.StringVar(value="")
         self.run3_lc_along_limit_var = tk.StringVar(value=RUN3_DEFAULTS["lc_along_limit_m"])
         self.run3_lc_max_lateral_var = tk.StringVar(value=RUN3_DEFAULTS["lc_max_lateral_m"])
@@ -5666,6 +5831,7 @@ class Run1App:
                 "refmap_pairs": self.run3_refmap_pairs_var.get(),
                 "refmap_distances": self.run3_refmap_distances_var.get(),
                 "refmap_refine": self.run3_refmap_refine_var.get(),
+                "refmap_lens": self.run3_refmap_lens_var.get(),
                 "lc_along_limit_m": self.run3_lc_along_limit_var.get(),
                 "lc_max_lateral_m": self.run3_lc_max_lateral_var.get(),
                 "lc_motorcycle_pairs_only": self.run3_lc_motorcycle_pairs_only_var.get(),
@@ -5849,6 +6015,7 @@ class Run1App:
                 ("refmap_pairs", self.run3_refmap_pairs_var),
                 ("refmap_distances", self.run3_refmap_distances_var),
                 ("refmap_refine", self.run3_refmap_refine_var),
+                ("refmap_lens", self.run3_refmap_lens_var),
                 ("lc_along_limit_m", self.run3_lc_along_limit_var),
                 ("lc_max_lateral_m", self.run3_lc_max_lateral_var),
                 ("lc_motorcycle_pairs_only", self.run3_lc_motorcycle_pairs_only_var),
@@ -6619,8 +6786,13 @@ class Run1App:
             refine = np.array(flat, dtype=float).reshape(3, 3) if len(flat) == 9 else None
         except (ValueError, TypeError):
             refine = None
+        try:
+            lv = [float(v) for v in json.loads(self.run3_refmap_lens_var.get() or "[]")]
+            lens, size = ((lv[0], lv[1]), (int(lv[2]), int(lv[3]))) if len(lv) == 4 else (None, None)
+        except (ValueError, TypeError):
+            lens, size = None, None
         return {"map_path": str(self.run3_refmap_path_var.get() or "").strip(), "scale": scale, "pairs": pairs, "map_frame": frame,
-                "distances": dist, "refine": refine}
+                "distances": dist, "refine": refine, "lens": lens, "size": size}
 
     def _run3_refmap_matrix(self, silent=False):
         """Camera pixel -> metre homography from the reference map (None / ValueError when it is not complete)."""
@@ -6632,8 +6804,9 @@ class Run1App:
                 raise ValueError("Reference map: set the scale (px per metre) of the map")
             if len(st["pairs"]) < 4:
                 raise ValueError("Reference map: at least 4 matching points are needed")
-            cal = reference_map_calibration([p[:2] for p in st["pairs"]], [p[2:] for p in st["pairs"]], st["scale"], st.get("refine"))
-            return {"H": cal["H"], "refined": st.get("refine") is not None, "rms_m": cal["rms_m"], "errors_m": cal["errors_m"],
+            cal = reference_map_calibration([p[:2] for p in st["pairs"]], [p[2:] for p in st["pairs"]], st["scale"], st.get("refine"),
+                                            st.get("lens"), st.get("size"))
+            return {"H": cal["H"], "lens": cal["lens"], "size": cal["size"], "refined": st.get("refine") is not None, "rms_m": cal["rms_m"], "errors_m": cal["errors_m"],
                     "map": {"path": st["map_path"], "scale": st["scale"], "frame": st["map_frame"]}, "points": [tuple(p[:2]) for p in st["pairs"]]}
         except Exception:
             if silent:
@@ -6713,6 +6886,9 @@ class Run1App:
             self.run3_refmap_pairs_var.set(json.dumps([[round(v, 2) for v in p] for p in res["pairs"]]))
             self.run3_refmap_distances_var.set(json.dumps({k: round(float(v), 4) for k, v in (res.get("distances") or {}).items()}))
             self.run3_refmap_refine_var.set("" if res.get("refine") is None else json.dumps([float(v) for v in np.asarray(res["refine"]).ravel()]))
+            lens_ = res.get("lens")
+            self.run3_refmap_lens_var.set("" if lens_ is None else json.dumps([round(float(lens_[0]), 5), round(float(lens_[1]), 5),
+                                                                               int(res["size"][0]), int(res["size"][1])]))
             if res.get("zones"):
                 self._apply_map_adjusted_zones(res["zones"])
             self.run3_refmap_enabled_var.set(True)
@@ -9173,7 +9349,9 @@ class Run1App:
             return pts
         persp = c["perspective"]
         if persp is not None:
-            mapped = cv2.perspectiveTransform(pts.reshape(-1, 1, 2).astype(np.float32), persp["H"])
+            if persp.get("lens") is not None:                  # a wide-angle lens bends the picture: straighten the points first
+                pts = lens_undistort(pts, persp["size"], persp["lens"])
+            mapped = cv2.perspectiveTransform(pts.reshape(-1, 1, 2).astype(np.float64), np.asarray(persp["H"], dtype=np.float64))
             return mapped.reshape(-1, 2).astype(np.float64)
         m = pts / c["ppm"]
         th = math.radians(c["axis_deg"])
