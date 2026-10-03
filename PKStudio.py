@@ -2108,7 +2108,7 @@ ROAD_LINE_TYPES = {
     "yellow_dashed": ("เส้นเหลืองประ (แบ่งทิศทางสวน แซงได้)", [(3.0, _RL_YELLOW), (6.0, None)], None, (0.15, 2), (0.0,)),
     "kerb_red_white": ("ขอบทางขาว-แดง", [(1.0, _RL_RED), (1.0, _RL_WHITE)], None, (0.35, 4), (0.0,)),
     "kerb_black_white": ("ขอบทางขาว-ดำ", [(1.0, _RL_BLACK), (1.0, _RL_WHITE)], None, (0.35, 4), (0.0,)),
-    "kerb_yellow_black": ("ขอบทางเหลือง-ดำ", [(1.0, _RL_YELLOW), (1.0, _RL_BLACK)], None, (0.35, 4), (0.0,)),
+    "kerb_yellow_white": ("ขอบทางขาว-เหลือง", [(1.0, _RL_YELLOW), (1.0, _RL_WHITE)], None, (0.35, 4), (0.0,)),
     "blue_motorcycle": ("ช่องจักรยานยนต์ (สีฟ้า)", None, _RL_BLUE, (0.5, 5), (0.0,)),
 }
 ROAD_LINE_DEFAULT = "white_solid"
@@ -2128,6 +2128,8 @@ def normalize_road_line(item):
         pts = item.get("points", item.get("p", []))
     else:
         kind, pts = ROAD_LINE_DEFAULT, item
+    if kind == "kerb_yellow_black":                      # an earlier name of the white-yellow kerb
+        kind = "kerb_yellow_white"
     if kind not in ROAD_LINE_TYPES:
         kind = ROAD_LINE_DEFAULT
     return kind, [(float(x), float(y)) for x, y in pts]
@@ -2237,7 +2239,7 @@ class RoadLineDialog(LensLineDialog):
         bar = ttk.Frame(top, padding=6)
         bar.pack(fill="x")
         ttk.Label(bar, text=("คลิกจุดตามแนวเส้นถนน (ขอบถนน เส้นแบ่งเลน ขอบทางม้าลาย) เส้นละกี่จุดก็ได้ — เส้นตรงใช้ 2 จุด เส้นโค้งใช้หลายจุด "
-                             "· เลือก ชนิดเส้น ก่อนวาดแต่ละเส้น (ขาวทึบ/ประ เหลืองทึบ/คู่/ประ ขอบทางขาว-แดง ขาว-ดำ เหลือง-ดำ ช่องจักรยานยนต์สีฟ้า) "
+                             "· เลือก ชนิดเส้น ก่อนวาดแต่ละเส้น (ขาวทึบ/ประ เหลืองทึบ/คู่/ประ ขอบทางขาว-แดง ขาว-ดำ ขาว-เหลือง ช่องจักรยานยนต์สีฟ้า) "
                              "· กด เส้นใหม่ เมื่อจะเริ่มเส้นถัดไป · ล้อเมาส์ = ซูม · ลาก = เลื่อนภาพ · เสร็จแล้วกด ใช้เส้นเหล่านี้"),
                   wraplength=980, justify="left").grid(row=0, column=0, columnspan=8, sticky="w")
         ttk.Button(bar, text="เส้นใหม่", command=self.new_line).grid(row=1, column=0, pady=4, padx=(0, 4))
