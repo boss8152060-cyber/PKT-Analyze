@@ -7,6 +7,7 @@ PKStudio.py starts a GUI/CUDA bootstrap when imported, so the tests exec only
 the region between the CORE-BEGIN / CORE-END markers.
 """
 import math
+import numpy as np
 import os
 import unittest
 
@@ -808,6 +809,45 @@ class TopviewTests(unittest.TestCase):
         self.assertAlmostEqual(side, 2.0)                                   # first edge = the width
         self.assertAlmostEqual(((d[1] - d[2]) ** 2).sum() ** 0.5, 4.0)      # second edge = the length
         self.assertTrue(CORE["oriented_rect"]((0, 0), None, 3.0, 1.0).shape == (4, 2))
+
+
+class ReferenceMapTests(unittest.TestCase):
+    f = staticmethod(lambda *a: CORE["reference_map_calibration"](*a))
+
+    def setUp(self):
+        # camera pixel -> map pixel: a perspective-like homography; map is 20 px per metre
+        self.h_true = np.array([[1.2, 0.15, 30.0], [0.05, 1.8, -20.0], [0.0004, 0.0012, 1.0]])
+        rng = np.random.default_rng(3)
+        self.cam = rng.uniform([100, 100], [1800, 1000], size=(8, 2))
+        self.map_px = CORE["apply_homography"](self.h_true, self.cam)
+
+    def test_exact_pairs_give_zero_error_and_metres(self):
+        r = self.f(self.cam, self.map_px, 20.0)
+        self.assertLess(r["rms_m"], 1e-6)
+        m = CORE["apply_homography"](r["H"], self.cam)
+        np.testing.assert_allclose(m * 20.0, self.map_px, atol=1e-4)           # metres x scale = the map pixel
+
+    def test_noise_is_reported_in_metres(self):
+        noisy = self.map_px + np.random.default_rng(5).normal(0, 2.0, self.map_px.shape)      # ~2 px = 10 cm
+        r = self.f(self.cam, noisy, 20.0)
+        self.assertGreater(r["rms_m"], 0.02)
+        self.assertLess(r["rms_m"], 0.30)
+        self.assertEqual(len(r["errors_m"]), 8)
+
+    def test_distance_on_the_ground_is_right(self):
+        r = self.f(self.cam, self.map_px, 20.0)
+        a, b = CORE["apply_homography"](self.h_true, [(500, 500), (900, 500)])
+        ma, mb = CORE["apply_homography"](r["H"], [(500, 500), (900, 500)])
+        self.assertAlmostEqual(math.hypot(*(mb - ma)), math.hypot(*(b - a)) / 20.0, places=5)
+
+    def test_rejects_too_few_or_collinear_points(self):
+        with self.assertRaises(ValueError):
+            self.f(self.cam[:3], self.map_px[:3], 20.0)
+        line = [(i * 100.0, i * 50.0) for i in range(6)]
+        with self.assertRaises(ValueError):
+            self.f(line, self.map_px[:6], 20.0)
+        with self.assertRaises(ValueError):
+            self.f(self.cam, self.map_px, 0)
 
 
 if __name__ == "__main__":
