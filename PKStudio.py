@@ -311,7 +311,7 @@ _bootstrap_cuda_environment()
 # ============================================================
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import cv2
 import torch
@@ -466,6 +466,10 @@ RUN3_DEFAULTS = {
     "gap_hold_min_duration_s": "0.30",      # ... for at least this long (s)
     "lateral_axis_angle_deg": "0.00",       # implementation starter value; verify per video
     "lc_heading_window_s": "0.50",          # centred window (s) used to get the heading of vehicle A
+    "refmap_enabled": False,                # use a reference map (top-view drone picture) instead of the 4-point Perspective Calibration
+    "refmap_path": "",                      # the map picture
+    "refmap_scale": "",                     # map picture pixels per metre
+    "refmap_pairs": "[]",                   # JSON [[cam_x, cam_y, map_x, map_y], ...]
     "topview_video": True,                  # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points)
     "lc_along_limit_m": "0",                # side-by-side window along the heading (m); 0 = auto (L_A + L_B) / 2
     "lc_max_lateral_m": "3.50",             # pairs further apart sideways than this (m) are unrelated; 0 = no limit
@@ -1183,6 +1187,36 @@ def homography_from_points(src, dst):
     return h / h[2, 2]
 
 
+def reference_map_calibration(cam_pts, map_pts, px_per_m):
+    """Camera pixels -> metres on a REFERENCE MAP (a true top-view picture such as a drone frame).
+    cam_pts / map_pts = the same ground points clicked on the camera picture and on the map (>= 4 pairs, not all on one
+    line); px_per_m = scale of the map picture. Returns {"H": 3x3 camera pixel -> metre (x right, y down like the map),
+    "errors_m": distance between each camera point carried onto the map and its clicked map point, "rms_m"}."""
+    cam = np.asarray(cam_pts, dtype=float).reshape(-1, 2)
+    mp = np.asarray(map_pts, dtype=float).reshape(-1, 2)
+    if not px_per_m or float(px_per_m) <= 0:
+        raise ValueError("map scale (px per metre) must be > 0")
+    mp = mp / float(px_per_m)
+    if len(cam) < 4 or len(cam) != len(mp):
+        raise ValueError("need at least 4 matching point pairs")
+    for pts in (cam, mp):
+        if np.linalg.svd(pts - pts.mean(axis=0), compute_uv=False)[-1] < 1e-6 * max(1.0, np.abs(pts).max()):
+            raise ValueError("the points lie on one line")
+
+    def normaliser(pts):
+        c = pts.mean(axis=0)
+        d = float(np.mean(np.hypot(*(pts - c).T)))
+        k = math.sqrt(2.0) / d if d > 0 else 1.0
+        return np.array([[k, 0, -k * c[0]], [0, k, -k * c[1]], [0, 0, 1.0]])
+
+    ts, td = normaliser(cam), normaliser(mp)
+    hn = homography_from_points(apply_homography(ts, cam), apply_homography(td, mp))
+    h = np.linalg.inv(td) @ hn @ ts
+    h = h / h[2, 2]
+    err = np.hypot(*(apply_homography(h, cam) - mp).T)
+    return {"H": h, "errors_m": [float(e) for e in err], "rms_m": float(np.sqrt(np.mean(err ** 2)))}
+
+
 def apply_homography(h, pts):
     p = np.asarray(pts, dtype=float).reshape(-1, 2)
     q = np.c_[p, np.ones(len(p))] @ np.asarray(h, dtype=float).T
@@ -1641,6 +1675,277 @@ class ClipPlayerDialog:
         except Exception:
             pass
         self.top.destroy()
+
+
+class ReferenceMapDialog:
+    """Reference-map calibration: a true top-view picture of the site (e.g. a drone frame) is the MAP. The user
+    (1) sets the map scale with two points of known distance, (2) clicks the same ground points on the camera frame
+    (left) and on the map (right), one pair at a time. Camera pixel -> metre is then fitted (>= 4 pairs).
+    The logic is in plain methods (add_camera_point, add_map_point, ...) so it can be tested without clicking."""
+
+    VIEW_W, VIEW_H = 620, 520
+
+    def __init__(self, app, video_path, state, on_save):
+        self.app, self.on_save = app, on_save
+        self.map_path = state.get("map_path", "")
+        self.scale = state.get("scale")
+        self.pairs = [list(p) for p in state.get("pairs", [])]
+        self.pending_cam = None
+        self.scale_pts = []
+        self.scale_mode = False
+        self.cam_img = None
+        self.map_img = None
+        self.video_path = video_path
+        self.view = {}
+        self.photos = {}
+        self.top = tk.Toplevel(app.root)
+        self.top.title("PK Studio — แผนที่อ้างอิง (ภาพ Topview)")
+        self.top.geometry("%dx%d+10+10" % (min(1320, self.top.winfo_screenwidth() - 40), min(860, self.top.winfo_screenheight() - 110)))
+        self.top.minsize(900, 600)
+        self.top.transient(app.root)
+        self.top.dialog = self                       # (lets the tests reach the object)
+        self.msg_var = tk.StringVar(value="")
+        self.scale_var = tk.StringVar(value=f"{self.scale:.4f}" if self.scale else "")
+        self.frame_var = tk.StringVar(value="")
+        self._build()
+        self._load_frame(None)
+        if self.map_path and os.path.isfile(self.map_path):
+            self.map_img = cv2.imread(self.map_path)
+        self.refresh()
+
+    # ----- layout -----
+    def _build(self):
+        top = self.top
+        bar = ttk.Frame(top, padding=8)
+        bar.pack(fill="x")
+        ttk.Label(bar, text=("ขั้นที่ 1: เลือกภาพแผนที่ (ภาพ Topview จากโดรน)   ขั้นที่ 2: ตั้งมาตราส่วน   "
+                             "ขั้นที่ 3: คลิปจุดบนพื้นถนนที่เห็นตรงกัน — คลิกบนภาพกล้อง (ซ้าย) ก่อน แล้วคลิกจุดเดียวกันบนแผนที่ (ขวา) อย่างน้อย 4 คู่ "
+                             "เลือกจุดบนพื้น เช่น มุมทางม้าลาย ปลายเส้น ขอบฟุตปาธ กระจายทั่วภาพ")).grid(row=0, column=0, columnspan=12, sticky="w", pady=(0, 6))
+        ttk.Button(bar, text="1) เลือกภาพแผนที่…", command=self.choose_map).grid(row=1, column=0, padx=(0, 6))
+        ttk.Button(bar, text="2) ตั้งมาตราส่วน (คลิก 2 จุดบนแผนที่)", command=self.start_scale_mode).grid(row=1, column=1, padx=(0, 6))
+        ttk.Label(bar, text="พิกเซลต่อเมตร").grid(row=1, column=2, padx=(10, 2))
+        ent = ttk.Entry(bar, textvariable=self.scale_var, width=10)
+        ent.grid(row=1, column=3)
+        ent.bind("<Return>", lambda e: self.scale_from_entry())
+        ent.bind("<FocusOut>", lambda e: self.scale_from_entry())
+        ttk.Label(bar, text="Frame").grid(row=1, column=4, padx=(14, 2))
+        ttk.Entry(bar, textvariable=self.frame_var, width=8).grid(row=1, column=5)
+        ttk.Button(bar, text="โหลด", command=lambda: self._load_frame(self.frame_var.get())).grid(row=1, column=6, padx=(4, 10))
+        ttk.Button(bar, text="ย้อนจุดล่าสุด", command=self.undo).grid(row=1, column=7, padx=2)
+        ttk.Button(bar, text="ล้างจุด", command=self.reset).grid(row=1, column=8, padx=2)
+        ttk.Button(bar, text="บันทึก", command=self.save).grid(row=1, column=10, padx=2)
+        ttk.Button(bar, text="ยกเลิก", command=self.top.destroy).grid(row=1, column=11, padx=2)
+        bar.columnconfigure(9, weight=1)
+        body = ttk.Frame(top, padding=(8, 0, 8, 4))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(1, weight=1)
+        ttk.Label(body, text="ภาพกล้อง").grid(row=0, column=0, sticky="w")
+        ttk.Label(body, text="แผนที่").grid(row=0, column=1, sticky="w")
+        self.canvases = {}
+        for col, name in enumerate(("cam", "map")):
+            cv_ = tk.Canvas(body, width=self.VIEW_W, height=self.VIEW_H, bg="#202020", highlightthickness=0)
+            cv_.grid(row=1, column=col, sticky="nsew", padx=(0 if col == 0 else 4, 0))
+            cv_.bind("<Button-1>", lambda e, n=name: self._on_click(n, e.x, e.y))
+            cv_.bind("<Configure>", lambda e, n=name: self._render(n))
+            self.canvases[name] = cv_
+        ttk.Label(top, textvariable=self.msg_var, padding=(8, 4), wraplength=1200, justify="left").pack(fill="x")
+
+    # ----- pictures -----
+    def _load_frame(self, index):
+        cap = cv2.VideoCapture(self.video_path)
+        try:
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            try:
+                idx = int(float(index)) - 1 if index not in (None, "") else total // 2
+            except ValueError:
+                idx = total // 2
+            idx = max(0, min(max(0, total - 1), idx))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, fr = cap.read()
+            if ok:
+                self.cam_img = fr
+                self.frame_var.set(str(idx + 1))
+        finally:
+            cap.release()
+        if getattr(self, "canvases", None):
+            self._render("cam")
+
+    def choose_map(self):
+        path = filedialog.askopenfilename(parent=self.top, title="เลือกภาพแผนที่ (Topview)",
+                                          filetypes=[("Image", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff"), ("All files", "*.*")])
+        if path:
+            self.set_map(path)
+
+    def set_map(self, path):
+        img = cv2.imread(path)
+        if img is None:
+            self.msg_var.set("เปิดภาพแผนที่ไม่ได้: " + path)
+            return False
+        if path != self.map_path:                       # a different picture: old map clicks and scale no longer fit
+            self.pairs = []
+            self.scale = None
+            self.scale_var.set("")
+        self.map_path, self.map_img = path, img
+        self.refresh()
+        return True
+
+    def _render(self, name):
+        img = self.cam_img if name == "cam" else self.map_img
+        cvs = self.canvases[name]
+        cw, ch = max(50, cvs.winfo_width()), max(50, cvs.winfo_height())
+        cvs.delete("all")
+        if img is None:
+            cvs.create_text(cw // 2, ch // 2, fill="#aaaaaa",
+                            text="ยังไม่ได้เลือกภาพแผนที่" if name == "map" else "อ่านเฟรมจากวิดีโอไม่ได้")
+            self.view[name] = None
+            return
+        h, w = img.shape[:2]
+        k = min(cw / float(w), ch / float(h))
+        ox, oy = (cw - w * k) / 2.0, (ch - h * k) / 2.0
+        self.view[name] = (k, ox, oy)
+        shown = cv2.resize(img, (max(1, int(w * k)), max(1, int(h * k))), interpolation=cv2.INTER_AREA)
+        pts = []
+        for n, p in enumerate(self.pairs, 1):
+            q = p[:2] if name == "cam" else p[2:]
+            pts.append((str(n), q, (0, 255, 255)))
+        if name == "cam" and self.pending_cam is not None:
+            pts.append((str(len(self.pairs) + 1), self.pending_cam, (0, 140, 255)))
+        if name == "map":
+            for n, q in enumerate(self.scale_pts, 1):
+                pts.append(("S" + str(n), q, (255, 120, 255)))
+            if len(self.scale_pts) == 2:
+                a, b = (tuple(int(v * k) for v in q) for q in self.scale_pts)
+                cv2.line(shown, a, b, (255, 120, 255), 2, cv2.LINE_AA)
+        for label, q, col in pts:
+            c = (int(q[0] * k), int(q[1] * k))
+            cv2.circle(shown, c, 6, col, 2, cv2.LINE_AA)
+            cv2.putText(shown, label, (c[0] + 8, c[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
+        ok, buf = cv2.imencode(".png", shown)
+        photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
+        self.photos[name] = photo
+        cvs.create_image(int(ox), int(oy), anchor="nw", image=photo)
+
+    def _on_click(self, name, ex, ey):
+        v = self.view.get(name)
+        if v is None:
+            return
+        k, ox, oy = v
+        x, y = (ex - ox) / k, (ey - oy) / k
+        img = self.cam_img if name == "cam" else self.map_img
+        if img is None or not (0 <= x < img.shape[1] and 0 <= y < img.shape[0]):
+            return
+        if name == "cam":
+            self.add_camera_point(x, y)
+        elif self.scale_mode:
+            self.add_scale_point(x, y)
+        else:
+            self.add_map_point(x, y)
+
+    # ----- logic (no clicking needed) -----
+    def add_camera_point(self, x, y):
+        self.scale_mode = False
+        self.pending_cam = (float(x), float(y))
+        self.refresh()
+
+    def add_map_point(self, x, y):
+        if self.pending_cam is None:
+            self.msg_var.set("คลิกจุดบนภาพกล้อง (ซ้าย) ก่อน แล้วคลิกจุดเดียวกันบนแผนที่")
+            return False
+        self.pairs.append([self.pending_cam[0], self.pending_cam[1], float(x), float(y)])
+        self.pending_cam = None
+        self.refresh()
+        return True
+
+    def start_scale_mode(self):
+        if self.map_img is None:
+            self.msg_var.set("เลือกภาพแผนที่ก่อน")
+            return
+        self.scale_mode = True
+        self.scale_pts = []
+        self.pending_cam = None
+        self.msg_var.set("คลิป 2 จุดบนแผนที่ที่รู้ระยะจริง (เช่น ความกว้างเลน ความยาวช่องทางม้าลาย) แล้วใส่ระยะเป็นเมตร")
+        self.refresh()
+
+    def add_scale_point(self, x, y):
+        self.scale_pts.append((float(x), float(y)))
+        if len(self.scale_pts) >= 2:
+            self.scale_pts = self.scale_pts[:2]
+            self.scale_mode = False
+            metres = simpledialog.askfloat("มาตราส่วน", "ระยะจริงระหว่าง 2 จุดนี้ (เมตร):", parent=self.top, minvalue=0.01)
+            if metres:
+                self.set_scale_from_points(self.scale_pts[0], self.scale_pts[1], metres)
+        self.refresh()
+
+    def set_scale_from_points(self, p1, p2, metres):
+        d = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        if d <= 0 or metres <= 0:
+            return False
+        self.scale = d / float(metres)
+        self.scale_var.set(f"{self.scale:.4f}")
+        self.refresh()
+        return True
+
+    def scale_from_entry(self):
+        try:
+            v = float(self.scale_var.get())
+        except ValueError:
+            return
+        if v > 0 and v != self.scale:
+            self.scale = v
+            self.refresh()
+
+    def undo(self):
+        if self.pending_cam is not None:
+            self.pending_cam = None
+        elif self.pairs:
+            self.pairs.pop()
+        self.refresh()
+
+    def reset(self):
+        self.pairs, self.pending_cam, self.scale_pts = [], None, []
+        self.refresh()
+
+    def calibration(self):
+        if not self.scale or len(self.pairs) < 4:
+            return None
+        try:
+            return reference_map_calibration([p[:2] for p in self.pairs], [p[2:] for p in self.pairs], self.scale)
+        except ValueError:
+            return None
+
+    def result(self):
+        return {"map_path": self.map_path, "scale": self.scale, "pairs": [list(p) for p in self.pairs]}
+
+    def refresh(self):
+        for name in ("cam", "map"):
+            if getattr(self, "canvases", None):
+                self._render(name)
+        cal = self.calibration()
+        n = len(self.pairs)
+        if cal is not None:
+            worst = max(cal["errors_m"])
+            self.msg_var.set(f"{n} คู่จุด · ความคลาดเคลื่อนเฉลี่ย {cal['rms_m'] * 100:.1f} ซม. · แย่สุด {worst * 100:.1f} ซม. "
+                             f"(จุดที่ {cal['errors_m'].index(worst) + 1}) — ถ้าสูงเกินไป ลองลบจุดล่าสุดหรือเลือกจุดใหม่ที่อยู่บนพื้นถนนจริง")
+        else:
+            need_ = []
+            if self.map_img is None:
+                need_.append("เลือกภาพแผนที่")
+            if not self.scale:
+                need_.append("ตั้งมาตราส่วน")
+            if n < 4:
+                need_.append(f"คลิปจุดคู่ให้ครบ 4 คู่ (ตอนนี้ {n})")
+            self.msg_var.set("ยังต้อง: " + ", ".join(need_))
+
+    def save(self):
+        cal = self.calibration()
+        if cal is None:
+            messagebox.showwarning("แผนที่อ้างอิง", self.msg_var.get(), parent=self.top)
+            return False
+        self.on_save(self.result())
+        self.top.destroy()
+        return True
 
 
 class BackgroundFrameReader:
@@ -2146,6 +2451,11 @@ class Run1App:
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
         self.run3_lc_heading_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_heading_window_s"])
         self.run3_topview_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["topview_video"])
+        self.run3_refmap_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["refmap_enabled"])
+        self.run3_refmap_path_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_path"])
+        self.run3_refmap_scale_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_scale"])
+        self.run3_refmap_pairs_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_pairs"])
+        self.run3_refmap_status_var = tk.StringVar(value="")
         self.run3_lc_along_limit_var = tk.StringVar(value=RUN3_DEFAULTS["lc_along_limit_m"])
         self.run3_lc_max_lateral_var = tk.StringVar(value=RUN3_DEFAULTS["lc_max_lateral_m"])
         self.run3_lc_motorcycle_pairs_only_var = tk.BooleanVar(value=RUN3_DEFAULTS["lc_motorcycle_pairs_only"])
@@ -2473,6 +2783,11 @@ class Run1App:
         r += 1
         ttk.Checkbutton(cal, text="สร้างวิดีโอ Topview (Tracking_Topview.mp4)", variable=self.run3_topview_video_var).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(cal, text="วาดจากพิกัดเมตรเดียวกับที่ตัวชี้วัดใช้ (ไฟล์ Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
+        r += 1
+        ttk.Checkbutton(cal, text="ใช้แผนที่อ้างอิง (ภาพ Topview จากโดรน) แทน Perspective", variable=self.run3_refmap_enabled_var,
+                        command=self.refresh_refmap_status).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(cal, textvariable=self.run3_refmap_status_var, foreground=gray).grid(row=r, column=2, sticky="w", pady=2)
+        ttk.Button(cal, text="🗺 ตั้งแผนที่อ้างอิง…", command=self.open_reference_map).grid(row=r, column=3, sticky="e", pady=2)
         r += 1
         ttk.Checkbutton(cal, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=r, column=0, sticky="w", pady=(6, 4))
         ttk.Label(cal, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง (P1→P2 ต้องขนานแนวถนน)", foreground=gray).grid(row=r, column=1, columnspan=2, sticky="w", pady=(6, 4))
@@ -4000,6 +4315,10 @@ class Run1App:
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
                 "lc_heading_window_s": self.run3_lc_heading_window_var.get(),
                 "topview_video": self.run3_topview_video_var.get(),
+                "refmap_enabled": self.run3_refmap_enabled_var.get(),
+                "refmap_path": self.run3_refmap_path_var.get(),
+                "refmap_scale": self.run3_refmap_scale_var.get(),
+                "refmap_pairs": self.run3_refmap_pairs_var.get(),
                 "lc_along_limit_m": self.run3_lc_along_limit_var.get(),
                 "lc_max_lateral_m": self.run3_lc_max_lateral_var.get(),
                 "lc_motorcycle_pairs_only": self.run3_lc_motorcycle_pairs_only_var.get(),
@@ -4176,6 +4495,10 @@ class Run1App:
                 ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
                 ("lc_heading_window_s", self.run3_lc_heading_window_var),
                 ("topview_video", self.run3_topview_video_var),
+                ("refmap_enabled", self.run3_refmap_enabled_var),
+                ("refmap_path", self.run3_refmap_path_var),
+                ("refmap_scale", self.run3_refmap_scale_var),
+                ("refmap_pairs", self.run3_refmap_pairs_var),
                 ("lc_along_limit_m", self.run3_lc_along_limit_var),
                 ("lc_max_lateral_m", self.run3_lc_max_lateral_var),
                 ("lc_motorcycle_pairs_only", self.run3_lc_motorcycle_pairs_only_var),
@@ -4920,7 +5243,68 @@ class Run1App:
             raise ValueError(f"Perspective correction: {label} must be x,y in pixels")
         return float(parts[0]), float(parts[1])
 
+    def _run3_refmap_state(self):
+        """The reference-map settings as {"map_path", "scale" (px/m or None), "pairs" [[cx, cy, mx, my], ...]}."""
+        try:
+            scale = float(str(self.run3_refmap_scale_var.get()).strip())
+            scale = scale if scale > 0 else None
+        except ValueError:
+            scale = None
+        try:
+            pairs = [[float(v) for v in p] for p in json.loads(self.run3_refmap_pairs_var.get() or "[]")]
+            pairs = [p for p in pairs if len(p) == 4]
+        except (ValueError, TypeError):
+            pairs = []
+        return {"map_path": str(self.run3_refmap_path_var.get() or "").strip(), "scale": scale, "pairs": pairs}
+
+    def _run3_refmap_matrix(self, silent=False):
+        """Camera pixel -> metre homography from the reference map (None / ValueError when it is not complete)."""
+        st = self._run3_refmap_state()
+        try:
+            if not st["map_path"] or not os.path.isfile(st["map_path"]):
+                raise ValueError("Reference map: the map picture was not found")
+            if not st["scale"]:
+                raise ValueError("Reference map: set the scale (px per metre) of the map")
+            if len(st["pairs"]) < 4:
+                raise ValueError("Reference map: at least 4 matching points are needed")
+            cal = reference_map_calibration([p[:2] for p in st["pairs"]], [p[2:] for p in st["pairs"]], st["scale"])
+            return {"H": cal["H"], "rms_m": cal["rms_m"], "errors_m": cal["errors_m"],
+                    "map": {"path": st["map_path"], "scale": st["scale"]}, "points": [tuple(p[:2]) for p in st["pairs"]]}
+        except Exception:
+            if silent:
+                return None
+            raise
+
+    def refresh_refmap_status(self):
+        if not bool(self.run3_refmap_enabled_var.get()):
+            self.run3_refmap_status_var.set("")
+            return
+        cal = self._run3_refmap_matrix(silent=True)
+        if cal is None:
+            st = self._run3_refmap_state()
+            self.run3_refmap_status_var.set(f"ยังไม่ครบ ({len(st['pairs'])} จุด, "
+                                            + ("ตั้งมาตราส่วนแล้ว" if st["scale"] else "ยังไม่ตั้งมาตราส่วน") + ") — กดตั้งแผนที่อ้างอิง")
+        else:
+            self.run3_refmap_status_var.set(f"{os.path.basename(cal['map']['path'])} · {len(cal['points'])} จุด · คลาดเฉลี่ย {cal['rms_m'] * 100:.1f} ซม.")
+
+    def open_reference_map(self):
+        video_path = str(self.video_var.get() or "").strip()
+        if not video_path or not os.path.isfile(video_path):
+            messagebox.showerror("แผนที่อ้างอิง", "เลือกวิดีโอก่อน (ใช้เฟรมจากวิดีโอนี้คลิปจุดบนพื้นถนน)")
+            return None
+
+        def on_save(res):
+            self.run3_refmap_path_var.set(res["map_path"])
+            self.run3_refmap_scale_var.set(f"{res['scale']:.6f}")
+            self.run3_refmap_pairs_var.set(json.dumps([[round(v, 2) for v in p] for p in res["pairs"]]))
+            self.run3_refmap_enabled_var.set(True)
+            self.refresh_refmap_status()
+
+        return ReferenceMapDialog(self, video_path, self._run3_refmap_state(), on_save)
+
     def _run3_get_perspective_matrix(self, silent=False):
+        if bool(self.run3_refmap_enabled_var.get()):
+            return self._run3_refmap_matrix(silent)          # the reference map replaces the 4-point calibration
         if not bool(self.run3_perspective_enabled_var.get()):
             return None
         try:
@@ -4996,7 +5380,7 @@ class Run1App:
         if not self.run3_site_id_var.get().strip():
             raise ValueError("Run 3 Site_ID is required when Run 3 is enabled.")
 
-        if self.run3_perspective_enabled_var.get():
+        if self.run3_perspective_enabled_var.get() or self.run3_refmap_enabled_var.get():
             self._run3_get_perspective_matrix(silent=False)
 
         # Every Run 3 indicator now uses metric coordinates.
@@ -7301,7 +7685,7 @@ class Run1App:
             "ttc_enabled": bool(self.run3_ttc_enabled_var.get()),
             "ldp_enabled": bool(self.run3_ldp_enabled_var.get()),
             "ppm": ppm,
-            "perspective_enabled": bool(self.run3_perspective_enabled_var.get()),
+            "perspective_enabled": bool(self.run3_perspective_enabled_var.get()) or bool(self.run3_refmap_enabled_var.get()),
             "perspective": self._run3_get_perspective_matrix(silent=True),
             "axis_deg": num(self.run3_lateral_axis_angle_var, 0.0) or 0.0,
             "speed_zones": zones_of(self.run3_speed_zone_vars),
@@ -7349,6 +7733,8 @@ class Run1App:
 
     @staticmethod
     def _run3_calibration_mode(c):
+        if c["perspective"] is not None and c["perspective"].get("map"):
+            return "Reference_Map"
         return "Perspective_Homography" if c["perspective"] is not None else "PPM_Only"
 
     @staticmethod
@@ -7457,11 +7843,18 @@ class Run1App:
         # static layer: background, grid, zones
         base = np.full((H, W, 3), 38, np.uint8)
         t_all = [it[2] for items in per_frame.values() for it in items]
-        bg = self._run3_topview_background(video_path, min(t_all), max(t_all))
+        persp = c.get("perspective") or {}
+        map_img = None
+        if persp.get("map"):                                  # a true top-view picture: use it as the map
+            map_img = cv2.imread(persp["map"]["path"])
+        bg = map_img if map_img is not None else self._run3_topview_background(video_path, min(t_all), max(t_all))
         bg_used = False
         if bg is not None:
             try:
-                if c.get("perspective") is not None:
+                if map_img is not None:
+                    k = 1.0 / float(persp["map"]["scale"])                 # map pixel -> metre
+                    hm = np.array([[k, 0, 0], [0, k, 0], [0, 0, 1.0]])
+                elif c.get("perspective") is not None:
                     hm = np.asarray(c["perspective"]["H"], dtype=np.float64)
                 else:
                     bh, bw = bg.shape[:2]
@@ -7469,7 +7862,7 @@ class Run1App:
                     hm = cv2.getPerspectiveTransform(src, self._run3_to_metric(src, c).astype(np.float32))
                 mm = np.array([[cv["scale"], 0, -cv["scale"] * cv["xmin"]], [0, cv["scale"], -cv["scale"] * cv["ymin"]], [0, 0, 1]])
                 warped = cv2.warpPerspective(bg, mm @ hm, (W, H))
-                base = cv2.addWeighted(warped, 0.55, base, 0.45, 0)
+                base = cv2.addWeighted(warped, 0.85 if map_img is not None else 0.55, base, 0.15 if map_img is not None else 0.45, 0)
                 bg_used = True
             except Exception:
                 log.exception("Topview background could not be warped; using a plain grid")
@@ -7491,7 +7884,7 @@ class Run1App:
             cv2.polylines(base, [q], True, (120, 220, 120), 1, cv2.LINE_AA)
             cx, cy = q.reshape(-1, 2).mean(axis=0)
             cv2.putText(base, zname.replace("Zone ", "Z"), (int(cx) - 8, int(cy) + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (120, 220, 120), 1, cv2.LINE_AA)
-        cv2.putText(base, f"metres (x right, y down)  {cv['scale']:.1f} px/m  " + ("road photo + points" if bg_used else "grid + points"),
+        cv2.putText(base, f"metres (x right, y down)  {cv['scale']:.1f} px/m  " + (("map + points" if map_img is not None else "road photo + points") if bg_used else "grid + points"),
                     (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
         frames = sorted(per_frame)
         times = sorted({per_frame[f][0][2] for f in frames})
