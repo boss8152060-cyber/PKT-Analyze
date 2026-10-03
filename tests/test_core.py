@@ -840,6 +840,17 @@ class ReferenceMapTests(unittest.TestCase):
         ma, mb = CORE["apply_homography"](r["H"], [(500, 500), (900, 500)])
         self.assertAlmostEqual(math.hypot(*(mb - ma)), math.hypot(*(b - a)) / 20.0, places=5)
 
+    def test_refine_is_a_correction_in_map_pixels(self):
+        base = self.f(self.cam, self.map_px, 20.0)
+        same = self.f(self.cam, self.map_px, 20.0, np.eye(3))
+        np.testing.assert_allclose(same["H"], base["H"], atol=1e-9)                       # identity = no change
+        shift = np.array([[1, 0, 40.0], [0, 1, -20.0], [0, 0, 1]])                         # 40 px right, 20 px up on the map
+        moved = self.f(self.cam, self.map_px, 20.0, shift)
+        a = CORE["apply_homography"](base["H"], self.cam[:3])
+        b = CORE["apply_homography"](moved["H"], self.cam[:3])
+        np.testing.assert_allclose(b - a, [[2.0, -1.0]] * 3, atol=1e-6)                    # in metres: 40/20, -20/20
+        self.assertGreater(moved["rms_m"], 1.0)                                            # errors stay measured against the clicks
+
     def test_rejects_too_few_or_collinear_points(self):
         with self.assertRaises(ValueError):
             self.f(self.cam[:3], self.map_px[:3], 20.0)

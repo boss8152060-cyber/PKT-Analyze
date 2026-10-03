@@ -471,6 +471,7 @@ RUN3_DEFAULTS = {
     "refmap_frame": "",                     # when the map is a VIDEO: the frame number used (1-based, empty = middle)
     "refmap_scale": "",                     # map picture pixels per metre
     "refmap_pairs": "[]",                   # JSON [[cam_x, cam_y, map_x, map_y], ...]
+    "refmap_refine": "",                    # JSON 3x3 (flattened) automatic correction in map pixels; empty = none
     "refmap_distances": "{}",               # JSON {"Z3.1|Z3.2": real distance in m between two zone corners, ...}
     "topview_video": True,                  # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points)
     "lc_along_limit_m": "0",                # side-by-side window along the heading (m); 0 = auto (L_A + L_B) / 2
@@ -1189,11 +1190,14 @@ def homography_from_points(src, dst):
     return h / h[2, 2]
 
 
-def reference_map_calibration(cam_pts, map_pts, px_per_m):
+def reference_map_calibration(cam_pts, map_pts, px_per_m, refine=None):
     """Camera pixels -> metres on a REFERENCE MAP (a true top-view picture such as a drone frame).
     cam_pts / map_pts = the same ground points clicked on the camera picture and on the map (>= 4 pairs, not all on one
     line); px_per_m = scale of the map picture. Returns {"H": 3x3 camera pixel -> metre (x right, y down like the map),
-    "errors_m": distance between each camera point carried onto the map and its clicked map point, "rms_m"}."""
+    "errors_m": distance between each camera point carried onto the map and its clicked map point, "rms_m"}.
+    refine (3x3, optional) = a correction in MAP PIXELS found by the automatic alignment (map px -> better map px);
+    it is applied after the clicked pairs' fit. The errors are then measured against the clicked points, which the
+    alignment says may themselves be off."""
     cam = np.asarray(cam_pts, dtype=float).reshape(-1, 2)
     mp = np.asarray(map_pts, dtype=float).reshape(-1, 2)
     if not px_per_m or float(px_per_m) <= 0:
@@ -1215,6 +1219,10 @@ def reference_map_calibration(cam_pts, map_pts, px_per_m):
     hn = homography_from_points(apply_homography(ts, cam), apply_homography(td, mp))
     h = np.linalg.inv(td) @ hn @ ts
     h = h / h[2, 2]
+    if refine is not None:
+        sm = np.diag([float(px_per_m), float(px_per_m), 1.0])
+        h = np.linalg.inv(sm) @ np.asarray(refine, dtype=float) @ sm @ h
+        h = h / h[2, 2]
     err = np.hypot(*(apply_homography(h, cam) - mp).T)
     return {"H": h, "errors_m": [float(e) for e in err], "rms_m": float(np.sqrt(np.mean(err ** 2)))}
 
@@ -1714,6 +1722,93 @@ def load_reference_map_image(path, frame=None):
         return None
 
 
+def refine_reference_map(cam_img, map_img, h_px, mask_polys=None, model="affine", work_width=1920):
+    """Automatic refinement of a camera -> map registration. The camera picture is carried onto the map with the
+    rough homography h_px (camera px -> map px, full resolution), then ECC finds the small correction that makes
+    their EDGE images (road edges, kerbs, lane lines; shadows and vehicles hardly matter) agree best inside the
+    road mask. model: "rigid" (shift + turn), "affine" (+ scale / shear; default), "homography".
+    Returns None when the alignment fails, else {"R": 3x3 in map px (map px -> refined map px), "ncc_before",
+    "ncc_after", "shift_px_median/max" (how far the refinement moves the zone corners / mask points, map px),
+    "before"/"after" blended pictures (working resolution)}."""
+    mh0, mw0 = map_img.shape[:2]
+    f = min(1.0, float(work_width) / mw0)
+    fm = np.diag([f, f, 1.0])
+    map_s = cv2.resize(map_img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA) if f < 1.0 else map_img
+    mh, mw = map_s.shape[:2]
+    h0 = fm @ np.asarray(h_px, dtype=np.float64)
+    warp0 = cv2.warpPerspective(cam_img, h0, (mw, mh))
+    valid = cv2.warpPerspective(np.full(cam_img.shape[:2], 255, np.uint8), h0, (mw, mh))
+    valid = cv2.erode(valid, np.ones((9, 9), np.uint8))
+    probe = []
+    if mask_polys:
+        mask = np.zeros((mh, mw), np.uint8)
+        for poly in mask_polys:
+            q = cv2.perspectiveTransform(np.asarray(poly, dtype=np.float32).reshape(-1, 1, 2), h0).reshape(-1, 2)
+            probe.extend(q.tolist())
+            cv2.fillPoly(mask, [q.astype(np.int32)], 255)
+        k = max(5, int(0.032 * mw)) | 1
+        mask = cv2.dilate(mask, np.ones((k, k), np.uint8))
+        mask = cv2.bitwise_and(mask, valid)
+    else:
+        mask = valid
+    if int((mask > 0).sum()) < 2000:
+        return None
+
+    def prep(img):
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        g = cv2.createCLAHE(2.0, (8, 8)).apply(g)
+        return cv2.GaussianBlur(g, (0, 0), 1.2)
+
+    def edges(img):
+        g = prep(img).astype(np.float32)
+        e = np.sqrt(cv2.Sobel(g, cv2.CV_32F, 1, 0) ** 2 + cv2.Sobel(g, cv2.CV_32F, 0, 1) ** 2)
+        e = cv2.GaussianBlur(e, (0, 0), 2.0)
+        return e / (e.max() + 1e-6)
+
+    def ncc(a, b):
+        v = mask > 0
+        x, y = a[v] - a[v].mean(), b[v] - b[v].mean()
+        return float((x * y).sum() / (np.sqrt((x * x).sum() * (y * y).sum()) + 1e-9))
+
+    tmpl, inp = edges(map_s), edges(warp0)
+    motion = {"rigid": cv2.MOTION_EUCLIDEAN, "affine": cv2.MOTION_AFFINE, "homography": cv2.MOTION_HOMOGRAPHY}.get(model, cv2.MOTION_AFFINE)
+    hom = motion == cv2.MOTION_HOMOGRAPHY
+    w = np.eye(3, dtype=np.float32) if hom else np.eye(2, 3, dtype=np.float32)
+    try:
+        for lvl in (4, 2, 1):
+            t = cv2.resize(tmpl, None, fx=1.0 / lvl, fy=1.0 / lvl, interpolation=cv2.INTER_AREA)
+            i_ = cv2.resize(inp, None, fx=1.0 / lvl, fy=1.0 / lvl, interpolation=cv2.INTER_AREA)
+            m_ = cv2.resize(mask, None, fx=1.0 / lvl, fy=1.0 / lvl, interpolation=cv2.INTER_NEAREST)
+            wl = w.copy()
+            wl[0, 2] /= lvl
+            wl[1, 2] /= lvl
+            if hom:
+                wl[2, 0] *= lvl
+                wl[2, 1] *= lvl
+            crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-6)
+            _, wl = cv2.findTransformECC(t, i_, wl, motion, crit, m_, 5)
+            wl[0, 2] *= lvl
+            wl[1, 2] *= lvl
+            if hom:
+                wl[2, 0] /= lvl
+                wl[2, 1] /= lvl
+            w = wl
+    except cv2.error:
+        return None
+    w3 = w.astype(np.float64) if hom else np.vstack([w, [0, 0, 1]]).astype(np.float64)
+    r_f = np.linalg.inv(w3)                           # ECC: template -> input; the correction of the input is the inverse
+    r_full = np.linalg.inv(fm) @ r_f @ fm
+    warp1 = cv2.warpPerspective(cam_img, r_f @ h0, (mw, mh))
+    if not probe:
+        ys, xs = np.nonzero(mask[::20, ::20])
+        probe = [[float(x * 20), float(y * 20)] for x, y in zip(xs, ys)]
+    pr = np.asarray(probe, dtype=np.float32).reshape(-1, 1, 2)
+    moved = np.hypot(*(cv2.perspectiveTransform(pr, r_f) - pr).reshape(-1, 2).T) / f
+    return {"R": r_full, "ncc_before": ncc(tmpl, inp), "ncc_after": ncc(tmpl, edges(warp1)),
+            "shift_px_median": float(np.median(moved)), "shift_px_max": float(moved.max()),
+            "before": cv2.addWeighted(map_s, 0.5, warp0, 0.5, 0), "after": cv2.addWeighted(map_s, 0.5, warp1, 0.5, 0)}
+
+
 class ReferenceMapDialog:
     """Reference-map calibration: a true top-view picture of the site (e.g. a drone frame) is the MAP. The user
     (1) sets the map scale with two points of known distance, (2) clicks the same ground points on the camera frame
@@ -1735,6 +1830,8 @@ class ReferenceMapDialog:
         self.distances = {str(k): float(v) for k, v in (state.get("distances") or {}).items()}   # "Z3.1|Z3.2" -> real metres
         self.zone_nodes = {}                             # zone name -> [node index of each vertex]
         self.edges = []                                  # [{"a": node, "b": node, "key": "Z3.1|Z3.2", "label": "Z3.1 – Z3.2"}]
+        self.refine = state.get("refine")                # automatic correction in map pixels (3x3) or None
+        self._refine_job = None
         self.layout_rot = 0                              # first layout of the zone corners on the map: turned by rot x 90 deg
         self.layout_flip = False
         self.pending_cam = None
@@ -1774,6 +1871,7 @@ class ReferenceMapDialog:
         self.msg_var = tk.StringVar(value="")
         self.show_zones_var = tk.BooleanVar(value=True)
         self.node_mode_var = tk.BooleanVar(value=False)
+        self.refine_model_var = tk.StringVar(value="affine")
         self.node_msg_var = tk.StringVar(value="")
         self.del_var = tk.StringVar(value="")
         self.scale_var = tk.StringVar(value=f"{self.scale:.4f}" if self.scale else "")
@@ -1824,6 +1922,15 @@ class ReferenceMapDialog:
                         command=self.toggle_node_mode).grid(row=4, column=0, columnspan=5, sticky="w", pady=(4, 0))
         ttk.Button(bar, text="ข้ามมุมนี้", command=self.skip_node).grid(row=4, column=5, sticky="w", pady=(4, 0))
         ttk.Button(bar, text="หมุนผังโซน 90°", command=self.rotate_layout).grid(row=3, column=5, sticky="w", pady=(4, 0))
+        auto = ttk.Frame(bar)
+        auto.grid(row=5, column=0, columnspan=12, sticky="w", pady=(4, 0))
+        self.auto_button = ttk.Button(auto, text="⚙ ปรับอัตโนมัติ (ซ้อนภาพกล้องกับแผนที่)", command=self.auto_align)
+        self.auto_button.pack(side="left")
+        ttk.Combobox(auto, textvariable=self.refine_model_var, state="readonly", width=11,
+                     values=("rigid", "affine", "homography")).pack(side="left", padx=6)
+        ttk.Label(auto, text="rigid = เลื่อน+หมุน · affine = +ย่อขยาย (แนะนำ) · homography = เต็มรูป (เสี่ยงเพี้ยนที่ขอบ)",
+                  foreground="#666666").pack(side="left")
+        ttk.Button(auto, text="ล้างการปรับอัตโนมัติ", command=self.clear_refine).pack(side="left", padx=10)
         ttk.Button(bar, text="พลิกผังโซน", command=self.flip_layout).grid(row=3, column=6, sticky="w", pady=(4, 0))
         ttk.Label(bar, textvariable=self.node_msg_var, foreground="#444444").grid(row=4, column=6, columnspan=6, sticky="w", padx=(8, 0), pady=(4, 0))
         ttk.Button(bar, text="บันทึก", command=self.save).grid(row=2, column=10, padx=2)
@@ -2665,17 +2772,114 @@ class ReferenceMapDialog:
         self.pairs, self.pending_cam, self.scale_pts = [], None, []
         self.refresh()
 
-    def calibration(self):
+    def calibration(self, use_refine=True):
         if not self.scale or len(self.pairs) < 4:
             return None
         try:
-            return reference_map_calibration([p[:2] for p in self.pairs], [p[2:] for p in self.pairs], self.scale)
+            return reference_map_calibration([p[:2] for p in self.pairs], [p[2:] for p in self.pairs], self.scale,
+                                             self.refine if use_refine else None)
         except ValueError:
             return None
 
+    # ----- automatic alignment of the camera picture onto the map -----
+    def clear_refine(self):
+        self.refine = None
+        self.refresh()
+
+    def auto_align(self, model=None, blocking=False):
+        """Start the automatic alignment from the clicked pairs' calibration. In the program it runs in a thread and
+        a before/after picture is shown to accept or reject; blocking=True (tests) returns the result instead."""
+        cal0 = self.calibration(use_refine=False)
+        if cal0 is None:
+            self.msg_var.set("ต้องมีคู่จุดครบ 4 คู่และมาตราส่วนก่อน จึงปรับอัตโนมัติได้ (ใช้ผลจากคู่จุดเป็นจุดเริ่มต้น)")
+            return None
+        if self.cam_img is None or self.map_img is None:
+            return None
+        model = model or self.refine_model_var.get()
+        h_px = np.diag([self.scale, self.scale, 1.0]) @ cal0["H"]
+        polys = [poly for _, poly in self._zone_polys()] or None
+        cam, mp = self.cam_img.copy(), self.map_img.copy()
+        if blocking:
+            return refine_reference_map(cam, mp, h_px, polys, model)
+        if self._refine_job is not None:
+            return None
+        self.msg_var.set("กำลังซ้อนภาพกล้องกับแผนที่ (ใช้เวลาไม่กี่วินาที)…")
+        self.auto_button.config(state="disabled")
+        box = {}
+
+        def work():
+            try:
+                box["res"] = refine_reference_map(cam, mp, h_px, polys, model)
+            except Exception as exc:                        # reported in the dialog
+                box["err"] = str(exc)
+
+        th = threading.Thread(target=work, daemon=True)
+        th.start()
+        self._refine_job = (th, box)
+        self.top.after(200, self._poll_refine)
+        return None
+
+    def _poll_refine(self):
+        job = self._refine_job
+        if job is None:
+            return
+        th, box = job
+        try:
+            alive = th.is_alive()
+        except Exception:
+            alive = False
+        if alive:
+            self.top.after(200, self._poll_refine)
+            return
+        self._refine_job = None
+        try:
+            self.auto_button.config(state="normal")
+        except tk.TclError:
+            return
+        res = box.get("res")
+        if res is None:
+            self.msg_var.set("ปรับอัตโนมัติไม่สำเร็จ (" + box.get("err", "ภาพไม่พอให้ซ้อน") + ") — ลองเลือกเฟรมที่มีรถน้อยกว่า หรือแก้จุดคู่ก่อน")
+            return
+        self._show_refine_preview(res)
+
+    def refine_summary(self, res):
+        cm = lambda px: px / self.scale * 100.0
+        better = res["ncc_after"] - res["ncc_before"]
+        verdict = ("ดีขึ้นชัดเจน" if better > 0.05 else ("ดีขึ้นเล็กน้อย" if better > 0.01 else "ไม่ดีขึ้น — ไม่แนะนำให้ใช้"))
+        return (f"ความตรงของเส้นถนน {res['ncc_before']:.3f} → {res['ncc_after']:.3f} ({verdict}) · "
+                f"ขยับมุมโซนเฉลี่ย {cm(res['shift_px_median']):.0f} ซม. สูงสุด {cm(res['shift_px_max']):.0f} ซม.")
+
+    def apply_refine(self, res):
+        self.refine = np.asarray(res["R"], dtype=float)
+        self.refresh()
+        self.msg_var.set("ใช้ผลปรับอัตโนมัติแล้ว — ค่าคลาดเคลื่อนเทียบกับจุดที่คลิก (ซึ่งอาจคลิกคลาดเอง); " + self.refine_summary(res))
+
+    def _show_refine_preview(self, res):
+        pv = tk.Toplevel(self.top)
+        pv.title("ผลปรับอัตโนมัติ — ภาพกล้องซ้อนบนแผนที่")
+        pv.transient(self.top)
+        shown = []
+        for key in ("before", "after"):
+            im = res[key]
+            k = min(560.0 / im.shape[1], 340.0 / im.shape[0])
+            im = cv2.resize(im, (int(im.shape[1] * k), int(im.shape[0] * k)), interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".png", im)
+            shown.append(tk.PhotoImage(data=base64.b64encode(buf.tobytes())))
+        pv.photos = shown
+        for col, (text, ph_) in enumerate((("ก่อน (จากจุดคู่)", shown[0]), ("หลังปรับอัตโนมัติ", shown[1]))):
+            ttk.Label(pv, text=text).grid(row=0, column=col, pady=(6, 0))
+            tk.Label(pv, image=ph_).grid(row=1, column=col, padx=6, pady=4)
+        ttk.Label(pv, text=self.refine_summary(res) + "\nเส้นถนน ขอบฟุตปาธ ทางม้าลายควรซ้อนกันเป็นเส้นเดียว (ไม่เป็นเงาซ้อน) — ส่วนที่ไกลหรือมีต้นไม้/รถอาจยังเหลื่อมได้",
+                  wraplength=1100, justify="left").grid(row=2, column=0, columnspan=2, padx=8, pady=4)
+        row = ttk.Frame(pv)
+        row.grid(row=3, column=0, columnspan=2, pady=8)
+        ttk.Button(row, text="ใช้ผลนี้", command=lambda: (self.apply_refine(res), pv.destroy())).pack(side="left", padx=8)
+        ttk.Button(row, text="ไม่ใช้", command=pv.destroy).pack(side="left", padx=8)
+        self.preview = pv
+
     def result(self):
         return {"map_path": self.map_path, "map_frame": self.map_frame, "scale": self.scale, "pairs": [list(p) for p in self.pairs],
-                "distances": dict(self.distances)}
+                "distances": dict(self.distances), "refine": None if self.refine is None else np.asarray(self.refine, dtype=float)}
 
     def refresh(self):
         cal = self._cal = self.calibration()
@@ -2690,7 +2894,8 @@ class ReferenceMapDialog:
         if cal is not None:
             worst = max(cal["errors_m"])
             near = [p[1] for p in self.pairs]
-            self.msg_var.set(f"{n} คู่จุด · ความคลาดเคลื่อนเฉลี่ย {cal['rms_m'] * 100:.1f} ซม. · แย่สุด {worst * 100:.1f} ซม. "
+            self.msg_var.set(("[ปรับอัตโนมัติ: เปิด — ค่าด้านล่างเทียบกับจุดที่คลิก] " if self.refine is not None else "")
+                             + f"{n} คู่จุด · ความคลาดเคลื่อนเฉลี่ย {cal['rms_m'] * 100:.1f} ซม. · แย่สุด {worst * 100:.1f} ซม. "
                              f"(จุดที่ {cal['errors_m'].index(worst) + 1}) · จุดเขียว <15 ซม., ส้ม <40 ซม., แดง ≥40 ซม. — "
                              "ควรเฉลี่ยไม่เกิน ~20–30 ซม.; ลบ/คลิปจุดสีแดงใหม่ (ช่อง ลบจุดเลขที่) และเพิ่มจุดให้กระจายทั่วภาพ "
                              f"รวมส่วนใกล้กล้อง (ตอนนี้จุดอยู่ช่วงแถว y = {min(near):.0f}–{max(near):.0f} พิกเซล)")
@@ -2719,7 +2924,7 @@ class ReferenceMapDialog:
         if cal is None:
             messagebox.showwarning("แผนที่อ้างอิง", self.msg_var.get(), parent=self.top)
             return False
-        if cal["rms_m"] > 0.30 and not messagebox.askyesno(
+        if cal["rms_m"] > 0.30 and self.refine is None and not messagebox.askyesno(
                 "ความคลาดเคลื่อนสูง",
                 f"ความคลาดเคลื่อนเฉลี่ย {cal['rms_m'] * 100:.0f} ซม. (แย่สุด {max(cal['errors_m']) * 100:.0f} ซม.)\n\n"
                 "ตำแหน่งรถ ระยะ และความเร็วจะคลาดเคลื่อนตามนี้ และโซนจะไม่ทับถนนบนแผนที่\n"
@@ -3239,6 +3444,7 @@ class Run1App:
         self.run3_refmap_frame_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_frame"])
         self.run3_refmap_pairs_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_pairs"])
         self.run3_refmap_distances_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_distances"])
+        self.run3_refmap_refine_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_refine"])
         self.run3_refmap_status_var = tk.StringVar(value="")
         self.run3_lc_along_limit_var = tk.StringVar(value=RUN3_DEFAULTS["lc_along_limit_m"])
         self.run3_lc_max_lateral_var = tk.StringVar(value=RUN3_DEFAULTS["lc_max_lateral_m"])
@@ -5105,6 +5311,7 @@ class Run1App:
                 "refmap_frame": self.run3_refmap_frame_var.get(),
                 "refmap_pairs": self.run3_refmap_pairs_var.get(),
                 "refmap_distances": self.run3_refmap_distances_var.get(),
+                "refmap_refine": self.run3_refmap_refine_var.get(),
                 "lc_along_limit_m": self.run3_lc_along_limit_var.get(),
                 "lc_max_lateral_m": self.run3_lc_max_lateral_var.get(),
                 "lc_motorcycle_pairs_only": self.run3_lc_motorcycle_pairs_only_var.get(),
@@ -5287,6 +5494,7 @@ class Run1App:
                 ("refmap_frame", self.run3_refmap_frame_var),
                 ("refmap_pairs", self.run3_refmap_pairs_var),
                 ("refmap_distances", self.run3_refmap_distances_var),
+                ("refmap_refine", self.run3_refmap_refine_var),
                 ("lc_along_limit_m", self.run3_lc_along_limit_var),
                 ("lc_max_lateral_m", self.run3_lc_max_lateral_var),
                 ("lc_motorcycle_pairs_only", self.run3_lc_motorcycle_pairs_only_var),
@@ -6052,8 +6260,13 @@ class Run1App:
             dist = {str(k): float(v) for k, v in json.loads(self.run3_refmap_distances_var.get() or "{}").items() if float(v) > 0}
         except (ValueError, TypeError, AttributeError):
             dist = {}
+        try:
+            flat = [float(v) for v in json.loads(self.run3_refmap_refine_var.get() or "[]")]
+            refine = np.array(flat, dtype=float).reshape(3, 3) if len(flat) == 9 else None
+        except (ValueError, TypeError):
+            refine = None
         return {"map_path": str(self.run3_refmap_path_var.get() or "").strip(), "scale": scale, "pairs": pairs, "map_frame": frame,
-                "distances": dist}
+                "distances": dist, "refine": refine}
 
     def _run3_refmap_matrix(self, silent=False):
         """Camera pixel -> metre homography from the reference map (None / ValueError when it is not complete)."""
@@ -6065,8 +6278,8 @@ class Run1App:
                 raise ValueError("Reference map: set the scale (px per metre) of the map")
             if len(st["pairs"]) < 4:
                 raise ValueError("Reference map: at least 4 matching points are needed")
-            cal = reference_map_calibration([p[:2] for p in st["pairs"]], [p[2:] for p in st["pairs"]], st["scale"])
-            return {"H": cal["H"], "rms_m": cal["rms_m"], "errors_m": cal["errors_m"],
+            cal = reference_map_calibration([p[:2] for p in st["pairs"]], [p[2:] for p in st["pairs"]], st["scale"], st.get("refine"))
+            return {"H": cal["H"], "refined": st.get("refine") is not None, "rms_m": cal["rms_m"], "errors_m": cal["errors_m"],
                     "map": {"path": st["map_path"], "scale": st["scale"], "frame": st["map_frame"]}, "points": [tuple(p[:2]) for p in st["pairs"]]}
         except Exception:
             if silent:
@@ -6097,6 +6310,7 @@ class Run1App:
             self.run3_refmap_frame_var.set("" if res.get("map_frame") is None else str(int(res["map_frame"]) + 1))
             self.run3_refmap_pairs_var.set(json.dumps([[round(v, 2) for v in p] for p in res["pairs"]]))
             self.run3_refmap_distances_var.set(json.dumps({k: round(float(v), 4) for k, v in (res.get("distances") or {}).items()}))
+            self.run3_refmap_refine_var.set("" if res.get("refine") is None else json.dumps([float(v) for v in np.asarray(res["refine"]).ravel()]))
             self.run3_refmap_enabled_var.set(True)
             self.refresh_refmap_status()
 
