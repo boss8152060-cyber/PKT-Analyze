@@ -6,6 +6,7 @@ driven through its methods (no mouse), then the result must reproduce the known 
 """
 import importlib.util
 import json
+import math
 import os
 import sys
 import tempfile
@@ -51,6 +52,12 @@ vw.release()
 root = tk.Tk()
 root.withdraw()
 app = m.Run1App(root)
+# a modal box must never block the test: answer them
+m.messagebox.askyesno = lambda *a, **k: False
+m.messagebox.showwarning = lambda *a, **k: None
+m.messagebox.showinfo = lambda *a, **k: None
+m.simpledialog.askfloat = lambda *a, **k: None
+m.simpledialog.askstring = lambda *a, **k: None
 app.video_var.set(video_path)
 
 # ---- the dialog
@@ -196,6 +203,7 @@ check("the map is the background", ok and (fr > 150).any(axis=2).sum() > 500)
 # ---- zones over the pictures, error colours, delete a point, warning on a poor calibration
 app.zones["Zone 3"] = [(300, 200), (900, 200), (900, 500), (300, 500)]
 dlg3 = app.open_reference_map()
+dlg3.node_mode_var.set(False)                                  # (these steps click point pairs by hand)
 dlg3.reset()
 dlg3.set_scale_from_points((100, 100), (300, 100), 10.0)
 for c_, p_ in zip(cam_pts, map_pts):
@@ -291,6 +299,65 @@ check("node markers are drawn on the map", a_ is not None and a_.std() > 5)
 check("the progress text counts the corners", "จับคู่แล้ว 5" in dlg5.node_msg_var.get(), dlg5.node_msg_var.get())
 dlg5.close()
 
+# ---- the zones come onto the map by themselves; real distances between the corners
+dlg6 = app.open_reference_map()
+dlg6.reset()
+dlg6.scale = None
+dlg6.scale_var.set("")
+dlg6.refresh()
+check("zones are on the map right away (node mode is on by itself)", dlg6.node_mode_var.get() and len(dlg6.nodes) == 8)
+mh_, mw_ = dlg6.map_img.shape[:2]
+pos0 = [dlg6.predicted_map(i) for i in range(8)]
+check("first layout: every corner has a place on the map, inside it", all(q is not None and 0 <= q[0] < mw_ and 0 <= q[1] < mh_ for q in pos0))
+dlg6.rotate_layout()
+pos1 = [dlg6.predicted_map(i) for i in range(8)]
+check("rotate the layout moves the corners", any(abs(a_[0] - b_[0]) > 5 or abs(a_[1] - b_[1]) > 5 for a_, b_ in zip(pos0, pos1)))
+dlg6.rotate_layout(); dlg6.rotate_layout(); dlg6.rotate_layout()
+dlg6.flip_layout()
+pos2 = [dlg6.predicted_map(i) for i in range(8)]
+check("flip the layout mirrors it", any(abs(a_[0] - b_[0]) > 5 for a_, b_ in zip(pos0, pos2)))
+dlg6.flip_layout()
+truth6 = {}
+for i, nd in enumerate(dlg6.nodes):
+    truth6[i] = (map_z3 if nd["zone"] == "Zone 3" else map_z4)[nd["idx"]]
+dlg6.assign_node(0, *truth6[0])
+p1 = dlg6.predicted_map(1)
+check("one corner placed: the layout follows it (that corner sits exactly where it was put)", dlg6._node_map_pos(0) == tuple(map(float, truth6[0])) and p1 is not None)
+dlg6.assign_node(1, *truth6[1])
+dlg6.assign_node(2, *truth6[2])
+q3 = dlg6.predicted_map(3)
+check("three corners placed: the others follow an affine fit (rough)", q3 is not None and math.hypot(q3[0] - truth6[3][0], q3[1] - truth6[3][1]) < 200)
+for i in (3, 4, 5, 6, 7):
+    dlg6.assign_node(i, *truth6[i])
+check("all corners placed", all(dlg6.node_pair_index(i) is not None for i in range(8)) and len(dlg6.pairs) == 8)
+check("edges of the zones, shared edges once", len(dlg6.edges) == 9, str([e["label"] for e in dlg6.edges]))
+check("no scale yet: the table has no measured length", all(r[3] is None for r in dlg6.edge_rows()))
+e0 = dlg6.edges[0]
+real0 = math.hypot(truth6[e0["a"]][0] - truth6[e0["b"]][0], truth6[e0["a"]][1] - truth6[e0["b"]][1]) / 20.0
+check("a real distance on one edge gives the map scale", dlg6.set_distance(e0["key"], real0) and dlg6.scale is not None and abs(dlg6.scale - 20.0) < 1e-6,
+      str(dlg6.scale))
+for e in dlg6.edges[1:]:
+    real = math.hypot(truth6[e["a"]][0] - truth6[e["b"]][0], truth6[e["a"]][1] - truth6[e["b"]][1]) / 20.0
+    dlg6.set_distance(e["key"], real)
+rows = dlg6.edge_rows()
+check("all distances entered and the measured ones agree", all(r[5] == "ตรง" for r in rows), str([r[5] for r in rows]))
+check("the table shows the rows", len(dlg6.tree.get_children()) == 9)
+e3 = dlg6.edges[3]
+dlg6.set_distance(e3["key"], 1.6 * (math.hypot(truth6[e3["a"]][0] - truth6[e3["b"]][0], truth6[e3["a"]][1] - truth6[e3["b"]][1]) / 20.0))
+bad_rows = [r for r in dlg6.edge_rows() if r[5] == "ตรวจจุด!"]
+check("a wrong distance is flagged to check the corner", len(bad_rows) == 1 and bad_rows[0][0] == e3["key"], str(bad_rows))
+dlg6.set_distance(e3["key"], None)
+check("clearing a distance", e3["key"] not in dlg6.distances)
+check("a custom pair of corners", dlg6.add_custom_edge("Z3.1", "Z4.3") and len(dlg6.edges) == 10
+      and dlg6.add_custom_edge("z3.1", "z4.3") is False and dlg6.add_custom_edge("Z3.1", "Z9.9") is False)
+saved_state = dlg6.result()
+check("the distances are in the result", len(saved_state["distances"]) == 8 and saved_state["scale"] > 0)
+check("save keeps pairs, scale and distances in the settings", dlg6.save() is True
+      and len(app._run3_refmap_state()["distances"]) == 8 and len(app._run3_refmap_state()["pairs"]) == 8)
+dlg7 = app.open_reference_map()
+check("a new dialog brings the distances and the corners back", len(dlg7.distances) == 8 and len(dlg7.pairs) == 8 and dlg7.node_mode_var.get())
+dlg7.close()
+
 # ---- the map can also be a VIDEO (a drone clip): one chosen frame is the map
 map_video = os.path.join(tmp, "drone_ไทย.mp4")                       # (non-ASCII name on purpose)
 vw = cv2.VideoWriter(map_video, cv2.VideoWriter_fourcc(*"mp4v"), 10, (1200, 800))
@@ -305,6 +372,7 @@ check("video map: frame choice", first is not None and last is not None and abs(
       and abs(float(last.mean()) - 40.0) < 6, f"first {first.mean():.1f} last {last.mean():.1f}")
 check("image map with a non-ASCII path loads", m.load_reference_map_image(map_path) is not None)
 dlg2 = app.open_reference_map()
+dlg2.node_mode_var.set(False)
 check("video map accepted by the dialog", dlg2.set_map(map_video, 2) and dlg2.map_frame == 2 and dlg2.pairs == [], str(dlg2.map_frame))
 dlg2.set_scale_from_points((100, 100), (300, 100), 10.0)
 for c_, p_ in zip(cam_pts, map_pts):

@@ -471,6 +471,7 @@ RUN3_DEFAULTS = {
     "refmap_frame": "",                     # when the map is a VIDEO: the frame number used (1-based, empty = middle)
     "refmap_scale": "",                     # map picture pixels per metre
     "refmap_pairs": "[]",                   # JSON [[cam_x, cam_y, map_x, map_y], ...]
+    "refmap_distances": "{}",               # JSON {"Z3.1|Z3.2": real distance in m between two zone corners, ...}
     "topview_video": True,                  # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points)
     "lc_along_limit_m": "0",                # side-by-side window along the heading (m); 0 = auto (L_A + L_B) / 2
     "lc_max_lateral_m": "3.50",             # pairs further apart sideways than this (m) are unrelated; 0 = no limit
@@ -1731,6 +1732,11 @@ class ReferenceMapDialog:
         self.map_frame = state.get("map_frame")                # 0-based, only for a video map (None = middle)
         self.scale = state.get("scale")
         self.pairs = [list(p) for p in state.get("pairs", [])]
+        self.distances = {str(k): float(v) for k, v in (state.get("distances") or {}).items()}   # "Z3.1|Z3.2" -> real metres
+        self.zone_nodes = {}                             # zone name -> [node index of each vertex]
+        self.edges = []                                  # [{"a": node, "b": node, "key": "Z3.1|Z3.2", "label": "Z3.1 – Z3.2"}]
+        self.layout_rot = 0                              # first layout of the zone corners on the map: turned by rot x 90 deg
+        self.layout_flip = False
         self.pending_cam = None
         self.scale_pts = []
         self.scale_mode = False
@@ -1780,6 +1786,10 @@ class ReferenceMapDialog:
             self._open_map_source(self.map_path)
             self.map_img = load_reference_map_image(self.map_path, self.map_frame)
             self._sync_frame_controls("map")
+        if self.nodes:                                   # the zones come onto the map by themselves
+            self.node_mode_var.set(True)
+            self.skipped_nodes = set()
+            self.active_node = self._next_unpaired(-1)
         self.refresh()
 
     # ----- layout -----
@@ -1813,6 +1823,8 @@ class ReferenceMapDialog:
         ttk.Checkbutton(bar, text="ใช้มุมโซนเป็นจุดอ้างอิง (ฝั่งกล้องกำหนดให้แล้ว — คลิกที่แผนที่อย่างเดียว)", variable=self.node_mode_var,
                         command=self.toggle_node_mode).grid(row=4, column=0, columnspan=5, sticky="w", pady=(4, 0))
         ttk.Button(bar, text="ข้ามมุมนี้", command=self.skip_node).grid(row=4, column=5, sticky="w", pady=(4, 0))
+        ttk.Button(bar, text="หมุนผังโซน 90°", command=self.rotate_layout).grid(row=3, column=5, sticky="w", pady=(4, 0))
+        ttk.Button(bar, text="พลิกผังโซน", command=self.flip_layout).grid(row=3, column=6, sticky="w", pady=(4, 0))
         ttk.Label(bar, textvariable=self.node_msg_var, foreground="#444444").grid(row=4, column=6, columnspan=6, sticky="w", padx=(8, 0), pady=(4, 0))
         ttk.Button(bar, text="บันทึก", command=self.save).grid(row=2, column=10, padx=2)
         ttk.Button(bar, text="ยกเลิก", command=self.close).grid(row=2, column=11, padx=2)
@@ -1858,6 +1870,26 @@ class ReferenceMapDialog:
             for text, kind, amount in (("◀◀ -5 วิ", "sec", -5), ("◀ -1 เฟรม", "frame", -1), ("+1 เฟรม ▶", "frame", 1), ("+5 วิ ▶▶", "sec", 5)):
                 ttk.Button(sb, text=text, command=lambda n=name, k=kind, a=amount: self.step(n, k, a)).pack(side="left", padx=2)
             ttk.Label(sb, textvariable=self.frame_label[name], foreground="#666666").pack(side="left", padx=8)
+        # real distances between zone corners (edges of the zones): they give the scale and check the corner positions
+        tb = ttk.LabelFrame(top, text="ระยะจริงระหว่างมุมโซน (ดับเบิลคลิกแถวเพื่อใส่ระยะเป็นเมตร) — ใช้หามาตราส่วนและตรวจตำแหน่งมุมบนแผนที่", padding=4)
+        tb.pack(fill="x", padx=8, pady=(2, 2))
+        tb.columnconfigure(0, weight=1)
+        self.tree = ttk.Treeview(tb, columns=("real", "meas", "diff", "status"), show="tree headings", height=4)
+        self.tree.heading("#0", text="ระหว่างมุม")
+        for col, text, wd in (("real", "ระยะจริง (ม.)", 100), ("meas", "วัดบนแผนที่ (ม.)", 120), ("diff", "ต่าง (ซม.)", 90), ("status", "สถานะ", 140)):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=wd, anchor="center")
+        self.tree.column("#0", width=200)
+        sbar = ttk.Scrollbar(tb, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sbar.set)
+        self.tree.grid(row=0, column=0, sticky="ew")
+        sbar.grid(row=0, column=1, sticky="ns")
+        side = ttk.Frame(tb)
+        side.grid(row=0, column=2, sticky="n", padx=(8, 0))
+        ttk.Button(side, text="ระยะ → มาตราส่วน", command=self.scale_from_distances).pack(fill="x", pady=1)
+        ttk.Button(side, text="เพิ่มระยะระหว่างมุมอื่น…", command=self.ask_custom_edge).pack(fill="x", pady=1)
+        ttk.Button(side, text="ล้างระยะทั้งหมด", command=self.clear_distances).pack(fill="x", pady=1)
+        self.tree.bind("<Double-1>", self._on_tree_double)
         # fixed height: a changing message must never resize the pictures under the mouse
         tk.Label(top, textvariable=self.msg_var, height=3, anchor="nw", wraplength=1250, justify="left", padx=8, pady=4).pack(fill="x")
 
@@ -2182,7 +2214,22 @@ class ReferenceMapDialog:
             if ex_ > sx0 and ey_ > sy0:
                 out[dy + sy0:dy + ey_, dx + sx0:dx + ex_] = res[sy0:ey_, sx0:ex_]
         cal = self._cal
-        if self.show_zones_var.get():                        # the zones through the current calibration: do they sit on the road?
+        if self.node_mode_var.get() and name == "map":       # the zones on the map, built from the corner positions
+            for zname, idxs in self.zone_nodes.items():
+                q = []
+                for n in idxs:
+                    pos = self._node_map_pos(n) if self._node_map_pos(n) is not None else self.predicted_map(n)
+                    if pos is None:
+                        q = None
+                        break
+                    q.append(pos)
+                if q is None or len(q) < 3:
+                    continue
+                qc = np.round(np.asarray(q, dtype=float) * k + np.array([ox, oy])).astype(np.int32).reshape(-1, 1, 2)
+                cv2.polylines(out, [qc], True, (0, 215, 255), 1, cv2.LINE_AA)
+                cx_, cy_ = qc.reshape(-1, 2).mean(axis=0)
+                cv2.putText(out, zname.replace("Zone ", "Z"), (int(cx_) - 8, int(cy_) + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 215, 255), 1, cv2.LINE_AA)
+        if self.show_zones_var.get() and not (name == "map" and self.node_mode_var.get()):   # the zones through the current calibration
             for zname, poly in self._zone_polys():
                 if name == "cam":
                     q = np.asarray(poly, dtype=float)
@@ -2242,13 +2289,31 @@ class ReferenceMapDialog:
     # ----- zone corners as the camera-side reference points -----
     def _build_nodes(self, merge_px=8.0):
         """The corners of the zones drawn on the camera picture (shared corners of neighbouring zones counted once)."""
-        self.nodes = []
+        self.nodes, self.zone_nodes, self.edges = [], {}, []
         for zname, poly in self._zone_polys():
             num = zname.replace("Zone ", "")
+            idxs = []
             for i, pt in enumerate(poly):
-                if any(math.hypot(pt[0] - n["cam"][0], pt[1] - n["cam"][1]) < merge_px for n in self.nodes):
-                    continue
-                self.nodes.append({"zone": zname, "idx": i, "label": f"Z{num}.{i + 1}", "cam": (float(pt[0]), float(pt[1]))})
+                hit = next((k for k, n in enumerate(self.nodes) if math.hypot(pt[0] - n["cam"][0], pt[1] - n["cam"][1]) < merge_px), None)
+                if hit is None:
+                    self.nodes.append({"zone": zname, "idx": i, "label": f"Z{num}.{i + 1}", "cam": (float(pt[0]), float(pt[1]))})
+                    hit = len(self.nodes) - 1
+                idxs.append(hit)
+            self.zone_nodes[zname] = idxs
+        seen = set()
+        for idxs in self.zone_nodes.values():
+            for a, b in zip(idxs, idxs[1:] + idxs[:1]):
+                if a != b and (min(a, b), max(a, b)) not in seen:
+                    seen.add((min(a, b), max(a, b)))
+                    self._add_edge(a, b)
+
+    def _edge_key(self, a, b):
+        a, b = min(a, b), max(a, b)
+        return f"{self.nodes[a]['label']}|{self.nodes[b]['label']}"
+
+    def _add_edge(self, a, b):
+        key = self._edge_key(a, b)
+        self.edges.append({"a": min(a, b), "b": max(a, b), "key": key, "label": key.replace("|", " – ")})
 
     def node_pair_index(self, i):
         cx, cy = self.nodes[i]["cam"]
@@ -2258,12 +2323,175 @@ class ReferenceMapDialog:
         return None
 
     def predicted_map(self, i):
-        """Where corner i should be on the map according to the current calibration (None without one)."""
+        """Where corner i is (or should be) on the map: by the calibration when it exists; before that by a
+        first layout of the zone corners that follows the corners already placed (1: move, 2: similarity, 3+: affine)."""
         if self._ndrag is not None and self._ndrag == ("node", i) and self._ndrag_pos is not None:
             return self._ndrag_pos
-        if self._cal is None:
+        if self._cal is not None:
+            return tuple(apply_homography(self._cal["H"], [self.nodes[i]["cam"]])[0] * self.scale)
+        fn = self._layout_fn()
+        return None if fn is None else fn(self.nodes[i]["cam"])
+
+    def _initial_layout(self):
+        """The zone corners of the camera picture placed in the middle of the map (about 60 % of it), turned / mirrored
+        by the layout buttons. Only a starting point: the user drags the corners to their places."""
+        if self.map_img is None or not self.nodes:
             return None
-        return tuple(apply_homography(self._cal["H"], [self.nodes[i]["cam"]])[0] * self.scale)
+        cam = np.array([n["cam"] for n in self.nodes], dtype=float)
+        c0 = (cam.min(axis=0) + cam.max(axis=0)) / 2.0
+
+        def turn(q):
+            q = np.asarray(q, dtype=float).reshape(-1, 2) - c0
+            if self.layout_flip:
+                q = q * np.array([-1.0, 1.0])
+            for _ in range(self.layout_rot % 4):
+                q = np.stack([-q[:, 1], q[:, 0]], axis=1)
+            return q
+
+        t = turn(cam)
+        span = np.maximum(t.max(axis=0) - t.min(axis=0), 1.0)
+        mh, mw = self.map_img.shape[:2]
+        k = 0.6 * min(mw / span[0], mh / span[1])
+        mid = (t.max(axis=0) + t.min(axis=0)) / 2.0
+        return lambda c: tuple((turn(c)[0] - mid) * k + np.array([mw / 2.0, mh / 2.0]))
+
+    def _layout_fn(self):
+        init = self._initial_layout()
+        if init is None:
+            return None
+        n = len(self.pairs)
+        if n == 0:
+            return init
+        cam = np.array([p[:2] for p in self.pairs], dtype=float)
+        mp = np.array([p[2:] for p in self.pairs], dtype=float)
+        if n >= 3:
+            a = np.c_[cam, np.ones(n)]
+            if np.linalg.matrix_rank(a) == 3:
+                m_ = np.linalg.lstsq(a, mp, rcond=None)[0]
+                return lambda c: tuple(np.r_[np.asarray(c, dtype=float), 1.0] @ m_)
+        if n >= 2:
+            z, w = cam[:, 0] + 1j * cam[:, 1], mp[:, 0] + 1j * mp[:, 1]
+            zc, wc = z - z.mean(), w - w.mean()
+            if np.abs(zc).sum() > 1e-9:
+                a_ = (wc * np.conj(zc)).sum() / (np.abs(zc) ** 2).sum()
+                b_ = w.mean() - a_ * z.mean()
+                return lambda c: (lambda v: (v.real, v.imag))(a_ * (c[0] + 1j * c[1]) + b_)
+        shift = np.array(mp[0]) - np.array(init(cam[0]))
+        return lambda c: tuple(np.array(init(c)) + shift)
+
+    def rotate_layout(self):
+        self.layout_rot = (self.layout_rot + 1) % 4
+        self.refresh()
+
+    def flip_layout(self):
+        self.layout_flip = not self.layout_flip
+        self.refresh()
+
+    # ----- real distances between zone corners -----
+    def _node_map_pos(self, i):
+        j = self.node_pair_index(i)
+        return None if j is None else tuple(self.pairs[j][2:])
+
+    def edge_rows(self):
+        """[(key, label, real m or None, measured m or None, diff cm or None, status text)] for every zone edge."""
+        rows = []
+        for e in self.edges:
+            real = self.distances.get(e["key"])
+            pa, pb = self._node_map_pos(e["a"]), self._node_map_pos(e["b"])
+            meas = diff = None
+            if pa is not None and pb is not None and self.scale:
+                meas = math.hypot(pa[0] - pb[0], pa[1] - pb[1]) / self.scale
+            if meas is not None and real:
+                diff = (meas - real) * 100.0
+            if real is None:
+                st = "ยังไม่ใส่ระยะ"
+            elif meas is None:
+                st = "รอจับคู่มุม"
+            elif abs(meas - real) <= max(0.30, 0.05 * real):
+                st = "ตรง"
+            else:
+                st = "ตรวจจุด!"
+            rows.append((e["key"], e["label"], real, meas, diff, st))
+        return rows
+
+    def _refresh_table(self):
+        if not getattr(self, "tree", None):
+            return
+        sel = self.tree.selection()
+        self.tree.delete(*self.tree.get_children())
+        for key, label, real, meas, diff, st in self.edge_rows():
+            self.tree.insert("", "end", iid=key, text=label, values=(
+                "" if real is None else f"{real:.2f}", "" if meas is None else f"{meas:.2f}",
+                "" if diff is None else f"{diff:+.0f}", st), tags=("bad",) if st == "ตรวจจุด!" else ())
+        self.tree.tag_configure("bad", foreground="#c00000")
+        if sel and self.tree.exists(sel[0]):
+            self.tree.selection_set(sel[0])
+
+    def set_distance(self, key, metres):
+        """Real distance (m) between the two corners of an edge; None / 0 removes it. With no scale yet the first
+        distances give it."""
+        if not any(e["key"] == key for e in self.edges):
+            return False
+        if metres and float(metres) > 0:
+            self.distances[key] = float(metres)
+        else:
+            self.distances.pop(key, None)
+        if not self.scale:
+            self.scale_from_distances(quiet=True)
+        self.refresh()
+        return True
+
+    def scale_from_distances(self, quiet=False):
+        """px per metre of the map = the median of (map distance / real distance) over the edges that have both."""
+        ratios = []
+        for e in self.edges:
+            real = self.distances.get(e["key"])
+            pa, pb = self._node_map_pos(e["a"]), self._node_map_pos(e["b"])
+            if real and pa is not None and pb is not None:
+                ratios.append(math.hypot(pa[0] - pb[0], pa[1] - pb[1]) / real)
+        if not ratios:
+            if not quiet:
+                self.msg_var.set("ใส่ระยะจริงของเส้นที่ทั้งสองมุมจับคู่บนแผนที่แล้วอย่างน้อย 1 เส้นก่อน")
+            return False
+        self.scale = float(np.median(ratios))
+        self.scale_var.set(f"{self.scale:.4f}")
+        if not quiet:
+            self.refresh()
+        return True
+
+    def clear_distances(self):
+        self.distances = {}
+        self.refresh()
+
+    def ask_custom_edge(self):
+        text = simpledialog.askstring("เพิ่มระยะระหว่างมุมอื่น", "ชื่อมุมสองมุมคั่นด้วยจุลภาค เช่น Z3.1,Z4.2", parent=self.top)
+        if not text:
+            return False
+        parts = [t.strip() for t in text.replace("–", ",").replace("|", ",").split(",")]
+        if len(parts) != 2 or not self.add_custom_edge(parts[0], parts[1]):
+            self.msg_var.set("ไม่พบชื่อมุมที่พิมพ์ (ดูชื่อมุมบนภาพ เช่น Z3.1)")
+            return False
+        return True
+
+    def add_custom_edge(self, la, lb):
+        idx = {n["label"].lower(): i for i, n in enumerate(self.nodes)}
+        a, b = idx.get(str(la).strip().lower()), idx.get(str(lb).strip().lower())
+        if a is None or b is None or a == b or any(e["key"] == self._edge_key(a, b) for e in self.edges):
+            return False
+        self._add_edge(a, b)
+        self.refresh()
+        return True
+
+    def _on_tree_double(self, event):
+        key = self.tree.identify_row(event.y)
+        if not key:
+            return
+        edge = next((e for e in self.edges if e["key"] == key), None)
+        if edge is None:
+            return
+        metres = simpledialog.askfloat("ระยะจริง", f"ระยะจริงระหว่าง {edge['label']} (เมตร) — 0 หรือเว้นว่าง = ลบ", parent=self.top, minvalue=0.0)
+        if metres is not None:
+            self.set_distance(key, metres)
 
     def _next_unpaired(self, after=-1):
         n = len(self.nodes)
@@ -2446,7 +2674,8 @@ class ReferenceMapDialog:
             return None
 
     def result(self):
-        return {"map_path": self.map_path, "map_frame": self.map_frame, "scale": self.scale, "pairs": [list(p) for p in self.pairs]}
+        return {"map_path": self.map_path, "map_frame": self.map_frame, "scale": self.scale, "pairs": [list(p) for p in self.pairs],
+                "distances": dict(self.distances)}
 
     def refresh(self):
         cal = self._cal = self.calibration()
@@ -2456,6 +2685,7 @@ class ReferenceMapDialog:
         for name in ("cam", "map"):
             if getattr(self, "canvases", None):
                 self._render(name)
+        self._refresh_table()
         n = len(self.pairs)
         if cal is not None:
             worst = max(cal["errors_m"])
@@ -3008,6 +3238,7 @@ class Run1App:
         self.run3_refmap_scale_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_scale"])
         self.run3_refmap_frame_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_frame"])
         self.run3_refmap_pairs_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_pairs"])
+        self.run3_refmap_distances_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_distances"])
         self.run3_refmap_status_var = tk.StringVar(value="")
         self.run3_lc_along_limit_var = tk.StringVar(value=RUN3_DEFAULTS["lc_along_limit_m"])
         self.run3_lc_max_lateral_var = tk.StringVar(value=RUN3_DEFAULTS["lc_max_lateral_m"])
@@ -4873,6 +5104,7 @@ class Run1App:
                 "refmap_scale": self.run3_refmap_scale_var.get(),
                 "refmap_frame": self.run3_refmap_frame_var.get(),
                 "refmap_pairs": self.run3_refmap_pairs_var.get(),
+                "refmap_distances": self.run3_refmap_distances_var.get(),
                 "lc_along_limit_m": self.run3_lc_along_limit_var.get(),
                 "lc_max_lateral_m": self.run3_lc_max_lateral_var.get(),
                 "lc_motorcycle_pairs_only": self.run3_lc_motorcycle_pairs_only_var.get(),
@@ -5054,6 +5286,7 @@ class Run1App:
                 ("refmap_scale", self.run3_refmap_scale_var),
                 ("refmap_frame", self.run3_refmap_frame_var),
                 ("refmap_pairs", self.run3_refmap_pairs_var),
+                ("refmap_distances", self.run3_refmap_distances_var),
                 ("lc_along_limit_m", self.run3_lc_along_limit_var),
                 ("lc_max_lateral_m", self.run3_lc_max_lateral_var),
                 ("lc_motorcycle_pairs_only", self.run3_lc_motorcycle_pairs_only_var),
@@ -5815,7 +6048,12 @@ class Run1App:
             frame = frame if frame >= 0 else None
         except ValueError:
             frame = None
-        return {"map_path": str(self.run3_refmap_path_var.get() or "").strip(), "scale": scale, "pairs": pairs, "map_frame": frame}
+        try:
+            dist = {str(k): float(v) for k, v in json.loads(self.run3_refmap_distances_var.get() or "{}").items() if float(v) > 0}
+        except (ValueError, TypeError, AttributeError):
+            dist = {}
+        return {"map_path": str(self.run3_refmap_path_var.get() or "").strip(), "scale": scale, "pairs": pairs, "map_frame": frame,
+                "distances": dist}
 
     def _run3_refmap_matrix(self, silent=False):
         """Camera pixel -> metre homography from the reference map (None / ValueError when it is not complete)."""
@@ -5858,6 +6096,7 @@ class Run1App:
             self.run3_refmap_scale_var.set(f"{res['scale']:.6f}")
             self.run3_refmap_frame_var.set("" if res.get("map_frame") is None else str(int(res["map_frame"]) + 1))
             self.run3_refmap_pairs_var.set(json.dumps([[round(v, 2) for v in p] for p in res["pairs"]]))
+            self.run3_refmap_distances_var.set(json.dumps({k: round(float(v), 4) for k, v in (res.get("distances") or {}).items()}))
             self.run3_refmap_enabled_var.set(True)
             self.refresh_refmap_status()
 
