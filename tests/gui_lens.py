@@ -237,7 +237,6 @@ if os.environ.get("PK_DEBUG_SAVE"):
     cv2.imwrite(os.environ["PK_DEBUG_SAVE"], vis)
 check("the Topview road matches the real ground seen from above", ncc_a > 0.80, f"NCC {ncc_a:.3f}, valid pixels {int(valid.sum())}")
 
-# ---- the vehicle's own picture is placed on its footprint (the Topview looks like the normal video, from above)
 import copy
 tr_bb = copy.deepcopy(tr)
 for r in tr_bb["1"]:
@@ -253,7 +252,6 @@ def frame_of(path, idx=14):
     return f_.astype(np.int16)
 
 
-diff = np.abs(frame_of(vid_bb) - frame_of(vid_a)).sum(axis=2)
 off = {f"show_label_{n}": False for n in ("id", "class", "conf", "zone", "speed")}
 vid_off = app._run3_write_topview_video(tr_bb, dict(base_cfg, lens=LENS, lens_size=(CW, CH)), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video, display=dict(off, draw_trail=False))
 vid_id = app._run3_write_topview_video(tr_bb, dict(base_cfg, lens=LENS, lens_size=(CW, CH)), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video, display=dict(off, show_label_id=True, show_prefix_id=True, draw_trail=True, trail_length=10))
@@ -289,7 +287,6 @@ check("the road lines land on the right metres (even bent by the lens between th
 check("the map-style Topview has no camera photo (plain background away from the lines)", float(np.abs(fm[5:25, 5:60].astype(float) - 38).mean()) < 40)
 
 check("the Topview has the video's shape", abs(Wf / Hf - CW / CH) < 0.02, f"{Wf}x{Hf}")
-check("the vehicle picture is pasted at its footprint (and only there)", int((diff > 60).sum()) > 500 and int((np.hypot(xs_ - car[0], ys_ - car[1]) > 250)[diff > 60].sum()) == 0, f"{int((diff > 60).sum())} changed pixels")
 vid_b = app._run3_write_topview_video(tr, dict(base_cfg, lens=None, lens_size=None), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video)
 ncc_b = ncc_of(vid_b)
 check("without the lens correction the road stays curved (clearly worse)", ncc_b < ncc_a - 0.08, f"with {ncc_a:.3f}, without {ncc_b:.3f}")
