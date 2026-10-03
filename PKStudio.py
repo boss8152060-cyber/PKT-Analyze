@@ -2094,6 +2094,9 @@ class ReferenceMapDialog:
         self.msg_var = tk.StringVar(value="")
         self.show_zones_var = tk.BooleanVar(value=True)
         self.node_mode_var = tk.BooleanVar(value=False)
+        self.lens_f_var = tk.StringVar(value="")
+        self.lens_k_var = tk.StringVar(value="")
+        self.lens_msg_var = tk.StringVar(value="")
         self.zone_edit_var = tk.BooleanVar(value=False)
         self.refine_model_var = tk.StringVar(value="affine")
         self.node_msg_var = tk.StringVar(value="")
@@ -2108,10 +2111,6 @@ class ReferenceMapDialog:
             self._open_map_source(self.map_path)
             self.map_img = load_reference_map_image(self.map_path, self.map_frame)
             self._sync_frame_controls("map")
-        if self.nodes:                                   # the zones come onto the map by themselves
-            self.node_mode_var.set(True)
-            self.skipped_nodes = set()
-            self.active_node = self._next_unpaired(-1)
         self.refresh()
 
     # ----- layout -----
@@ -2119,14 +2118,16 @@ class ReferenceMapDialog:
         top = self.top
         bar = ttk.Frame(top, padding=8)
         bar.pack(fill="x")
-        ttk.Label(bar, text=("ขั้นที่ 1: เลือกแผนที่ (ภาพ Topview หรือวิดีโอโดรน — วิดีโอใช้ 1 เฟรม)   ขั้นที่ 2: ตั้งมาตราส่วน   "
-                             "ขั้นที่ 3: คลิปจุดบนพื้นถนนที่เห็นตรงกัน — คลิกบนภาพกล้อง (ซ้าย) ก่อน แล้วคลิกจุดเดียวกันบนแผนที่ (ขวา) อย่างน้อย 4 คู่ "
-                             "เลือกจุดบนพื้น เช่น มุมทางม้าลาย ปลายเส้น ขอบฟุตปาธ กระจายทั่วภาพ"),
+        ttk.Label(bar, text=("แปลงภาพกล้องเป็นพิกัดบนพื้นถนน 3 ขั้น: (1) แก้ความโก่งของเลนส์ (intrinsic)  "
+                             "(2) คลิกจุดบนพื้นถนนที่เห็นตรงกันบนภาพกล้อง (ซ้าย) แล้วบนแผนที่ (ขวา) อย่างน้อย 4 คู่ (extrinsic) — "
+                             "จุดแดง = ที่คลิก จุดน้ำเงิน = ตำแหน่งที่คำนวณกลับ (reprojection) ยิ่งห่างกันยิ่งคลาด  "
+                             "(3) ขอบเขตสนใจ (ROI) = โซนที่โหลดไว้ ติ๊ก \"แสดงโซน\" เพื่อดูว่าตรงถนนไหม  "
+                             "เลือกจุดบนพื้น เช่น มุมทางม้าลาย ปลายเส้น ขอบฟุตปาธ กระจายทั่วภาพ รวมส่วนใกล้กล้อง"),
                   wraplength=1250, justify="left").grid(row=0, column=0, columnspan=12, sticky="w", pady=(0, 2))
-        ttk.Label(bar, text="ล้อเมาส์ = ซูมที่ตำแหน่งลูกศรเมาส์ · ลากเมาส์ (ซ้ายหรือกลาง/ขวา) = เลื่อนภาพ · คลิกเฉย ๆ = ลงจุด · ปุ่ม รีเซ็ต View = กลับมาพอดีกรอบ",
+        ttk.Label(bar, text="ล้อเมาส์ = ซูมที่ตำแหน่งลูกศรเมาส์ · ลากเมาส์ (ซ้ายหรือกลาง/ขวา) = เลื่อนภาพ · คลิกเฉย ๆ = ลงจุด · รีเซ็ต View = กลับมาพอดีกรอบ",
                   foreground="#666666").grid(row=1, column=0, columnspan=12, sticky="w", pady=(0, 6))
-        ttk.Button(bar, text="1) เลือกแผนที่ (ภาพหรือวิดีโอ)…", command=self.choose_map).grid(row=2, column=0, padx=(0, 6))
-        ttk.Button(bar, text="2) ตั้งมาตราส่วน (คลิก 2 จุดบนแผนที่)", command=self.start_scale_mode).grid(row=2, column=1, padx=(0, 6))
+        ttk.Button(bar, text="เลือกแผนที่ (ภาพหรือวิดีโอโดรน)…", command=self.choose_map).grid(row=2, column=0, padx=(0, 6))
+        ttk.Button(bar, text="ตั้งมาตราส่วน (คลิก 2 จุดบนแผนที่)", command=self.start_scale_mode).grid(row=2, column=1, padx=(0, 6))
         ttk.Label(bar, text="พิกเซลต่อเมตร").grid(row=2, column=2, padx=(10, 2))
         ent = ttk.Entry(bar, textvariable=self.scale_var, width=10)
         ent.grid(row=2, column=3)
@@ -2135,38 +2136,26 @@ class ReferenceMapDialog:
         ttk.Button(bar, text="รีเซ็ต View", command=self.reset_views).grid(row=2, column=4, padx=(14, 2))
         ttk.Button(bar, text="ย้อนจุดล่าสุด", command=self.undo).grid(row=2, column=5, padx=2)
         ttk.Button(bar, text="ล้างจุด", command=self.reset).grid(row=2, column=6, padx=2)
-        ttk.Checkbutton(bar, text="แสดงโซนบนภาพ (ตรวจว่าตรงถนนไหม)", variable=self.show_zones_var,
+        ttk.Button(bar, text="บันทึก", command=self.save).grid(row=2, column=10, padx=2)
+        ttk.Button(bar, text="ยกเลิก", command=self.close).grid(row=2, column=11, padx=2)
+        ttk.Checkbutton(bar, text="แสดงโซน (ROI) บนภาพ", variable=self.show_zones_var,
                         command=self.reset_views_keep).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ttk.Label(bar, text="ลบจุดเลขที่").grid(row=3, column=2, sticky="e", padx=(10, 2), pady=(4, 0))
         de = ttk.Entry(bar, textvariable=self.del_var, width=6)
         de.grid(row=3, column=3, sticky="w", pady=(4, 0))
         de.bind("<Return>", lambda e: self.delete_pair(self.del_var.get()))
         ttk.Button(bar, text="ลบ", width=5, command=lambda: self.delete_pair(self.del_var.get())).grid(row=3, column=4, sticky="w", pady=(4, 0))
-        ttk.Checkbutton(bar, text="ใช้มุมโซนเป็นจุดอ้างอิง (ฝั่งกล้องกำหนดให้แล้ว — คลิกที่แผนที่อย่างเดียว)", variable=self.node_mode_var,
-                        command=self.toggle_node_mode).grid(row=4, column=0, columnspan=5, sticky="w", pady=(4, 0))
-        ttk.Button(bar, text="ข้ามมุมนี้", command=self.skip_node).grid(row=4, column=5, sticky="w", pady=(4, 0))
-        ttk.Button(bar, text="จัดมุมที่เหลือใหม่", command=self.refresh_predictions).grid(row=4, column=6, sticky="w", padx=(6, 0), pady=(4, 0))
-        ttk.Button(bar, text="หมุนผังโซน 90°", command=self.rotate_layout).grid(row=3, column=5, sticky="w", pady=(4, 0))
-        auto = ttk.Frame(bar)
-        auto.grid(row=5, column=0, columnspan=12, sticky="w", pady=(4, 0))
-        self.auto_button = ttk.Button(auto, text="⚙ ปรับอัตโนมัติ (ซ้อนภาพกล้องกับแผนที่)", command=self.auto_align)
-        self.auto_button.pack(side="left")
-        ttk.Combobox(auto, textvariable=self.refine_model_var, state="readonly", width=11,
-                     values=("rigid", "affine", "homography")).pack(side="left", padx=6)
-        ttk.Label(auto, text="rigid = เลื่อน+หมุน · affine = +ย่อขยาย (แนะนำ) · homography = เต็มรูป (เสี่ยงเพี้ยนที่ขอบ)",
-                  foreground="#666666").pack(side="left")
-        ttk.Button(auto, text="ล้างการปรับอัตโนมัติ", command=self.clear_refine).pack(side="left", padx=10)
-        ttk.Button(auto, text="🔍 ประมาณความโก่งของเลนส์", command=self.estimate_lens_now).pack(side="left", padx=(16, 4))
-        ttk.Button(auto, text="ล้างเลนส์", command=self.clear_lens).pack(side="left")
-        self.snap_button = ttk.Button(auto, text="⚡ ปรับโซนให้ชิดถนนอัตโนมัติ", command=self.snap_zones)
-        self.snap_button.pack(side="left", padx=(16, 4))
-        ttk.Button(auto, text="คืนโซนเดิม", command=self.clear_snapped).pack(side="left")
-        ttk.Checkbutton(auto, text="แก้มุมโซนบนแผนที่ (ลากมุม · Shift+คลิก ลบ · Ctrl+คลิกบนเส้น เพิ่ม)", variable=self.zone_edit_var,
-                        command=self.toggle_zone_edit).pack(side="left", padx=(12, 0))
-        ttk.Button(bar, text="พลิกผังโซน", command=self.flip_layout).grid(row=3, column=6, sticky="w", pady=(4, 0))
-        ttk.Label(bar, textvariable=self.node_msg_var, foreground="#444444").grid(row=4, column=7, columnspan=5, sticky="w", padx=(8, 0), pady=(4, 0))
-        ttk.Button(bar, text="บันทึก", command=self.save).grid(row=2, column=10, padx=2)
-        ttk.Button(bar, text="ยกเลิก", command=self.close).grid(row=2, column=11, padx=2)
+        lensf = ttk.LabelFrame(bar, text="ขั้นที่ 1 · เลนส์ (ความโก่งของภาพ)", padding=4)
+        lensf.grid(row=4, column=0, columnspan=12, sticky="ew", pady=(6, 0))
+        ttk.Button(lensf, text="🔍 ประมาณเลนส์จากคู่จุด", command=self.estimate_lens_now).pack(side="left")
+        ttk.Button(lensf, text="ดูภาพก่อน/หลังแก้เลนส์", command=self.preview_lens).pack(side="left", padx=6)
+        ttk.Button(lensf, text="ล้างเลนส์", command=self.clear_lens).pack(side="left")
+        ttk.Label(lensf, text="หรือกำหนดเอง  f (เท่าของความกว้างภาพ)").pack(side="left", padx=(14, 2))
+        ttk.Entry(lensf, textvariable=self.lens_f_var, width=6).pack(side="left")
+        ttk.Label(lensf, text="k1").pack(side="left", padx=(8, 2))
+        ttk.Entry(lensf, textvariable=self.lens_k_var, width=6).pack(side="left")
+        ttk.Button(lensf, text="ใช้ค่านี้", command=lambda: self.set_lens_manual(self.lens_f_var.get(), self.lens_k_var.get())).pack(side="left", padx=6)
+        ttk.Label(lensf, textvariable=self.lens_msg_var, foreground="#444444").pack(side="left", padx=8)
         bar.columnconfigure(9, weight=1)
         body = ttk.Frame(top, padding=(8, 0, 8, 4))
         body.pack(fill="both", expand=True)
@@ -2209,26 +2198,6 @@ class ReferenceMapDialog:
             for text, kind, amount in (("◀◀ -5 วิ", "sec", -5), ("◀ -1 เฟรม", "frame", -1), ("+1 เฟรม ▶", "frame", 1), ("+5 วิ ▶▶", "sec", 5)):
                 ttk.Button(sb, text=text, command=lambda n=name, k=kind, a=amount: self.step(n, k, a)).pack(side="left", padx=2)
             ttk.Label(sb, textvariable=self.frame_label[name], foreground="#666666").pack(side="left", padx=8)
-        # real distances between zone corners (edges of the zones): they give the scale and check the corner positions
-        tb = ttk.LabelFrame(top, text="ระยะจริงระหว่างมุมโซน (ดับเบิลคลิกแถวเพื่อใส่ระยะเป็นเมตร) — ใช้หามาตราส่วนและตรวจตำแหน่งมุมบนแผนที่", padding=4)
-        tb.pack(fill="x", padx=8, pady=(2, 2))
-        tb.columnconfigure(0, weight=1)
-        self.tree = ttk.Treeview(tb, columns=("real", "meas", "diff", "status"), show="tree headings", height=4)
-        self.tree.heading("#0", text="ระหว่างมุม")
-        for col, text, wd in (("real", "ระยะจริง (ม.)", 100), ("meas", "วัดบนแผนที่ (ม.)", 120), ("diff", "ต่าง (ซม.)", 90), ("status", "สถานะ", 140)):
-            self.tree.heading(col, text=text)
-            self.tree.column(col, width=wd, anchor="center")
-        self.tree.column("#0", width=200)
-        sbar = ttk.Scrollbar(tb, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=sbar.set)
-        self.tree.grid(row=0, column=0, sticky="ew")
-        sbar.grid(row=0, column=1, sticky="ns")
-        side = ttk.Frame(tb)
-        side.grid(row=0, column=2, sticky="n", padx=(8, 0))
-        ttk.Button(side, text="ระยะ → มาตราส่วน", command=self.scale_from_distances).pack(fill="x", pady=1)
-        ttk.Button(side, text="เพิ่มระยะระหว่างมุมอื่น…", command=self.ask_custom_edge).pack(fill="x", pady=1)
-        ttk.Button(side, text="ล้างระยะทั้งหมด", command=self.clear_distances).pack(fill="x", pady=1)
-        self.tree.bind("<Double-1>", self._on_tree_double)
         # fixed height: a changing message must never resize the pictures under the mouse
         tk.Label(top, textvariable=self.msg_var, height=3, anchor="nw", wraplength=1250, justify="left", padx=8, pady=4).pack(fill="x")
 
@@ -2627,11 +2596,16 @@ class ReferenceMapDialog:
                     for vx, vy in qc.reshape(-1, 2):
                         cv2.rectangle(out, (int(vx) - 5, int(vy) - 5), (int(vx) + 5, int(vy) + 5), (255, 255, 255), 1)
         pts = []
+        reproj = []                                              # (number, clicked, carried through the calibration, error m)
         for n, p in enumerate(self.pairs, 1):
             err = cal["errors_m"][n - 1] if cal is not None and n - 1 < len(cal["errors_m"]) else None
-            col = (0, 255, 255) if err is None else ((0, 220, 0) if err < 0.15 else ((0, 165, 255) if err < 0.40 else (0, 0, 255)))
-            lab = str(n) if err is None else f"{n} {err * 100:.0f}cm"
-            pts.append((lab, p[:2] if name == "cam" else p[2:], col))
+            clicked = p[:2] if name == "cam" else p[2:]
+            if err is None:
+                pts.append((str(n), clicked, (0, 0, 255)))
+            elif name == "cam":
+                reproj.append((n, clicked, cal_metres_to_cam(cal, np.asarray(p[2:], dtype=float) / self.scale)[0], err))
+            else:
+                reproj.append((n, clicked, cal_cam_to_metres(cal, [p[:2]])[0] * self.scale, err))
         if name == "cam" and self.pending_cam is not None:
             pts.append((str(len(self.pairs) + 1), self.pending_cam, (0, 140, 255)))
         if name == "map":
@@ -2645,6 +2619,14 @@ class ReferenceMapDialog:
             if -20 <= c[0] <= cw + 20 and -20 <= c[1] <= ch + 20:
                 cv2.circle(out, c, 6, col, 2, cv2.LINE_AA)
                 cv2.putText(out, label, (c[0] + 8, c[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
+        for n, clicked, rp, err in reproj:                       # as in the paper's Fig. 2: red = clicked, blue = reprojected
+            c1 = (int(clicked[0] * k + ox), int(clicked[1] * k + oy))
+            c2 = (int(rp[0] * k + ox), int(rp[1] * k + oy))
+            if max(abs(c1[0]), abs(c1[1]), abs(c2[0]), abs(c2[1])) < 20000:
+                cv2.line(out, c1, c2, (200, 200, 200), 1, cv2.LINE_AA)
+                cv2.circle(out, c2, 7, (255, 80, 0), 2, cv2.LINE_AA)                 # blue (BGR)
+                cv2.circle(out, c1, 5, (0, 0, 255), 2, cv2.LINE_AA)                  # red
+                cv2.putText(out, f"{n}  {err * 100:.0f}cm", (c1[0] + 9, c1[1] - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
         if self.node_mode_var.get():                         # zone corners that are not paired yet
             for i, nd in enumerate(self.nodes):
                 if self.node_pair_index(i) is not None:
@@ -3107,6 +3089,58 @@ class ReferenceMapDialog:
         self._pred_cache.clear()
         self.refresh()
 
+    def set_lens_manual(self, f_text, k_text):
+        """Lens values typed by the user (e.g. from a standard checkerboard calibration): f in widths of the picture, k1 radial."""
+        try:
+            lens = (float(str(f_text).strip()), float(str(k_text).strip()))
+        except ValueError:
+            self.msg_var.set("ใส่ f และ k1 เป็นตัวเลข เช่น f = 0.85, k1 = -0.45")
+            return False
+        if not lens_is_valid(self.cam_wh, lens):
+            self.msg_var.set("ค่าเลนส์นี้ทำให้ภาพพับที่มุม (ไม่สมเหตุผล) ลอง f ใหญ่ขึ้นหรือ k1 เข้าใกล้ 0")
+            return False
+        self.lens = lens
+        self.refine = None
+        self._pred_cache.clear()
+        self.refresh()
+        return True
+
+    def _sync_lens_vars(self):
+        if self.lens is None:
+            self.lens_msg_var.set("ยังไม่แก้เลนส์ (ถ้าคลาดมากทั้งที่คลิกแม่น ลองประมาณเลนส์)")
+        else:
+            self.lens_f_var.set(f"{self.lens[0]:.3f}")
+            self.lens_k_var.set(f"{self.lens[1]:.3f}")
+            self.lens_msg_var.set(f"แก้เลนส์แล้ว: f = {self.lens[0]:.2f}×ความกว้างภาพ, k1 = {self.lens[1]:.2f}")
+
+    def preview_lens(self):
+        """The camera frame before (left) and after (right) the lens correction, with a grid: straight road edges must look straight."""
+        if self.lens is None or self.cam_img is None:
+            self.msg_var.set("ยังไม่ได้แก้เลนส์ — กด ประมาณเลนส์จากคู่จุด หรือกำหนด f / k1 เอง")
+            return None
+        before = self.cam_img.copy()
+        after = lens_undistort_image(self.cam_img, self.lens)
+        shown = []
+        for im in (before, after):
+            h, w = im.shape[:2]
+            for i in range(1, 10):                                   # a light grid to judge straightness
+                cv2.line(im, (int(w * i / 10), 0), (int(w * i / 10), h - 1), (255, 255, 255), 1)
+                cv2.line(im, (0, int(h * i / 10)), (w - 1, int(h * i / 10)), (255, 255, 255), 1)
+            k = min(620.0 / w, 400.0 / h)
+            ok, buf = cv2.imencode(".png", cv2.resize(im, (int(w * k), int(h * k)), interpolation=cv2.INTER_AREA))
+            shown.append(tk.PhotoImage(data=base64.b64encode(buf.tobytes())))
+        pv = tk.Toplevel(self.top)
+        pv.title("ภาพกล้องก่อน/หลังแก้เลนส์")
+        pv.transient(self.top)
+        pv.photos = shown
+        for col, (text, ph_) in enumerate((("ก่อน (ภาพเดิมจากกล้อง)", shown[0]), (f"หลังแก้เลนส์ (f={self.lens[0]:.2f}, k1={self.lens[1]:.2f})", shown[1]))):
+            ttk.Label(pv, text=text).grid(row=0, column=col, pady=(6, 0))
+            tk.Label(pv, image=ph_).grid(row=1, column=col, padx=6, pady=4)
+        ttk.Label(pv, text="ขอบถนน/เส้นตรงในโลกจริงควรเป็นเส้นตรงหลังแก้เลนส์ (เทียบกับเส้นตารางสีขาว) · ขอบภาพที่ถูกดึงออกอาจเป็นช่องว่างดำ ซึ่งเป็นเรื่องปกติ",
+                  foreground="#555555").grid(row=2, column=0, columnspan=2, pady=(0, 8))
+        self.preview = pv
+        return pv
+
     # ----- zones fitted to the road surface of the map -----
     def _cal_h(self):
         return self.calibration()
@@ -3395,6 +3429,7 @@ class ReferenceMapDialog:
                 "zones": self.zones_in_camera(), "lens": self.lens, "size": self.cam_wh if self.lens is not None else None}
 
     def refresh(self):
+        self._sync_lens_vars()
         cal = self._cal = self.calibration()
         if len(self.pairs) >= 4 and self._pairs_seen < 4:      # the calibration just became possible: place the rest once
             self._pred_cache.clear()
@@ -3414,7 +3449,7 @@ class ReferenceMapDialog:
                     if self.lens is None and cal["rms_m"] > 0.5 and n >= 6 else "")
             self.msg_var.set(("[ปรับอัตโนมัติ: เปิด — ค่าด้านล่างเทียบกับจุดที่คลิก] " if self.refine is not None else "")
                              + f"{n} คู่จุด · ความคลาดเคลื่อนเฉลี่ย {cal['rms_m'] * 100:.1f} ซม. · แย่สุด {worst * 100:.1f} ซม. "
-                             f"(จุดที่ {cal['errors_m'].index(worst) + 1}) · จุดเขียว <15 ซม., ส้ม <40 ซม., แดง ≥40 ซม. — "
+                             f"(จุดที่ {cal['errors_m'].index(worst) + 1}) · เส้นเทายาว = จุดที่คลาดมาก (แดง = ที่คลิก, น้ำเงิน = ตำแหน่งที่คำนวณกลับ) — "
                              "ควรเฉลี่ยไม่เกิน ~20–30 ซม.; ลบ/คลิปจุดสีแดงใหม่ (ช่อง ลบจุดเลขที่) และเพิ่มจุดให้กระจายทั่วภาพ "
                              f"รวมส่วนใกล้กล้อง (ตอนนี้จุดอยู่ช่วงแถว y = {min(near):.0f}–{max(near):.0f} พิกเซล)" + hint)
         else:
