@@ -92,7 +92,7 @@ while time.time() < end and not seen:
     root.update()
     time.sleep(0.01)
 check("UI queue: callback posted by a worker thread runs on the main thread", seen == [True] and app.status_var.get() == "from worker", str(seen))
-check("default paths are relative to the program folder", m.DEFAULT_MODEL.endswith(os.path.join("Input", "Model", "best.pt")), m.DEFAULT_MODEL)
+check("default paths are relative to the program folder", m.DEFAULT_MODEL.endswith(os.path.join("PK STUDIO", "Input", "Model", "best.pt")), m.DEFAULT_MODEL)
 
 # --- window layout: four steps + a run bar with the ready-to-run list ---
 check("four steps in order", [app.notebook.tab(i, "text") for i in range(4)] == ["① คลิปวิดีโอ", "② ทางแยก", "③ ตัวชี้วัด", "④ ตรวจจับและติดตาม"])
