@@ -1813,7 +1813,7 @@ SNAP_COLORS = {"Zone 1": (255, 200, 0), "Zone 2": (0, 255, 255), "Zone 3": (0, 1
                "Zone 5": (0, 255, 0), "Zone 6": (255, 255, 0), "Zone 7": (0, 0, 255)}
 
 
-def snap_zones_to_road(map_img, zone_polys, px_per_m, grow_m=1.2, thr=12.0, work_width=1920):
+def snap_zones_to_road(map_img, zone_polys, px_per_m, grow_m=1.2, thr=12.0, work_width=1920, max_vertices=10):
     """Fit hand-drawn zones to the road surface of the (top-view) map picture, automatically.
     Each zone is grown from its own core (the polygon shrunk by 0.8 m) into the pixels whose COLOUR is like the zone's
     own surface (a trimmed Gaussian in Lab, so lane paint, vehicles and shadows inside it do not matter), at most
@@ -1870,11 +1870,17 @@ def snap_zones_to_road(map_img, zone_polys, px_per_m, grow_m=1.2, thr=12.0, work
     over = img.copy()
     for i, n in enumerate(names):
         m = ((owner == i) & has).astype(np.uint8) * 255
+        m = cv2.medianBlur(m, 2 * int(0.3 * sc) + 1)                 # irons out jagged edges (paint, pavement colour)
         a0, a1 = float((drawn[n] > 0).sum()), float((m > 0).sum())
         cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         ok = bool(cnts) and 0.4 * a0 <= a1 <= 3.0 * a0
         if ok:
-            ap = cv2.approxPolyDP(max(cnts, key=cv2.contourArea), 0.25 * sc, True).reshape(-1, 2).astype(float)
+            big, eps = max(cnts, key=cv2.contourArea), 0.25 * sc
+            while True:                                              # few corners: easy to read and to drag
+                ap = cv2.approxPolyDP(big, eps, True).reshape(-1, 2).astype(float)
+                if len(ap) <= max_vertices or eps >= 1.5 * sc:
+                    break
+                eps *= 1.25
             ok = len(ap) >= 3
         out[n] = (ap if ok else polys[n]) / f
         status[n] = "snapped" if ok else "kept"
@@ -1957,6 +1963,7 @@ class ReferenceMapDialog:
         self.msg_var = tk.StringVar(value="")
         self.show_zones_var = tk.BooleanVar(value=True)
         self.node_mode_var = tk.BooleanVar(value=False)
+        self.zone_edit_var = tk.BooleanVar(value=False)
         self.refine_model_var = tk.StringVar(value="affine")
         self.node_msg_var = tk.StringVar(value="")
         self.del_var = tk.StringVar(value="")
@@ -2021,6 +2028,8 @@ class ReferenceMapDialog:
         self.snap_button = ttk.Button(auto, text="⚡ ปรับโซนให้ชิดถนนอัตโนมัติ", command=self.snap_zones)
         self.snap_button.pack(side="left", padx=(16, 4))
         ttk.Button(auto, text="คืนโซนเดิม", command=self.clear_snapped).pack(side="left")
+        ttk.Checkbutton(auto, text="แก้มุมโซนบนแผนที่ (ลากมุม · Shift+คลิก ลบ · Ctrl+คลิกบนเส้น เพิ่ม)", variable=self.zone_edit_var,
+                        command=self.toggle_zone_edit).pack(side="left", padx=(12, 0))
         ttk.Button(bar, text="พลิกผังโซน", command=self.flip_layout).grid(row=3, column=6, sticky="w", pady=(4, 0))
         ttk.Label(bar, textvariable=self.node_msg_var, foreground="#444444").grid(row=4, column=7, columnspan=5, sticky="w", padx=(8, 0), pady=(4, 0))
         ttk.Button(bar, text="บันทึก", command=self.save).grid(row=2, column=10, padx=2)
@@ -2042,7 +2051,7 @@ class ReferenceMapDialog:
             cv_ = tk.Canvas(body, width=self.VIEW_W, height=self.VIEW_H, bg="#202020", highlightthickness=0)
             cv_.grid(row=1, column=col, sticky="nsew", padx=pad)
             cv_.bind("<Configure>", lambda e, n=name: self._on_configure(n))
-            cv_.bind("<ButtonPress-1>", lambda e, n=name: self._press(n, e.x, e.y, False))
+            cv_.bind("<ButtonPress-1>", lambda e, n=name: self._press(n, e.x, e.y, False, e.state))
             cv_.bind("<B1-Motion>", lambda e, n=name: self._drag(n, e.x, e.y))
             cv_.bind("<ButtonRelease-1>", lambda e, n=name: self._release(n, e.x, e.y))
             for b in (2, 3):
@@ -2313,7 +2322,22 @@ class ReferenceMapDialog:
         self._render(name)
 
     # ----- mouse -----
-    def _press(self, name, ex, ey, always_pan):
+    def _press(self, name, ex, ey, always_pan, state=0):
+        if name == "map" and self.zone_edit_var.get() and self.snapped_map is not None and not always_pan:
+            hit = self._hit_zone_vertex(ex, ey)
+            if hit is not None:
+                if state & 0x1:                                  # Shift+click: delete the corner
+                    self.delete_zone_vertex(*hit)
+                    return
+                self._ndrag_cand, self._ndrag_from = ("zv",) + hit, (ex, ey)
+                self._ndrag, self._ndrag_pos = None, None
+                return
+            if state & 0x4:                                      # Ctrl+click on an edge: add a corner
+                edge = self._hit_zone_edge(ex, ey)
+                if edge is not None:
+                    k, ox, oy = self.view["map"]
+                    self.insert_zone_vertex(edge[0], edge[1], (ex - ox) / k, (ey - oy) / k)
+                    return
         if name == "map" and self.node_mode_var.get() and not always_pan:
             hit = self._hit_node_marker(ex, ey)
             if hit is not None:                                  # a marker is only picked up when the mouse really MOVES;
@@ -2334,7 +2358,9 @@ class ReferenceMapDialog:
                 k, ox, oy = v
                 h, w = self.map_img.shape[:2]
                 x, y = min(max((ex - ox) / k, 0), w - 1), min(max((ey - oy) / k, 0), h - 1)
-                if self._ndrag[0] == "pair":
+                if self._ndrag[0] == "zv":
+                    self.move_zone_vertex(self._ndrag[1], self._ndrag[2], x, y, refresh=False)
+                elif self._ndrag[0] == "pair":
                     self.pairs[self._ndrag[1]][2:] = [float(x), float(y)]
                     self.refresh()
                 else:
@@ -2356,6 +2382,10 @@ class ReferenceMapDialog:
             self._on_click(name, ex, ey)                          # no movement: it was a click, not a drag
             return
         self._ndrag_cand = None
+        if self._ndrag is not None and self._ndrag[0] == "zv":
+            self._ndrag = None
+            self.refresh()
+            return
         if self._ndrag is not None:
             kind, idx = self._ndrag
             pos, self._ndrag, self._ndrag_pos = self._ndrag_pos, None, None
@@ -2370,6 +2400,8 @@ class ReferenceMapDialog:
         self._on_click(name, ex, ey)
 
     def _on_click(self, name, ex, ey):
+        if self.zone_edit_var.get():                              # editing zone corners: a plain click does nothing
+            return
         v = self.view.get(name)
         if v is None:
             return
@@ -2458,6 +2490,9 @@ class ReferenceMapDialog:
                     continue
                 qc = np.round(arr * k + np.array([ox, oy])).astype(np.int32).reshape(-1, 1, 2)
                 cv2.polylines(out, [qc], True, (0, 215, 255), 2, cv2.LINE_AA)
+                if name == "map" and self.zone_edit_var.get():
+                    for vx, vy in qc.reshape(-1, 2):
+                        cv2.rectangle(out, (int(vx) - 5, int(vy) - 5), (int(vx) + 5, int(vy) + 5), (255, 255, 255), 1)
         pts = []
         for n, p in enumerate(self.pairs, 1):
             err = cal["errors_m"][n - 1] if cal is not None and n - 1 < len(cal["errors_m"]) else None
@@ -2739,6 +2774,7 @@ class ReferenceMapDialog:
 
     def toggle_node_mode(self):
         if self.node_mode_var.get():
+            self.zone_edit_var.set(False)
             if not self.nodes:
                 self.node_mode_var.set(False)
                 self.msg_var.set("ยังไม่ได้โหลดไฟล์โซน (แท็บ ② ทางแยก) จึงไม่มีมุมโซนให้ใช้")
@@ -2990,7 +3026,92 @@ class ReferenceMapDialog:
 
     def clear_snapped(self):
         self.snapped_map = None
+        self.zone_edit_var.set(False)
         self.refresh()
+
+    # ----- editing the zone corners on the map -----
+    def toggle_zone_edit(self):
+        """Corners of the zones (the automatically snapped ones, or the drawn ones carried to the map) can be dragged."""
+        if not self.zone_edit_var.get():
+            self.refresh()
+            return True
+        cal = self.calibration()
+        if cal is None:
+            self.zone_edit_var.set(False)
+            self.msg_var.set("ต้องมีคู่จุดครบ 4 คู่และมาตราส่วนก่อน จึงแก้โซนบนแผนที่ได้")
+            return False
+        if self.snapped_map is None:
+            self.snapped_map = {z: apply_homography(cal["H"], np.asarray(poly, dtype=float)) * self.scale for z, poly in self._zone_polys()}
+        if not self.snapped_map:
+            self.snapped_map = None
+            self.zone_edit_var.set(False)
+            self.msg_var.set("ยังไม่ได้โหลดไฟล์โซน (แท็บ ② ทางแยก)")
+            return False
+        self.node_mode_var.set(False)                             # the calibration markers and the zone corners are separate jobs
+        msg = ("ลากสี่เหลี่ยมเล็กที่มุมโซนบนแผนที่ให้ตรงถนน · Shift+คลิกที่มุม = ลบ · Ctrl+คลิกบนเส้นขอบ = เพิ่มมุม · กดบันทึกเพื่อเขียนไฟล์โซนใหม่ *_mapfit.json")
+        if cal["rms_m"] > 0.30 and self.refine is None:
+            msg += f" · ระวัง: คู่จุดยังคลาด {cal['rms_m'] * 100:.0f} ซม. (โซนบนภาพกล้องจะคลาดตาม)"
+        self.msg_var.set(msg)
+        self.refresh()
+        return True
+
+    def _hit_zone_vertex(self, ex, ey, radius=10):
+        v = self.view.get("map")
+        if v is None or not self.snapped_map:
+            return None
+        k, ox, oy = v
+        best = None
+        for zname, pts in self.snapped_map.items():
+            for i, (x, y) in enumerate(pts):
+                d = math.hypot(x * k + ox - ex, y * k + oy - ey)
+                if d <= radius and (best is None or d < best[0]):
+                    best = (d, zname, i)
+        return None if best is None else (best[1], best[2])
+
+    def _hit_zone_edge(self, ex, ey, radius=8):
+        v = self.view.get("map")
+        if v is None or not self.snapped_map:
+            return None
+        k, ox, oy = v
+        best = None
+        for zname, pts in self.snapped_map.items():
+            n = len(pts)
+            for i in range(n):
+                a = np.array([pts[i][0] * k + ox, pts[i][1] * k + oy])
+                b = np.array([pts[(i + 1) % n][0] * k + ox, pts[(i + 1) % n][1] * k + oy])
+                ab = b - a
+                t = 0.0 if not ab.any() else max(0.0, min(1.0, float(np.dot(np.array([ex, ey]) - a, ab) / np.dot(ab, ab))))
+                d = float(np.hypot(*(a + t * ab - np.array([ex, ey]))))
+                if d <= radius and (best is None or d < best[0]):
+                    best = (d, zname, i)
+        return None if best is None else (best[1], best[2])
+
+    def move_zone_vertex(self, zname, idx, mx, my, refresh=True):
+        if not self.snapped_map or zname not in self.snapped_map or not (0 <= idx < len(self.snapped_map[zname])):
+            return False
+        h, w = self.map_img.shape[:2]
+        self.snapped_map[zname] = np.asarray(self.snapped_map[zname], dtype=float).copy()
+        self.snapped_map[zname][idx] = [min(max(float(mx), 0), w - 1), min(max(float(my), 0), h - 1)]
+        if refresh:
+            self.refresh()
+        else:
+            self._render("map")
+            self._render("cam")
+        return True
+
+    def delete_zone_vertex(self, zname, idx):
+        if not self.snapped_map or len(self.snapped_map.get(zname, [])) <= 3:
+            return False
+        self.snapped_map[zname] = np.delete(np.asarray(self.snapped_map[zname], dtype=float), idx, axis=0)
+        self.refresh()
+        return True
+
+    def insert_zone_vertex(self, zname, after_idx, mx, my):
+        if not self.snapped_map or zname not in self.snapped_map:
+            return False
+        self.snapped_map[zname] = np.insert(np.asarray(self.snapped_map[zname], dtype=float), after_idx + 1, [float(mx), float(my)], axis=0)
+        self.refresh()
+        return True
 
     def _show_snap_preview(self, res):
         pv = tk.Toplevel(self.top)

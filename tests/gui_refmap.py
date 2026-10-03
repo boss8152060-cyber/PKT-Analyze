@@ -526,6 +526,44 @@ check("the snapped zones are drawn on both pictures", dlgS.last_render["map"] is
 dlgS.clear_snapped()
 check("restore the drawn zones", dlgS.snapped_map is None and dlgS.zones_in_camera() is None)
 dlgS.apply_snapped(resS)
+check("snap: clean outlines (few corners, easy to drag)", all(len(q) <= 10 for q in resS["polys"].values()), str({n: len(q) for n, q in resS["polys"].items()}))
+# ---- drag the zone corners on the map (a few corners may still be off)
+dlgS.node_mode_var.set(True)
+dlgS.zone_edit_var.set(True)
+check("zone edit starts and switches the calibration markers off", dlgS.toggle_zone_edit() and not dlgS.node_mode_var.get())
+root.update()
+zname_e = "Zone 3"
+before_pts = np.array(dlgS.snapped_map[zname_e], float).copy()
+new_pt = before_pts[0] + np.array([30.0, 20.0])
+check("move a corner", dlgS.move_zone_vertex(zname_e, 0, *new_pt))
+zc_e = dlgS.zones_in_camera()
+want_e = ph(h_map_to_cam, [new_pt])[0]
+check("the moved corner comes back in camera pixels", abs(zc_e[zname_e][0][0] - want_e[0]) < 1.5 and abs(zc_e[zname_e][0][1] - want_e[1]) < 1.5,
+      f"{zc_e[zname_e][0]} vs {want_e.round(1)}")
+n_before = len(dlgS.snapped_map[zname_e])
+check("delete a corner", dlgS.delete_zone_vertex(zname_e, 1) and len(dlgS.snapped_map[zname_e]) == n_before - 1)
+check("insert a corner", dlgS.insert_zone_vertex(zname_e, 0, new_pt[0] + 5, new_pt[1] + 5) and len(dlgS.snapped_map[zname_e]) == n_before)
+root.update()
+kk2, ox2, oy2 = dlgS.view["map"]
+vx, vy = dlgS.snapped_map["Zone 4"][1]
+cv_e = dlgS.canvases["map"]
+sx2, sy2 = int(vx * kk2 + ox2), int(vy * kk2 + oy2)
+before_v = list(dlgS.snapped_map["Zone 4"][1])
+pairs_n = len(dlgS.pairs)
+cv_e.event_generate("<ButtonPress-1>", x=sx2, y=sy2)
+cv_e.event_generate("<B1-Motion>", x=sx2 + 12, y=sy2 + 7)
+cv_e.event_generate("<B1-Motion>", x=sx2 + 25, y=sy2 + 15)
+cv_e.event_generate("<ButtonRelease-1>", x=sx2 + 25, y=sy2 + 15)
+root.update()
+after_v = dlgS.snapped_map["Zone 4"][1]
+check("dragging a corner square with the mouse moves it", abs(after_v[0] - before_v[0] - 25 / kk2) < 2 and abs(after_v[1] - before_v[1] - 15 / kk2) < 2, f"{before_v} -> {list(after_v)}")
+cv_e.event_generate("<ButtonPress-1>", x=sx2 + 200, y=sy2 + 150)
+cv_e.event_generate("<ButtonRelease-1>", x=sx2 + 200, y=sy2 + 150)
+root.update()
+check("in zone edit a plain click adds no point pair", len(dlgS.pairs) == pairs_n and dlgS.pending_cam is None)
+dlgS.zone_edit_var.set(False)
+dlgS.toggle_zone_edit()
+check("the edited corners are kept when the edit mode is switched off", dlgS.snapped_map is not None and abs(dlgS.snapped_map["Zone 4"][1][0] - after_v[0]) < 1e-9)
 shown2 = []
 m.messagebox.showinfo = lambda *a, **k: shown2.append(a)
 check("save writes a new zone file with the snapped zones", dlgS.save() is True)
@@ -534,6 +572,7 @@ check("the new file exists, the original is untouched, the program uses it", os.
       and json.load(open(zone_src2))["zones"][0]["points"] == cam_a.tolist() and app.zone_line_config_var.get() == new_file)
 saved_a = np.array(json.load(open(new_file))["zones"][0]["points"], float)
 check("the file holds the snapped zone (different from the drawn one)", len(saved_a) >= 3 and not (len(saved_a) == 4 and np.allclose(saved_a, cam_a, atol=2)))
+check("the file holds the hand-edited corner", any(abs(pt[0] - want_e[0]) < 2 and abs(pt[1] - want_e[1]) < 2 for pt in saved_a.tolist()), "")
 check("the user is told a re-run is needed", len(shown2) == 1)
 app.video_var.set(old_video)
 
