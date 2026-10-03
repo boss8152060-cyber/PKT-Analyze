@@ -401,8 +401,12 @@ DEFAULT_SETTINGS = {
 
     # Trajectory Position: choose where the tracked trajectory is anchored
     # inside each bounding box. Offset moves the anchor inward from the selected edge(s).
-    "trajectory_position": "Center",
+    # Bottom = the point where the vehicle touches the road (the only point the road-plane
+    # calibration is valid for); Offset 0 keeps it on the box edge, not floating above the ground.
+    "trajectory_position": "Bottom",
     "trajectory_offset": "0",
+    # Zone visits shorter than this (s) between two visits of the same zone are boundary flicker
+    "zone_flicker_merge_s": "0.30",
 
     # Zone overlay display controls.
     "show_zone_boundary": True,
@@ -551,7 +555,7 @@ import numpy as np
 
 # V27(2): zone visits shorter/closer than this are treated as boundary flicker
 # when the Run 2 summaries are built (raw Detection_Records zones are untouched).
-ZONE_FLICKER_MERGE_S = 0.10
+ZONE_FLICKER_MERGE_S = 0.10          # code default; the program setting is `zone_flicker_merge_s`
 
 
 def collect_zone_visits(zone_states, fallback_end):
@@ -2059,6 +2063,7 @@ class Run1App:
         # Trajectory Position controls.
         self.trajectory_position_var = tk.StringVar(value=DEFAULT_SETTINGS["trajectory_position"])
         self.trajectory_offset_var = tk.StringVar(value=DEFAULT_SETTINGS["trajectory_offset"])
+        self.zone_flicker_merge_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_flicker_merge_s"])
 
         # Zone overlay display controls.
         self.show_zone_boundary_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_zone_boundary"])
@@ -2399,7 +2404,10 @@ class Run1App:
         ttk.Label(box, text="เลื่อนเข้าด้านใน %").grid(row=0, column=2, sticky="e", padx=(12, 4), pady=4)
         self.trajectory_offset_spin = ttk.Spinbox(box, from_=0, to=50, increment=1, textvariable=self.trajectory_offset_var, width=7)
         self.trajectory_offset_spin.grid(row=0, column=3, sticky="w", pady=4)
-        ttk.Label(box, text="ใช้จุดเดียวบนกรอบรถตัดสินโซน (point-in-polygon); Center ไม่ใช้ค่าเลื่อน", foreground=gray).grid(row=1, column=0, columnspan=4, sticky="w")
+        ttk.Label(box, text="ใช้จุดเดียวบนกรอบรถตัดสินโซน (point-in-polygon); แนะนำ Bottom + เลื่อน 0 (จุดที่ล้อแตะพื้น); Center ไม่ใช้ค่าเลื่อน", foreground=gray).grid(row=1, column=0, columnspan=4, sticky="w")
+        ttk.Label(box, text="รวมการสลับโซนที่รอยต่อ ≤ (วินาที)").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Spinbox(box, from_=0, to=2, increment=0.05, textvariable=self.zone_flicker_merge_var, width=7).grid(row=2, column=1, sticky="w", pady=4)
+        ttk.Label(box, text="A→B→A ที่ B สั้นกว่านี้ถือเป็นการกะพริบที่ขอบโซน ตัดออกจากลำดับโซน/Movement (ไม่แก้ข้อมูลรายเฟรม); 0.10 = ค่าเดิม", foreground=gray).grid(row=3, column=0, columnspan=4, sticky="w")
         self.update_trajectory_position_controls()
 
         geo = self.section("ความกว้างถนน (m) — ใช้เป็นตัวหารของ LDP")
@@ -2578,6 +2586,14 @@ class Run1App:
                 return "-"
         self.run3_w_entry_text.set("W_entry = " + total("lane_entry_motorcycle_m", "lane_entry_car_m"))
         self.run3_w_opp_text.set("W_opp = " + total("lane_opp_motorcycle_m", "lane_opp_car_m"))
+
+    def _flicker_merge_s(self):
+        """Zone-boundary flicker merge window (s) from the program setting (falls back to the code default)."""
+        try:
+            v = float(str(self.zone_flicker_merge_var.get()).strip())
+        except (TypeError, ValueError):
+            return ZONE_FLICKER_MERGE_S
+        return v if v >= 0 else ZONE_FLICKER_MERGE_S
 
     def update_trajectory_position_controls(self, event=None):
         """Update the trajectory-position controls.
@@ -3917,6 +3933,7 @@ class Run1App:
             "research_mode": self.research_mode_var.get(),
             "trajectory_position": self.trajectory_position_var.get(),
             "trajectory_offset": self.trajectory_offset_var.get(),
+            "zone_flicker_merge_s": self.zone_flicker_merge_var.get(),
             "show_zone_boundary": self.show_zone_boundary_var.get(),
             "show_zone_label": self.show_zone_label_var.get(),
             "show_zone_label_prefix": self.show_zone_label_prefix_var.get(),
@@ -4066,6 +4083,7 @@ class Run1App:
             ("research_mode", self.research_mode_var),
             ("trajectory_position", self.trajectory_position_var),
             ("trajectory_offset", self.trajectory_offset_var),
+            ("zone_flicker_merge_s", self.zone_flicker_merge_var),
             ("show_zone_boundary", self.show_zone_boundary_var),
             ("show_zone_label", self.show_zone_label_var),
             ("show_zone_label_prefix", self.show_zone_label_prefix_var),
@@ -5058,6 +5076,14 @@ class Run1App:
             warnings.append(
                 f"Trajectory Position = '{position}' (ขั้น ② ทางแยก): PPM / Perspective Calibration วัดบนพื้นถนน แต่จุดนี้ไม่ใช่จุดที่ล้อแตะพื้น "
                 "(เช่น Top = หัวคนขี่) ความเร็วและระยะจะเพี้ยน (โดยทั่วไปสูงเกินจริง) — แนะนำ Bottom")
+        try:
+            offset_now = float(self.trajectory_offset_var.get() or 0)
+        except ValueError:
+            offset_now = 0.0
+        if position.startswith("Bottom") and offset_now > 0:
+            warnings.append(
+                f"Trajectory Position = Bottom แต่เลื่อนเข้าด้านใน {offset_now:g}% (ขั้น ② ทางแยก): จุดจะลอยจากพื้นถนนขึ้นไปในตัวรถ "
+                "ทำให้ตัดสินโซนที่ขอบคลาดเคลื่อน (รถสลับโซนที่รอยต่อมากขึ้น) และ calibration วัดผิดเล็กน้อย — แนะนำเลื่อน 0")
         defined = {z for z in ZONE_IDS if len(self.zones.get(f"Zone {z}", [])) >= 3}
         any_enabled = any(bool(getattr(self, f"run3_{k}_enabled_var").get())
                           for k in ("speed", "gap", "lc", "pet", "ttc", "ldp"))
@@ -5703,6 +5729,7 @@ class Run1App:
             zone_assignment_summary = defaultdict(lambda: defaultdict(int))
             trajectory_position = settings.get("trajectory_position", self.trajectory_position_var.get())
             trajectory_offset = float(settings.get("trajectory_offset", self.trajectory_offset_var.get() or 0))
+            flicker_merge_s = self._flicker_merge_s()
             zone_confirmation_frames = 1
             zone_entry_count = defaultdict(int)
             zone_exit_count = defaultdict(int)
@@ -6657,7 +6684,7 @@ class Run1App:
                     last_time_final = (state_info.get("last_frame", frame_index) - 1) / fps if fps > 0 else 0.0
                     visits = clean_zone_visits(collect_zone_visits(
                         zone_track_state[track_id].get("zone_states", {}), last_time_final
-                    ))
+                    ), flicker_merge_s)
                     if not visits:
                         continue
                     class_name_final = state_info.get("class_name", "")
@@ -6694,7 +6721,7 @@ class Run1App:
                     last_frame_final = state_info.get("last_frame", frame_index)
                     last_time_final = (last_frame_final - 1) / fps if fps > 0 else 0.0
                     for zname, start_t, end_t in clean_zone_visits(
-                        collect_zone_visits(zmap.get("zone_states", {}), last_time_final)
+                        collect_zone_visits(zmap.get("zone_states", {}), last_time_final), flicker_merge_s
                     ):
                         duration = max(0.0, float(end_t) - float(start_t))
                         agg = zone_aggregate[zname]
@@ -6735,7 +6762,7 @@ class Run1App:
                             "trajectory_offset_percent": float(self.trajectory_offset_var.get()),
                             "temporal_confirmation_frames": 0,
                              "zone_assignment_rule": "Trajectory Position point-in-polygon only",
-                            "summary_flicker_merge_s": ZONE_FLICKER_MERGE_S,
+                            "summary_flicker_merge_s": flicker_merge_s,
                             "assignment_observations": {
                                 z: dict(v) for z, v in zone_assignment_summary.items()
                             },
@@ -6902,7 +6929,7 @@ class Run1App:
                     "trajectory_offset_percent": float(self.trajectory_offset_var.get()),
                     "temporal_confirmation_frames": 0,
                              "zone_assignment_rule": "Trajectory Position point-in-polygon only",
-                            "summary_flicker_merge_s": ZONE_FLICKER_MERGE_S,
+                            "summary_flicker_merge_s": flicker_merge_s,
                 },
                 "processing_time_seconds": round(total_time, 6),
                 "average_fps": round(average_fps, 6),
@@ -7051,7 +7078,7 @@ class Run1App:
         with open(path, "r", newline="", encoding="utf-8-sig") as f:
             return list(csv.DictReader(f))
 
-    def _run3_build_movement_index(self, tracks, summaries=None, mapping=None, site_id=None):
+    def _run3_build_movement_index(self, tracks, summaries=None, mapping=None, site_id=None, merge_gap_s=ZONE_FLICKER_MERGE_S):
         """One canonical Movement per Vehicle_ID (SPEC v28 section 3).
 
         The Movement comes from the flicker-cleaned zone sequence built from the
@@ -7061,7 +7088,7 @@ class Run1App:
         """
         movement_by_id, status_by_id, sequence_by_id = {}, {}, {}
         for tid, rows in tracks.items():
-            seq = zone_sequence_from_samples([(r["_timestamp"], r.get("_zone_num")) for r in rows])
+            seq = zone_sequence_from_samples([(r["_timestamp"], r.get("_zone_num")) for r in rows], merge_gap_s)
             movement, status = classify_movement_robust(seq)
             key = str(tid)
             movement_by_id[key] = movement
@@ -7270,6 +7297,7 @@ class Run1App:
             "waiting_threshold": num(self.run3_waiting_speed_threshold_var, GAP_HOLD_SPEED_KMH),
             "hold_min_duration_s": num(self.run3_hold_min_duration_var, GAP_HOLD_MIN_S),
             "lc_heading_window_s": num(self.run3_lc_heading_window_var, 0.5),
+            "zone_flicker_merge_s": self._flicker_merge_s(),
             "lc_along_limit_m": max(0.0, num(self.run3_lc_along_limit_var, 0.0) or 0.0),
             "lc_max_lateral_m": max(0.0, num(self.run3_lc_max_lateral_var, 3.5) or 0.0),
             "lc_motorcycle_pairs_only": bool(self.run3_lc_motorcycle_pairs_only_var.get()),
@@ -8435,7 +8463,7 @@ class Run1App:
             mapping = self._run3_parse_reference_mapping(c["mapping_text"])
         except Exception as exc:
             mapping_parse_error = str(exc)
-        movement_by_id, movement_source_by_id, sequence_by_id = self._run3_build_movement_index(tracks, summaries, mapping, c["site_id"])
+        movement_by_id, movement_source_by_id, sequence_by_id = self._run3_build_movement_index(tracks, summaries, mapping, c["site_id"], c.get("zone_flicker_merge_s", ZONE_FLICKER_MERGE_S))
         tracks_by_zone = defaultdict(int)
         for rows in tracks.values():
             for z in {r.get("_zone_num") for r in rows}:
