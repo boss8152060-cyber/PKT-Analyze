@@ -270,10 +270,22 @@ px_, py_ = dlg5.predicted_map(4)
 sx, sy = int(px_ * kk + oxx), int(py_ * kk + oyy)
 tx, ty = truth[4]
 cvm5.event_generate("<ButtonPress-1>", x=sx, y=sy)
+cvm5.event_generate("<B1-Motion>", x=sx + 9, y=sy + 9)                 # (a real move first, then the drop)
 cvm5.event_generate("<B1-Motion>", x=int(tx * kk + oxx) + 1, y=int(ty * kk + oyy) + 1)
 cvm5.event_generate("<ButtonRelease-1>", x=int(tx * kk + oxx) + 1, y=int(ty * kk + oyy) + 1)
 root.update()
 check("dragging a corner marker creates its pair", len(dlg5.pairs) == 5 and dlg5.node_pair_index(4) == 4, str(len(dlg5.pairs)))
+# dragging a paired corner must not move the markers of the corners that are not paired yet
+free = [i for i in range(len(dlg5.nodes)) if dlg5.node_pair_index(i) is None]
+if free:
+    root.update()
+    pos_free = {i: dlg5.predicted_map(i) for i in free}
+    jj = dlg5.node_pair_index(1)
+    dlg5.pairs[jj][2] += 25.0
+    dlg5.refresh()
+    check("after a corner is moved the free markers have not jumped", all(dlg5.predicted_map(i) == pos_free[i] for i in free))
+    dlg5.pairs[jj][2] -= 25.0
+    dlg5.refresh()
 # drag an already paired corner: its map position follows
 root.update()
 kk, oxx, oyy = dlg5.view["map"]                                   # (the canvas may have been resized by the changing label)
@@ -323,10 +335,15 @@ for i, nd in enumerate(dlg6.nodes):
 dlg6.assign_node(0, *truth6[0])
 p1 = dlg6.predicted_map(1)
 check("one corner placed: the layout follows it (that corner sits exactly where it was put)", dlg6._node_map_pos(0) == tuple(map(float, truth6[0])) and p1 is not None)
+still_before = {i: dlg6.predicted_map(i) for i in range(3, 8)}
 dlg6.assign_node(1, *truth6[1])
 dlg6.assign_node(2, *truth6[2])
+still_after = {i: dlg6.predicted_map(i) for i in range(3, 8)}
+check("placing corners does NOT make the other markers jump (they stay still)", all(still_after[i] == still_before[i] for i in range(3, 8)))
+dlg6.refresh_predictions()
 q3 = dlg6.predicted_map(3)
-check("three corners placed: the others follow an affine fit (rough)", q3 is not None and math.hypot(q3[0] - truth6[3][0], q3[1] - truth6[3][1]) < 200)
+check("the button re-places the remaining corners after the placed ones (small step: not wild)",
+      q3 is not None and math.hypot(q3[0] - still_before[3][0], q3[1] - still_before[3][1]) < 0.6 * max(mw_, mh_))
 for i in (3, 4, 5, 6, 7):
     dlg6.assign_node(i, *truth6[i])
 check("all corners placed", all(dlg6.node_pair_index(i) is not None for i in range(8)) and len(dlg6.pairs) == 8)

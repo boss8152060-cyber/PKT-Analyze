@@ -1935,6 +1935,8 @@ class ReferenceMapDialog:
         self.active_node = None
         self._ndrag = None                               # ("pair", j) / ("node", i) while a marker is dragged on the map
         self._ndrag_pos = None
+        self._pred_cache = {}                            # unpaired corner -> where its marker is shown: kept STILL (see predicted_map)
+        self._pairs_seen = 0
         self._pan = None
         self._slider_busy = False
         self._seek_after = {}
@@ -2005,6 +2007,7 @@ class ReferenceMapDialog:
         ttk.Checkbutton(bar, text="ใช้มุมโซนเป็นจุดอ้างอิง (ฝั่งกล้องกำหนดให้แล้ว — คลิกที่แผนที่อย่างเดียว)", variable=self.node_mode_var,
                         command=self.toggle_node_mode).grid(row=4, column=0, columnspan=5, sticky="w", pady=(4, 0))
         ttk.Button(bar, text="ข้ามมุมนี้", command=self.skip_node).grid(row=4, column=5, sticky="w", pady=(4, 0))
+        ttk.Button(bar, text="จัดมุมที่เหลือใหม่", command=self.refresh_predictions).grid(row=4, column=6, sticky="w", padx=(6, 0), pady=(4, 0))
         ttk.Button(bar, text="หมุนผังโซน 90°", command=self.rotate_layout).grid(row=3, column=5, sticky="w", pady=(4, 0))
         auto = ttk.Frame(bar)
         auto.grid(row=5, column=0, columnspan=12, sticky="w", pady=(4, 0))
@@ -2019,7 +2022,7 @@ class ReferenceMapDialog:
         self.snap_button.pack(side="left", padx=(16, 4))
         ttk.Button(auto, text="คืนโซนเดิม", command=self.clear_snapped).pack(side="left")
         ttk.Button(bar, text="พลิกผังโซน", command=self.flip_layout).grid(row=3, column=6, sticky="w", pady=(4, 0))
-        ttk.Label(bar, textvariable=self.node_msg_var, foreground="#444444").grid(row=4, column=6, columnspan=6, sticky="w", padx=(8, 0), pady=(4, 0))
+        ttk.Label(bar, textvariable=self.node_msg_var, foreground="#444444").grid(row=4, column=7, columnspan=5, sticky="w", padx=(8, 0), pady=(4, 0))
         ttk.Button(bar, text="บันทึก", command=self.save).grid(row=2, column=10, padx=2)
         ttk.Button(bar, text="ยกเลิก", command=self.close).grid(row=2, column=11, padx=2)
         bar.columnconfigure(9, weight=1)
@@ -2233,6 +2236,7 @@ class ReferenceMapDialog:
         if self.map_cap is not None and frame is not None:
             self.map_frame = max(0, min(self.map_total - 1, int(frame)))
         self.zoom["map"] = 1.0
+        self._pred_cache.clear()
         self.reset_view("map", render=False)
         self._sync_frame_controls("map")
         if self.map_cap is not None:
@@ -2312,12 +2316,18 @@ class ReferenceMapDialog:
     def _press(self, name, ex, ey, always_pan):
         if name == "map" and self.node_mode_var.get() and not always_pan:
             hit = self._hit_node_marker(ex, ey)
-            if hit is not None:
-                self._ndrag, self._ndrag_pos = hit, None
+            if hit is not None:                                  # a marker is only picked up when the mouse really MOVES;
+                self._ndrag_cand, self._ndrag_from = hit, (ex, ey)   # a plain click on it still places the active corner
+                self._ndrag, self._ndrag_pos = None, None
                 return
+        self._ndrag_cand = None
         self._pan = {"name": name, "x": ex, "y": ey, "x0": ex, "y0": ey, "moved": bool(always_pan), "always": bool(always_pan)}
 
     def _drag(self, name, ex, ey):
+        cand = getattr(self, "_ndrag_cand", None)
+        if cand is not None and self._ndrag is None and name == "map":
+            if abs(ex - self._ndrag_from[0]) > 3 or abs(ey - self._ndrag_from[1]) > 3:
+                self._ndrag = cand
         if self._ndrag is not None and name == "map":
             v = self.view.get("map")
             if v is not None:
@@ -2341,6 +2351,11 @@ class ReferenceMapDialog:
             p["x"], p["y"] = ex, ey
 
     def _release(self, name, ex, ey):
+        if self._ndrag is None and getattr(self, "_ndrag_cand", None) is not None:
+            self._ndrag_cand = None
+            self._on_click(name, ex, ey)                          # no movement: it was a click, not a drag
+            return
+        self._ndrag_cand = None
         if self._ndrag is not None:
             kind, idx = self._ndrag
             pos, self._ndrag, self._ndrag_pos = self._ndrag_pos, None, None
@@ -2525,14 +2540,33 @@ class ReferenceMapDialog:
         return None
 
     def predicted_map(self, i):
-        """Where corner i is (or should be) on the map: by the calibration when it exists; before that by a
-        first layout of the zone corners that follows the corners already placed (1: move, 2: similarity, 3+: affine)."""
+        """Where the marker of a corner that is not paired yet is shown on the map. The position is computed ONCE
+        (first layout, or the calibration when there is one) and then stays still: placing or dragging other corners must
+        not make the remaining markers jump around. It is recomputed only when the calibration first becomes possible
+        (4th pair), after rotate / flip / a new map, or by the button "จัดมุมที่เหลือใหม่"."""
         if self._ndrag is not None and self._ndrag == ("node", i) and self._ndrag_pos is not None:
             return self._ndrag_pos
-        if self._cal is not None:
-            return tuple(apply_homography(self._cal["H"], [self.nodes[i]["cam"]])[0] * self.scale)
+        if i in self._pred_cache:
+            return self._pred_cache[i]
+        q = self._model_prediction(i)
+        if q is not None:
+            self._pred_cache[i] = q
+        return q
+
+    def _model_prediction(self, i):
+        cam = self.nodes[i]["cam"]
+        if self._cal is not None and self.map_img is not None:
+            q = tuple(apply_homography(self._cal["H"], [cam])[0] * self.scale)
+            h, w = self.map_img.shape[:2]
+            if -0.5 * w <= q[0] <= 1.5 * w and -0.5 * h <= q[1] <= 1.5 * h:            # a wild extrapolation is not trusted
+                return q
         fn = self._layout_fn()
-        return None if fn is None else fn(self.nodes[i]["cam"])
+        return None if fn is None else fn(cam)
+
+    def refresh_predictions(self):
+        """Place the markers of the corners that are not paired yet again, following the corners already placed."""
+        self._pred_cache.clear()
+        self.refresh()
 
     def _initial_layout(self):
         """The zone corners of the camera picture placed in the middle of the map (about 60 % of it), turned / mirrored
@@ -2558,6 +2592,8 @@ class ReferenceMapDialog:
         return lambda c: tuple((turn(c)[0] - mid) * k + np.array([mw / 2.0, mh / 2.0]))
 
     def _layout_fn(self):
+        """First layout of the corners that follow the placed ones, in small steps so it never swings wildly:
+        0 pairs = the first layout, 1 = shifted, 2-3 = also turned (at most 30 deg) and scaled (0.7-1.4 x)."""
         init = self._initial_layout()
         if init is None:
             return None
@@ -2565,28 +2601,26 @@ class ReferenceMapDialog:
         if n == 0:
             return init
         cam = np.array([p[:2] for p in self.pairs], dtype=float)
-        mp = np.array([p[2:] for p in self.pairs], dtype=float)
-        if n >= 3:
-            a = np.c_[cam, np.ones(n)]
-            if np.linalg.matrix_rank(a) == 3:
-                m_ = np.linalg.lstsq(a, mp, rcond=None)[0]
-                return lambda c: tuple(np.r_[np.asarray(c, dtype=float), 1.0] @ m_)
+        w = np.array([complex(p[2], p[3]) for p in self.pairs])
+        z = np.array([complex(*init(c)) for c in cam])
         if n >= 2:
-            z, w = cam[:, 0] + 1j * cam[:, 1], mp[:, 0] + 1j * mp[:, 1]
             zc, wc = z - z.mean(), w - w.mean()
             if np.abs(zc).sum() > 1e-9:
                 a_ = (wc * np.conj(zc)).sum() / (np.abs(zc) ** 2).sum()
+                a_ = min(1.4, max(0.7, abs(a_))) * np.exp(1j * float(np.clip(np.angle(a_), -np.radians(30), np.radians(30))))
                 b_ = w.mean() - a_ * z.mean()
-                return lambda c: (lambda v: (v.real, v.imag))(a_ * (c[0] + 1j * c[1]) + b_)
-        shift = np.array(mp[0]) - np.array(init(cam[0]))
-        return lambda c: tuple(np.array(init(c)) + shift)
+                return lambda c: (lambda v: (v.real, v.imag))(a_ * complex(*init(c)) + b_)
+        shift = w[0] - z[0]
+        return lambda c: (lambda v: (v.real, v.imag))(complex(*init(c)) + shift)
 
     def rotate_layout(self):
         self.layout_rot = (self.layout_rot + 1) % 4
+        self._pred_cache.clear()
         self.refresh()
 
     def flip_layout(self):
         self.layout_flip = not self.layout_flip
+        self._pred_cache.clear()
         self.refresh()
 
     # ----- real distances between zone corners -----
@@ -2712,7 +2746,8 @@ class ReferenceMapDialog:
             self.skipped_nodes = set()
             self.active_node = self._next_unpaired(-1)
             self.msg_var.set("มุมโซนส้ม = มุมที่ต้องจับคู่ (ตำแหน่งบนภาพกล้องกำหนดให้แล้ว) คลิกบนแผนที่ที่ตำแหน่งเดียวกันบนพื้นถนน "
-                             "— ข้ามมุมที่ไม่ตรงลักษณะถนนได้ · เมื่อจับคู่ครบ 4 มุมแล้ว มุมที่เหลือจะแสดงบนแผนที่ที่ตำแหน่งโดยประมาณ ลากไปให้ตรงได้เลย")
+                             "— ข้ามมุมที่ไม่ตรงลักษณะถนนได้ · มุมที่ยังไม่จับคู่ **อยู่นิ่ง** ไม่กระโดดตามทุกครั้งที่วางมุม; พอจับคู่ครบ 4 มุม โปรแกรมจัดมุมที่เหลือให้ตามผลคำนวณครั้งเดียว "
+                             "(กด จัดมุมที่เหลือใหม่ เมื่อต้องการให้จัดอีก) แล้วลากไปให้ตรงได้เลย")
         self.refresh()
         return True
 
@@ -3078,6 +3113,9 @@ class ReferenceMapDialog:
 
     def refresh(self):
         cal = self._cal = self.calibration()
+        if len(self.pairs) >= 4 and self._pairs_seen < 4:      # the calibration just became possible: place the rest once
+            self._pred_cache.clear()
+        self._pairs_seen = len(self.pairs)
         paired = sum(1 for i in range(len(self.nodes)) if self.node_pair_index(i) is not None)
         self.node_msg_var.set(f"มุมโซน {len(self.nodes)} จุด · จับคู่แล้ว {paired} · ข้าม {len(self.skipped_nodes)}"
                               + (f" · ตอนนี้: {self.nodes[self.active_node]['label']}" if self.node_mode_var.get() and self.active_node is not None else ""))
