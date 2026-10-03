@@ -214,7 +214,7 @@ inside = (met[..., 0] * 20 > 5) & (met[..., 0] * 20 < 1195) & (met[..., 1] * 20 
 path = m.topview_px(cvs, np.array([r["_m"] for r in tr["1"]]))
 near = np.zeros((Hf, Wf), bool)
 for q in path[::3]:
-    near |= np.hypot(xs_ - q[0], ys_ - q[1]) < 5.0 * cvs["scale"]                              # the area around the vehicle path stays bright
+    near |= np.hypot(xs_ - q[0], ys_ - q[1]) < 1.5 * cvs["scale"]                              # the area around the vehicle path stays visible (the rest is blanked)
 car = m.topview_px(cvs, [tr["1"][14]["_m"]])[0]
 valid = seen & inside & near & (np.hypot(xs_ - car[0], ys_ - car[1]) > 90) & (ys_ > 30)
 
