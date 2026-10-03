@@ -2135,6 +2135,11 @@ def normalize_road_line(item):
     return kind, [(float(x), float(y)) for x, y in pts]
 
 
+def road_line_straight(item):
+    """Is this saved road line marked 'really straight' (it is then also used to estimate the lens)? Old formats: yes."""
+    return bool(item.get("straight", item.get("s", True))) if isinstance(item, dict) else True
+
+
 def _offset_polyline(q, d):
     """The polyline moved sideways by d pixels (normal of each vertex = mean of its two segments' normals)."""
     if abs(d) < 1e-9 or len(q) < 2:
@@ -2184,13 +2189,21 @@ class RoadLineDialog(LensLineDialog):
     as the vehicles, so they always match the vehicle positions. Same view controls as the lens tool."""
 
     def __init__(self, app, video_path, on_apply, initial=None):
-        norm = [normalize_road_line(it) for it in (initial or [])]
+        norm = [(normalize_road_line(it), road_line_straight(it)) for it in (initial or [])]
         super().__init__(app, video_path, on_apply)
-        self.top.title("วาดเส้นถนน")
+        self.top.title("เลนส์ + เส้นถนน")
         self.types = [ROAD_LINE_DEFAULT]
+        self.straight = [True]
         if norm:
-            self.lines = [pts for _, pts in norm] + [[]]
-            self.types = [k for k, _ in norm] + [self.type_key()]
+            self.lines = [pts for (_, pts), _s in norm] + [[]]
+            self.types = [k for (k, _), _s in norm] + [self.type_key()]
+            self.straight = [st for _p, st in norm] + [bool(self.straight_var.get())]
+        try:
+            lens_now, size_now = app._run3_lens_params()
+        except Exception:
+            lens_now = None
+        if lens_now is not None and tuple(size_now) == tuple(self.size):
+            self.lens = tuple(lens_now)                      # the lens already set: the corrected picture can be shown at once
         self.refresh()
 
     def type_key(self):
@@ -2203,6 +2216,11 @@ class RoadLineDialog(LensLineDialog):
             types.append(self.type_key())
         del types[len(self.lines):]
         self.types = types
+        st = getattr(self, "straight", [])
+        while len(st) < len(self.lines):
+            st.append(bool(self.straight_var.get()))
+        del st[len(self.lines):]
+        self.straight = st
 
     def set_type(self, kind):
         """The type of the line being drawn."""
@@ -2210,6 +2228,16 @@ class RoadLineDialog(LensLineDialog):
         self._sync_types()
         self.types[-1] = kind
         self.refresh()
+
+    def _on_straight_changed(self):
+        self._sync_types()
+        self.straight[-1] = bool(self.straight_var.get())
+        self.result_info = None
+
+    def usable_lines(self):
+        """Only lines marked 'really straight' are used to estimate the lens (a curved road edge would bend the estimate)."""
+        self._sync_types()
+        return [l for l, st in zip(self.lines, self.straight) if st and len(l) >= 3]
 
     def _on_type_changed(self):
         self._sync_types()
@@ -2239,15 +2267,19 @@ class RoadLineDialog(LensLineDialog):
         bar = ttk.Frame(top, padding=6)
         bar.pack(fill="x")
         ttk.Label(bar, text=("คลิกจุดตามแนวเส้นถนน (ขอบถนน เส้นแบ่งเลน ขอบทางม้าลาย) เส้นละกี่จุดก็ได้ — เส้นตรงใช้ 2 จุด เส้นโค้งใช้หลายจุด "
-                             "· เลือก ชนิดเส้น ก่อนวาดแต่ละเส้น (ขาวทึบ/ประ เหลืองทึบ/คู่/ประ ขอบทางขาว-แดง ขาว-ดำ ขาว-เหลือง ช่องจักรยานยนต์สีฟ้า) "
-                             "· กด เส้นใหม่ เมื่อจะเริ่มเส้นถัดไป · ล้อเมาส์ = ซูม · ลาก = เลื่อนภาพ · เสร็จแล้วกด ใช้เส้นเหล่านี้"),
-                  wraplength=980, justify="left").grid(row=0, column=0, columnspan=8, sticky="w")
+                             "· เลือก ชนิดเส้น ก่อนวาดแต่ละเส้น · เส้นที่ตรงจริงในโลก (ติ๊กไว้) ใช้ประมาณเลนส์ได้ด้วย: เส้นตรงอย่างน้อย 3 เส้น 3 จุดขึ้นไป "
+                             "ใกล้ขอบภาพ แล้วกด ประมาณเลนส์ — คลิกครั้งเดียวได้ทั้งเลนส์และเส้นถนน · กด เส้นใหม่ เมื่อจะเริ่มเส้นถัดไป · ล้อเมาส์ = ซูม · ลาก = เลื่อนภาพ"),
+                  wraplength=980, justify="left").grid(row=0, column=0, columnspan=9, sticky="w")
         ttk.Button(bar, text="เส้นใหม่", command=self.new_line).grid(row=1, column=0, pady=4, padx=(0, 4))
         ttk.Button(bar, text="ย้อนจุด", command=self.undo_point).grid(row=1, column=1, padx=4)
         ttk.Button(bar, text="ลบเส้นนี้", command=self.delete_line).grid(row=1, column=2, padx=4)
         ttk.Button(bar, text="รีเซ็ต View", command=self.reset_view).grid(row=1, column=3, padx=4)
-        ttk.Button(bar, text="ใช้เส้นเหล่านี้", command=self.apply).grid(row=1, column=4, padx=(14, 4))
-        ttk.Button(bar, text="ปิด", command=self.close).grid(row=1, column=5, padx=4)
+        ttk.Button(bar, text="ประมาณเลนส์", command=self.estimate).grid(row=1, column=4, padx=(14, 4))
+        ttk.Checkbutton(bar, text="ดูภาพที่แก้เลนส์แล้ว", variable=self.fixed_var, command=self.refresh).grid(row=1, column=5, padx=4)
+        ttk.Button(bar, text="ใช้ค่านี้ (เลนส์ + เส้น)", command=self.apply).grid(row=1, column=6, padx=(14, 4))
+        ttk.Button(bar, text="ปิด", command=self.close).grid(row=1, column=7, padx=4)
+        self.straight_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="เส้นนี้ตรงจริง (ใช้ประมาณเลนส์)", variable=self.straight_var, command=self._on_straight_changed).grid(row=3, column=3, columnspan=3, sticky="w", padx=(10, 2))
         ttk.Label(bar, text="ชนิดเส้นที่กำลังวาด").grid(row=2, column=3, sticky="e", padx=(10, 2))
         self.type_var = tk.StringVar(value=ROAD_LINE_TYPES[ROAD_LINE_DEFAULT][0])
         cb = ttk.Combobox(bar, textvariable=self.type_var, values=[v[0] for v in ROAD_LINE_TYPES.values()], state="readonly", width=48)
@@ -2272,12 +2304,15 @@ class RoadLineDialog(LensLineDialog):
 
     def apply(self):
         self._sync_types()
-        use = [{"type": k, "points": l} for l, k in zip(self.lines, self.types) if len(l) >= 2]
-        if not use:
+        use = [{"type": k, "points": l, "straight": st} for l, k, st in zip(self.lines, self.types, self.straight) if len(l) >= 2]
+        if not use and self.lens is None:
             self.msg_var.set("ยังไม่มีเส้น (แต่ละเส้นต้องมีอย่างน้อย 2 จุด)")
             messagebox.showinfo("เส้นถนน", self.msg_var.get(), parent=self.top)
             return False
-        self.on_apply(use)
+        if use:
+            self.on_apply(use)
+        if self.lens is not None:
+            self.app.set_lens_values(self.lens)
         self.close()
         return True
 
@@ -3123,7 +3158,7 @@ class Run1App:
         ttk.Entry(lensf, textvariable=self.run3_lens_k1_var, width=8).pack(side="left", padx=(2, 8))
         ttk.Label(lensf, text="k2").pack(side="left")
         ttk.Entry(lensf, textvariable=self.run3_lens_k2_var, width=8).pack(side="left", padx=(2, 8))
-        ttk.Button(lensf, text="แก้เลนส์จากเส้นตรง…", command=self.open_lens_line_tool).pack(side="left", padx=4)
+        ttk.Button(lensf, text="เลนส์ + เส้นถนน…", command=self.open_road_line_tool).pack(side="left", padx=4)
         ttk.Button(lensf, text="ดูภาพก่อน/หลัง", command=self.preview_lens_settings).pack(side="left", padx=4)
         ttk.Button(lensf, text="ล้าง", width=5, command=self.clear_lens_values).pack(side="left", padx=4)
         r += 1
@@ -3133,7 +3168,7 @@ class Run1App:
         roadf = ttk.Frame(cal)
         roadf.grid(row=r, column=0, columnspan=4, sticky="w", pady=2)
         ttk.Checkbutton(roadf, text="Topview แบบแผนที่ (กริดเปล่า + เส้นถนน ไม่ใช้ภาพกล้อง)", variable=self.run3_topview_map_var).pack(side="left")
-        ttk.Button(roadf, text="วาดเส้นถนน…", command=self.open_road_line_tool).pack(side="left", padx=6)
+        ttk.Button(roadf, text="เลนส์ + เส้นถนน…", command=self.open_road_line_tool).pack(side="left", padx=6)
         ttk.Button(roadf, text="ล้างเส้นถนน", command=self.clear_road_lines).pack(side="left", padx=2)
         self.road_lines_info_var = tk.StringVar(value="")
         ttk.Label(roadf, textvariable=self.road_lines_info_var, foreground=gray).pack(side="left", padx=6)
@@ -5617,15 +5652,15 @@ class Run1App:
             for item in data:
                 kind, pts = normalize_road_line(item)
                 if len(pts) >= 2:
-                    out.append({"type": kind, "points": pts})
+                    out.append({"type": kind, "points": pts, "straight": road_line_straight(item)})
             return out
         except (ValueError, TypeError):
             return []
 
     def set_road_lines(self, lines):
-        norm = [normalize_road_line(it) for it in (lines or [])]
-        norm = [(k, pts) for k, pts in norm if len(pts) >= 2]
-        self.run3_road_lines_var.set(json.dumps([{"t": k, "p": [[round(x, 1), round(y, 1)] for x, y in pts]} for k, pts in norm]) if norm else "")
+        norm = [(normalize_road_line(it), road_line_straight(it)) for it in (lines or [])]
+        norm = [(k, pts, st) for (k, pts), st in norm if len(pts) >= 2]
+        self.run3_road_lines_var.set(json.dumps([{"t": k, "p": [[round(x, 1), round(y, 1)] for x, y in pts], "s": bool(st)} for k, pts, st in norm]) if norm else "")
 
     def clear_road_lines(self):
         self.run3_road_lines_var.set("")
