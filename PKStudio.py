@@ -1717,9 +1717,13 @@ class ReferenceMapDialog:
     """Reference-map calibration: a true top-view picture of the site (e.g. a drone frame) is the MAP. The user
     (1) sets the map scale with two points of known distance, (2) clicks the same ground points on the camera frame
     (left) and on the map (right), one pair at a time. Camera pixel -> metre is then fitted (>= 4 pairs).
-    The logic is in plain methods (add_camera_point, add_map_point, ...) so it can be tested without clicking."""
+    Both pictures can be zoomed with the mouse wheel (zoom happens at the pointer), moved by dragging, and reset
+    with the "รีเซ็ต View" button. A camera video and a map video each have a frame slider like the clip player.
+    The logic is in plain methods (add_camera_point, add_map_point, zoom_at, ...) so it can be tested without clicking."""
 
-    VIEW_W, VIEW_H = 620, 520
+    VIEW_W, VIEW_H = 620, 480
+    ZOOM_MAX = 40.0
+    ZOOM_STEP = 1.25
 
     def __init__(self, app, video_path, state, on_save):
         self.app, self.on_save = app, on_save
@@ -1733,22 +1737,38 @@ class ReferenceMapDialog:
         self.cam_img = None
         self.map_img = None
         self.video_path = video_path
-        self.view = {}
+        self.view = {}                                   # name -> (k, ox, oy): canvas = image * k + (ox, oy)
+        self.fit_k = {}
+        self.zoom = {"cam": 1.0, "map": 1.0}
         self.photos = {}
+        self.last_render = {}
+        self._pan = None
+        self._slider_busy = False
+        self._seek_after = {}
+        self.cam_cap = cv2.VideoCapture(video_path)
+        self.cam_total = max(1, int(self.cam_cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
+        self.cam_fps = float(self.cam_cap.get(cv2.CAP_PROP_FPS) or 30.0) or 30.0
+        self.cam_idx = None
+        self.map_cap = None
+        self.map_total = 1
+        self.map_fps = 30.0
         self.top = tk.Toplevel(app.root)
         self.top.title("PK Studio — แผนที่อ้างอิง (ภาพ Topview)")
-        self.top.geometry("%dx%d+10+10" % (min(1320, self.top.winfo_screenwidth() - 40), min(860, self.top.winfo_screenheight() - 110)))
-        self.top.minsize(900, 600)
+        self.top.geometry("%dx%d+10+10" % (min(1320, self.top.winfo_screenwidth() - 40), min(900, self.top.winfo_screenheight() - 110)))
+        self.top.minsize(900, 640)
         self.top.transient(app.root)
+        self.top.protocol("WM_DELETE_WINDOW", self.close)
         self.top.dialog = self                       # (lets the tests reach the object)
         self.msg_var = tk.StringVar(value="")
         self.scale_var = tk.StringVar(value=f"{self.scale:.4f}" if self.scale else "")
-        self.frame_var = tk.StringVar(value="")
-        self.map_frame_var = tk.StringVar(value="" if self.map_frame is None else str(int(self.map_frame) + 1))
+        self.frame_text = {"cam": tk.StringVar(value=""), "map": tk.StringVar(value="")}
+        self.frame_label = {"cam": tk.StringVar(value=""), "map": tk.StringVar(value="")}
         self._build()
-        self._load_frame(None)
+        self.set_camera_frame(None)
         if self.map_path and os.path.isfile(self.map_path):
+            self._open_map_source(self.map_path)
             self.map_img = load_reference_map_image(self.map_path, self.map_frame)
+            self._sync_frame_controls("map")
         self.refresh()
 
     # ----- layout -----
@@ -1758,61 +1778,189 @@ class ReferenceMapDialog:
         bar.pack(fill="x")
         ttk.Label(bar, text=("ขั้นที่ 1: เลือกแผนที่ (ภาพ Topview หรือวิดีโอโดรน — วิดีโอใช้ 1 เฟรม)   ขั้นที่ 2: ตั้งมาตราส่วน   "
                              "ขั้นที่ 3: คลิปจุดบนพื้นถนนที่เห็นตรงกัน — คลิกบนภาพกล้อง (ซ้าย) ก่อน แล้วคลิกจุดเดียวกันบนแผนที่ (ขวา) อย่างน้อย 4 คู่ "
-                             "เลือกจุดบนพื้น เช่น มุมทางม้าลาย ปลายเส้น ขอบฟุตปาธ กระจายทั่วภาพ")).grid(row=0, column=0, columnspan=12, sticky="w", pady=(0, 6))
-        ttk.Button(bar, text="1) เลือกแผนที่ (ภาพหรือวิดีโอ)…", command=self.choose_map).grid(row=1, column=0, padx=(0, 6))
-        ttk.Button(bar, text="2) ตั้งมาตราส่วน (คลิก 2 จุดบนแผนที่)", command=self.start_scale_mode).grid(row=1, column=1, padx=(0, 6))
-        ttk.Label(bar, text="พิกเซลต่อเมตร").grid(row=1, column=2, padx=(10, 2))
+                             "เลือกจุดบนพื้น เช่น มุมทางม้าลาย ปลายเส้น ขอบฟุตปาธ กระจายทั่วภาพ"),
+                  wraplength=1250, justify="left").grid(row=0, column=0, columnspan=12, sticky="w", pady=(0, 2))
+        ttk.Label(bar, text="ล้อเมาส์ = ซูมที่ตำแหน่งลูกศรเมาส์ · ลากเมาส์ (ซ้ายหรือกลาง/ขวา) = เลื่อนภาพ · คลิกเฉย ๆ = ลงจุด · ปุ่ม รีเซ็ต View = กลับมาพอดีกรอบ",
+                  foreground="#666666").grid(row=1, column=0, columnspan=12, sticky="w", pady=(0, 6))
+        ttk.Button(bar, text="1) เลือกแผนที่ (ภาพหรือวิดีโอ)…", command=self.choose_map).grid(row=2, column=0, padx=(0, 6))
+        ttk.Button(bar, text="2) ตั้งมาตราส่วน (คลิก 2 จุดบนแผนที่)", command=self.start_scale_mode).grid(row=2, column=1, padx=(0, 6))
+        ttk.Label(bar, text="พิกเซลต่อเมตร").grid(row=2, column=2, padx=(10, 2))
         ent = ttk.Entry(bar, textvariable=self.scale_var, width=10)
-        ent.grid(row=1, column=3)
+        ent.grid(row=2, column=3)
         ent.bind("<Return>", lambda e: self.scale_from_entry())
         ent.bind("<FocusOut>", lambda e: self.scale_from_entry())
-        ttk.Label(bar, text="Frame กล้อง").grid(row=2, column=0, sticky="e", padx=(0, 2), pady=(6, 0))
-        ttk.Entry(bar, textvariable=self.frame_var, width=8).grid(row=2, column=1, sticky="w", pady=(6, 0))
-        ttk.Button(bar, text="โหลด", command=lambda: self._load_frame(self.frame_var.get())).grid(row=2, column=2, sticky="w", pady=(6, 0))
-        ttk.Label(bar, text="Frame แผนที่ (เมื่อแผนที่เป็นวิดีโอ)").grid(row=2, column=3, columnspan=2, sticky="e", padx=(14, 2), pady=(6, 0))
-        ttk.Entry(bar, textvariable=self.map_frame_var, width=8).grid(row=2, column=5, sticky="w", pady=(6, 0))
-        ttk.Button(bar, text="โหลด", command=lambda: self.set_map_frame(self.map_frame_var.get())).grid(row=2, column=6, sticky="w", padx=(4, 0), pady=(6, 0))
-        ttk.Button(bar, text="ย้อนจุดล่าสุด", command=self.undo).grid(row=1, column=7, padx=2)
-        ttk.Button(bar, text="ล้างจุด", command=self.reset).grid(row=1, column=8, padx=2)
-        ttk.Button(bar, text="บันทึก", command=self.save).grid(row=1, column=10, padx=2)
-        ttk.Button(bar, text="ยกเลิก", command=self.top.destroy).grid(row=1, column=11, padx=2)
+        ttk.Button(bar, text="รีเซ็ต View", command=self.reset_views).grid(row=2, column=4, padx=(14, 2))
+        ttk.Button(bar, text="ย้อนจุดล่าสุด", command=self.undo).grid(row=2, column=5, padx=2)
+        ttk.Button(bar, text="ล้างจุด", command=self.reset).grid(row=2, column=6, padx=2)
+        ttk.Button(bar, text="บันทึก", command=self.save).grid(row=2, column=10, padx=2)
+        ttk.Button(bar, text="ยกเลิก", command=self.close).grid(row=2, column=11, padx=2)
         bar.columnconfigure(9, weight=1)
         body = ttk.Frame(top, padding=(8, 0, 8, 4))
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(1, weight=1)
-        ttk.Label(body, text="ภาพกล้อง").grid(row=0, column=0, sticky="w")
-        ttk.Label(body, text="แผนที่").grid(row=0, column=1, sticky="w")
         self.canvases = {}
+        self.sliders = {}
         for col, name in enumerate(("cam", "map")):
+            pad = (0 if col == 0 else 4, 0)
+            head = ttk.Frame(body)
+            head.grid(row=0, column=col, sticky="ew", padx=pad)
+            ttk.Label(head, text="ภาพกล้อง" if name == "cam" else "แผนที่").pack(side="left")
+            ttk.Button(head, text="รีเซ็ต View", width=11, command=lambda n=name: self.reset_view(n)).pack(side="right")
             cv_ = tk.Canvas(body, width=self.VIEW_W, height=self.VIEW_H, bg="#202020", highlightthickness=0)
-            cv_.grid(row=1, column=col, sticky="nsew", padx=(0 if col == 0 else 4, 0))
-            cv_.bind("<Button-1>", lambda e, n=name: self._on_click(n, e.x, e.y))
-            cv_.bind("<Configure>", lambda e, n=name: self._render(n))
+            cv_.grid(row=1, column=col, sticky="nsew", padx=pad)
+            cv_.bind("<Configure>", lambda e, n=name: self._on_configure(n))
+            cv_.bind("<ButtonPress-1>", lambda e, n=name: self._press(n, e.x, e.y, False))
+            cv_.bind("<B1-Motion>", lambda e, n=name: self._drag(n, e.x, e.y))
+            cv_.bind("<ButtonRelease-1>", lambda e, n=name: self._release(n, e.x, e.y))
+            for b in (2, 3):
+                cv_.bind(f"<ButtonPress-{b}>", lambda e, n=name: self._press(n, e.x, e.y, True))
+                cv_.bind(f"<B{b}-Motion>", lambda e, n=name: self._drag(n, e.x, e.y))
+            cv_.bind("<MouseWheel>", lambda e, n=name: self.zoom_at(n, e.x, e.y, 1 if e.delta > 0 else -1))
+            cv_.bind("<Button-4>", lambda e, n=name: self.zoom_at(n, e.x, e.y, 1))
+            cv_.bind("<Button-5>", lambda e, n=name: self.zoom_at(n, e.x, e.y, -1))
             self.canvases[name] = cv_
-        ttk.Label(top, textvariable=self.msg_var, padding=(8, 4), wraplength=1200, justify="left").pack(fill="x")
+            fb = ttk.Frame(body)
+            fb.grid(row=2, column=col, sticky="ew", padx=pad, pady=(2, 0))
+            fb.columnconfigure(1, weight=1)
+            ttk.Label(fb, text="Frame").grid(row=0, column=0)
+            sl = tk.Scale(fb, from_=0, to=1, orient="horizontal", showvalue=False, command=lambda v, n=name: self._on_slider(n, v))
+            sl.grid(row=0, column=1, sticky="ew", padx=4)
+            self.sliders[name] = sl
+            en = ttk.Entry(fb, textvariable=self.frame_text[name], width=8)
+            en.grid(row=0, column=2)
+            en.bind("<Return>", lambda e, n=name: self._goto_text(n))
+            sb = ttk.Frame(body)
+            sb.grid(row=3, column=col, sticky="w", padx=pad)
+            for text, kind, amount in (("◀◀ -5 วิ", "sec", -5), ("◀ -1 เฟรม", "frame", -1), ("+1 เฟรม ▶", "frame", 1), ("+5 วิ ▶▶", "sec", 5)):
+                ttk.Button(sb, text=text, command=lambda n=name, k=kind, a=amount: self.step(n, k, a)).pack(side="left", padx=2)
+            ttk.Label(sb, textvariable=self.frame_label[name], foreground="#666666").pack(side="left", padx=8)
+        ttk.Label(top, textvariable=self.msg_var, padding=(8, 4), wraplength=1250, justify="left").pack(fill="x")
 
-    # ----- pictures -----
-    def _load_frame(self, index):
-        cap = cv2.VideoCapture(self.video_path)
+    # ----- frames (camera video, and a map that is a video) -----
+    def _fps_total(self, name):
+        return (self.cam_fps, self.cam_total) if name == "cam" else (self.map_fps, self.map_total)
+
+    def _sync_frame_controls(self, name):
+        fps, total = self._fps_total(name)
+        idx = self.cam_idx if name == "cam" else self.map_frame
+        sl = self.sliders[name]
+        is_video = name == "cam" or (self.map_cap is not None)
+        self._slider_busy = True
         try:
-            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-            try:
-                idx = int(float(index)) - 1 if index not in (None, "") else total // 2
-            except ValueError:
-                idx = total // 2
-            idx = max(0, min(max(0, total - 1), idx))
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ok, fr = cap.read()
-            if ok:
-                self.cam_img = fr
-                self.frame_var.set(str(idx + 1))
+            sl.config(to=max(1, total - 1), state="normal" if is_video else "disabled")
+            if is_video and idx is not None:
+                sl.set(idx)
         finally:
-            cap.release()
-        if getattr(self, "canvases", None):
-            self._render("cam")
+            self._slider_busy = False
+        if is_video and idx is not None:
+            self.frame_text[name].set(str(int(idx) + 1))
+            self.frame_label[name].set(f"{int(idx) + 1}/{total} · {format_clock_time(idx / fps)}")
+        else:
+            self.frame_text[name].set("")
+            self.frame_label[name].set("" if is_video else "(แผนที่เป็นภาพ ไม่มีเฟรม)")
 
+    def _read_frame(self, cap, idx):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ok, fr = cap.read()
+        return fr if ok else None
+
+    def set_camera_frame(self, idx):
+        """Show frame `idx` (0-based; None = the middle) of the camera video."""
+        if not self.cam_cap.isOpened():
+            return False
+        idx = self.cam_total // 2 if idx in (None, "") else int(idx)
+        idx = max(0, min(self.cam_total - 1, idx))
+        fr = self._read_frame(self.cam_cap, idx)
+        if fr is None:
+            return False
+        self.cam_img, self.cam_idx = fr, idx
+        self._sync_frame_controls("cam")
+        if getattr(self, "canvases", None):
+            if "cam" not in self.view:
+                self.reset_view("cam", render=False)
+            self._render("cam")
+        return True
+
+    def _load_frame(self, index):
+        """(Compatibility) camera frame by its 1-based number as text."""
+        try:
+            return self.set_camera_frame(int(float(index)) - 1)
+        except (TypeError, ValueError):
+            return self.set_camera_frame(None)
+
+    def _open_map_source(self, path):
+        if self.map_cap is not None:
+            self.map_cap.release()
+            self.map_cap = None
+        if is_video_file(path):
+            cap = cv2.VideoCapture(path)
+            if cap.isOpened():
+                self.map_cap = cap
+                self.map_total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
+                self.map_fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0) or 30.0
+                if self.map_frame is None:
+                    self.map_frame = self.map_total // 2
+            else:
+                cap.release()
+
+    def _goto(self, name, idx):
+        if name == "cam":
+            return self.set_camera_frame(idx)
+        return self._goto_map(idx)
+
+    def _goto_map(self, idx):
+        if self.map_cap is None:
+            return False
+        idx = max(0, min(self.map_total - 1, int(idx)))
+        fr = self._read_frame(self.map_cap, idx)
+        if fr is None:
+            return False
+        self.map_img, self.map_frame = fr, idx
+        self._sync_frame_controls("map")
+        self._render("map")
+        return True
+
+    def step(self, name, kind, amount):
+        fps, _ = self._fps_total(name)
+        cur = self.cam_idx if name == "cam" else self.map_frame
+        if cur is None:
+            return False
+        return self._goto(name, cur + (int(round(amount * fps)) if kind == "sec" else int(amount)))
+
+    def _on_slider(self, name, value):
+        if self._slider_busy:
+            return
+        old = self._seek_after.get(name)
+        if old is not None:
+            try:
+                self.top.after_cancel(old)
+            except Exception:
+                pass
+        self._seek_after[name] = self.top.after(40, lambda: self._goto(name, int(float(value))))
+
+    def _goto_text(self, name):
+        try:
+            self._goto(name, int(float(self.frame_text[name].get())) - 1)
+        except ValueError:
+            pass
+
+    def set_map_frame(self, text):
+        """Another frame of a video map (1-based number as typed by the user)."""
+        if not self.map_path or self.map_cap is None:
+            self.msg_var.set("แผนที่ปัจจุบันไม่ใช่วิดีโอ")
+            return False
+        try:
+            idx = int(float(str(text).strip())) - 1
+        except ValueError:
+            return False
+        ok = self._goto_map(idx)
+        if ok:
+            self.refresh()
+        return ok
+
+    # ----- map source -----
     def choose_map(self):
         path = filedialog.askopenfilename(parent=self.top, title="เลือกแผนที่ (ภาพ Topview หรือวิดีโอโดรน)",
                                           filetypes=[("Image or video", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.mp4 *.mov *.avi *.mkv *.m4v"),
@@ -1832,64 +1980,104 @@ class ReferenceMapDialog:
             self.scale_var.set("")
         self.map_path, self.map_img = path, img
         self.map_frame = frame if is_video_file(path) else None
-        if is_video_file(path):
-            self.map_frame_var.set("" if frame is None else str(int(frame) + 1))
-            self.msg_var.set("แผนที่เป็นวิดีโอ: ใช้เฟรมกลาง เลือกเฟรมอื่นได้ที่ช่อง Frame แผนที่ "
-                             "(เลือกเฟรมที่ไม่มีตัวอักษรทับและโดรนนิ่ง)")
+        self._open_map_source(path)
+        if self.map_cap is not None and frame is not None:
+            self.map_frame = max(0, min(self.map_total - 1, int(frame)))
+        self.zoom["map"] = 1.0
+        self.reset_view("map", render=False)
+        self._sync_frame_controls("map")
+        if self.map_cap is not None:
+            self.msg_var.set("แผนที่เป็นวิดีโอ: เลื่อนแถบ Frame เลือกเฟรมที่โดรนนิ่งและไม่มีตัวอักษรทับ (เริ่มที่เฟรมกลาง)")
         self.refresh()
         return True
 
-    def set_map_frame(self, text):
-        """Another frame of a video map (1-based number as typed by the user)."""
-        if not self.map_path or not is_video_file(self.map_path):
-            self.msg_var.set("แผนที่ปัจจุบันไม่ใช่วิดีโอ")
-            return False
-        try:
-            frame = int(float(str(text).strip())) - 1
-        except ValueError:
-            frame = None
-        img = load_reference_map_image(self.map_path, frame)
-        if img is None:
-            return False
-        self.map_img, self.map_frame = img, frame
-        self.refresh()
-        return True
-
-    def _render(self, name):
-        img = self.cam_img if name == "cam" else self.map_img
+    # ----- zoom / pan -----
+    def _canvas_size(self, name):
         cvs = self.canvases[name]
-        cw, ch = max(50, cvs.winfo_width()), max(50, cvs.winfo_height())
-        cvs.delete("all")
+        return max(50, cvs.winfo_width()), max(50, cvs.winfo_height())
+
+    def _image(self, name):
+        return self.cam_img if name == "cam" else self.map_img
+
+    def reset_view(self, name, render=True):
+        """The whole picture fitted in the frame (zoom 1), centred."""
+        img = self._image(name)
+        self.zoom[name] = 1.0
         if img is None:
-            cvs.create_text(cw // 2, ch // 2, fill="#aaaaaa",
-                            text="ยังไม่ได้เลือกภาพแผนที่" if name == "map" else "อ่านเฟรมจากวิดีโอไม่ได้")
             self.view[name] = None
-            return
+        else:
+            cw, ch = self._canvas_size(name)
+            h, w = img.shape[:2]
+            k = min(cw / float(w), ch / float(h))
+            self.fit_k[name] = k
+            self.view[name] = (k, (cw - w * k) / 2.0, (ch - h * k) / 2.0)
+        if render:
+            self._render(name)
+
+    def reset_views(self):
+        for name in ("cam", "map"):
+            self.reset_view(name)
+
+    def zoom_at(self, name, ex, ey, steps):
+        """Zoom the picture by `steps` wheel notches keeping the image point under the pointer (ex, ey) fixed."""
+        v = self.view.get(name)
+        img = self._image(name)
+        if v is None or img is None:
+            return False
+        k, ox, oy = v
+        z_new = min(self.ZOOM_MAX, max(1.0, self.zoom[name] * (self.ZOOM_STEP ** steps)))
+        if z_new == self.zoom[name]:
+            return False
+        k2 = self.fit_k[name] * z_new
+        px, py = (ex - ox) / k, (ey - oy) / k
+        self.zoom[name] = z_new
+        if z_new == 1.0:
+            self.reset_view(name)
+            return True
+        self.view[name] = (k2,) + self._clamp(name, ex - px * k2, ey - py * k2, k2)
+        self._render(name)
+        return True
+
+    def _clamp(self, name, ox, oy, k):
+        """Keep the picture from leaving the frame completely."""
+        img = self._image(name)
+        cw, ch = self._canvas_size(name)
         h, w = img.shape[:2]
-        k = min(cw / float(w), ch / float(h))
-        ox, oy = (cw - w * k) / 2.0, (ch - h * k) / 2.0
-        self.view[name] = (k, ox, oy)
-        shown = cv2.resize(img, (max(1, int(w * k)), max(1, int(h * k))), interpolation=cv2.INTER_AREA)
-        pts = []
-        for n, p in enumerate(self.pairs, 1):
-            q = p[:2] if name == "cam" else p[2:]
-            pts.append((str(n), q, (0, 255, 255)))
-        if name == "cam" and self.pending_cam is not None:
-            pts.append((str(len(self.pairs) + 1), self.pending_cam, (0, 140, 255)))
-        if name == "map":
-            for n, q in enumerate(self.scale_pts, 1):
-                pts.append(("S" + str(n), q, (255, 120, 255)))
-            if len(self.scale_pts) == 2:
-                a, b = (tuple(int(v * k) for v in q) for q in self.scale_pts)
-                cv2.line(shown, a, b, (255, 120, 255), 2, cv2.LINE_AA)
-        for label, q, col in pts:
-            c = (int(q[0] * k), int(q[1] * k))
-            cv2.circle(shown, c, 6, col, 2, cv2.LINE_AA)
-            cv2.putText(shown, label, (c[0] + 8, c[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
-        ok, buf = cv2.imencode(".png", shown)
-        photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
-        self.photos[name] = photo
-        cvs.create_image(int(ox), int(oy), anchor="nw", image=photo)
+        return (min(cw * 0.9, max(cw * 0.1 - w * k, ox)), min(ch * 0.9, max(ch * 0.1 - h * k, oy)))
+
+    def pan_by(self, name, dx, dy):
+        v = self.view.get(name)
+        if v is None:
+            return False
+        k, ox, oy = v
+        self.view[name] = (k,) + self._clamp(name, ox + dx, oy + dy, k)
+        self._render(name)
+        return True
+
+    def _on_configure(self, name):
+        if self.zoom.get(name, 1.0) <= 1.0:
+            self.reset_view(name, render=False)
+        self._render(name)
+
+    # ----- mouse -----
+    def _press(self, name, ex, ey, always_pan):
+        self._pan = {"name": name, "x": ex, "y": ey, "x0": ex, "y0": ey, "moved": bool(always_pan), "always": bool(always_pan)}
+
+    def _drag(self, name, ex, ey):
+        p = self._pan
+        if p is None or p["name"] != name:
+            return
+        if not p["moved"] and (abs(ex - p["x0"]) > 4 or abs(ey - p["y0"]) > 4) and self.zoom.get(name, 1.0) > 1.0:
+            p["moved"] = True
+        if p["moved"]:
+            self.pan_by(name, ex - p["x"], ey - p["y"])
+            p["x"], p["y"] = ex, ey
+
+    def _release(self, name, ex, ey):
+        p, self._pan = self._pan, None
+        if p is not None and p["moved"]:
+            return                                       # it was a drag, not a click
+        self._on_click(name, ex, ey)
 
     def _on_click(self, name, ex, ey):
         v = self.view.get(name)
@@ -1897,7 +2085,7 @@ class ReferenceMapDialog:
             return
         k, ox, oy = v
         x, y = (ex - ox) / k, (ey - oy) / k
-        img = self.cam_img if name == "cam" else self.map_img
+        img = self._image(name)
         if img is None or not (0 <= x < img.shape[1] and 0 <= y < img.shape[0]):
             return
         if name == "cam":
@@ -1906,6 +2094,56 @@ class ReferenceMapDialog:
             self.add_scale_point(x, y)
         else:
             self.add_map_point(x, y)
+
+    # ----- drawing -----
+    def _render(self, name):
+        cvs = self.canvases[name]
+        img = self._image(name)
+        cw, ch = self._canvas_size(name)
+        cvs.delete("all")
+        if img is None:
+            cvs.create_text(cw // 2, ch // 2, fill="#aaaaaa",
+                            text="ยังไม่ได้เลือกแผนที่" if name == "map" else "อ่านเฟรมจากวิดีโอไม่ได้")
+            self.view[name] = None
+            return
+        if self.view.get(name) is None:
+            self.reset_view(name, render=False)
+        k, ox, oy = self.view[name]
+        h, w = img.shape[:2]
+        out = np.full((ch, cw, 3), 32, np.uint8)
+        ix0, iy0 = max(0, int(math.floor(-ox / k))), max(0, int(math.floor(-oy / k)))
+        ix1, iy1 = min(w, int(math.ceil((cw - ox) / k))), min(h, int(math.ceil((ch - oy) / k)))
+        if ix1 > ix0 and iy1 > iy0:
+            crop = img[iy0:iy1, ix0:ix1]
+            dw, dh = max(1, int(round((ix1 - ix0) * k))), max(1, int(round((iy1 - iy0) * k)))
+            res = cv2.resize(crop, (dw, dh), interpolation=cv2.INTER_AREA if k < 1 else cv2.INTER_LINEAR)
+            dx, dy = int(round(ix0 * k + ox)), int(round(iy0 * k + oy))
+            sx0, sy0 = max(0, -dx), max(0, -dy)
+            ex_, ey_ = min(dw, cw - dx), min(dh, ch - dy)
+            if ex_ > sx0 and ey_ > sy0:
+                out[dy + sy0:dy + ey_, dx + sx0:dx + ex_] = res[sy0:ey_, sx0:ex_]
+        pts = []
+        for n, p in enumerate(self.pairs, 1):
+            pts.append((str(n), p[:2] if name == "cam" else p[2:], (0, 255, 255)))
+        if name == "cam" and self.pending_cam is not None:
+            pts.append((str(len(self.pairs) + 1), self.pending_cam, (0, 140, 255)))
+        if name == "map":
+            for n, q in enumerate(self.scale_pts, 1):
+                pts.append(("S" + str(n), q, (255, 120, 255)))
+            if len(self.scale_pts) == 2:
+                a, b = (tuple(int(v * k + o) for v, o in zip(q, (ox, oy))) for q in self.scale_pts)
+                cv2.line(out, a, b, (255, 120, 255), 2, cv2.LINE_AA)
+        for label, q, col in pts:
+            c = (int(q[0] * k + ox), int(q[1] * k + oy))
+            if -20 <= c[0] <= cw + 20 and -20 <= c[1] <= ch + 20:
+                cv2.circle(out, c, 6, col, 2, cv2.LINE_AA)
+                cv2.putText(out, label, (c[0] + 8, c[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
+        cv2.putText(out, f"zoom x{self.zoom[name]:.1f}", (6, ch - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+        self.last_render[name] = out                       # (what the canvas shows; lets the tests look at the picture)
+        ok, buf = cv2.imencode(".png", out)
+        photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
+        self.photos[name] = photo
+        cvs.create_image(0, 0, anchor="nw", image=photo)
 
     # ----- logic (no clicking needed) -----
     def add_camera_point(self, x, y):
@@ -1924,12 +2162,12 @@ class ReferenceMapDialog:
 
     def start_scale_mode(self):
         if self.map_img is None:
-            self.msg_var.set("เลือกภาพแผนที่ก่อน")
+            self.msg_var.set("เลือกแผนที่ก่อน")
             return
         self.scale_mode = True
         self.scale_pts = []
         self.pending_cam = None
-        self.msg_var.set("คลิป 2 จุดบนแผนที่ที่รู้ระยะจริง (เช่น ความกว้างเลน ความยาวช่องทางม้าลาย) แล้วใส่ระยะเป็นเมตร")
+        self.msg_var.set("คลิป 2 จุดบนแผนที่ที่รู้ระยะจริง (เช่น ความกว้างเลน ความยาวช่องทางม้าลาย) แล้วใส่ระยะเป็นเมตร — ซูมเข้าไปคลิกให้แม่นได้")
         self.refresh()
 
     def add_scale_point(self, x, y):
@@ -1995,12 +2233,22 @@ class ReferenceMapDialog:
         else:
             need_ = []
             if self.map_img is None:
-                need_.append("เลือกภาพแผนที่")
+                need_.append("เลือกแผนที่")
             if not self.scale:
                 need_.append("ตั้งมาตราส่วน")
             if n < 4:
                 need_.append(f"คลิปจุดคู่ให้ครบ 4 คู่ (ตอนนี้ {n})")
             self.msg_var.set("ยังต้อง: " + ", ".join(need_))
+
+    def close(self):
+        for cap in (self.cam_cap, self.map_cap):
+            if cap is not None:
+                cap.release()
+        self.map_cap = None
+        try:
+            self.top.destroy()
+        except tk.TclError:
+            pass
 
     def save(self):
         cal = self.calibration()
@@ -2008,7 +2256,7 @@ class ReferenceMapDialog:
             messagebox.showwarning("แผนที่อ้างอิง", self.msg_var.get(), parent=self.top)
             return False
         self.on_save(self.result())
-        self.top.destroy()
+        self.close()
         return True
 
 
