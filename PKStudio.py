@@ -2097,24 +2097,147 @@ class LensLineDialog:
         self.view = (k, (cw - w * k) / 2.0, (ch - h * k) / 2.0)
 
 
+# ---------------- Road line types (Topview map) ----------------
+_RL_WHITE, _RL_YELLOW, _RL_RED, _RL_BLACK, _RL_BLUE = (235, 235, 235), (0, 215, 255), (60, 60, 230), (12, 12, 12), (255, 130, 30)   # BGR
+# key -> (Thai label, pattern [(length m, colour or None = gap)] or None = solid, colour of a solid line, width (m, min px), offsets (m))
+ROAD_LINE_TYPES = {
+    "white_solid": ("เส้นขาวทึบ (ขอบทาง / ห้ามเปลี่ยนเลน)", None, _RL_WHITE, (0.15, 2), (0.0,)),
+    "white_dashed": ("เส้นขาวประ (แบ่งเลนทางเดียวกัน เปลี่ยนเลน/แซงได้)", [(3.0, _RL_WHITE), (6.0, None)], None, (0.15, 2), (0.0,)),
+    "yellow_solid": ("เส้นเหลืองทึบ (แบ่งทิศทางสวน ห้ามแซง)", None, _RL_YELLOW, (0.15, 2), (0.0,)),
+    "yellow_double": ("เส้นเหลืองคู่ (แบ่งทิศทางสวน ห้ามแซงทั้งสองฝั่ง)", None, _RL_YELLOW, (0.12, 2), (-0.15, 0.15)),
+    "yellow_dashed": ("เส้นเหลืองประ (แบ่งทิศทางสวน แซงได้)", [(3.0, _RL_YELLOW), (6.0, None)], None, (0.15, 2), (0.0,)),
+    "kerb_red_white": ("ขอบทางขาว-แดง", [(1.0, _RL_RED), (1.0, _RL_WHITE)], None, (0.35, 4), (0.0,)),
+    "kerb_black_white": ("ขอบทางขาว-ดำ", [(1.0, _RL_BLACK), (1.0, _RL_WHITE)], None, (0.35, 4), (0.0,)),
+    "kerb_yellow_black": ("ขอบทางเหลือง-ดำ", [(1.0, _RL_YELLOW), (1.0, _RL_BLACK)], None, (0.35, 4), (0.0,)),
+    "blue_motorcycle": ("ช่องจักรยานยนต์ (สีฟ้า)", None, _RL_BLUE, (0.5, 5), (0.0,)),
+}
+ROAD_LINE_DEFAULT = "white_solid"
+
+
+def road_line_preview_color(kind):
+    spec = ROAD_LINE_TYPES.get(kind, ROAD_LINE_TYPES[ROAD_LINE_DEFAULT])
+    if spec[2] is not None:
+        return spec[2]
+    return next(c_ for _, c_ in spec[1] if c_ is not None and c_ != _RL_BLACK) if any(c_ not in (None, _RL_BLACK) for _, c_ in spec[1]) else _RL_BLACK
+
+
+def normalize_road_line(item):
+    """A saved road line (old format: a list of points; new: {"type"/"t", "points"/"p"}) -> (type key, list of (x, y))."""
+    if isinstance(item, dict):
+        kind = item.get("type", item.get("t", ROAD_LINE_DEFAULT))
+        pts = item.get("points", item.get("p", []))
+    else:
+        kind, pts = ROAD_LINE_DEFAULT, item
+    if kind not in ROAD_LINE_TYPES:
+        kind = ROAD_LINE_DEFAULT
+    return kind, [(float(x), float(y)) for x, y in pts]
+
+
+def _offset_polyline(q, d):
+    """The polyline moved sideways by d pixels (normal of each vertex = mean of its two segments' normals)."""
+    if abs(d) < 1e-9 or len(q) < 2:
+        return q
+    seg = np.diff(q, axis=0)
+    ln = np.maximum(np.hypot(seg[:, 0], seg[:, 1]), 1e-9)
+    nrm = np.stack([-seg[:, 1] / ln, seg[:, 0] / ln], axis=1)
+    vn = np.zeros_like(q)
+    vn[:-1] += nrm
+    vn[1:] += nrm
+    vl = np.maximum(np.hypot(vn[:, 0], vn[:, 1]), 1e-9)
+    return q + vn / vl[:, None] * d
+
+
+def draw_road_line(img, q, kind, scale):
+    """Draw one road line (canvas pixels q, N x 2) in the style of its type; scale = px per metre."""
+    label, pattern, color, (width_m, width_min), offsets = ROAD_LINE_TYPES.get(kind, ROAD_LINE_TYPES[ROAD_LINE_DEFAULT])
+    q = np.asarray(q, dtype=float).reshape(-1, 2)
+    if len(q) < 2:
+        return
+    width = max(int(width_min), int(round(width_m * scale)))
+    for off in offsets:
+        pts = _offset_polyline(q, off * scale)
+        if pattern is None:
+            cv2.polylines(img, [np.round(pts).astype(np.int32).reshape(-1, 1, 2)], False, color, width, cv2.LINE_AA)
+            continue
+        seg = np.hypot(*np.diff(pts, axis=0).T)
+        cum = np.concatenate([[0.0], np.cumsum(seg)])
+        total = float(cum[-1])
+        period = sum(l_ for l_, _ in pattern) * scale
+        if total <= 0 or period <= 1e-6 or total / period > 20000:
+            continue
+        pos, k = 0.0, 0
+        while pos < total:
+            length_m, col = pattern[k % len(pattern)]
+            end = min(total, pos + length_m * scale)
+            if col is not None and end > pos:
+                tt = np.unique(np.concatenate([[pos], cum[(cum > pos) & (cum < end)], [end]]))
+                xs, ys = np.interp(tt, cum, pts[:, 0]), np.interp(tt, cum, pts[:, 1])
+                cv2.polylines(img, [np.round(np.stack([xs, ys], axis=1)).astype(np.int32).reshape(-1, 1, 2)], False, col, width, cv2.LINE_AA)
+            pos, k = end, k + 1
+
+
 class RoadLineDialog(LensLineDialog):
     """Road lines for the map-style Topview: click along kerbs, lane lines, crosswalk edges ... on a frame of the camera video
     (a line = as many points as it needs, 2 or more). The lines are carried to the road plane by the same lens + calibration
     as the vehicles, so they always match the vehicle positions. Same view controls as the lens tool."""
 
     def __init__(self, app, video_path, on_apply, initial=None):
-        self._initial = [list(map(tuple, l)) for l in (initial or [])]
+        norm = [normalize_road_line(it) for it in (initial or [])]
         super().__init__(app, video_path, on_apply)
         self.top.title("วาดเส้นถนน")
-        if self._initial:
-            self.lines = self._initial + [[]]
-            self.refresh()
+        self.types = [ROAD_LINE_DEFAULT]
+        if norm:
+            self.lines = [pts for _, pts in norm] + [[]]
+            self.types = [k for k, _ in norm] + [self.type_key()]
+        self.refresh()
+
+    def type_key(self):
+        label = self.type_var.get()
+        return next((k for k, v in ROAD_LINE_TYPES.items() if v[0] == label), ROAD_LINE_DEFAULT)
+
+    def _sync_types(self):
+        types = getattr(self, "types", [])
+        while len(types) < len(self.lines):
+            types.append(self.type_key())
+        del types[len(self.lines):]
+        self.types = types
+
+    def set_type(self, kind):
+        """The type of the line being drawn."""
+        self.type_var.set(ROAD_LINE_TYPES[kind][0])
+        self._sync_types()
+        self.types[-1] = kind
+        self.refresh()
+
+    def _on_type_changed(self):
+        self._sync_types()
+        self.types[-1] = self.type_key()
+        self.refresh()
+
+    def new_line(self):
+        ok = super().new_line()
+        self._sync_types()
+        return ok
+
+    def undo_point(self):
+        super().undo_point()
+        self._sync_types()
+
+    def delete_line(self):
+        super().delete_line()
+        self._sync_types()
+
+    def refresh(self):
+        self._sync_types()
+        self.LINE_COLORS = [road_line_preview_color(k) for k in self.types] or [(0, 255, 255)]
+        super().refresh()
 
     def _build(self):
         top = self.top
         bar = ttk.Frame(top, padding=6)
         bar.pack(fill="x")
         ttk.Label(bar, text=("คลิกจุดตามแนวเส้นถนน (ขอบถนน เส้นแบ่งเลน ขอบทางม้าลาย) เส้นละกี่จุดก็ได้ — เส้นตรงใช้ 2 จุด เส้นโค้งใช้หลายจุด "
+                             "· เลือก ชนิดเส้น ก่อนวาดแต่ละเส้น (ขาวทึบ/ประ เหลืองทึบ/คู่/ประ ขอบทางขาว-แดง ขาว-ดำ เหลือง-ดำ ช่องจักรยานยนต์สีฟ้า) "
                              "· กด เส้นใหม่ เมื่อจะเริ่มเส้นถัดไป · ล้อเมาส์ = ซูม · ลาก = เลื่อนภาพ · เสร็จแล้วกด ใช้เส้นเหล่านี้"),
                   wraplength=980, justify="left").grid(row=0, column=0, columnspan=8, sticky="w")
         ttk.Button(bar, text="เส้นใหม่", command=self.new_line).grid(row=1, column=0, pady=4, padx=(0, 4))
@@ -2123,6 +2246,11 @@ class RoadLineDialog(LensLineDialog):
         ttk.Button(bar, text="รีเซ็ต View", command=self.reset_view).grid(row=1, column=3, padx=4)
         ttk.Button(bar, text="ใช้เส้นเหล่านี้", command=self.apply).grid(row=1, column=4, padx=(14, 4))
         ttk.Button(bar, text="ปิด", command=self.close).grid(row=1, column=5, padx=4)
+        ttk.Label(bar, text="ชนิดเส้นที่กำลังวาด").grid(row=2, column=3, sticky="e", padx=(10, 2))
+        self.type_var = tk.StringVar(value=ROAD_LINE_TYPES[ROAD_LINE_DEFAULT][0])
+        cb = ttk.Combobox(bar, textvariable=self.type_var, values=[v[0] for v in ROAD_LINE_TYPES.values()], state="readonly", width=48)
+        cb.grid(row=2, column=4, columnspan=3, sticky="w")
+        cb.bind("<<ComboboxSelected>>", lambda e: self._on_type_changed())
         ttk.Label(bar, text="เฟรม").grid(row=2, column=0, sticky="e")
         ttk.Entry(bar, textvariable=self.frame_var, width=8).grid(row=2, column=1, sticky="w")
         ttk.Button(bar, text="โหลดเฟรม", command=lambda: self.set_frame(self.frame_var.get())).grid(row=2, column=2, sticky="w")
@@ -2141,7 +2269,8 @@ class RoadLineDialog(LensLineDialog):
         tk.Label(top, textvariable=self.msg_var, height=2, anchor="nw", wraplength=980, justify="left", padx=6, pady=4).pack(fill="x")
 
     def apply(self):
-        use = [l for l in self.lines if len(l) >= 2]
+        self._sync_types()
+        use = [{"type": k, "points": l} for l, k in zip(self.lines, self.types) if len(l) >= 2]
         if not use:
             self.msg_var.set("ยังไม่มีเส้น (แต่ละเส้นต้องมีอย่างน้อย 2 จุด)")
             messagebox.showinfo("เส้นถนน", self.msg_var.get(), parent=self.top)
@@ -5479,15 +5608,22 @@ class Run1App:
         return LensLineDialog(self, video, self.set_lens_values)
 
     def get_road_lines(self):
-        """The road lines clicked on the camera picture: list of lists of (x, y) pixels as recorded."""
+        """The road lines clicked on the camera picture: list of {"type": key, "points": [(x, y) pixels as recorded, ...]}."""
         try:
             data = json.loads(self.run3_road_lines_var.get() or "[]")
-            return [[(float(x), float(y)) for x, y in line] for line in data if len(line) >= 2]
+            out = []
+            for item in data:
+                kind, pts = normalize_road_line(item)
+                if len(pts) >= 2:
+                    out.append({"type": kind, "points": pts})
+            return out
         except (ValueError, TypeError):
             return []
 
     def set_road_lines(self, lines):
-        self.run3_road_lines_var.set(json.dumps([[[round(float(x), 1), round(float(y), 1)] for x, y in l] for l in lines if len(l) >= 2]) if lines else "")
+        norm = [normalize_road_line(it) for it in (lines or [])]
+        norm = [(k, pts) for k, pts in norm if len(pts) >= 2]
+        self.run3_road_lines_var.set(json.dumps([{"t": k, "p": [[round(x, 1), round(y, 1)] for x, y in pts]} for k, pts in norm]) if norm else "")
 
     def clear_road_lines(self):
         self.run3_road_lines_var.set("")
@@ -8163,7 +8299,8 @@ class Run1App:
             cv2.putText(base, text_, org_, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (235, 235, 235), 1, cv2.LINE_AA)
         road_n = 0
         if map_style:                                              # the road lines clicked on the camera picture, carried to the road plane
-            for line in c.get("road_lines") or []:
+            for item in c.get("road_lines") or []:
+                kind_, line = normalize_road_line(item)
                 pts_px = np.asarray(line, dtype=float).reshape(-1, 2)
                 if len(pts_px) < 2:
                     continue
@@ -8174,7 +8311,7 @@ class Run1App:
                 dense = np.concatenate([np.linspace(u[i], u[i + 1], 25, endpoint=False) for i in range(len(u) - 1)] + [u[-1:]])
                 rec_px = lens_distort(dense, c["lens_size"], c["lens"]) if c.get("lens") is not None else dense
                 q = np.clip(topview_px(cv, self._run3_to_metric(rec_px, c)), -1e5, 1e5)
-                cv2.polylines(base, [np.round(q).astype(np.int32).reshape(-1, 1, 2)], False, (225, 225, 225), 2, cv2.LINE_AA)
+                draw_road_line(base, q, kind_, cv["scale"])
                 road_n += 1
         zlayer = base.copy()                                       # zones: drawn like in the normal video (same switches, same opacity)
         if flag("show_zone_boundary", True) or flag("show_zone_label", True):
