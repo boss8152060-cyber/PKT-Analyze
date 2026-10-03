@@ -72,8 +72,43 @@ def grid_overlaps(container):
 
 check("dialog opens and shows the camera frame", dlg.cam_img is not None and dlg.view.get("cam") is not None)
 check("dialog: no two widgets share a grid cell", not grid_overlaps(dlg.top), str(grid_overlaps(dlg.top)))
-check("map missing: calibration not ready", dlg.calibration() is None and "เลือกภาพแผนที่" in dlg.msg_var.get())
+check("map missing: calibration not ready", dlg.calibration() is None and "เลือกแผนที่" in dlg.msg_var.get())
 check("map loads", dlg.set_map(map_path) and dlg.map_img is not None)
+# ---- zoom at the pointer, pan, reset view, frame slider
+root.update()
+k0, ox0, oy0 = dlg.view["map"]
+ex, ey = 300, 200                                              # a pointer position inside the map canvas
+img_pt = ((ex - ox0) / k0, (ey - oy0) / k0)                    # the map point under the pointer
+dlg.zoom_at("map", ex, ey, 3)
+k1, ox1, oy1 = dlg.view["map"]
+check("wheel zoom: zoom factor grows", dlg.zoom["map"] > 1.9 and k1 > k0 * 1.9, f"zoom {dlg.zoom['map']:.2f}")
+check("wheel zoom keeps the point under the pointer fixed",
+      abs(img_pt[0] * k1 + ox1 - ex) < 1.0 and abs(img_pt[1] * k1 + oy1 - ey) < 1.0)
+check("the other picture is not zoomed", dlg.zoom["cam"] == 1.0)
+dlg.zoom_at("map", ex, ey, 100)
+check("zoom stops at the maximum", dlg.zoom["map"] <= dlg.ZOOM_MAX + 1e-9, f"{dlg.zoom['map']:.1f}")
+dlg.pan_by("map", -30, 20)
+k2, ox2, oy2 = dlg.view["map"]
+check("pan moves the picture", k2 == dlg.view["map"][0] and ox2 != ox1)
+# a click while zoomed lands on the right map pixel
+dlg._on_click("map", ex, ey)                                   # (no pending camera point: only a message)
+dlg.reset_view("map")
+k3, ox3, oy3 = dlg.view["map"]
+check("reset view: back to fit, zoom 1", dlg.zoom["map"] == 1.0 and abs(k3 - k0) < 1e-6 and abs(ox3 - ox0) < 1.0)
+dlg.zoom_at("cam", 100, 100, 2)
+dlg.zoom_at("map", 100, 100, 2)
+dlg.reset_views()
+check("reset both views", dlg.zoom["cam"] == 1.0 and dlg.zoom["map"] == 1.0)
+dlg.zoom_at("cam", 100, 100, -5)
+check("zoom out below fit is ignored", dlg.zoom["cam"] == 1.0)
+check("camera frame slider covers the video", int(float(dlg.sliders["cam"].cget("to"))) == dlg.cam_total - 1)
+n0 = dlg.cam_idx
+dlg.step("cam", "frame", 3)
+check("step frames", dlg.cam_idx == min(dlg.cam_total - 1, n0 + 3))
+dlg.step("cam", "sec", -1)
+check("step by seconds", dlg.cam_idx < n0 + 3)
+check("goto frame by number", dlg._load_frame("2") and dlg.cam_idx == 1)
+check("map is an image: the map slider is off", str(dlg.sliders["map"].cget("state")) == "disabled" or dlg.map_cap is None)
 dlg.start_scale_mode()
 check("scale mode starts", dlg.scale_mode)
 # a known 10 m distance on the map (200 px)
@@ -178,6 +213,31 @@ for c_, p_ in zip(cam_pts, map_pts):
     dlg2.add_camera_point(*c_)
     dlg2.add_map_point(*p_)
 check("map frame can be changed", dlg2.set_map_frame("25") and dlg2.map_frame == 24 and abs(float(dlg2.map_img.mean()) - 40.0) < 6)
+dlg2.set_map_frame("3")
+check("video map: the map slider is on and covers the map video", str(dlg2.sliders["map"].cget("state")) == "normal"
+      and int(float(dlg2.sliders["map"].cget("to"))) == dlg2.map_total - 1)
+dlg2.step("map", "frame", 2)
+check("video map: step frames", dlg2.map_frame == 4, str(dlg2.map_frame))
+# real mouse events: wheel zoom at the pointer, a drag pans, a plain click puts a point
+root.update()
+cvm = dlg2.canvases["map"]
+cvm.event_generate("<MouseWheel>", x=250, y=180, delta=120)
+root.update()
+check("mouse wheel event zooms", dlg2.zoom["map"] > 1.0, f"{dlg2.zoom['map']:.2f}")
+ox_before = dlg2.view["map"][1]
+cvm.event_generate("<ButtonPress-1>", x=250, y=180)
+cvm.event_generate("<B1-Motion>", x=290, y=200)
+cvm.event_generate("<ButtonRelease-1>", x=290, y=200)
+root.update()
+check("dragging pans (and does not put a point)", dlg2.view["map"][1] != ox_before and dlg2.pending_cam is None)
+dlg2.reset_view("map")
+dlg2.add_camera_point(5, 5)
+n_pairs = len(dlg2.pairs)
+cvm.event_generate("<ButtonPress-1>", x=300, y=220)
+cvm.event_generate("<ButtonRelease-1>", x=300, y=220)
+root.update()
+check("a plain click on the map completes the pair", len(dlg2.pairs) == n_pairs + 1)
+dlg2.undo()
 dlg2.set_map_frame("3")
 check("video map: save", dlg2.save() is True)
 st2 = app._run3_refmap_state()
