@@ -401,12 +401,8 @@ DEFAULT_SETTINGS = {
 
     # Trajectory Position: choose where the tracked trajectory is anchored
     # inside each bounding box. Offset moves the anchor inward from the selected edge(s).
-    # Bottom = the point where the vehicle touches the road (the only point the road-plane
-    # calibration is valid for); Offset 0 keeps it on the box edge, not floating above the ground.
-    "trajectory_position": "Bottom",
+    "trajectory_position": "Center",
     "trajectory_offset": "0",
-    # Zone visits shorter than this (s) between two visits of the same zone are boundary flicker
-    "zone_flicker_merge_s": "0.30",
 
     # Zone overlay display controls.
     "show_zone_boundary": True,
@@ -470,8 +466,6 @@ RUN3_DEFAULTS = {
     "gap_hold_min_duration_s": "0.30",      # ... for at least this long (s)
     "lateral_axis_angle_deg": "0.00",       # implementation starter value; verify per video
     "lc_heading_window_s": "0.50",          # centred window (s) used to get the heading of vehicle A
-    "lc_along_limit_m": "0",                # side-by-side window along the heading (m); 0 = auto (L_A + L_B) / 2
-    "lc_max_lateral_m": "3.50",             # pairs further apart sideways than this (m) are unrelated; 0 = no limit
     "pet_interaction_distance_m": "3.00",   # implementation starter value
     "pet_threshold_s": "1.00",
     # V27 implementation starter values (editable; verify per site):
@@ -555,7 +549,7 @@ import numpy as np
 
 # V27(2): zone visits shorter/closer than this are treated as boundary flicker
 # when the Run 2 summaries are built (raw Detection_Records zones are untouched).
-ZONE_FLICKER_MERGE_S = 0.10          # code default; the program setting is `zone_flicker_merge_s`
+ZONE_FLICKER_MERGE_S = 0.10
 
 
 def collect_zone_visits(zone_states, fallback_end):
@@ -818,24 +812,20 @@ def track_headings(times, points, window_s, min_speed_ms):
     return out
 
 
-def lateral_clearance(center_a, heading_a, center_b, len_a, len_b, w_a, w_b, along_limit=None, max_lateral=None):
+def lateral_clearance(center_a, heading_a, center_b, len_a, len_b, w_a, w_b):
     """Lateral clearance for one time sample (SPEC v28 section 5). Axes come from vehicle A's
     heading: `along` = separation along the heading, `lateral` = perpendicular
-    separation. The vehicles are side by side when |along| <= along_limit, which is
-    (L_A + L_B) / 2 unless a fixed limit (m) is given - only then the clearance is measurable.
-    `max_lateral` (m, None/0 = off): a pair further apart sideways than this is not related
-    (`Too_Far`), e.g. two vehicles far apart inside one large zone.
+    separation. The boxes overlap along the direction of travel when
+    |along| <= (L_A + L_B) / 2 - only then the clearance is measurable.
     clearance = lateral - (W_A + W_B) / 2 (edge to edge; negative = boxes overlap)."""
     dx, dy = center_b[0] - center_a[0], center_b[1] - center_a[1]
     hx, hy = heading_a
     along = dx * hx + dy * hy
     signed = hx * dy - hy * dx
     lateral = abs(signed)
-    limit = along_limit if along_limit else (len_a + len_b) / 2.0
     return {
         "Along_m": along, "Lateral_m": lateral, "Signed_Lateral_m": signed,
-        "Overlap": abs(along) <= limit,
-        "Too_Far": bool(max_lateral) and lateral > max_lateral,
+        "Overlap": abs(along) <= (len_a + len_b) / 2.0,
         "Clearance_m": lateral - (w_a + w_b) / 2.0,
     }
 
@@ -2063,7 +2053,6 @@ class Run1App:
         # Trajectory Position controls.
         self.trajectory_position_var = tk.StringVar(value=DEFAULT_SETTINGS["trajectory_position"])
         self.trajectory_offset_var = tk.StringVar(value=DEFAULT_SETTINGS["trajectory_offset"])
-        self.zone_flicker_merge_var = tk.StringVar(value=DEFAULT_SETTINGS["zone_flicker_merge_s"])
 
         # Zone overlay display controls.
         self.show_zone_boundary_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_zone_boundary"])
@@ -2111,8 +2100,6 @@ class Run1App:
         self.run3_hold_min_duration_var = tk.StringVar(value=RUN3_DEFAULTS["gap_hold_min_duration_s"])
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
         self.run3_lc_heading_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_heading_window_s"])
-        self.run3_lc_along_limit_var = tk.StringVar(value=RUN3_DEFAULTS["lc_along_limit_m"])
-        self.run3_lc_max_lateral_var = tk.StringVar(value=RUN3_DEFAULTS["lc_max_lateral_m"])
         self.run3_lc_motorcycle_pairs_only_var = tk.BooleanVar(value=RUN3_DEFAULTS["lc_motorcycle_pairs_only"])
         self.run3_pet_interaction_distance_var = tk.StringVar(value=RUN3_DEFAULTS["pet_interaction_distance_m"])
         self.run3_pet_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["pet_threshold_s"])
@@ -2404,10 +2391,7 @@ class Run1App:
         ttk.Label(box, text="เลื่อนเข้าด้านใน %").grid(row=0, column=2, sticky="e", padx=(12, 4), pady=4)
         self.trajectory_offset_spin = ttk.Spinbox(box, from_=0, to=50, increment=1, textvariable=self.trajectory_offset_var, width=7)
         self.trajectory_offset_spin.grid(row=0, column=3, sticky="w", pady=4)
-        ttk.Label(box, text="ใช้จุดเดียวบนกรอบรถตัดสินโซน (point-in-polygon); แนะนำ Bottom + เลื่อน 0 (จุดที่ล้อแตะพื้น); Center ไม่ใช้ค่าเลื่อน", foreground=gray).grid(row=1, column=0, columnspan=4, sticky="w")
-        ttk.Label(box, text="รวมการสลับโซนที่รอยต่อ ≤ (วินาที)").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Spinbox(box, from_=0, to=2, increment=0.05, textvariable=self.zone_flicker_merge_var, width=7).grid(row=2, column=1, sticky="w", pady=4)
-        ttk.Label(box, text="A→B→A ที่ B สั้นกว่านี้ถือเป็นการกะพริบที่ขอบโซน ตัดออกจากลำดับโซน/Movement (ไม่แก้ข้อมูลรายเฟรม); 0.10 = ค่าเดิม", foreground=gray).grid(row=3, column=0, columnspan=4, sticky="w")
+        ttk.Label(box, text="ใช้จุดเดียวบนกรอบรถตัดสินโซน (point-in-polygon); Center ไม่ใช้ค่าเลื่อน", foreground=gray).grid(row=1, column=0, columnspan=4, sticky="w")
         self.update_trajectory_position_controls()
 
         geo = self.section("ความกว้างถนน (m) — ใช้เป็นตัวหารของ LDP")
@@ -2509,8 +2493,6 @@ class Run1App:
         self._zone_checks(box, self.run3_lc_zone_vars, 1)
         ttk.Checkbutton(box, text="เฉพาะคู่ที่มีรถจักรยานยนต์ (ไม่ติ๊ก = ทุกคู่ของยานพาหนะทุกประเภท)", variable=self.run3_lc_motorcycle_pairs_only_var).grid(row=2, column=0, columnspan=8, sticky="w", pady=2)
         self._entry_row(box, 3, "หน้าต่างหาทิศ heading ของรถ A (s)", self.run3_lc_heading_window_var)
-        self._entry_row(box, 4, "ช่วงเคียงข้างตามแนวยาว ±(m) — 0 = อัตโนมัติ (L_A+L_B)/2", self.run3_lc_along_limit_var)
-        self._entry_row(box, 5, "ระยะด้านข้างไกลสุดที่ถือว่าเกี่ยวข้องกัน (m) — 0 = ไม่จำกัด", self.run3_lc_max_lateral_var)
 
         box = self._indicator_box("Gap Acceptance", self.run3_gap_enabled_var,
                                   "รถที่รอ (ดูกระแสที่ต้องให้ทางตามตาราง) ยอมรับ/ปฏิเสธช่องว่างสองขั้น Access/Exit; Line เป็นตัวเลือก (ไม่มี Line ใช้เวลาเข้าโซนต้นทางของกระแสนั้น)")
@@ -2586,14 +2568,6 @@ class Run1App:
                 return "-"
         self.run3_w_entry_text.set("W_entry = " + total("lane_entry_motorcycle_m", "lane_entry_car_m"))
         self.run3_w_opp_text.set("W_opp = " + total("lane_opp_motorcycle_m", "lane_opp_car_m"))
-
-    def _flicker_merge_s(self):
-        """Zone-boundary flicker merge window (s) from the program setting (falls back to the code default)."""
-        try:
-            v = float(str(self.zone_flicker_merge_var.get()).strip())
-        except (TypeError, ValueError):
-            return ZONE_FLICKER_MERGE_S
-        return v if v >= 0 else ZONE_FLICKER_MERGE_S
 
     def update_trajectory_position_controls(self, event=None):
         """Update the trajectory-position controls.
@@ -3933,7 +3907,6 @@ class Run1App:
             "research_mode": self.research_mode_var.get(),
             "trajectory_position": self.trajectory_position_var.get(),
             "trajectory_offset": self.trajectory_offset_var.get(),
-            "zone_flicker_merge_s": self.zone_flicker_merge_var.get(),
             "show_zone_boundary": self.show_zone_boundary_var.get(),
             "show_zone_label": self.show_zone_label_var.get(),
             "show_zone_label_prefix": self.show_zone_label_prefix_var.get(),
@@ -3973,8 +3946,6 @@ class Run1App:
                 "gap_hold_min_duration_s": self.run3_hold_min_duration_var.get(),
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
                 "lc_heading_window_s": self.run3_lc_heading_window_var.get(),
-                "lc_along_limit_m": self.run3_lc_along_limit_var.get(),
-                "lc_max_lateral_m": self.run3_lc_max_lateral_var.get(),
                 "lc_motorcycle_pairs_only": self.run3_lc_motorcycle_pairs_only_var.get(),
                 "pet_interaction_distance_m": self.run3_pet_interaction_distance_var.get(),
                 "pet_threshold_s": self.run3_pet_threshold_var.get(),
@@ -4083,7 +4054,6 @@ class Run1App:
             ("research_mode", self.research_mode_var),
             ("trajectory_position", self.trajectory_position_var),
             ("trajectory_offset", self.trajectory_offset_var),
-            ("zone_flicker_merge_s", self.zone_flicker_merge_var),
             ("show_zone_boundary", self.show_zone_boundary_var),
             ("show_zone_label", self.show_zone_label_var),
             ("show_zone_label_prefix", self.show_zone_label_prefix_var),
@@ -4149,8 +4119,6 @@ class Run1App:
                 ("gap_hold_min_duration_s", self.run3_hold_min_duration_var),
                 ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
                 ("lc_heading_window_s", self.run3_lc_heading_window_var),
-                ("lc_along_limit_m", self.run3_lc_along_limit_var),
-                ("lc_max_lateral_m", self.run3_lc_max_lateral_var),
                 ("lc_motorcycle_pairs_only", self.run3_lc_motorcycle_pairs_only_var),
                 ("pet_interaction_distance_m", self.run3_pet_interaction_distance_var),
                 ("pet_threshold_s", self.run3_pet_threshold_var),
@@ -5076,14 +5044,6 @@ class Run1App:
             warnings.append(
                 f"Trajectory Position = '{position}' (ขั้น ② ทางแยก): PPM / Perspective Calibration วัดบนพื้นถนน แต่จุดนี้ไม่ใช่จุดที่ล้อแตะพื้น "
                 "(เช่น Top = หัวคนขี่) ความเร็วและระยะจะเพี้ยน (โดยทั่วไปสูงเกินจริง) — แนะนำ Bottom")
-        try:
-            offset_now = float(self.trajectory_offset_var.get() or 0)
-        except ValueError:
-            offset_now = 0.0
-        if position.startswith("Bottom") and offset_now > 0:
-            warnings.append(
-                f"Trajectory Position = Bottom แต่เลื่อนเข้าด้านใน {offset_now:g}% (ขั้น ② ทางแยก): จุดจะลอยจากพื้นถนนขึ้นไปในตัวรถ "
-                "ทำให้ตัดสินโซนที่ขอบคลาดเคลื่อน (รถสลับโซนที่รอยต่อมากขึ้น) และ calibration วัดผิดเล็กน้อย — แนะนำเลื่อน 0")
         defined = {z for z in ZONE_IDS if len(self.zones.get(f"Zone {z}", [])) >= 3}
         any_enabled = any(bool(getattr(self, f"run3_{k}_enabled_var").get())
                           for k in ("speed", "gap", "lc", "pet", "ttc", "ldp"))
@@ -5729,7 +5689,6 @@ class Run1App:
             zone_assignment_summary = defaultdict(lambda: defaultdict(int))
             trajectory_position = settings.get("trajectory_position", self.trajectory_position_var.get())
             trajectory_offset = float(settings.get("trajectory_offset", self.trajectory_offset_var.get() or 0))
-            flicker_merge_s = self._flicker_merge_s()
             zone_confirmation_frames = 1
             zone_entry_count = defaultdict(int)
             zone_exit_count = defaultdict(int)
@@ -6684,7 +6643,7 @@ class Run1App:
                     last_time_final = (state_info.get("last_frame", frame_index) - 1) / fps if fps > 0 else 0.0
                     visits = clean_zone_visits(collect_zone_visits(
                         zone_track_state[track_id].get("zone_states", {}), last_time_final
-                    ), flicker_merge_s)
+                    ))
                     if not visits:
                         continue
                     class_name_final = state_info.get("class_name", "")
@@ -6721,7 +6680,7 @@ class Run1App:
                     last_frame_final = state_info.get("last_frame", frame_index)
                     last_time_final = (last_frame_final - 1) / fps if fps > 0 else 0.0
                     for zname, start_t, end_t in clean_zone_visits(
-                        collect_zone_visits(zmap.get("zone_states", {}), last_time_final), flicker_merge_s
+                        collect_zone_visits(zmap.get("zone_states", {}), last_time_final)
                     ):
                         duration = max(0.0, float(end_t) - float(start_t))
                         agg = zone_aggregate[zname]
@@ -6762,7 +6721,7 @@ class Run1App:
                             "trajectory_offset_percent": float(self.trajectory_offset_var.get()),
                             "temporal_confirmation_frames": 0,
                              "zone_assignment_rule": "Trajectory Position point-in-polygon only",
-                            "summary_flicker_merge_s": flicker_merge_s,
+                            "summary_flicker_merge_s": ZONE_FLICKER_MERGE_S,
                             "assignment_observations": {
                                 z: dict(v) for z, v in zone_assignment_summary.items()
                             },
@@ -6929,7 +6888,7 @@ class Run1App:
                     "trajectory_offset_percent": float(self.trajectory_offset_var.get()),
                     "temporal_confirmation_frames": 0,
                              "zone_assignment_rule": "Trajectory Position point-in-polygon only",
-                            "summary_flicker_merge_s": flicker_merge_s,
+                            "summary_flicker_merge_s": ZONE_FLICKER_MERGE_S,
                 },
                 "processing_time_seconds": round(total_time, 6),
                 "average_fps": round(average_fps, 6),
@@ -7078,7 +7037,7 @@ class Run1App:
         with open(path, "r", newline="", encoding="utf-8-sig") as f:
             return list(csv.DictReader(f))
 
-    def _run3_build_movement_index(self, tracks, summaries=None, mapping=None, site_id=None, merge_gap_s=ZONE_FLICKER_MERGE_S):
+    def _run3_build_movement_index(self, tracks, summaries=None, mapping=None, site_id=None):
         """One canonical Movement per Vehicle_ID (SPEC v28 section 3).
 
         The Movement comes from the flicker-cleaned zone sequence built from the
@@ -7088,7 +7047,7 @@ class Run1App:
         """
         movement_by_id, status_by_id, sequence_by_id = {}, {}, {}
         for tid, rows in tracks.items():
-            seq = zone_sequence_from_samples([(r["_timestamp"], r.get("_zone_num")) for r in rows], merge_gap_s)
+            seq = zone_sequence_from_samples([(r["_timestamp"], r.get("_zone_num")) for r in rows])
             movement, status = classify_movement_robust(seq)
             key = str(tid)
             movement_by_id[key] = movement
@@ -7297,9 +7256,6 @@ class Run1App:
             "waiting_threshold": num(self.run3_waiting_speed_threshold_var, GAP_HOLD_SPEED_KMH),
             "hold_min_duration_s": num(self.run3_hold_min_duration_var, GAP_HOLD_MIN_S),
             "lc_heading_window_s": num(self.run3_lc_heading_window_var, 0.5),
-            "zone_flicker_merge_s": self._flicker_merge_s(),
-            "lc_along_limit_m": max(0.0, num(self.run3_lc_along_limit_var, 0.0) or 0.0),
-            "lc_max_lateral_m": max(0.0, num(self.run3_lc_max_lateral_var, 3.5) or 0.0),
             "lc_motorcycle_pairs_only": bool(self.run3_lc_motorcycle_pairs_only_var.get()),
             "pet_interaction": num(self.run3_pet_interaction_distance_var, 3.0),
             "pet_threshold": num(self.run3_pet_threshold_var, 1.0),
@@ -7939,17 +7895,14 @@ class Run1App:
         import bisect
         zones = c["lc_zones"]
         moto_pairs_only = c["lc_motorcycle_pairs_only"]
-        along_limit = c.get("lc_along_limit_m") or None          # None = (L_A + L_B) / 2
-        max_lateral = c.get("lc_max_lateral_m") or None          # None = no sideways limit
         widths = {k: v for k, v in c["widths"].items() if v is not None}
         lengths = {k: v for k, v in c["lengths"].items() if v is not None}
         tol = self._run3_time_tolerance(tracks)
         order = {tid: i for i, tid in enumerate(tracks)}
         perspective = c["perspective"] is not None
         diag = {"a_samples": 0, "a_no_heading": 0, "pairs_same_direction": 0, "pairs_other_direction": 0,
-                "time_matched": 0, "no_box_overlap": 0, "too_far_sideways": 0, "rows": 0, "missing_dimension_class": set(),
-                "motorcycle_pairs_only": moto_pairs_only,
-                "along_limit_m": along_limit if along_limit else "auto (L_A+L_B)/2", "max_lateral_m": max_lateral}
+                "time_matched": 0, "no_box_overlap": 0, "rows": 0, "missing_dimension_class": set(),
+                "motorcycle_pairs_only": moto_pairs_only}
 
         # zone -> tid -> (timestamps, rows) ; zone -> sorted list of (start, end, tid)
         obs = defaultdict(dict); spans = defaultdict(list)
@@ -8043,13 +7996,9 @@ class Run1App:
                     diag["time_matched"] += 1
                     cls_b = classes[tid_b]
                     res = lateral_clearance(r_a["_mc"], r_a["_h"], r_b["_mc"],
-                                            lengths[cls_a], lengths[cls_b], widths[cls_a], widths[cls_b],
-                                            along_limit, max_lateral)
+                                            lengths[cls_a], lengths[cls_b], widths[cls_a], widths[cls_b])
                     if not res["Overlap"]:
                         diag["no_box_overlap"] += 1
-                        continue
-                    if res["Too_Far"]:
-                        diag["too_far_sideways"] += 1
                         continue
                     pair_rows[tid_b].append({
                         "Site_ID": c["site_id"], "Pair_ID": f"{tid_a}_{tid_b}",
@@ -8083,7 +8032,6 @@ class Run1App:
             ys = [float(r["Lateral_Clearance_m"]) for r in lst]
             ts = [float(r["Timestamp"]) for r in lst]
             first = lst[0]
-            closest = min(lst, key=lambda r: abs(float(r["Along_m"])))      # the moment the two are level (along ~ 0)
             out.append({
                 "Site_ID": first["Site_ID"], "Pair_ID": pair, "Zone": zone,
                 "Vehicle_A_ID": first["Vehicle_A_ID"], "Vehicle_A_Class": first["Vehicle_A_Class"],
@@ -8091,7 +8039,6 @@ class Run1App:
                 "Zone_Sequence_A": first["Zone_Sequence_A"], "Zone_Sequence_B": first["Zone_Sequence_B"],
                 "Start_Time": f"{min(ts):.6f}", "End_Time": f"{max(ts):.6f}", "Samples": len(ys),
                 "Lateral_Clearance_Min_m": f"{min(ys):.6f}", "Lateral_Clearance_Mean_m": f"{sum(ys) / len(ys):.6f}",
-                "Closest_Along_m": f"{closest['Along_m']}", "Lateral_Clearance_At_Closest_m": f"{closest['Lateral_Clearance_m']}",
                 "QC_Flag": "Negative_Lateral_Clearance" if min(ys) < 0 else "",
             })
         return out
@@ -8463,7 +8410,7 @@ class Run1App:
             mapping = self._run3_parse_reference_mapping(c["mapping_text"])
         except Exception as exc:
             mapping_parse_error = str(exc)
-        movement_by_id, movement_source_by_id, sequence_by_id = self._run3_build_movement_index(tracks, summaries, mapping, c["site_id"], c.get("zone_flicker_merge_s", ZONE_FLICKER_MERGE_S))
+        movement_by_id, movement_source_by_id, sequence_by_id = self._run3_build_movement_index(tracks, summaries, mapping, c["site_id"])
         tracks_by_zone = defaultdict(int)
         for rows in tracks.values():
             for z in {r.get("_zone_num") for r in rows}:
@@ -8546,7 +8493,7 @@ class Run1App:
             row_counts["lc"] = len(rows)
             outputs["lateral_clearance"] = write_csv("Lateral_Clearance.csv", fields, rows)
             pairs = self._run3_lc_pair_summary(rows)
-            pair_fields = ["Site_ID","Pair_ID","Zone","Vehicle_A_ID","Vehicle_A_Class","Vehicle_B_ID","Vehicle_B_Class","Zone_Sequence_A","Zone_Sequence_B","Start_Time","End_Time","Samples","Lateral_Clearance_Min_m","Lateral_Clearance_Mean_m","Closest_Along_m","Lateral_Clearance_At_Closest_m","QC_Flag"]
+            pair_fields = ["Site_ID","Pair_ID","Zone","Vehicle_A_ID","Vehicle_A_Class","Vehicle_B_ID","Vehicle_B_Class","Zone_Sequence_A","Zone_Sequence_B","Start_Time","End_Time","Samples","Lateral_Clearance_Min_m","Lateral_Clearance_Mean_m","QC_Flag"]
             outputs["lateral_clearance_pairs"] = write_csv("Lateral_Clearance_Pairs.csv", pair_fields, pairs)
             s_ = indicator("Lateral Clearance (all measured samples)", "Distance", "m", "All samples",
                            [float(r["Lateral_Clearance_m"]) for r in rows])

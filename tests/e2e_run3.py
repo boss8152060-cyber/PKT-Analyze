@@ -246,12 +246,6 @@ def scene1(app):
     app.run3_lc_motorcycle_pairs_only_var.set(False)
     only_m = {r["Pair_ID"] for r in read_csv(os.path.join(out_m, "Lateral_Clearance.csv"))}
     check("Lateral Clearance motorcycle-pairs-only option keeps A-B and A-E only", only_m == {"1_2", "1_5"}, str(sorted(only_m)))
-    # sideways limit: D-E (4.1 m apart) is dropped at 3.5 m, the pairs closer than that stay
-    app.run3_lc_max_lateral_var.set("3.5")
-    out_l, _ = run_scene(app, veh)
-    app.run3_lc_max_lateral_var.set("0")
-    lim = {r["Pair_ID"] for r in read_csv(os.path.join(out_l, "Lateral_Clearance.csv"))}
-    check("Lateral Clearance sideways limit 3.5 m drops D-E (4.1 m) and keeps the closer pairs", "4_5" not in lim and {"1_2", "1_5", "2_5"} <= lim, str(sorted(lim)))
     ind = read_csv(os.path.join(out, "Indicator_Summary.csv"))
     check("indicator summary lists LDP, Lateral Clearance, Speed", any("LDP" in r["Indicator"] for r in ind) and any("Lateral Clearance" in r["Indicator"] for r in ind) and any("Speed" in r["Indicator"] for r in ind))
 
@@ -526,7 +520,6 @@ def scene5(app):
     still recognised as 2-3-4 (status Exact_AfterDedupe) and gets LDP rows."""
     zone_w = lambda x, y: 2 if x < 10 else (3 if x < 12 else (2 if x < 14 else (3 if x < 20 else 4)))
     veh = [(1, "Car", make_rows(1, "Car", along_x(0.0, 10.0), zone_w, 360, (4.5, 1.8)))]
-    app.zone_flicker_merge_var.set("0.10")          # the old merge window: the 0.2 s wobble stays and is removed later as a repeated zone
     out, summary = run_scene(app, veh)
     print("scene 5 output:", out)
     ms = summary["source_counts"]["movement_status"]
@@ -536,18 +529,12 @@ def scene5(app):
     check("LDP is computed for it (status Exact_AfterDedupe counts as Exact)", len(ldp) >= 2, str(len(ldp)))
     wide = read_csv(os.path.join(out, "Speed.csv"))
     check("vehicle speed table shows status and movement", wide[0]["Movement"] == "2-3-4" and wide[0]["Movement_Status"] == "Exact_AfterDedupe")
-    # the program default (0.30 s) already treats the 0.2 s dip into zone 3 as boundary flicker: plain Exact
-    app.zone_flicker_merge_var.set("0.30")
-    out_f, summary_f = run_scene(app, veh)
-    msf = summary_f["source_counts"]["movement_status"]
-    check("flicker merge 0.30 s turns the wobbling car into a plain Exact 2-3-4", msf.get("Exact") == 1 and not msf.get("Exact_AfterDedupe"), str(msf))
 
 
 def main():
     root = tk.Tk()
     root.withdraw()
     app = m.Run1App(root)
-    app.run3_lc_max_lateral_var.set("0")          # the scene's D-E pair is 4.1 m apart sideways; the default limit (3.5 m) is tested below
     app.run3_site_id_var.set("8")
     app.run3_ppm_var.set(str(PPM))
     app.run3_perspective_enabled_var.set(False)
