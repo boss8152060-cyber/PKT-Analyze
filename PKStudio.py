@@ -466,6 +466,9 @@ RUN3_DEFAULTS = {
     "gap_hold_min_duration_s": "0.30",      # ... for at least this long (s)
     "lateral_axis_angle_deg": "0.00",       # implementation starter value; verify per video
     "lc_heading_window_s": "0.50",          # centred window (s) used to get the heading of vehicle A
+    "lens_f": "",                           # lens (radial) distortion correction: f (x picture width, blank = 1), k1, k2; blank = none
+    "lens_k1": "",
+    "lens_k2": "",
     "topview_video": True,                  # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points)
     "lc_along_limit_m": "0",                # side-by-side window along the heading (m); 0 = auto (L_A + L_B) / 2
     "lc_max_lateral_m": "3.50",             # pairs further apart sideways than this (m) are unrelated; 0 = no limit
@@ -1249,6 +1252,131 @@ def oriented_rect(center, heading, length, width):
     c = np.asarray(center, dtype=float)
     hl, hw = length / 2.0, width / 2.0
     return np.array([c + hl * ux + hw * uy, c + hl * ux - hw * uy, c - hl * ux - hw * uy, c - hl * ux + hw * uy])
+
+# ---------------- Lens (fisheye) distortion ----------------
+# Action cameras (GoPro Wide, SJCAM 170 deg ...) look much wider than a rectilinear lens can: a polynomial in the
+# image radius breaks down. The model used is the equidistant-with-corrections fisheye model (as cv2.fisheye):
+#   a ray at angle theta from the optical axis lands at the normalised radius  theta_d = theta (1 + k1 theta^2 + k2 theta^4)
+# (k1 = k2 = 0: the plain equidistant fisheye). In the straightened (rectilinear) picture the radius is tan(theta).
+# lens = (f_ratio, k1[, k2]) with f = f_ratio x picture width (pixels), centre = picture centre.
+THETA_MAX = 1.52                       # 87 degrees: a rectilinear picture cannot show rays beyond this
+
+
+def _lens_terms(lens):
+    return float(lens[0]), float(lens[1]), (float(lens[2]) if len(lens) > 2 else 0.0)
+
+
+def lens_distort(pts, size, lens):
+    """Straightened (rectilinear) pixels -> pixels as the fisheye lens recorded them."""
+    f_ratio, k1, k2 = _lens_terms(lens)
+    p = np.asarray(pts, dtype=float).reshape(-1, 2)
+    c = np.array([size[0] / 2.0, size[1] / 2.0])
+    f = f_ratio * size[0]
+    x = (p - c) / f
+    ru = np.sqrt((x ** 2).sum(axis=1))
+    th = np.arctan(ru)
+    thd = th * (1.0 + k1 * th ** 2 + k2 * th ** 4)
+    scale = np.where(ru > 1e-12, thd / np.where(ru > 1e-12, ru, 1.0), 1.0)
+    return x * scale[:, None] * f + c
+
+
+def lens_undistort(pts, size, lens):
+    """Pixels as recorded -> straightened (rectilinear) pixels (the inverse of lens_distort; Newton on the angle)."""
+    f_ratio, k1, k2 = _lens_terms(lens)
+    p = np.asarray(pts, dtype=float).reshape(-1, 2)
+    c = np.array([size[0] / 2.0, size[1] / 2.0])
+    f = f_ratio * size[0]
+    x = (p - c) / f
+    rd = np.sqrt((x ** 2).sum(axis=1))
+    th = np.minimum(rd, THETA_MAX)
+    for _ in range(50):
+        g = th * (1.0 + k1 * th ** 2 + k2 * th ** 4) - rd
+        d = 1.0 + 3.0 * k1 * th ** 2 + 5.0 * k2 * th ** 4
+        th = np.clip(th - g / np.where(np.abs(d) < 1e-6, 1e-6, d), 0.0, THETA_MAX)
+    ru = np.tan(th)
+    scale = np.where(rd > 1e-12, ru / np.where(rd > 1e-12, rd, 1.0), 1.0)
+    return x * scale[:, None] * f + c
+
+
+def lens_is_valid(size, lens):
+    """The model must grow steadily from the centre to the corner of the picture, with the corner ray inside 87 degrees."""
+    f_ratio, k1, k2 = _lens_terms(lens)
+    if f_ratio <= 0:
+        return False
+    rmax = math.hypot(size[0] / 2.0, size[1] / 2.0) / (f_ratio * size[0])        # corner radius (in f), as recorded
+    th = np.linspace(0.0, THETA_MAX, 400)
+    thd = th * (1.0 + k1 * th ** 2 + k2 * th ** 4)
+    d = 1.0 + 3.0 * k1 * th ** 2 + 5.0 * k2 * th ** 4
+    hit = np.nonzero(thd >= rmax)[0]
+    if len(hit) == 0:
+        return False
+    return bool(np.all(d[:hit[0] + 1] > 0.1))
+
+
+def line_bend(lines, size=None, lens=None):
+    """How curved the clicked lines are: the RMS distance of their points from the straight line that fits them best, as a
+    fraction of the line length (after the lens correction when `lens` is given). 0 = perfectly straight.
+    lines = list of N x 2 arrays (N >= 3)."""
+    acc, n = 0.0, 0
+    for pts in lines:
+        q = np.asarray(pts, dtype=float).reshape(-1, 2)
+        if lens is not None:
+            q = lens_undistort(q, size, lens)
+        d = q - q.mean(axis=0)
+        sv = np.linalg.svd(d, compute_uv=False)
+        length = max(1e-9, float(np.ptp(d @ np.linalg.svd(d, full_matrices=False)[2][0])))
+        acc += (float(sv[-1]) / math.sqrt(len(q)) / length) ** 2
+        n += 1
+    return math.sqrt(acc / n) if n else 0.0
+
+
+def estimate_lens_from_lines(lines, size, use_k2=False, min_gain=0.3):
+    """Find the fisheye lens that makes the clicked lines straight again. `lines` are points (pixels as recorded) clicked along
+    things that are straight in reality (kerb edges, lane lines, crosswalk edges, building edges): >= 2 lines with >= 3 points
+    each, best spread over the picture and its edges (a line through the centre says nothing about the lens).
+    Searches f (the focal length, which for a fisheye sets how strongly the picture is bent) and k1 (and k2 when use_k2),
+    with a small pull towards k = 0 (the plain equidistant fisheye). Returns {"lens", "bend_before", "bend_after" (fractions
+    of the line length), "lines", "points"} or None when the lines are too few or the lens does not make them clearly
+    straighter (< `min_gain`: the lens is not the problem, or the clicks are off)."""
+    lines = [np.asarray(l, dtype=float).reshape(-1, 2) for l in lines if len(l) >= 3]
+    if len(lines) < 2 or sum(len(l) for l in lines) < 6:
+        return None
+    before = line_bend(lines)
+
+    def cost(f, k1, k2):
+        lens = (f, k1, k2)
+        if f <= 0.2 or not lens_is_valid(size, lens):
+            return None
+        return line_bend(lines, size, lens) ** 2 + 0.002 * (k1 ** 2 + k2 ** 2)
+
+    best = (before ** 2, None)
+    for f in np.arange(0.35, 1.61, 0.05):                            # coarse search without k2 (fast); k2 only refines
+        for k1 in np.arange(-0.3, 0.301, 0.05):
+            c_ = cost(float(f), float(k1), 0.0)
+            if c_ is not None and c_ < best[0]:
+                best = (c_, (float(f), float(k1), 0.0))
+    if best[1] is None:
+        return None
+    step = [0.02, 0.02, 0.02]
+    cur = list(best[1])
+    for _ in range(18):                                              # local refinement, shrinking steps
+        improved = False
+        for idx in range(3 if use_k2 else 2):
+            for sign in (1, -1):
+                cand = list(cur)
+                cand[idx] += sign * step[idx]
+                c_ = cost(*cand)
+                if c_ is not None and c_ < best[0]:
+                    best, cur, improved = (c_, tuple(cand)), cand, True
+        if not improved:
+            step = [v / 2.0 for v in step]
+    lens = tuple(float(v) for v in cur)
+    after = line_bend(lines, size, lens)
+    if after > (1.0 - min_gain) * before:
+        return None
+    return {"lens": lens, "bend_before": before, "bend_after": after, "lines": len(lines), "points": int(sum(len(l) for l in lines))}
+
+
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -1641,6 +1769,324 @@ class ClipPlayerDialog:
         except Exception:
             pass
         self.top.destroy()
+
+
+def lens_undistort_image(img, lens):
+    """The camera picture with the fisheye distortion removed: the central part seen as a rectilinear picture of the same size and
+    focal length f (so a pixel here is exactly the 'straightened' pixel lens_undistort returns for the recorded one)."""
+    h, w = img.shape[:2]
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float64)
+    src = lens_distort(np.stack([xs.ravel(), ys.ravel()], axis=1), (w, h), lens).reshape(h, w, 2).astype(np.float32)
+    return cv2.remap(img, src[..., 0], src[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(32, 32, 32))
+
+
+def show_lens_preview(parent, img, lens):
+    """A window with the camera picture before (left) and after (right) the lens correction, with a grid:
+    what is straight in the real world (kerbs, lane lines, building edges) must be straight on the right."""
+    shown = []
+    for im in (img.copy(), lens_undistort_image(img, lens)):
+        h, w = im.shape[:2]
+        for i in range(1, 10):
+            cv2.line(im, (int(w * i / 10), 0), (int(w * i / 10), h - 1), (255, 255, 255), 1)
+            cv2.line(im, (0, int(h * i / 10)), (w - 1, int(h * i / 10)), (255, 255, 255), 1)
+        k = min(620.0 / w, 400.0 / h)
+        ok, buf = cv2.imencode(".png", cv2.resize(im, (int(w * k), int(h * k)), interpolation=cv2.INTER_AREA))
+        shown.append(tk.PhotoImage(data=base64.b64encode(buf.tobytes())))
+    pv = tk.Toplevel(parent)
+    pv.title("ภาพกล้องก่อน/หลังแก้เลนส์")
+    pv.photos = shown
+    k2 = f", k2={lens[2]:.2f}" if len(lens) > 2 and abs(lens[2]) > 1e-9 else ""
+    for col, (text, ph_) in enumerate((("ก่อน (ภาพเดิมจากกล้อง)", shown[0]), (f"หลังแก้เลนส์ (f={lens[0]:.2f}, k1={lens[1]:.2f}{k2})", shown[1]))):
+        ttk.Label(pv, text=text).grid(row=0, column=col, pady=(6, 0))
+        tk.Label(pv, image=ph_).grid(row=1, column=col, padx=6, pady=4)
+    ttk.Label(pv, text="ขอบถนน เส้นแบ่งเลน ขอบอาคารที่ตรงในโลกจริงควรเป็นเส้นตรงหลังแก้เลนส์ (เทียบกับเส้นตารางสีขาว) · ภาพหลังแก้เลนส์แสดงเฉพาะส่วนกลางของภาพ (ส่วนขอบถูกตัดออก) ซึ่งเป็นเรื่องปกติ",
+              foreground="#555555").grid(row=2, column=0, columnspan=2, pady=(0, 8))
+    return pv
+
+
+class LensLineDialog:
+    """Lens correction WITHOUT any reference picture: click points along things that are straight in the real world (kerb
+    edges, lane lines, crosswalk edges, building edges) in a frame of the camera video; the lens (k1, optionally k2) that
+    makes those lines straight again is found. Spread the lines over the picture and its edges. The logic is in plain
+    methods (new_line, add_point, estimate, ...) so it can be tested without clicking."""
+
+    VIEW_W, VIEW_H = 1000, 600
+    LINE_COLORS = [(0, 255, 255), (0, 200, 0), (255, 160, 0), (255, 0, 255), (0, 128, 255), (255, 255, 0), (160, 160, 255), (80, 255, 160)]
+
+    def __init__(self, app, video_path, on_apply, initial=None):
+        self.app, self.on_apply = app, on_apply
+        self.lines = [[]]
+        self.lens = None
+        self.result_info = None
+        self.zoom = 1.0
+        self.view = None
+        self._pan = None
+        self.photo = None
+        self.last_render = None
+        self.cap = cv2.VideoCapture(video_path)
+        self.total = max(1, int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
+        self.cam_img = None
+        self.top = tk.Toplevel(app.root)
+        self.top.title("แก้เลนส์จากเส้นตรง")
+        self.top.geometry("+10+10")
+        self.top.protocol("WM_DELETE_WINDOW", self.close)
+        self.top.dialog = self
+        self.msg_var = tk.StringVar(value="")
+        self.frame_var = tk.StringVar(value="")
+        self.fixed_var = tk.BooleanVar(value=False)
+        self.k2_var = tk.BooleanVar(value=False)
+        self._build()
+        self.set_frame(None)
+        self.refresh()
+
+    def _build(self):
+        top = self.top
+        bar = ttk.Frame(top, padding=6)
+        bar.pack(fill="x")
+        ttk.Label(bar, text=("คลิกจุดตามแนวที่ตรงในโลกจริง (ขอบฟุตปาธ เส้นแบ่งเลน ขอบทางม้าลาย ขอบอาคาร) เส้นละ 4–8 จุด ยิ่งไกลจากกลางภาพและยาวยิ่งดี "
+                             "อย่างน้อย 3 เส้นกระจายทั่วภาพ แล้วกด ประมาณเลนส์ · ล้อเมาส์ = ซูมที่ลูกศรเมาส์ · ลาก = เลื่อนภาพ"),
+                  wraplength=980, justify="left").grid(row=0, column=0, columnspan=9, sticky="w")
+        ttk.Button(bar, text="เส้นใหม่", command=self.new_line).grid(row=1, column=0, pady=4, padx=(0, 4))
+        ttk.Button(bar, text="ย้อนจุด", command=self.undo_point).grid(row=1, column=1, padx=4)
+        ttk.Button(bar, text="ลบเส้นนี้", command=self.delete_line).grid(row=1, column=2, padx=4)
+        ttk.Button(bar, text="ประมาณเลนส์", command=self.estimate).grid(row=1, column=3, padx=(14, 4))
+        ttk.Checkbutton(bar, text="ใช้ k2 (ปรับละเอียด)", variable=self.k2_var).grid(row=1, column=4, padx=4)
+        ttk.Checkbutton(bar, text="ดูภาพที่แก้เลนส์แล้ว", variable=self.fixed_var, command=self.refresh).grid(row=1, column=5, padx=4)
+        ttk.Button(bar, text="รีเซ็ต View", command=self.reset_view).grid(row=1, column=6, padx=4)
+        ttk.Button(bar, text="ใช้ค่านี้", command=self.apply).grid(row=1, column=7, padx=(14, 4))
+        ttk.Button(bar, text="ปิด", command=self.close).grid(row=1, column=8, padx=4)
+        ttk.Label(bar, text="เฟรม").grid(row=2, column=0, sticky="e")
+        ttk.Entry(bar, textvariable=self.frame_var, width=8).grid(row=2, column=1, sticky="w")
+        ttk.Button(bar, text="โหลดเฟรม", command=lambda: self.set_frame(self.frame_var.get())).grid(row=2, column=2, sticky="w")
+        self.canvas = tk.Canvas(top, width=self.VIEW_W, height=self.VIEW_H, bg="#202020", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True, padx=6)
+        self.canvas.bind("<Configure>", lambda e: self._on_configure())
+        self.canvas.bind("<ButtonPress-1>", lambda e: self._press(e.x, e.y))
+        self.canvas.bind("<B1-Motion>", lambda e: self._drag(e.x, e.y))
+        self.canvas.bind("<ButtonRelease-1>", lambda e: self._release(e.x, e.y))
+        for b in (2, 3):
+            self.canvas.bind(f"<ButtonPress-{b}>", lambda e: self._press(e.x, e.y, True))
+            self.canvas.bind(f"<B{b}-Motion>", lambda e: self._drag(e.x, e.y))
+        self.canvas.bind("<MouseWheel>", lambda e: self.zoom_at(e.x, e.y, 1 if e.delta > 0 else -1))
+        self.canvas.bind("<Button-4>", lambda e: self.zoom_at(e.x, e.y, 1))
+        self.canvas.bind("<Button-5>", lambda e: self.zoom_at(e.x, e.y, -1))
+        tk.Label(top, textvariable=self.msg_var, height=3, anchor="nw", wraplength=980, justify="left", padx=6, pady=4).pack(fill="x")
+
+    # ----- the picture -----
+    def set_frame(self, index):
+        if not self.cap.isOpened():
+            return False
+        try:
+            idx = int(float(index)) - 1 if index not in (None, "") else self.total // 2
+        except ValueError:
+            idx = self.total // 2
+        idx = max(0, min(self.total - 1, idx))
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ok, fr = self.cap.read()
+        if not ok:
+            return False
+        self.cam_img = fr
+        self.size = (fr.shape[1], fr.shape[0])
+        self.frame_var.set(str(idx + 1))
+        self.view = None
+        self.zoom = 1.0
+        if getattr(self, "canvas", None):
+            self.refresh()
+        return True
+
+    def _canvas_size(self):
+        return max(50, self.canvas.winfo_width()), max(50, self.canvas.winfo_height())
+
+    def reset_view(self):
+        self.zoom = 1.0
+        if self.cam_img is not None:
+            cw, ch = self._canvas_size()
+            w, h = self.size
+            k = min(cw / float(w), ch / float(h))
+            self.fit_k = k
+            self.view = (k, (cw - w * k) / 2.0, (ch - h * k) / 2.0)
+        self.refresh()
+
+    def _on_configure(self):
+        if self.zoom <= 1.0:
+            self.view = None
+        self.refresh()
+
+    def zoom_at(self, ex, ey, steps):
+        if self.view is None:
+            return False
+        k, ox, oy = self.view
+        z_new = min(40.0, max(1.0, self.zoom * (1.25 ** steps)))
+        if z_new == self.zoom:
+            return False
+        px, py = (ex - ox) / k, (ey - oy) / k
+        self.zoom = z_new
+        if z_new == 1.0:
+            self.view = None
+        else:
+            k2 = self.fit_k * z_new
+            self.view = (k2, ex - px * k2, ey - py * k2)
+        self.refresh()
+        return True
+
+    def pan_by(self, dx, dy):
+        if self.view is None:
+            return False
+        k, ox, oy = self.view
+        self.view = (k, ox + dx, oy + dy)
+        self.refresh()
+        return True
+
+    def _press(self, ex, ey, always_pan=False):
+        self._pan = {"x": ex, "y": ey, "x0": ex, "y0": ey, "moved": bool(always_pan)}
+
+    def _drag(self, ex, ey):
+        p = self._pan
+        if p is None:
+            return
+        if not p["moved"] and (abs(ex - p["x0"]) > 4 or abs(ey - p["y0"]) > 4) and self.zoom > 1.0:
+            p["moved"] = True
+        if p["moved"]:
+            self.pan_by(ex - p["x"], ey - p["y"])
+            p["x"], p["y"] = ex, ey
+
+    def _release(self, ex, ey):
+        p, self._pan = self._pan, None
+        if p is not None and p["moved"]:
+            return
+        if self.view is None:
+            return
+        k, ox, oy = self.view
+        x, y = (ex - ox) / k, (ey - oy) / k
+        if 0 <= x < self.size[0] and 0 <= y < self.size[1]:
+            self.add_point(x, y)
+
+    # ----- lines (logic) -----
+    def new_line(self):
+        if self.lines and not self.lines[-1]:
+            return False                                           # the current line is still empty
+        self.lines.append([])
+        self.refresh()
+        return True
+
+    def add_point(self, x, y):
+        """A point (in the picture as the camera recorded it) on the line being drawn. When the corrected picture is shown, the point
+        is given in that picture and carried back to the recorded one."""
+        pt = (float(x), float(y))
+        if self.fixed_var.get() and self.lens is not None:
+            pt = tuple(lens_distort([pt], self.size, self.lens)[0])
+        self.lines[-1].append(pt)
+        self.result_info = None
+        self.refresh()
+        return True
+
+    def undo_point(self):
+        if self.lines[-1]:
+            self.lines[-1].pop()
+        elif len(self.lines) > 1:
+            self.lines.pop()
+            if self.lines[-1]:
+                self.lines[-1].pop()
+        self.result_info = None
+        self.refresh()
+
+    def delete_line(self):
+        if len(self.lines) > 1:
+            self.lines.pop()
+        else:
+            self.lines = [[]]
+        self.result_info = None
+        self.refresh()
+
+    def usable_lines(self):
+        return [l for l in self.lines if len(l) >= 3]
+
+    def estimate(self):
+        use = self.usable_lines()
+        if len(use) < 2:
+            self.msg_var.set("ต้องมีอย่างน้อย 2 เส้น (แนะนำ 3 เส้นขึ้นไป) เส้นละ 3 จุดขึ้นไป")
+            return None
+        res = estimate_lens_from_lines(use, self.size, bool(self.k2_var.get()))
+        if res is None:
+            self.msg_var.set("ไม่พบเลนส์ที่ทำให้เส้นตรงขึ้นชัดเจน — เส้นอาจตรงอยู่แล้ว ผ่านกลางภาพมากเกินไป หรือคลิกไม่ตรงแนว ลองเพิ่มเส้นใกล้ขอบภาพ")
+            return None
+        self.lens, self.result_info = res["lens"], res
+        self.msg_var.set(f"ประมาณเลนส์ได้: f = {res['lens'][0]:.3f}×ความกว้างภาพ, k1 = {res['lens'][1]:.3f}" + (f", k2 = {res['lens'][2]:.3f}" if self.k2_var.get() else "")
+                         + f" · เส้นโค้ง {res['bend_before'] * 100:.2f}% → {res['bend_after'] * 100:.2f}% ของความยาวเส้น จาก {res['lines']} เส้น {res['points']} จุด"
+                         + " · ติ๊ก 'ดูภาพที่แก้เลนส์แล้ว' เพื่อตรวจ แล้วกด ใช้ค่านี้")
+        self.refresh()
+        return res
+
+    def apply(self):
+        if self.lens is None:
+            self.msg_var.set("ยังไม่ได้ประมาณเลนส์")
+            return False
+        self.on_apply(self.lens)
+        self.close()
+        return True
+
+    def close(self):
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+        try:
+            self.top.destroy()
+        except tk.TclError:
+            pass
+
+    # ----- drawing -----
+    def refresh(self):
+        if self.cam_img is None or not getattr(self, "canvas", None):
+            return
+        if self.view is None:
+            self.reset_view_silent()
+        k, ox, oy = self.view
+        cw, ch = self._canvas_size()
+        show_fixed = self.fixed_var.get() and self.lens is not None
+        img = lens_undistort_image(self.cam_img, self.lens) if show_fixed else self.cam_img
+        h, w = img.shape[:2]
+        out = np.full((ch, cw, 3), 32, np.uint8)
+        ix0, iy0 = max(0, int(math.floor(-ox / k))), max(0, int(math.floor(-oy / k)))
+        ix1, iy1 = min(w, int(math.ceil((cw - ox) / k))), min(h, int(math.ceil((ch - oy) / k)))
+        if ix1 > ix0 and iy1 > iy0:
+            res = cv2.resize(img[iy0:iy1, ix0:ix1], (max(1, int(round((ix1 - ix0) * k))), max(1, int(round((iy1 - iy0) * k)))),
+                             interpolation=cv2.INTER_AREA if k < 1 else cv2.INTER_LINEAR)
+            dx, dy = int(round(ix0 * k + ox)), int(round(iy0 * k + oy))
+            sx0, sy0 = max(0, -dx), max(0, -dy)
+            ex_, ey_ = min(res.shape[1], cw - dx), min(res.shape[0], ch - dy)
+            if ex_ > sx0 and ey_ > sy0:
+                out[dy + sy0:dy + ey_, dx + sx0:dx + ex_] = res[sy0:ey_, sx0:ex_]
+        for n, pts in enumerate(self.lines):
+            if not pts:
+                continue
+            col = self.LINE_COLORS[n % len(self.LINE_COLORS)]
+            shown = lens_undistort(pts, self.size, self.lens) if show_fixed else np.asarray(pts, dtype=float)
+            c = np.round(shown * k + np.array([ox, oy])).astype(np.int32)
+            if len(c) > 1:
+                cv2.polylines(out, [c.reshape(-1, 1, 2)], False, col, 1, cv2.LINE_AA)
+            for q in c:
+                cv2.circle(out, (int(q[0]), int(q[1])), 4, col, -1, cv2.LINE_AA)
+            if show_fixed and len(shown) >= 3:                      # the straight line that fits the corrected points
+                d = shown - shown.mean(axis=0)
+                u = np.linalg.svd(d, full_matrices=False)[2][0]
+                t = d @ u
+                a, b = shown.mean(axis=0) + u * t.min(), shown.mean(axis=0) + u * t.max()
+                cv2.line(out, tuple(np.round(a * k + [ox, oy]).astype(int)), tuple(np.round(b * k + [ox, oy]).astype(int)), (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(out, f"zoom x{self.zoom:.1f}" + ("   corrected picture" if show_fixed else ""), (6, ch - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+        self.last_render = out
+        ok, buf = cv2.imencode(".png", out)
+        self.photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+        if not self.msg_var.get():
+            self.msg_var.set("คลิกจุดตามแนวเส้นที่ตรงในโลกจริง")
+
+    def reset_view_silent(self):
+        cw, ch = self._canvas_size()
+        w, h = self.size
+        k = min(cw / float(w), ch / float(h))
+        self.fit_k = k
+        self.view = (k, (cw - w * k) / 2.0, (ch - h * k) / 2.0)
 
 
 class BackgroundFrameReader:
@@ -2146,6 +2592,9 @@ class Run1App:
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
         self.run3_lc_heading_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_heading_window_s"])
         self.run3_topview_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["topview_video"])
+        self.run3_lens_f_var = tk.StringVar(value=RUN3_DEFAULTS["lens_f"])
+        self.run3_lens_k1_var = tk.StringVar(value=RUN3_DEFAULTS["lens_k1"])
+        self.run3_lens_k2_var = tk.StringVar(value=RUN3_DEFAULTS["lens_k2"])
         self.run3_lc_along_limit_var = tk.StringVar(value=RUN3_DEFAULTS["lc_along_limit_m"])
         self.run3_lc_max_lateral_var = tk.StringVar(value=RUN3_DEFAULTS["lc_max_lateral_m"])
         self.run3_lc_motorcycle_pairs_only_var = tk.BooleanVar(value=RUN3_DEFAULTS["lc_motorcycle_pairs_only"])
@@ -2470,6 +2919,18 @@ class Run1App:
         r += 1
         ttk.Label(cal, text="Road direction angle (deg) — ใช้เมื่อไม่มี Perspective").grid(row=r, column=0, columnspan=2, sticky="w", pady=4)
         ttk.Entry(cal, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=r, column=2, sticky="w", pady=4)
+        r += 1
+        lensf = ttk.LabelFrame(cal, text="เลนส์ fisheye (แก้ความโก่งของภาพกล้องมุมกว้างก่อนแปลงเป็นพื้นถนน — f = ความยาวโฟกัสเป็นเท่าของความกว้างภาพ เช่น 0.5 · เว้น f ว่าง = ไม่แก้)", padding=4)
+        lensf.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 2))
+        ttk.Label(lensf, text="f").pack(side="left")
+        ttk.Entry(lensf, textvariable=self.run3_lens_f_var, width=6).pack(side="left", padx=(2, 8))
+        ttk.Label(lensf, text="k1").pack(side="left")
+        ttk.Entry(lensf, textvariable=self.run3_lens_k1_var, width=8).pack(side="left", padx=(2, 8))
+        ttk.Label(lensf, text="k2").pack(side="left")
+        ttk.Entry(lensf, textvariable=self.run3_lens_k2_var, width=8).pack(side="left", padx=(2, 8))
+        ttk.Button(lensf, text="แก้เลนส์จากเส้นตรง…", command=self.open_lens_line_tool).pack(side="left", padx=4)
+        ttk.Button(lensf, text="ดูภาพก่อน/หลัง", command=self.preview_lens_settings).pack(side="left", padx=4)
+        ttk.Button(lensf, text="ล้าง", width=5, command=self.clear_lens_values).pack(side="left", padx=4)
         r += 1
         ttk.Checkbutton(cal, text="สร้างวิดีโอ Topview (Tracking_Topview.mp4)", variable=self.run3_topview_video_var).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(cal, text="วาดจากพิกัดเมตรเดียวกับที่ตัวชี้วัดใช้ (ไฟล์ Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
@@ -4000,6 +4461,9 @@ class Run1App:
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
                 "lc_heading_window_s": self.run3_lc_heading_window_var.get(),
                 "topview_video": self.run3_topview_video_var.get(),
+                "lens_f": self.run3_lens_f_var.get(),
+                "lens_k1": self.run3_lens_k1_var.get(),
+                "lens_k2": self.run3_lens_k2_var.get(),
                 "lc_along_limit_m": self.run3_lc_along_limit_var.get(),
                 "lc_max_lateral_m": self.run3_lc_max_lateral_var.get(),
                 "lc_motorcycle_pairs_only": self.run3_lc_motorcycle_pairs_only_var.get(),
@@ -4176,6 +4640,9 @@ class Run1App:
                 ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
                 ("lc_heading_window_s", self.run3_lc_heading_window_var),
                 ("topview_video", self.run3_topview_video_var),
+                ("lens_f", self.run3_lens_f_var),
+                ("lens_k1", self.run3_lens_k1_var),
+                ("lens_k2", self.run3_lens_k2_var),
                 ("lc_along_limit_m", self.run3_lc_along_limit_var),
                 ("lc_max_lateral_m", self.run3_lc_max_lateral_var),
                 ("lc_motorcycle_pairs_only", self.run3_lc_motorcycle_pairs_only_var),
@@ -4920,6 +5387,70 @@ class Run1App:
             raise ValueError(f"Perspective correction: {label} must be x,y in pixels")
         return float(parts[0]), float(parts[1])
 
+    def _video_frame_for_tools(self):
+        video = str(self.video_var.get() or "").strip()
+        if not video or not os.path.isfile(video):
+            messagebox.showerror("เลนส์", "เลือกวิดีโอก่อน (ใช้เฟรมจากวิดีโอนี้)")
+            return None
+        return video
+
+    def open_lens_line_tool(self):
+        video = self._video_frame_for_tools()
+        if video is None:
+            return None
+        return LensLineDialog(self, video, self.set_lens_values)
+
+    def set_lens_values(self, lens):
+        self.run3_lens_f_var.set(f"{float(lens[0]):.4f}")
+        self.run3_lens_k1_var.set(f"{float(lens[1]):.4f}")
+        self.run3_lens_k2_var.set(f"{float(lens[2]) if len(lens) > 2 else 0.0:.4f}")
+
+    def clear_lens_values(self):
+        for var in (self.run3_lens_f_var, self.run3_lens_k1_var, self.run3_lens_k2_var):
+            var.set("")
+
+    def preview_lens_settings(self):
+        video = self._video_frame_for_tools()
+        if video is None:
+            return None
+        lens, size = self._run3_lens_params()
+        if lens is None:
+            messagebox.showinfo("เลนส์", "ยังไม่ได้ตั้งค่าเลนส์ (ใส่ f หรือกด แก้เลนส์จากเส้นตรง)")
+            return None
+        cap = cv2.VideoCapture(video)
+        try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 2) // 2)
+            ok, fr = cap.read()
+        finally:
+            cap.release()
+        return show_lens_preview(self.root, fr, lens) if ok else None
+
+    def _run3_lens_params(self):
+        """(lens, size) from the lens values of step 2 (or the lens tool); (None, None) when no correction is set."""
+        def num(var):
+            try:
+                return float(str(var.get()).strip())
+            except ValueError:
+                return None
+        f = num(self.run3_lens_f_var)
+        if f is None or f <= 0:                                   # no focal length typed = no correction
+            return None, None
+        k1, k2 = num(self.run3_lens_k1_var) or 0.0, num(self.run3_lens_k2_var) or 0.0
+        size = getattr(self, "_lens_size_override", None)
+        if size is None:
+            w, h = self._actual_video_size()
+            size = (w, h) if w and h else None
+        if size is None:
+            return None, None
+        lens = (f, k1, k2)
+        return (lens, (int(size[0]), int(size[1]))) if lens_is_valid(size, lens) else (None, None)
+
+    @staticmethod
+    def _run3_undistort(pts, c):
+        """Camera pixels as clicked / detected -> pixels of the straightened picture (no change without a lens)."""
+        p = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+        return lens_undistort(p, c["lens_size"], c["lens"]) if c.get("lens") is not None else p
+
     def _run3_get_perspective_matrix(self, silent=False):
         if not bool(self.run3_perspective_enabled_var.get()):
             return None
@@ -4928,6 +5459,8 @@ class Run1App:
             p2 = self._run3_parse_xy(self.run3_perspective_p2_var.get(), "P2")
             p3 = self._run3_parse_xy(self.run3_perspective_p3_var.get(), "P3")
             p4 = self._run3_parse_xy(self.run3_perspective_p4_var.get(), "P4")
+            lens_, lsize_ = self._run3_lens_params()
+            q1, q2, q3, q4 = ([tuple(q) for q in lens_undistort([p1, p2, p3, p4], lsize_, lens_)] if lens_ is not None else [p1, p2, p3, p4])
             # Prefer the four measured side lengths; target is the mean-opposite-side rectangle.
             raw4 = [
                 self.run3_perspective_l12_var.get(), self.run3_perspective_l23_var.get(),
@@ -4944,7 +5477,7 @@ class Run1App:
                 width_m = float(self.run3_perspective_width_var.get())
             if length_m <= 0 or width_m <= 0:
                 raise ValueError("Perspective correction: calibration lengths must be > 0")
-            src = np.float32([p1,p2,p3,p4])
+            src = np.float32([q1, q2, q3, q4])
             dst = np.float32([[0,0],[length_m,0],[length_m,width_m],[0,width_m]])
             H = cv2.getPerspectiveTransform(src, dst)
             return {"H": H, "length_m": length_m, "width_m": width_m, "points": [p1,p2,p3,p4], "four_side_lengths_m": raw4}
@@ -7303,6 +7836,8 @@ class Run1App:
             "ppm": ppm,
             "perspective_enabled": bool(self.run3_perspective_enabled_var.get()),
             "perspective": self._run3_get_perspective_matrix(silent=True),
+            "lens": self._run3_lens_params()[0],
+            "lens_size": self._run3_lens_params()[1],
             "axis_deg": num(self.run3_lateral_axis_angle_var, 0.0) or 0.0,
             "speed_zones": zones_of(self.run3_speed_zone_vars),
             "speed_smoothing_samples": max(1, int(num(self.run3_speed_smoothing_var, 5) or 1)),
@@ -7367,6 +7902,8 @@ class Run1App:
         pts = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
         if len(pts) == 0:
             return pts
+        if c.get("lens") is not None:                           # a wide-angle lens bends the picture: straighten the points first
+            pts = lens_undistort(pts, c["lens_size"], c["lens"])
         persp = c["perspective"]
         if persp is not None:
             mapped = cv2.perspectiveTransform(pts.reshape(-1, 1, 2).astype(np.float32), persp["H"])
@@ -7461,37 +7998,48 @@ class Run1App:
         bg_used = False
         if bg is not None:
             try:
-                if c.get("perspective") is not None:
-                    hm = np.asarray(c["perspective"]["H"], dtype=np.float64)
-                else:
-                    bh, bw = bg.shape[:2]
-                    src = np.float32([[0, 0], [bw, 0], [bw, bh], [0, bh]])
-                    hm = cv2.getPerspectiveTransform(src, self._run3_to_metric(src, c).astype(np.float32))
-                mm = np.array([[cv["scale"], 0, -cv["scale"] * cv["xmin"]], [0, cv["scale"], -cv["scale"] * cv["ymin"]], [0, 0, 1]])
-                warped = cv2.warpPerspective(bg, mm @ hm, (W, H))
-                base = cv2.addWeighted(warped, 0.55, base, 0.45, 0)
+                # every canvas pixel -> metres -> where it is in the camera picture (homography^-1, then the lens): one remap
+                xs, ys = np.meshgrid(np.arange(W, dtype=np.float64), np.arange(H, dtype=np.float64))
+                metres = np.stack([xs.ravel() / cv["scale"] + cv["xmin"], ys.ravel() / cv["scale"] + cv["ymin"]], axis=1)
+                campx = self._run3_from_metric(metres, c).reshape(H, W, 2).astype(np.float32)
+                warped = cv2.remap(bg, campx[..., 0], campx[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(38, 38, 38))
+                roi = np.zeros((H, W), np.uint8)                   # the study area stays bright; the stretched far field fades out
+                for zname, pts in zone_m:
+                    cv2.fillPoly(roi, [np.round(topview_px(cv, pts)).astype(np.int32).reshape(-1, 1, 2)], 255)
+                for q in topview_px(cv, np.asarray(all_pts, dtype=float)[::5]):
+                    cv2.circle(roi, (int(round(q[0])), int(round(q[1]))), 2, 255, -1)
+                grow = max(3, int(2 * 7.0 * cv["scale"])) | 1                  # (a kernel diameter: the study area is grown by 7 m)
+                roi = cv2.dilate(roi, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow)))
+                roi = cv2.GaussianBlur(roi, (0, 0), max(2.0, 2.0 * cv["scale"])).astype(np.float32) / 255.0
+                factor = (0.30 + 0.70 * roi)[..., None]
+                base = (warped.astype(np.float32) * factor + 38.0 * (1.0 - factor)).astype(np.uint8)
                 bg_used = True
             except Exception:
-                log.exception("Topview background could not be warped; using a plain grid")
+                log.exception("Topview background could not be built; using a plain grid")
         step = 5.0 if max(W, H) / cv["scale"] <= 80 else 10.0
+        grid = base.copy()                                         # the metre grid is faint, so the road still looks like a map
+        labels = []
         x = math.ceil(cv["xmin"] / step) * step
         while (x - cv["xmin"]) * cv["scale"] < W:
             px = int(round((x - cv["xmin"]) * cv["scale"]))
-            cv2.line(base, (px, 0), (px, H - 1), (90, 90, 90), 1)
-            cv2.putText(base, f"{x:g}", (px + 2, H - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (170, 170, 170), 1, cv2.LINE_AA)
+            cv2.line(grid, (px, 0), (px, H - 1), (255, 255, 255), 1)
+            labels.append((f"{x:g}", (px + 2, H - 4)))
             x += step
         y = math.ceil(cv["ymin"] / step) * step
         while (y - cv["ymin"]) * cv["scale"] < H:
             py = int(round((y - cv["ymin"]) * cv["scale"]))
-            cv2.line(base, (0, py), (W - 1, py), (90, 90, 90), 1)
-            cv2.putText(base, f"{y:g}", (2, py - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (170, 170, 170), 1, cv2.LINE_AA)
+            cv2.line(grid, (0, py), (W - 1, py), (255, 255, 255), 1)
+            labels.append((f"{y:g}", (2, py - 3)))
             y += step
+        base = cv2.addWeighted(grid, 0.22, base, 0.78, 0)
+        for text_, org_ in labels:
+            cv2.putText(base, text_, org_, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (235, 235, 235), 1, cv2.LINE_AA)
         for zname, pts in zone_m:
             q = np.round(topview_px(cv, pts)).astype(np.int32).reshape(-1, 1, 2)
             cv2.polylines(base, [q], True, (120, 220, 120), 1, cv2.LINE_AA)
             cx, cy = q.reshape(-1, 2).mean(axis=0)
             cv2.putText(base, zname.replace("Zone ", "Z"), (int(cx) - 8, int(cy) + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (120, 220, 120), 1, cv2.LINE_AA)
-        cv2.putText(base, f"metres (x right, y down)  {cv['scale']:.1f} px/m  " + ("road photo + points" if bg_used else "grid + points"),
+        cv2.putText(base, f"metres (x right, y down)  {cv['scale']:.1f} px/m  " + ("empty road (median of frames), lens corrected, laid flat + points" if bg_used else "grid + points"),
                     (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
         frames = sorted(per_frame)
         times = sorted({per_frame[f][0][2] for f in frames})
@@ -7510,26 +8058,46 @@ class Run1App:
             for fr in frames:
                 img = base.copy()
                 now = per_frame[fr][0][2]
+                drawn = []
                 for tid, cls, t, m, h in per_frame[fr]:
                     pt = topview_px(cv, [m])[0]
                     trails[tid].append((t, pt))
                     while trails[tid] and trails[tid][0][0] < t - trail_s:
                         trails[tid].popleft()
                     col = TOPVIEW_CLASS_COLORS.get(cls, TOPVIEW_DEFAULT_COLOR)
-                    if len(trails[tid]) > 1:
-                        cv2.polylines(img, [np.round(np.array([q for _, q in trails[tid]])).astype(np.int32).reshape(-1, 1, 2)],
-                                      False, col, 1, cv2.LINE_AA)
                     ln = lengths.get(cls) or 4.5
                     wd = widths.get(cls) or 1.8
                     box = np.round(topview_px(cv, oriented_rect(m, h, ln, wd))).astype(np.int32).reshape(-1, 1, 2)
+                    nose = topview_px(cv, [np.asarray(m, dtype=float) + np.asarray(h if h else (1.0, 0.0), dtype=float) * (ln * 0.5)])[0]
+                    drawn.append((tid, col, box, pt, nose))
+                fill = img.copy()                                     # vehicles as translucent footprints, like cars on a map
+                for tid, col, box, pt, nose in drawn:
+                    cv2.fillPoly(fill, [box], col)
+                img = cv2.addWeighted(fill, 0.35, img, 0.65, 0)
+                for tid, col, box, pt, nose in drawn:
+                    if len(trails[tid]) > 1:
+                        cv2.polylines(img, [np.round(np.array([q for _, q in trails[tid]])).astype(np.int32).reshape(-1, 1, 2)],
+                                      False, col, 1, cv2.LINE_AA)
                     cv2.polylines(img, [box], True, col, 2, cv2.LINE_AA)
+                    cv2.line(img, (int(round(pt[0])), int(round(pt[1]))), (int(round(nose[0])), int(round(nose[1]))), (255, 255, 255), 1, cv2.LINE_AA)
                     cv2.circle(img, (int(round(pt[0])), int(round(pt[1]))), 2, (255, 255, 255), -1)
-                    cv2.putText(img, str(tid), (int(pt[0]) + 5, int(pt[1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
+                    cv2.putText(img, str(tid), (int(pt[0]) + 5, int(pt[1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
                 cv2.putText(img, f"t = {now:.2f} s   frame {fr}", (6, H - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
                 writer.write(img)
         finally:
             writer.release()
         return out_path
+
+    def _run3_from_metric(self, pts_m, c):
+        """Road-plane metres -> camera pixels (the inverse of _run3_to_metric: homography^-1, then the lens bends it again)."""
+        m = np.asarray(pts_m, dtype=np.float64).reshape(-1, 2)
+        persp = c["perspective"]
+        if persp is not None:
+            p = cv2.perspectiveTransform(m.reshape(-1, 1, 2), np.linalg.inv(np.asarray(persp["H"], dtype=np.float64))).reshape(-1, 2)
+        else:
+            th = math.radians(c["axis_deg"])
+            p = (m[:, 0:1] * np.array([math.cos(th), math.sin(th)]) + m[:, 1:2] * np.array([-math.sin(th), math.cos(th)])) * c["ppm"]
+        return lens_distort(p, c["lens_size"], c["lens"]) if c.get("lens") is not None else p
 
     def _run3_remove_duplicate_tracks(self, tracks):
         """Remove the frames of a track that duplicates another track (same vehicle, two IDs).
@@ -7590,12 +8158,12 @@ class Run1App:
         info = {}
         for z, cal in (c.get("zone_calibrations") or {}).items():
             base_corners = self._run3_to_metric(cal["points"], c)
-            tr = zone_metric_transform(cal["points"], cal["lengths"], base_corners)
+            tr = zone_metric_transform(self._run3_undistort(cal["points"], c), cal["lengths"], base_corners)
             info[f"Zone {z}"] = {"alignment_rms_m": round(tr["rms"], 3), "length_m": tr["length_m"], "width_m": tr["width_m"]}
             for src, dst in (("_point", "_m"), ("_center", "_mc")):
                 idx = [i for i, r in enumerate(rows_all) if r.get("_zone_num") == z and r.get(src) is not None]
                 if idx:
-                    mapped = zone_metric_points(tr, [rows_all[i][src] for i in idx])
+                    mapped = zone_metric_points(tr, self._run3_undistort([rows_all[i][src] for i in idx], c))
                     for j, i in enumerate(idx):
                         rows_all[i][dst] = (float(mapped[j, 0]), float(mapped[j, 1]))
         self._run3_zone_cal_info = info
