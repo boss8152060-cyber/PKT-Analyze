@@ -224,6 +224,67 @@ check("a poor calibration asks before saving (and 'no' keeps the dialog)", dlg3.
 m.messagebox.askyesno = orig_ask
 dlg3.close()
 
+# ---- adjust the zones on the map (drag corners), then they come back as camera-picture zones and a new zone file
+zone_src = os.path.join(tmp, "zones_src.json")
+cam_zone = [(300, 200), (900, 200), (900, 500), (300, 500)]
+with open(zone_src, "w", encoding="utf-8") as f:
+    json.dump({"video_path": video_path, "frame_width": 1280, "frame_height": 720,
+               "zones": [{"id": "z3", "name": "Zone 3", "points": cam_zone, "points_norm": [], "color_bgr": [0, 200, 0]}],
+               "lines": {}}, f)
+app.zone_line_config_var.set(zone_src)
+app._load_pkstudio_json(zone_src)
+dlg4 = app.open_reference_map()
+dlg4.reset()
+dlg4.set_scale_from_points((100, 100), (300, 100), 10.0)
+for c_, p_ in zip(cam_pts, map_pts):
+    dlg4.add_camera_point(*c_)
+    dlg4.add_map_point(*p_)
+dlg4.zone_edit_var.set(True)
+check("zone edit starts when the calibration is ready", dlg4.toggle_zone_edit() and dlg4.zone_map is not None and len(dlg4.zone_map["Zone 3"]) == 4)
+check("not adjusted yet: nothing to save", dlg4.zones_in_camera() is None)
+orig_map = [list(q) for q in dlg4.zone_map["Zone 3"]]
+want_cam0 = None
+new_map0 = [orig_map[0][0] + 40.0, orig_map[0][1] + 25.0]
+check("move a corner", dlg4.move_zone_vertex("Zone 3", 0, *new_map0))
+zc = dlg4.zones_in_camera()
+want = ph(h_map_to_cam, [new_map0])[0]
+check("the moved corner comes back in camera pixels (exact calibration)", zc is not None and abs(zc["Zone 3"][0][0] - want[0]) < 1.5 and abs(zc["Zone 3"][0][1] - want[1]) < 1.5,
+      "" if zc is None else f"{zc['Zone 3'][0]} vs {want.round(1)}")
+check("the other corners stay where they were", zc is not None and all(abs(a_ - b_) <= 1.5 for a_, b_ in zip(zc["Zone 3"][1], cam_zone[1])))
+check("delete a corner (4 -> 3) and not below 3", dlg4.delete_zone_vertex("Zone 3", 3) and len(dlg4.zone_map["Zone 3"]) == 3
+      and dlg4.delete_zone_vertex("Zone 3", 0) is False)
+check("insert a corner after corner 0", dlg4.insert_zone_vertex("Zone 3", 0, 700.0, 300.0) and len(dlg4.zone_map["Zone 3"]) == 4)
+# the mouse: drag a corner square on the map canvas
+root.update()
+kk, oxx, oyy = dlg4.view["map"]
+vx, vy = dlg4.zone_map["Zone 3"][1]
+cvm4 = dlg4.canvases["map"]
+sx, sy = int(vx * kk + oxx), int(vy * kk + oyy)
+before = list(dlg4.zone_map["Zone 3"][1])
+cvm4.event_generate("<ButtonPress-1>", x=sx, y=sy)
+cvm4.event_generate("<B1-Motion>", x=sx + 30, y=sy + 18)
+cvm4.event_generate("<ButtonRelease-1>", x=sx + 30, y=sy + 18)
+root.update()
+after = dlg4.zone_map["Zone 3"][1]
+check("dragging a corner square moves that corner (and puts no point pair)", abs(after[0] - before[0] - 30 / kk) < 2 and abs(after[1] - before[1] - 18 / kk) < 2
+      and dlg4.pending_cam is None, f"{before} -> {after}")
+dlg4.revert_zones()
+check("revert gives the original zones back", dlg4.zone_map is None and dlg4.zones_in_camera() is None)
+dlg4.zone_edit_var.set(True)
+dlg4.toggle_zone_edit()
+dlg4.move_zone_vertex("Zone 3", 2, dlg4.zone_map["Zone 3"][2][0] + 30, dlg4.zone_map["Zone 3"][2][1] - 20)
+shown = []
+m.messagebox.showinfo = lambda *a, **k: shown.append(a)
+check("save with adjusted zones", dlg4.save() is True)
+new_zone_file = os.path.splitext(zone_src)[0] + "_mapfit.json"
+check("a new zone file is written, the original is not touched",
+      os.path.isfile(new_zone_file) and json.load(open(zone_src))["zones"][0]["points"] == [list(p) for p in cam_zone])
+saved_pts = json.load(open(new_zone_file))["zones"][0]["points"]
+check("the new file holds the adjusted zone and is the zone file now", app.zone_line_config_var.get() == new_zone_file and saved_pts[2] != list(cam_zone[2]),
+      str(saved_pts))
+check("the program uses the adjusted zone", len(app.zones["Zone 3"]) == 4 and [int(round(v)) for v in app.zones["Zone 3"][2]] == saved_pts[2])
+check("the user is told a re-run is needed", len(shown) == 1)
+
 # ---- the map can also be a VIDEO (a drone clip): one chosen frame is the map
 map_video = os.path.join(tmp, "drone_ไทย.mp4")                       # (non-ASCII name on purpose)
 vw = cv2.VideoWriter(map_video, cv2.VideoWriter_fourcc(*"mp4v"), 10, (1200, 800))
