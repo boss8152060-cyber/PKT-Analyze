@@ -1743,9 +1743,6 @@ class ReferenceMapDialog:
         self.photos = {}
         self.last_render = {}
         self._cal = None                                 # the current calibration (set by refresh)
-        self.zone_map = None                             # zone name -> [[map_x, map_y], ...] while zones are adjusted on the map
-        self.zone_dirty = False
-        self._vdrag = None
         self._pan = None
         self._slider_busy = False
         self._seek_after = {}
@@ -1765,7 +1762,6 @@ class ReferenceMapDialog:
         self.top.dialog = self                       # (lets the tests reach the object)
         self.msg_var = tk.StringVar(value="")
         self.show_zones_var = tk.BooleanVar(value=True)
-        self.zone_edit_var = tk.BooleanVar(value=False)
         self.del_var = tk.StringVar(value="")
         self.scale_var = tk.StringVar(value=f"{self.scale:.4f}" if self.scale else "")
         self.frame_text = {"cam": tk.StringVar(value=""), "map": tk.StringVar(value="")}
@@ -1806,9 +1802,6 @@ class ReferenceMapDialog:
         de.grid(row=3, column=3, sticky="w", pady=(4, 0))
         de.bind("<Return>", lambda e: self.delete_pair(self.del_var.get()))
         ttk.Button(bar, text="ลบ", width=5, command=lambda: self.delete_pair(self.del_var.get())).grid(row=3, column=4, sticky="w", pady=(4, 0))
-        ttk.Checkbutton(bar, text="แก้โซนบนแผนที่ (ลากจุดมุมโซน · Shift+คลิกจุด = ลบ · Ctrl+คลิกบนเส้น = เพิ่มจุด)", variable=self.zone_edit_var,
-                        command=self.toggle_zone_edit).grid(row=4, column=0, columnspan=6, sticky="w", pady=(4, 0))
-        ttk.Button(bar, text="คืนโซนเดิม", command=self.revert_zones).grid(row=4, column=6, sticky="w", pady=(4, 0))
         ttk.Button(bar, text="บันทึก", command=self.save).grid(row=2, column=10, padx=2)
         ttk.Button(bar, text="ยกเลิก", command=self.close).grid(row=2, column=11, padx=2)
         bar.columnconfigure(9, weight=1)
@@ -1828,7 +1821,7 @@ class ReferenceMapDialog:
             cv_ = tk.Canvas(body, width=self.VIEW_W, height=self.VIEW_H, bg="#202020", highlightthickness=0)
             cv_.grid(row=1, column=col, sticky="nsew", padx=pad)
             cv_.bind("<Configure>", lambda e, n=name: self._on_configure(n))
-            cv_.bind("<ButtonPress-1>", lambda e, n=name: self._press(n, e.x, e.y, False, e.state))
+            cv_.bind("<ButtonPress-1>", lambda e, n=name: self._press(n, e.x, e.y, False))
             cv_.bind("<B1-Motion>", lambda e, n=name: self._drag(n, e.x, e.y))
             cv_.bind("<ButtonRelease-1>", lambda e, n=name: self._release(n, e.x, e.y))
             for b in (2, 3):
@@ -2077,30 +2070,10 @@ class ReferenceMapDialog:
         self._render(name)
 
     # ----- mouse -----
-    def _press(self, name, ex, ey, always_pan, state=0):
-        if name == "map" and not always_pan and self.zone_map is not None and self.zone_edit_var.get():
-            hit = self._hit_zone_vertex(ex, ey)
-            if hit is not None:
-                if state & 0x1:                                      # Shift+click: delete the vertex
-                    self.delete_zone_vertex(*hit)
-                else:
-                    self._vdrag = hit
-                return
-            if state & 0x4:                                          # Ctrl+click on an edge: add a vertex
-                edge = self._hit_zone_edge(ex, ey)
-                if edge is not None:
-                    k, ox, oy = self.view["map"]
-                    self.insert_zone_vertex(edge[0], edge[1], (ex - ox) / k, (ey - oy) / k)
-                    return
+    def _press(self, name, ex, ey, always_pan):
         self._pan = {"name": name, "x": ex, "y": ey, "x0": ex, "y0": ey, "moved": bool(always_pan), "always": bool(always_pan)}
 
     def _drag(self, name, ex, ey):
-        if self._vdrag is not None and name == "map":
-            v = self.view.get("map")
-            if v is not None:
-                k, ox, oy = v
-                self.move_zone_vertex(self._vdrag[0], self._vdrag[1], (ex - ox) / k, (ey - oy) / k, refresh=False)
-            return
         p = self._pan
         if p is None or p["name"] != name:
             return
@@ -2111,10 +2084,6 @@ class ReferenceMapDialog:
             p["x"], p["y"] = ex, ey
 
     def _release(self, name, ex, ey):
-        if self._vdrag is not None:
-            self._vdrag = None
-            self.refresh()
-            return
         p, self._pan = self._pan, None
         if p is not None and p["moved"]:
             return                                       # it was a drag, not a click
@@ -2164,18 +2133,18 @@ class ReferenceMapDialog:
             if ex_ > sx0 and ey_ > sy0:
                 out[dy + sy0:dy + ey_, dx + sx0:dx + ex_] = res[sy0:ey_, sx0:ex_]
         cal = self._cal
-        editing = self.zone_map is not None and cal is not None
-        if self.show_zones_var.get() or editing:             # the zones through the current calibration: do they sit on the road?
-            polys = self._zone_polys_for(name)
-            for zname, q in polys:
+        if self.show_zones_var.get():                        # the zones through the current calibration: do they sit on the road?
+            for zname, poly in self._zone_polys():
+                if name == "cam":
+                    q = np.asarray(poly, dtype=float)
+                elif cal is not None:
+                    q = apply_homography(cal["H"], np.asarray(poly, dtype=float)) * self.scale
+                else:
+                    continue
                 qc = np.round(q * k + np.array([ox, oy])).astype(np.int32).reshape(-1, 1, 2)
-                col = (0, 215, 255) if editing and self.zone_dirty and name == "map" else (80, 220, 80)
-                cv2.polylines(out, [qc], True, col, 2 if editing and name == "map" else 1, cv2.LINE_AA)
+                cv2.polylines(out, [qc], True, (80, 220, 80), 1, cv2.LINE_AA)
                 cx_, cy_ = qc.reshape(-1, 2).mean(axis=0)
-                cv2.putText(out, zname.replace("Zone ", "Z"), (int(cx_) - 8, int(cy_) + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 1, cv2.LINE_AA)
-                if editing and name == "map" and self.zone_edit_var.get():
-                    for vx, vy in qc.reshape(-1, 2):
-                        cv2.rectangle(out, (int(vx) - 5, int(vy) - 5), (int(vx) + 5, int(vy) + 5), (255, 255, 255), 1)
+                cv2.putText(out, zname.replace("Zone ", "Z"), (int(cx_) - 8, int(cy_) + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 220, 80), 1, cv2.LINE_AA)
         pts = []
         for n, p in enumerate(self.pairs, 1):
             err = cal["errors_m"][n - 1] if cal is not None and n - 1 < len(cal["errors_m"]) else None
@@ -2201,121 +2170,6 @@ class ReferenceMapDialog:
         photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
         self.photos[name] = photo
         cvs.create_image(0, 0, anchor="nw", image=photo)
-
-    def _zone_polys_for(self, name):
-        """[(zone name, polygon in the canvas picture's pixels)] for the "cam" or "map" picture."""
-        cal = self._cal
-        out = []
-        if self.zone_map is not None and cal is not None:
-            inv = np.linalg.inv(cal["H"])
-            for zname, pts in self.zone_map.items():
-                arr = np.asarray(pts, dtype=float)
-                out.append((zname, arr if name == "map" else apply_homography(inv, arr / self.scale)))
-            return out
-        for zname, poly in self._zone_polys():
-            arr = np.asarray(poly, dtype=float)
-            if name == "cam":
-                out.append((zname, arr))
-            elif cal is not None:
-                out.append((zname, apply_homography(cal["H"], arr) * self.scale))
-        return out
-
-    # ----- adjusting the zones on the map -----
-    def toggle_zone_edit(self):
-        if self.zone_edit_var.get():
-            if self._cal is None:
-                self.zone_edit_var.set(False)
-                self.msg_var.set("ต้องมีคู่จุดครบ 4 คู่และมาตราส่วนก่อน จึงจะแก้โซนบนแผนที่ได้")
-                return False
-            if self.zone_map is None:
-                self.zone_map = {z: [list(map(float, q)) for q in apply_homography(self._cal["H"], np.asarray(poly, dtype=float)) * self.scale]
-                                 for z, poly in self._zone_polys()}
-                self.zone_dirty = False
-            if not self.zone_map:
-                self.zone_edit_var.set(False)
-                self.zone_map = None
-                self.msg_var.set("ยังไม่ได้โหลดไฟล์โซน (แท็บ ② ทางแยก)")
-                return False
-            msg = "ลากสี่เหลี่ยมเล็กที่มุมโซนบนแผนที่ให้ตรงถนน แล้วกดบันทึก — โซนจะถูกแปลงกลับเป็นพิกัดบนภาพกล้อง และเขียนเป็นไฟล์ *_mapfit.json"
-            if self._cal["rms_m"] > 0.30:
-                msg += f"\nระวัง: ความคลาดเคลื่อนของจุดคู่ยังสูง ({self._cal['rms_m'] * 100:.0f} ซม.) โซนที่แก้จะคลาดเคลื่อนบนภาพกล้องตาม — แก้จุดคู่ก่อนดีกว่า"
-            self.msg_var.set(msg)
-        self.refresh()
-        return True
-
-    def revert_zones(self):
-        self.zone_map, self.zone_dirty, self._vdrag = None, False, None
-        self.zone_edit_var.set(False)
-        self.refresh()
-
-    def _hit_zone_vertex(self, ex, ey, radius=10):
-        v = self.view.get("map")
-        if v is None or self.zone_map is None:
-            return None
-        k, ox, oy = v
-        best = None
-        for zname, pts in self.zone_map.items():
-            for i, (x, y) in enumerate(pts):
-                d = math.hypot(x * k + ox - ex, y * k + oy - ey)
-                if d <= radius and (best is None or d < best[0]):
-                    best = (d, zname, i)
-        return None if best is None else (best[1], best[2])
-
-    def _hit_zone_edge(self, ex, ey, radius=8):
-        v = self.view.get("map")
-        if v is None or self.zone_map is None:
-            return None
-        k, ox, oy = v
-        best = None
-        for zname, pts in self.zone_map.items():
-            n = len(pts)
-            for i in range(n):
-                a = np.array([pts[i][0] * k + ox, pts[i][1] * k + oy])
-                b = np.array([pts[(i + 1) % n][0] * k + ox, pts[(i + 1) % n][1] * k + oy])
-                ab = b - a
-                t = 0.0 if not ab.any() else max(0.0, min(1.0, float(np.dot(np.array([ex, ey]) - a, ab) / np.dot(ab, ab))))
-                d = float(np.hypot(*(a + t * ab - np.array([ex, ey]))))
-                if d <= radius and (best is None or d < best[0]):
-                    best = (d, zname, i)
-        return None if best is None else (best[1], best[2])
-
-    def move_zone_vertex(self, zname, idx, mx, my, refresh=True):
-        if self.zone_map is None or zname not in self.zone_map or not (0 <= idx < len(self.zone_map[zname])):
-            return False
-        h, w = self.map_img.shape[:2]
-        self.zone_map[zname][idx] = [float(min(max(mx, 0), w - 1)), float(min(max(my, 0), h - 1))]
-        self.zone_dirty = True
-        if refresh:
-            self.refresh()
-        else:
-            self._render("map")
-            self._render("cam")
-        return True
-
-    def delete_zone_vertex(self, zname, idx):
-        if self.zone_map is None or len(self.zone_map.get(zname, [])) <= 3:
-            return False
-        self.zone_map[zname].pop(idx)
-        self.zone_dirty = True
-        self.refresh()
-        return True
-
-    def insert_zone_vertex(self, zname, after_idx, mx, my):
-        """A new corner after corner `after_idx` of the zone (on the map)."""
-        if self.zone_map is None or zname not in self.zone_map:
-            return False
-        self.zone_map[zname].insert(after_idx + 1, [float(mx), float(my)])
-        self.zone_dirty = True
-        self.refresh()
-        return True
-
-    def zones_in_camera(self):
-        """The adjusted zones as camera-picture pixels {zone name: [(x, y), ...]} (None when not adjusted)."""
-        if self.zone_map is None or not self.zone_dirty or self._cal is None:
-            return None
-        inv = np.linalg.inv(self._cal["H"])
-        return {z: [(int(round(x)), int(round(y))) for x, y in apply_homography(inv, np.asarray(pts, dtype=float) / self.scale)]
-                for z, pts in self.zone_map.items()}
 
     def _zone_polys(self):
         try:
@@ -2413,8 +2267,7 @@ class ReferenceMapDialog:
             return None
 
     def result(self):
-        return {"map_path": self.map_path, "map_frame": self.map_frame, "scale": self.scale, "pairs": [list(p) for p in self.pairs],
-                "zones": self.zones_in_camera()}
+        return {"map_path": self.map_path, "map_frame": self.map_frame, "scale": self.scale, "pairs": [list(p) for p in self.pairs]}
 
     def refresh(self):
         cal = self._cal = self.calibration()
@@ -5800,54 +5653,6 @@ class Run1App:
                 return None
             raise
 
-    def _apply_map_adjusted_zones(self, zones_cam):
-        """Zones adjusted on the reference map, as camera-picture pixels. All current zones are written to a new
-        file `<zone file>_mapfit.json` (the original is not touched) in the video's real pixel size, and loaded."""
-        src = self.zone_line_config_var.get().strip()
-        data = {"zones": [], "lines": {}}
-        if src and os.path.isfile(src):
-            with open(src, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        video = str(self.video_var.get() or "").strip()
-        w, h = self._actual_video_size()
-        if not (w and h):
-            w, h = data.get("frame_width"), data.get("frame_height")
-        meta = {}
-        for item in data.get("zones", []) if isinstance(data.get("zones"), list) else []:
-            n = self._normalize_zone_item(item)
-            if n:
-                meta[n["name"]] = item
-        current = {z: [tuple(map(float, pt)) for pt in pts] for z, pts in self.zones.items() if len(pts) >= 3}
-        current.update({z: [tuple(map(float, pt)) for pt in pts] for z, pts in zones_cam.items()})
-        out_zones = []
-        for name in ZONE_NAMES:
-            pts = current.get(name)
-            if not pts:
-                continue
-            item = dict(meta.get(name, {"id": name.replace("Zone ", "zone_"), "name": name, "color_bgr": [0, 200, 0],
-                                        "show_label": True, "reference_frame_index": 0}))
-            area = 0.5 * abs(sum(x1 * y2 - x2 * y1 for (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1])))
-            item.update({"name": name, "points": [[int(round(x)), int(round(y))] for x, y in pts],
-                         "points_norm": [[round(x / w, 6), round(y / h, 6)] for x, y in pts] if w and h else [],
-                         "area_px": float(area)})
-            out_zones.append(item)
-        data["zones"] = out_zones
-        data["frame_width"], data["frame_height"] = int(w), int(h)
-        if video:
-            data["video_path"] = video
-        base, ext = os.path.splitext(src if src else os.path.join(os.path.dirname(video) or ".", "zones.json"))
-        base = base[:-7] if base.endswith("_mapfit") else base
-        path = base + "_mapfit.json"
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        self.zone_line_config_var.set(path)
-        self._load_pkstudio_json(path)
-        self.refresh_measurement_status()
-        messagebox.showinfo("แก้โซนบนแผนที่แล้ว",
-                            "บันทึกโซนที่แก้เป็นไฟล์ใหม่ (ไฟล์เดิมไม่ถูกแตะ) และโหลดมาใช้แล้ว:\n\n" + path +
-                            "\n\nต้องรันตรวจจับใหม่ โซนใหม่จึงมีผลกับ Movement และตัวชี้วัด")
-        return path
-
     def refresh_refmap_status(self):
         if not bool(self.run3_refmap_enabled_var.get()):
             self.run3_refmap_status_var.set("")
@@ -5873,8 +5678,6 @@ class Run1App:
             self.run3_refmap_pairs_var.set(json.dumps([[round(v, 2) for v in p] for p in res["pairs"]]))
             self.run3_refmap_enabled_var.set(True)
             self.refresh_refmap_status()
-            if res.get("zones"):
-                self._apply_map_adjusted_zones(res["zones"])
 
         return ReferenceMapDialog(self, video_path, self._run3_refmap_state(), on_save)
 
