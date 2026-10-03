@@ -254,6 +254,12 @@ def frame_of(path, idx=14):
 
 
 diff = np.abs(frame_of(vid_bb) - frame_of(vid_a)).sum(axis=2)
+off = {f"show_label_{n}": False for n in ("id", "class", "conf", "zone", "speed")}
+vid_off = app._run3_write_topview_video(tr_bb, dict(base_cfg, lens=LENS, lens_size=(CW, CH)), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video, display=dict(off, draw_trail=False))
+vid_id = app._run3_write_topview_video(tr_bb, dict(base_cfg, lens=LENS, lens_size=(CW, CH)), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video, display=dict(off, show_label_id=True, show_prefix_id=True, draw_trail=True, trail_length=10))
+d_lab = np.abs(frame_of(vid_id) - frame_of(vid_off)).sum(axis=2)
+check("the labels and the trajectory of the Topview follow the display settings", int((d_lab > 60).sum()) > 100, f"{int((d_lab > 60).sum())} pixels differ")
+check("with every label off nothing but the point is drawn on the vehicle (no box, no text)", int((np.abs(frame_of(vid_off) - frame_of(vid_bb)).sum(axis=2) > 60).sum()) > 0)
 check("the Topview has the video's shape", abs(Wf / Hf - CW / CH) < 0.02, f"{Wf}x{Hf}")
 check("the vehicle picture is pasted at its footprint (and only there)", int((diff > 60).sum()) > 500 and int((np.hypot(xs_ - car[0], ys_ - car[1]) > 250)[diff > 60].sum()) == 0, f"{int((diff > 60).sum())} changed pixels")
 vid_b = app._run3_write_topview_video(tr, dict(base_cfg, lens=None, lens_size=None), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video)
