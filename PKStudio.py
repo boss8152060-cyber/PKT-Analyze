@@ -466,6 +466,7 @@ RUN3_DEFAULTS = {
     "gap_hold_min_duration_s": "0.30",      # ... for at least this long (s)
     "lateral_axis_angle_deg": "0.00",       # implementation starter value; verify per video
     "lc_heading_window_s": "0.50",          # centred window (s) used to get the heading of vehicle A
+    "topview_video": True,                  # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points)
     "lc_along_limit_m": "0",                # side-by-side window along the heading (m); 0 = auto (L_A + L_B) / 2
     "lc_max_lateral_m": "3.50",             # pairs further apart sideways than this (m) are unrelated; 0 = no limit
     "pet_interaction_distance_m": "3.00",   # implementation starter value
@@ -1210,6 +1211,44 @@ def zone_metric_transform(src_pts, lengths, base_pts):
 
 def zone_metric_points(transform, pts):
     return apply_homography(transform["H"], pts) @ transform["Q"] + transform["t"]
+
+# ---------------- Topview (road-plane) drawing helpers ----------------
+TOPVIEW_CLASS_COLORS = {            # BGR
+    "Motorcycle": (0, 165, 255), "Car": (255, 160, 40), "Pickup": (200, 120, 255), "Bus": (60, 60, 255),
+    "Truck": (60, 200, 60), "Van": (200, 200, 60), "Sidecar": (0, 220, 220),
+}
+TOPVIEW_DEFAULT_COLOR = (230, 230, 230)
+
+
+def topview_canvas(points_m, max_px=1280, margin_m=3.0, min_span_m=10.0):
+    """Canvas for a Topview picture of metric points (N x 2): px/m, the metric origin of the top-left pixel and the
+    picture size. Outliers are ignored (0.5 / 99.5 percentiles); the picture size is made even."""
+    p = np.asarray(points_m, dtype=float).reshape(-1, 2)
+    p = p[np.all(np.isfinite(p), axis=1)]
+    if len(p) == 0:
+        p = np.zeros((1, 2))
+    lo = np.percentile(p, 0.5, axis=0) - margin_m
+    hi = np.percentile(p, 99.5, axis=0) + margin_m
+    span = np.maximum(hi - lo, min_span_m)
+    scale = float(max_px) / float(span.max())
+    w, h = int(math.ceil(span[0] * scale)), int(math.ceil(span[1] * scale))
+    return {"scale": scale, "xmin": float(lo[0]), "ymin": float(lo[1]), "w": w + (w % 2), "h": h + (h % 2)}
+
+
+def topview_px(canvas, pts_m):
+    """Metric points (N x 2) -> canvas pixels (N x 2, float)."""
+    p = np.asarray(pts_m, dtype=float).reshape(-1, 2)
+    return (p - np.array([canvas["xmin"], canvas["ymin"]])) * canvas["scale"]
+
+
+def oriented_rect(center, heading, length, width):
+    """Corners (4 x 2) of a length x width rectangle centred on `center`, its long side along `heading`
+    (unit vector; None = along +x)."""
+    hx, hy = heading if heading else (1.0, 0.0)
+    ux, uy = np.array([hx, hy]), np.array([-hy, hx])
+    c = np.asarray(center, dtype=float)
+    hl, hw = length / 2.0, width / 2.0
+    return np.array([c + hl * ux + hw * uy, c + hl * ux - hw * uy, c - hl * ux - hw * uy, c - hl * ux + hw * uy])
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -2106,6 +2145,7 @@ class Run1App:
         self.run3_hold_min_duration_var = tk.StringVar(value=RUN3_DEFAULTS["gap_hold_min_duration_s"])
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
         self.run3_lc_heading_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_heading_window_s"])
+        self.run3_topview_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["topview_video"])
         self.run3_lc_along_limit_var = tk.StringVar(value=RUN3_DEFAULTS["lc_along_limit_m"])
         self.run3_lc_max_lateral_var = tk.StringVar(value=RUN3_DEFAULTS["lc_max_lateral_m"])
         self.run3_lc_motorcycle_pairs_only_var = tk.BooleanVar(value=RUN3_DEFAULTS["lc_motorcycle_pairs_only"])
@@ -2430,6 +2470,9 @@ class Run1App:
         r += 1
         ttk.Label(cal, text="Road direction angle (deg) — ใช้เมื่อไม่มี Perspective").grid(row=r, column=0, columnspan=2, sticky="w", pady=4)
         ttk.Entry(cal, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=r, column=2, sticky="w", pady=4)
+        r += 1
+        ttk.Checkbutton(cal, text="สร้างวิดีโอ Topview (Tracking_Topview.mp4)", variable=self.run3_topview_video_var).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(cal, text="วาดจากพิกัดเมตรเดียวกับที่ตัวชี้วัดใช้ (ไฟล์ Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
         r += 1
         ttk.Checkbutton(cal, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=r, column=0, sticky="w", pady=(6, 4))
         ttk.Label(cal, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง (P1→P2 ต้องขนานแนวถนน)", foreground=gray).grid(row=r, column=1, columnspan=2, sticky="w", pady=(6, 4))
@@ -3956,6 +3999,7 @@ class Run1App:
                 "gap_hold_min_duration_s": self.run3_hold_min_duration_var.get(),
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
                 "lc_heading_window_s": self.run3_lc_heading_window_var.get(),
+                "topview_video": self.run3_topview_video_var.get(),
                 "lc_along_limit_m": self.run3_lc_along_limit_var.get(),
                 "lc_max_lateral_m": self.run3_lc_max_lateral_var.get(),
                 "lc_motorcycle_pairs_only": self.run3_lc_motorcycle_pairs_only_var.get(),
@@ -4131,6 +4175,7 @@ class Run1App:
                 ("gap_hold_min_duration_s", self.run3_hold_min_duration_var),
                 ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
                 ("lc_heading_window_s", self.run3_lc_heading_window_var),
+                ("topview_video", self.run3_topview_video_var),
                 ("lc_along_limit_m", self.run3_lc_along_limit_var),
                 ("lc_max_lateral_m", self.run3_lc_max_lateral_var),
                 ("lc_motorcycle_pairs_only", self.run3_lc_motorcycle_pairs_only_var),
@@ -7270,6 +7315,7 @@ class Run1App:
             "waiting_threshold": num(self.run3_waiting_speed_threshold_var, GAP_HOLD_SPEED_KMH),
             "hold_min_duration_s": num(self.run3_hold_min_duration_var, GAP_HOLD_MIN_S),
             "lc_heading_window_s": num(self.run3_lc_heading_window_var, 0.5),
+            "topview_video": bool(self.run3_topview_video_var.get()),
             "lc_along_limit_m": max(0.0, num(self.run3_lc_along_limit_var, 0.0) or 0.0),
             "lc_max_lateral_m": max(0.0, num(self.run3_lc_max_lateral_var, 3.5) or 0.0),
             "lc_motorcycle_pairs_only": bool(self.run3_lc_motorcycle_pairs_only_var.get()),
@@ -7330,6 +7376,158 @@ class Run1App:
         road_u = np.array([math.cos(th), math.sin(th)])
         lat_u = np.array([-math.sin(th), math.cos(th)])
         return np.stack([m @ road_u, m @ lat_u], axis=1)
+
+    TOPVIEW_FIELDS = ["frame", "timestamp", "track_id", "class_name", "zone", "x_m", "y_m", "cx_m", "cy_m", "calibration_mode"]
+
+    def _run3_topview_rows(self, tracks, c):
+        """Every observed point in road-plane metres (the SAME numbers the indicators use):
+        x_m, y_m = the Trajectory Position point (zone / speed point); cx_m, cy_m = the box centre."""
+        mode = self._run3_calibration_mode(c)
+        rows = []
+        for tid, trows in tracks.items():
+            for r in trows:
+                m = r.get("_m")
+                if m is None:
+                    continue
+                mc = r.get("_mc")
+                rows.append({
+                    "frame": r.get("frame", ""), "timestamp": r.get("timestamp", ""), "track_id": tid,
+                    "class_name": r.get("class_name", ""), "zone": r.get("zone", ""),
+                    "x_m": f"{m[0]:.4f}", "y_m": f"{m[1]:.4f}",
+                    "cx_m": f"{mc[0]:.4f}" if mc is not None else "", "cy_m": f"{mc[1]:.4f}" if mc is not None else "",
+                    "calibration_mode": mode,
+                })
+        rows.sort(key=lambda x: (float(x["timestamp"] or 0), str(x["track_id"])))
+        return rows
+
+    def _run3_topview_background(self, video_path, t0, t1, n=15):
+        """Median of n frames spread over [t0, t1] = the road without moving vehicles (None if unreadable)."""
+        if not video_path or not os.path.isfile(video_path):
+            return None
+        cap = cv2.VideoCapture(video_path)
+        try:
+            if not cap.isOpened():
+                return None
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            frames = []
+            for k in range(n):
+                t = t0 + (t1 - t0) * (k + 0.5) / n
+                idx = int(t * fps)
+                if total:
+                    idx = max(0, min(total - 1, idx))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ok, fr = cap.read()
+                if ok:
+                    frames.append(fr)
+            if not frames:
+                return None
+            return np.median(np.stack(frames), axis=0).astype(np.uint8)
+        finally:
+            cap.release()
+
+    def _run3_write_topview_video(self, tracks, c, output_dir, video_path=None, max_px=1280, trail_s=2.0):
+        """Tracking_Topview.mp4: vehicles drawn on the road plane from the metric points (NOT a warped video, so
+        vehicles are never stretched). Background = the road of the video warped by the base calibration (a
+        vehicle-free median frame) when the video file is known, else a plain grid. Zones with their own
+        calibration are placed correctly by the points but the background uses the base calibration only."""
+        per_frame = defaultdict(list)
+        all_pts = []
+        for tid, rows in tracks.items():
+            valid = [r for r in rows if r.get("_m") is not None]
+            if not valid:
+                continue
+            heads = track_headings([r["_timestamp"] for r in valid], [r["_m"] for r in valid], 0.5, 0.5)
+            cls = self._run3_canonical_class(valid[0].get("class_name", ""))
+            for r, h in zip(valid, heads):
+                try:
+                    fr = int(float(r.get("frame", "")))
+                except (TypeError, ValueError):
+                    fr = int(round(r["_timestamp"] * 1000))
+                per_frame[fr].append((tid, cls, r["_timestamp"], r["_m"], h))
+                all_pts.append(r["_m"])
+        if not per_frame:
+            return None
+        zone_m = []
+        for zname, poly in self._zone_polygons():
+            zone_m.append((zname, self._run3_to_metric(np.asarray(poly, dtype=float), c)))
+            all_pts.extend(map(tuple, zone_m[-1][1]))
+        cv = topview_canvas(all_pts, max_px)
+        W, H = cv["w"], cv["h"]
+        # static layer: background, grid, zones
+        base = np.full((H, W, 3), 38, np.uint8)
+        t_all = [it[2] for items in per_frame.values() for it in items]
+        bg = self._run3_topview_background(video_path, min(t_all), max(t_all))
+        bg_used = False
+        if bg is not None:
+            try:
+                if c.get("perspective") is not None:
+                    hm = np.asarray(c["perspective"]["H"], dtype=np.float64)
+                else:
+                    bh, bw = bg.shape[:2]
+                    src = np.float32([[0, 0], [bw, 0], [bw, bh], [0, bh]])
+                    hm = cv2.getPerspectiveTransform(src, self._run3_to_metric(src, c).astype(np.float32))
+                mm = np.array([[cv["scale"], 0, -cv["scale"] * cv["xmin"]], [0, cv["scale"], -cv["scale"] * cv["ymin"]], [0, 0, 1]])
+                warped = cv2.warpPerspective(bg, mm @ hm, (W, H))
+                base = cv2.addWeighted(warped, 0.55, base, 0.45, 0)
+                bg_used = True
+            except Exception:
+                log.exception("Topview background could not be warped; using a plain grid")
+        step = 5.0 if max(W, H) / cv["scale"] <= 80 else 10.0
+        x = math.ceil(cv["xmin"] / step) * step
+        while (x - cv["xmin"]) * cv["scale"] < W:
+            px = int(round((x - cv["xmin"]) * cv["scale"]))
+            cv2.line(base, (px, 0), (px, H - 1), (90, 90, 90), 1)
+            cv2.putText(base, f"{x:g}", (px + 2, H - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (170, 170, 170), 1, cv2.LINE_AA)
+            x += step
+        y = math.ceil(cv["ymin"] / step) * step
+        while (y - cv["ymin"]) * cv["scale"] < H:
+            py = int(round((y - cv["ymin"]) * cv["scale"]))
+            cv2.line(base, (0, py), (W - 1, py), (90, 90, 90), 1)
+            cv2.putText(base, f"{y:g}", (2, py - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (170, 170, 170), 1, cv2.LINE_AA)
+            y += step
+        for zname, pts in zone_m:
+            q = np.round(topview_px(cv, pts)).astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(base, [q], True, (120, 220, 120), 1, cv2.LINE_AA)
+            cx, cy = q.reshape(-1, 2).mean(axis=0)
+            cv2.putText(base, zname.replace("Zone ", "Z"), (int(cx) - 8, int(cy) + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (120, 220, 120), 1, cv2.LINE_AA)
+        cv2.putText(base, f"metres (x right, y down)  {cv['scale']:.1f} px/m  " + ("road photo + points" if bg_used else "grid + points"),
+                    (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+        frames = sorted(per_frame)
+        times = sorted({per_frame[f][0][2] for f in frames})
+        dts = np.diff(times)
+        dts = dts[dts > 0]
+        fps_out = float(min(30.0, 1.0 / float(np.median(dts)))) if len(dts) else 30.0
+        out_path = os.path.join(output_dir, "Tracking_Topview.mp4")
+        writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps_out, (W, H))
+        if not writer.isOpened():
+            raise RuntimeError("Unable to create Tracking_Topview.mp4")
+        lengths, widths = c["lengths"], c["widths"]
+        trails = defaultdict(deque)
+        try:
+            for fr in frames:
+                img = base.copy()
+                now = per_frame[fr][0][2]
+                for tid, cls, t, m, h in per_frame[fr]:
+                    pt = topview_px(cv, [m])[0]
+                    trails[tid].append((t, pt))
+                    while trails[tid] and trails[tid][0][0] < t - trail_s:
+                        trails[tid].popleft()
+                    col = TOPVIEW_CLASS_COLORS.get(cls, TOPVIEW_DEFAULT_COLOR)
+                    if len(trails[tid]) > 1:
+                        cv2.polylines(img, [np.round(np.array([q for _, q in trails[tid]])).astype(np.int32).reshape(-1, 1, 2)],
+                                      False, col, 1, cv2.LINE_AA)
+                    ln = lengths.get(cls) or 4.5
+                    wd = widths.get(cls) or 1.8
+                    box = np.round(topview_px(cv, oriented_rect(m, h, ln, wd))).astype(np.int32).reshape(-1, 1, 2)
+                    cv2.polylines(img, [box], True, col, 2, cv2.LINE_AA)
+                    cv2.circle(img, (int(round(pt[0])), int(round(pt[1]))), 2, (255, 255, 255), -1)
+                    cv2.putText(img, str(tid), (int(pt[0]) + 5, int(pt[1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
+                cv2.putText(img, f"t = {now:.2f} s   frame {fr}", (6, H - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                writer.write(img)
+        finally:
+            writer.release()
+        return out_path
 
     def _run3_remove_duplicate_tracks(self, tracks):
         """Remove the frames of a track that duplicates another track (same vehicle, two IDs).
@@ -8670,6 +8868,21 @@ class Run1App:
                                                f"zones={sorted(c['speed_zones'])}; smoothing_samples={c['speed_smoothing_samples']}; "
                                                f"max_plausible_kmh={c.get('speed_max_kmh', 0)}; above_max_excluded_from_statistics={n_outliers}")
         run_step("speed", "Speed.csv", do_speed)
+
+        # Topview: the metric points the indicators used, as a file and (optionally) a road-plane video
+        try:
+            topview_rows = self._run3_topview_rows(tracks, c)
+            outputs["topview_records"] = write_csv("Detection_Records_Topview.csv", self.TOPVIEW_FIELDS, topview_rows)
+            summary["diagnostics"]["topview"] = {"records": len(topview_rows), "calibration_mode": self._run3_calibration_mode(c)}
+            if c.get("topview_video") and topview_rows:
+                status("Run 3 — drawing the Topview video...")
+                tv = self._run3_write_topview_video(tracks, c, output_dir, (settings or {}).get("video"))
+                if tv:
+                    outputs["topview_video"] = tv
+                    summary["diagnostics"]["topview"]["video"] = tv
+        except Exception as exc:
+            log.exception("Topview output failed")
+            summary["diagnostics"]["topview_error"] = str(exc)
 
         if duplicate_report:
             outputs["duplicate_tracks"] = write_csv(
