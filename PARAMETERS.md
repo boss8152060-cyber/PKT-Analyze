@@ -26,6 +26,8 @@
 | `waiting_speed_threshold` (km/h) | 5.0 | Gap (หยุดค้างกลางแยก) | มาก = นับว่าหยุดง่ายขึ้น → Access/Exit เปลี่ยน | 2, 5, 8 |
 | `gap_hold_min_duration_s` | 0.30 | Gap | | 0.2, 0.3, 0.5 |
 | `lc_heading_window_s` | 0.50 | Lateral Clearance | ทิศ heading ของรถ A | 0.25, 0.5, 1.0 |
+| `lc_along_limit_m` | 0 (อัตโนมัติ = (L_A+L_B)/2) | Lateral Clearance | ช่วงเคียงข้างตามแนวยาว ±m; มาก = เก็บคู่ที่เหลื่อมกันได้มากขึ้น | 0, 4, 6 |
+| `lc_max_lateral_m` | 3.5 (0 = ไม่จำกัด) | Lateral Clearance | ระยะด้านข้างไกลสุดที่ถือว่ารถสองคันเกี่ยวข้องกัน (ตัดคู่ที่ไกลกันในโซนใหญ่ เช่น R10 พบ 8–10 ม. ใน Zone 3) | 0, 3.5, 5 |
 | `pet_interaction_distance_m` | 3.0 | PET (กรณีเส้นทางไม่ตัดกัน) | จำนวน/ประเภทของเหตุการณ์ | 2, 3, 4 |
 | `pet_max_s` | 10 | PET | ตัดค่า PET ใหญ่ออก | 5, 10, 15 |
 | `pet_threshold_s` | 1.0 | PET (นับต่ำกว่าเกณฑ์) | | 0.5, 1.0, 1.5 |
