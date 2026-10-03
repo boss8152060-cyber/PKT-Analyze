@@ -358,6 +358,77 @@ dlg7 = app.open_reference_map()
 check("a new dialog brings the distances and the corners back", len(dlg7.distances) == 8 and len(dlg7.pairs) == 8 and dlg7.node_mode_var.get())
 dlg7.close()
 
+# ---- automatic alignment (ECC on road-edge images): a textured map, a camera seeing it, clicks that are ~0.6 m off
+rng = np.random.default_rng(11)
+tex = np.full((800, 1200, 3), 110, np.uint8)
+for _ in range(260):                                               # random bars and lines = edges to align on
+    x0, y0 = int(rng.integers(0, 1150)), int(rng.integers(0, 760))
+    if rng.random() < 0.5:
+        cv2.rectangle(tex, (x0, y0), (x0 + int(rng.integers(8, 60)), y0 + int(rng.integers(3, 14))), tuple(int(v) for v in rng.integers(30, 230, 3)), -1)
+    else:
+        cv2.line(tex, (x0, y0), (x0 + int(rng.integers(-90, 90)), y0 + int(rng.integers(-90, 90))), tuple(int(v) for v in rng.integers(30, 230, 3)), int(rng.integers(2, 5)))
+tex_path = os.path.join(tmp, "tex_map.png")
+cv2.imwrite(tex_path, tex)
+cam2 = cv2.warpPerspective(tex, h_map_to_cam, (1280, 720))
+cam2_path = os.path.join(tmp, "cam2.mp4")
+vw = cv2.VideoWriter(cam2_path, cv2.VideoWriter_fourcc(*"mp4v"), 10, (1280, 720))
+for _ in range(10):
+    vw.write(cam2)
+vw.release()
+old_video = app.video_var.get()
+app.video_var.set(cam2_path)
+dlg8 = app.open_reference_map()
+dlg8.node_mode_var.set(False)
+dlg8.reset()
+dlg8.refine = None
+dlg8.set_map(tex_path)
+dlg8.set_scale_from_points((100, 100), (300, 100), 10.0)
+pts_map = np.column_stack([rng.uniform(150, 1050, 8), rng.uniform(100, 700, 8)])
+pts_cam = ph(h_map_to_cam, pts_map)
+noisy = pts_map + rng.normal(0, 12.0, pts_map.shape)                # ~0.6 m click errors
+for c_, p_ in zip(pts_cam, noisy):
+    dlg8.add_camera_point(*c_)
+    dlg8.add_map_point(*p_)
+test_map = np.column_stack([rng.uniform(300, 900, 40), rng.uniform(200, 560, 40)])      # ground points inside the zones
+test_cam = ph(h_map_to_cam, test_map)
+
+
+def ground_error(dlg):
+    cal = dlg.calibration()
+    pred = m.apply_homography(cal["H"], test_cam) * dlg.scale
+    return float(np.mean(np.hypot(*(pred - test_map).T)) / 20.0)
+
+
+err_rough = ground_error(dlg8)
+check("noisy clicks: the ground positions are about half a metre off", err_rough > 0.15, f"{err_rough:.2f} m")
+res8 = dlg8.auto_align(model="affine", blocking=True)
+check("automatic alignment returns a correction", res8 is not None and res8["R"].shape == (3, 3))
+check("the road-edge agreement gets better", res8["ncc_after"] > res8["ncc_before"] + 0.02, f"{res8['ncc_before']:.3f} -> {res8['ncc_after']:.3f}")
+dlg8.apply_refine(res8)
+err_fine = ground_error(dlg8)
+check("after the alignment the ground positions are clearly closer to the truth", err_fine < 0.75 * err_rough and err_fine < 0.45,
+      f"{err_rough:.2f} m -> {err_fine:.2f} m")
+check("the message says the pair errors are measured against the clicks", "ปรับอัตโนมัติ" in dlg8.msg_var.get())
+check("the summary text gives the agreement and the shift in cm", "ซม." in dlg8.refine_summary(res8))
+dlg8.clear_refine()
+check("clear: back to the clicked pairs' calibration", dlg8.refine is None and abs(ground_error(dlg8) - err_rough) < 1e-9)
+dlg8.apply_refine(res8)
+saved_refine = dlg8.result()["refine"]
+check("save keeps the correction in the settings and the program uses it", dlg8.save() is True
+      and app._run3_refmap_state()["refine"] is not None
+      and np.allclose(app._run3_refmap_state()["refine"], saved_refine, atol=1e-6))
+persp8 = app._run3_get_perspective_matrix(silent=False)
+check("the perspective used by Run 3 includes the correction", persp8 is not None and persp8.get("refined") is True)
+got8 = app._run3_to_metric(test_cam[:5], {"perspective": persp8, "ppm": 1.0, "axis_deg": 0.0})
+check("Run 3 metres follow the refined mapping (map px / scale)", np.hypot(*(got8 * 20.0 - test_map[:5]).T).mean() / 20.0 < 0.30)
+# a blocking call without a calibration is refused politely
+dlg9 = app.open_reference_map()
+dlg9.node_mode_var.set(False)
+dlg9.reset()
+check("no calibration yet: automatic alignment is refused with a message", dlg9.auto_align(blocking=True) is None and "4 คู่" in dlg9.msg_var.get())
+dlg9.close()
+app.video_var.set(old_video)
+
 # ---- the map can also be a VIDEO (a drone clip): one chosen frame is the map
 map_video = os.path.join(tmp, "drone_ไทย.mp4")                       # (non-ASCII name on purpose)
 vw = cv2.VideoWriter(map_video, cv2.VideoWriter_fourcc(*"mp4v"), 10, (1200, 800))
