@@ -469,6 +469,8 @@ RUN3_DEFAULTS = {
     "lens_f": "",                           # lens (radial) distortion correction: f (x picture width, blank = 1), k1, k2; blank = none
     "lens_k1": "",
     "lens_k2": "",
+    "topview_map": False,                   # Topview as a map: empty grid + the road lines clicked on the camera picture (no camera photo)
+    "road_lines": "",                       # JSON: road lines clicked on the camera picture (pixels as recorded)
     "topview_video": True,                  # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points)
     "lc_along_limit_m": "0",                # side-by-side window along the heading (m); 0 = auto (L_A + L_B) / 2
     "lc_max_lateral_m": "3.50",             # pairs further apart sideways than this (m) are unrelated; 0 = no limit
@@ -2095,6 +2097,60 @@ class LensLineDialog:
         self.view = (k, (cw - w * k) / 2.0, (ch - h * k) / 2.0)
 
 
+class RoadLineDialog(LensLineDialog):
+    """Road lines for the map-style Topview: click along kerbs, lane lines, crosswalk edges ... on a frame of the camera video
+    (a line = as many points as it needs, 2 or more). The lines are carried to the road plane by the same lens + calibration
+    as the vehicles, so they always match the vehicle positions. Same view controls as the lens tool."""
+
+    def __init__(self, app, video_path, on_apply, initial=None):
+        self._initial = [list(map(tuple, l)) for l in (initial or [])]
+        super().__init__(app, video_path, on_apply)
+        self.top.title("วาดเส้นถนน")
+        if self._initial:
+            self.lines = self._initial + [[]]
+            self.refresh()
+
+    def _build(self):
+        top = self.top
+        bar = ttk.Frame(top, padding=6)
+        bar.pack(fill="x")
+        ttk.Label(bar, text=("คลิกจุดตามแนวเส้นถนน (ขอบถนน เส้นแบ่งเลน ขอบทางม้าลาย) เส้นละกี่จุดก็ได้ — เส้นตรงใช้ 2 จุด เส้นโค้งใช้หลายจุด "
+                             "· กด เส้นใหม่ เมื่อจะเริ่มเส้นถัดไป · ล้อเมาส์ = ซูม · ลาก = เลื่อนภาพ · เสร็จแล้วกด ใช้เส้นเหล่านี้"),
+                  wraplength=980, justify="left").grid(row=0, column=0, columnspan=8, sticky="w")
+        ttk.Button(bar, text="เส้นใหม่", command=self.new_line).grid(row=1, column=0, pady=4, padx=(0, 4))
+        ttk.Button(bar, text="ย้อนจุด", command=self.undo_point).grid(row=1, column=1, padx=4)
+        ttk.Button(bar, text="ลบเส้นนี้", command=self.delete_line).grid(row=1, column=2, padx=4)
+        ttk.Button(bar, text="รีเซ็ต View", command=self.reset_view).grid(row=1, column=3, padx=4)
+        ttk.Button(bar, text="ใช้เส้นเหล่านี้", command=self.apply).grid(row=1, column=4, padx=(14, 4))
+        ttk.Button(bar, text="ปิด", command=self.close).grid(row=1, column=5, padx=4)
+        ttk.Label(bar, text="เฟรม").grid(row=2, column=0, sticky="e")
+        ttk.Entry(bar, textvariable=self.frame_var, width=8).grid(row=2, column=1, sticky="w")
+        ttk.Button(bar, text="โหลดเฟรม", command=lambda: self.set_frame(self.frame_var.get())).grid(row=2, column=2, sticky="w")
+        self.canvas = tk.Canvas(top, width=self.VIEW_W, height=self.VIEW_H, bg="#202020", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True, padx=6)
+        self.canvas.bind("<Configure>", lambda e: self._on_configure())
+        self.canvas.bind("<ButtonPress-1>", lambda e: self._press(e.x, e.y))
+        self.canvas.bind("<B1-Motion>", lambda e: self._drag(e.x, e.y))
+        self.canvas.bind("<ButtonRelease-1>", lambda e: self._release(e.x, e.y))
+        for b in (2, 3):
+            self.canvas.bind(f"<ButtonPress-{b}>", lambda e: self._press(e.x, e.y, True))
+            self.canvas.bind(f"<B{b}-Motion>", lambda e: self._drag(e.x, e.y))
+        self.canvas.bind("<MouseWheel>", lambda e: self.zoom_at(e.x, e.y, 1 if e.delta > 0 else -1))
+        self.canvas.bind("<Button-4>", lambda e: self.zoom_at(e.x, e.y, 1))
+        self.canvas.bind("<Button-5>", lambda e: self.zoom_at(e.x, e.y, -1))
+        tk.Label(top, textvariable=self.msg_var, height=2, anchor="nw", wraplength=980, justify="left", padx=6, pady=4).pack(fill="x")
+
+    def apply(self):
+        use = [l for l in self.lines if len(l) >= 2]
+        if not use:
+            self.msg_var.set("ยังไม่มีเส้น (แต่ละเส้นต้องมีอย่างน้อย 2 จุด)")
+            messagebox.showinfo("เส้นถนน", self.msg_var.get(), parent=self.top)
+            return False
+        self.on_apply(use)
+        self.close()
+        return True
+
+
 class BackgroundFrameReader:
     """Reads the next frames of a cv2.VideoCapture in a background thread while the main loop runs detection on the GPU
     (decoding a 1080p frame takes ~9 ms of CPU). The frames come out in exactly the same order and are exactly the same
@@ -2598,6 +2654,8 @@ class Run1App:
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
         self.run3_lc_heading_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_heading_window_s"])
         self.run3_topview_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["topview_video"])
+        self.run3_topview_map_var = tk.BooleanVar(value=RUN3_DEFAULTS["topview_map"])
+        self.run3_road_lines_var = tk.StringVar(value=RUN3_DEFAULTS["road_lines"])
         self.run3_lens_f_var = tk.StringVar(value=RUN3_DEFAULTS["lens_f"])
         self.run3_lens_k1_var = tk.StringVar(value=RUN3_DEFAULTS["lens_k1"])
         self.run3_lens_k2_var = tk.StringVar(value=RUN3_DEFAULTS["lens_k2"])
@@ -2940,6 +2998,16 @@ class Run1App:
         r += 1
         ttk.Checkbutton(cal, text="สร้างวิดีโอ Topview (Tracking_Topview.mp4)", variable=self.run3_topview_video_var).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(cal, text="วาดจากพิกัดเมตรเดียวกับที่ตัวชี้วัดใช้ (ไฟล์ Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
+        r += 1
+        roadf = ttk.Frame(cal)
+        roadf.grid(row=r, column=0, columnspan=4, sticky="w", pady=2)
+        ttk.Checkbutton(roadf, text="Topview แบบแผนที่ (กริดเปล่า + เส้นถนน ไม่ใช้ภาพกล้อง)", variable=self.run3_topview_map_var).pack(side="left")
+        ttk.Button(roadf, text="วาดเส้นถนน…", command=self.open_road_line_tool).pack(side="left", padx=6)
+        ttk.Button(roadf, text="ล้างเส้นถนน", command=self.clear_road_lines).pack(side="left", padx=2)
+        self.road_lines_info_var = tk.StringVar(value="")
+        ttk.Label(roadf, textvariable=self.road_lines_info_var, foreground=gray).pack(side="left", padx=6)
+        self.run3_road_lines_var.trace_add("write", lambda *_: self._refresh_road_lines_info())
+        self._refresh_road_lines_info()
         r += 1
         ttk.Checkbutton(cal, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=r, column=0, sticky="w", pady=(6, 4))
         ttk.Label(cal, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง (P1→P2 ต้องขนานแนวถนน)", foreground=gray).grid(row=r, column=1, columnspan=2, sticky="w", pady=(6, 4))
@@ -4467,6 +4535,8 @@ class Run1App:
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
                 "lc_heading_window_s": self.run3_lc_heading_window_var.get(),
                 "topview_video": self.run3_topview_video_var.get(),
+                "topview_map": self.run3_topview_map_var.get(),
+                "road_lines": self.run3_road_lines_var.get(),
                 "lens_f": self.run3_lens_f_var.get(),
                 "lens_k1": self.run3_lens_k1_var.get(),
                 "lens_k2": self.run3_lens_k2_var.get(),
@@ -4646,6 +4716,8 @@ class Run1App:
                 ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
                 ("lc_heading_window_s", self.run3_lc_heading_window_var),
                 ("topview_video", self.run3_topview_video_var),
+                ("topview_map", self.run3_topview_map_var),
+                ("road_lines", self.run3_road_lines_var),
                 ("lens_f", self.run3_lens_f_var),
                 ("lens_k1", self.run3_lens_k1_var),
                 ("lens_k2", self.run3_lens_k2_var),
@@ -5405,6 +5477,33 @@ class Run1App:
         if video is None:
             return None
         return LensLineDialog(self, video, self.set_lens_values)
+
+    def get_road_lines(self):
+        """The road lines clicked on the camera picture: list of lists of (x, y) pixels as recorded."""
+        try:
+            data = json.loads(self.run3_road_lines_var.get() or "[]")
+            return [[(float(x), float(y)) for x, y in line] for line in data if len(line) >= 2]
+        except (ValueError, TypeError):
+            return []
+
+    def set_road_lines(self, lines):
+        self.run3_road_lines_var.set(json.dumps([[[round(float(x), 1), round(float(y), 1)] for x, y in l] for l in lines if len(l) >= 2]) if lines else "")
+
+    def clear_road_lines(self):
+        self.run3_road_lines_var.set("")
+
+    def _refresh_road_lines_info(self):
+        n = len(self.get_road_lines())
+        try:
+            self.road_lines_info_var.set(f"วาดแล้ว {n} เส้น" if n else "ยังไม่ได้วาดเส้นถนน")
+        except (AttributeError, tk.TclError):
+            pass
+
+    def open_road_line_tool(self):
+        video = self._video_frame_for_tools()
+        if video is None:
+            return None
+        return RoadLineDialog(self, video, self.set_road_lines, initial=self.get_road_lines())
 
     def set_lens_values(self, lens):
         self.run3_lens_f_var.set(f"{float(lens[0]):.4f}")
@@ -7857,6 +7956,8 @@ class Run1App:
             "hold_min_duration_s": num(self.run3_hold_min_duration_var, GAP_HOLD_MIN_S),
             "lc_heading_window_s": num(self.run3_lc_heading_window_var, 0.5),
             "topview_video": bool(self.run3_topview_video_var.get()),
+            "topview_map": bool(self.run3_topview_map_var.get()),
+            "road_lines": self.get_road_lines(),
             "lc_along_limit_m": max(0.0, num(self.run3_lc_along_limit_var, 0.0) or 0.0),
             "lc_max_lateral_m": max(0.0, num(self.run3_lc_max_lateral_var, 3.5) or 0.0),
             "lc_motorcycle_pairs_only": bool(self.run3_lc_motorcycle_pairs_only_var.get()),
@@ -8028,7 +8129,8 @@ class Run1App:
         # static layer: background, grid, zones
         base = np.full((H, W, 3), 38, np.uint8)
         t_all = [it[2] for items in per_frame.values() for it in items]
-        bg = self._run3_topview_background(video_path, min(t_all), max(t_all))
+        map_style = bool(c.get("topview_map"))
+        bg = None if map_style else self._run3_topview_background(video_path, min(t_all), max(t_all))
         bg_used = False
         if bg is not None:
             try:
@@ -8059,6 +8161,21 @@ class Run1App:
         base = cv2.addWeighted(grid, 0.22, base, 0.78, 0)
         for text_, org_ in labels:
             cv2.putText(base, text_, org_, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (235, 235, 235), 1, cv2.LINE_AA)
+        road_n = 0
+        if map_style:                                              # the road lines clicked on the camera picture, carried to the road plane
+            for line in c.get("road_lines") or []:
+                pts_px = np.asarray(line, dtype=float).reshape(-1, 2)
+                if len(pts_px) < 2:
+                    continue
+                if c.get("lens") is not None:                      # straight between the clicks in the straightened picture, then bent back
+                    u = lens_undistort(pts_px, c["lens_size"], c["lens"])
+                else:
+                    u = pts_px
+                dense = np.concatenate([np.linspace(u[i], u[i + 1], 25, endpoint=False) for i in range(len(u) - 1)] + [u[-1:]])
+                rec_px = lens_distort(dense, c["lens_size"], c["lens"]) if c.get("lens") is not None else dense
+                q = np.clip(topview_px(cv, self._run3_to_metric(rec_px, c)), -1e5, 1e5)
+                cv2.polylines(base, [np.round(q).astype(np.int32).reshape(-1, 1, 2)], False, (225, 225, 225), 2, cv2.LINE_AA)
+                road_n += 1
         zlayer = base.copy()                                       # zones: drawn like in the normal video (same switches, same opacity)
         if flag("show_zone_boundary", True) or flag("show_zone_label", True):
             meta_all = getattr(self, "zone_meta", {})
@@ -8079,7 +8196,7 @@ class Run1App:
                     (tw, th), _ = cv2.getTextSize(text_, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
                     cv2.putText(zlayer, text_, (int(cx) - tw // 2, int(cy) + th // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.55, zcol, 1, cv2.LINE_AA)
             base = cv2.addWeighted(zlayer, zone_alpha, base, 1.0 - zone_alpha, 0)
-        cv2.putText(base, f"metres (x right, y down)  {cv['scale']:.1f} px/m  " + ("empty road (median of frames), lens corrected, laid flat" if bg_used else "grid"),
+        cv2.putText(base, f"metres (x right, y down)  {cv['scale']:.1f} px/m  " + ("empty road (median of frames), lens corrected, laid flat" if bg_used else (f"map: grid + {road_n} road lines" if map_style else "grid")),
                     (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
         frames = sorted(per_frame)
         times = sorted({per_frame[f][0][2] for f in frames})
