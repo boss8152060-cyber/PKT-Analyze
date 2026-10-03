@@ -2106,9 +2106,9 @@ ROAD_LINE_TYPES = {
     "yellow_solid": ("เส้นเหลืองทึบ (แบ่งทิศทางสวน ห้ามแซง)", None, _RL_YELLOW, (0.15, 2), (0.0,)),
     "yellow_double": ("เส้นเหลืองคู่ (แบ่งทิศทางสวน ห้ามแซงทั้งสองฝั่ง)", None, _RL_YELLOW, (0.12, 2), (-0.15, 0.15)),
     "yellow_dashed": ("เส้นเหลืองประ (แบ่งทิศทางสวน แซงได้)", [(3.0, _RL_YELLOW), (6.0, None)], None, (0.15, 2), (0.0,)),
-    "kerb_red_white": ("ขอบทางขาว-แดง", [(1.0, _RL_RED), (1.0, _RL_WHITE)], None, (0.35, 4), (0.0,)),
-    "kerb_black_white": ("ขอบทางขาว-ดำ", [(1.0, _RL_BLACK), (1.0, _RL_WHITE)], None, (0.35, 4), (0.0,)),
-    "kerb_yellow_white": ("ขอบทางขาว-เหลือง", [(1.0, _RL_YELLOW), (1.0, _RL_WHITE)], None, (0.35, 4), (0.0,)),
+    "kerb_red_white": ("ขอบทางขาว-แดง", [(0.5, _RL_RED), (0.5, _RL_WHITE)], None, (0.35, 4), (0.0,)),
+    "kerb_black_white": ("ขอบทางขาว-ดำ", [(0.5, _RL_BLACK), (0.5, _RL_WHITE)], None, (0.35, 4), (0.0,)),
+    "kerb_yellow_white": ("ขอบทางขาว-เหลือง", [(0.5, _RL_YELLOW), (0.5, _RL_WHITE)], None, (0.35, 4), (0.0,)),
     "blue_motorcycle": ("ช่องจักรยานยนต์ (สีฟ้า)", None, _RL_BLUE, (0.5, 5), (0.0,)),
 }
 ROAD_LINE_DEFAULT = "white_solid"
