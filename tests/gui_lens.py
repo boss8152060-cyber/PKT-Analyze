@@ -201,7 +201,7 @@ for k in range(30):
 base_cfg = {"ppm": 1.0, "axis_deg": 0.0, "lengths": {"Car": 4.5}, "widths": {"Car": 1.8}, "perspective": {"H": H_c2m}}
 out_a = tempfile.mkdtemp(prefix="pk_tv_", dir=tmp)
 vid_a = app._run3_write_topview_video(tr, dict(base_cfg, lens=LENS, lens_size=(CW, CH)), out_a, video)
-cvs = m.topview_canvas([r["_m"] for r in tr["1"]], 1280)
+cvs = m.topview_canvas([r["_m"] for r in tr["1"]], 1280, aspect=CW / CH)
 Wf, Hf = cvs["w"], cvs["h"]
 xs_, ys_ = np.meshgrid(np.arange(Wf, dtype=np.float64), np.arange(Hf, dtype=np.float64))
 met = np.stack([xs_ / cvs["scale"] + cvs["xmin"], ys_ / cvs["scale"] + cvs["ymin"]], axis=-1)
@@ -236,6 +236,26 @@ if os.environ.get("PK_DEBUG_SAVE"):
     vis = np.hstack([fr_, expected, np.repeat((valid * 255).astype(np.uint8)[..., None], 3, axis=2)])
     cv2.imwrite(os.environ["PK_DEBUG_SAVE"], vis)
 check("the Topview road matches the real ground seen from above", ncc_a > 0.80, f"NCC {ncc_a:.3f}, valid pixels {int(valid.sum())}")
+
+# ---- the vehicle's own picture is placed on its footprint (the Topview looks like the normal video, from above)
+import copy
+tr_bb = copy.deepcopy(tr)
+for r in tr_bb["1"]:
+    r.update({"bbox_x1": "300", "bbox_y1": "200", "bbox_x2": "420", "bbox_y2": "280"})
+vid_bb = app._run3_write_topview_video(tr_bb, dict(base_cfg, lens=LENS, lens_size=(CW, CH)), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video)
+
+
+def frame_of(path, idx=14):
+    cap_ = cv2.VideoCapture(path)
+    cap_.set(cv2.CAP_PROP_POS_FRAMES, idx)
+    ok_, f_ = cap_.read()
+    cap_.release()
+    return f_.astype(np.int16)
+
+
+diff = np.abs(frame_of(vid_bb) - frame_of(vid_a)).sum(axis=2)
+check("the Topview has the video's shape", abs(Wf / Hf - CW / CH) < 0.02, f"{Wf}x{Hf}")
+check("the vehicle picture is pasted at its footprint (and only there)", int((diff > 60).sum()) > 500 and int((np.hypot(xs_ - car[0], ys_ - car[1]) > 250)[diff > 60].sum()) == 0, f"{int((diff > 60).sum())} changed pixels")
 vid_b = app._run3_write_topview_video(tr, dict(base_cfg, lens=None, lens_size=None), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video)
 ncc_b = ncc_of(vid_b)
 check("without the lens correction the road stays curved (clearly worse)", ncc_b < ncc_a - 0.08, f"with {ncc_a:.3f}, without {ncc_b:.3f}")
