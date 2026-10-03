@@ -468,6 +468,7 @@ RUN3_DEFAULTS = {
     "lc_heading_window_s": "0.50",          # centred window (s) used to get the heading of vehicle A
     "refmap_enabled": False,                # use a reference map (top-view drone picture) instead of the 4-point Perspective Calibration
     "refmap_path": "",                      # the map picture
+    "refmap_frame": "",                     # when the map is a VIDEO: the frame number used (1-based, empty = middle)
     "refmap_scale": "",                     # map picture pixels per metre
     "refmap_pairs": "[]",                   # JSON [[cam_x, cam_y, map_x, map_y], ...]
     "topview_video": True,                  # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points)
@@ -1677,6 +1678,41 @@ class ClipPlayerDialog:
         self.top.destroy()
 
 
+MAP_VIDEO_EXTENSIONS = (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".wmv")
+
+
+def is_video_file(path):
+    return os.path.splitext(str(path))[1].lower() in MAP_VIDEO_EXTENSIONS
+
+
+def load_reference_map_image(path, frame=None):
+    """The reference-map picture: an image file, or one frame (0-based index, default the middle) of a video
+    (e.g. a drone clip). Works with non-ASCII paths. Returns a BGR image or None."""
+    path = str(path or "")
+    if not path or not os.path.isfile(path):
+        return None
+    if is_video_file(path):
+        cap = cv2.VideoCapture(path)
+        try:
+            if not cap.isOpened():
+                return None
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            try:
+                idx = int(frame) if frame not in (None, "") else total // 2
+            except (TypeError, ValueError):
+                idx = total // 2
+            idx = max(0, min(max(0, total - 1), idx))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, fr = cap.read()
+            return fr if ok else None
+        finally:
+            cap.release()
+    try:
+        return cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
+
 class ReferenceMapDialog:
     """Reference-map calibration: a true top-view picture of the site (e.g. a drone frame) is the MAP. The user
     (1) sets the map scale with two points of known distance, (2) clicks the same ground points on the camera frame
@@ -1688,6 +1724,7 @@ class ReferenceMapDialog:
     def __init__(self, app, video_path, state, on_save):
         self.app, self.on_save = app, on_save
         self.map_path = state.get("map_path", "")
+        self.map_frame = state.get("map_frame")                # 0-based, only for a video map (None = middle)
         self.scale = state.get("scale")
         self.pairs = [list(p) for p in state.get("pairs", [])]
         self.pending_cam = None
@@ -1707,10 +1744,11 @@ class ReferenceMapDialog:
         self.msg_var = tk.StringVar(value="")
         self.scale_var = tk.StringVar(value=f"{self.scale:.4f}" if self.scale else "")
         self.frame_var = tk.StringVar(value="")
+        self.map_frame_var = tk.StringVar(value="" if self.map_frame is None else str(int(self.map_frame) + 1))
         self._build()
         self._load_frame(None)
         if self.map_path and os.path.isfile(self.map_path):
-            self.map_img = cv2.imread(self.map_path)
+            self.map_img = load_reference_map_image(self.map_path, self.map_frame)
         self.refresh()
 
     # ----- layout -----
@@ -1718,19 +1756,22 @@ class ReferenceMapDialog:
         top = self.top
         bar = ttk.Frame(top, padding=8)
         bar.pack(fill="x")
-        ttk.Label(bar, text=("ขั้นที่ 1: เลือกภาพแผนที่ (ภาพ Topview จากโดรน)   ขั้นที่ 2: ตั้งมาตราส่วน   "
+        ttk.Label(bar, text=("ขั้นที่ 1: เลือกแผนที่ (ภาพ Topview หรือวิดีโอโดรน — วิดีโอใช้ 1 เฟรม)   ขั้นที่ 2: ตั้งมาตราส่วน   "
                              "ขั้นที่ 3: คลิปจุดบนพื้นถนนที่เห็นตรงกัน — คลิกบนภาพกล้อง (ซ้าย) ก่อน แล้วคลิกจุดเดียวกันบนแผนที่ (ขวา) อย่างน้อย 4 คู่ "
                              "เลือกจุดบนพื้น เช่น มุมทางม้าลาย ปลายเส้น ขอบฟุตปาธ กระจายทั่วภาพ")).grid(row=0, column=0, columnspan=12, sticky="w", pady=(0, 6))
-        ttk.Button(bar, text="1) เลือกภาพแผนที่…", command=self.choose_map).grid(row=1, column=0, padx=(0, 6))
+        ttk.Button(bar, text="1) เลือกแผนที่ (ภาพหรือวิดีโอ)…", command=self.choose_map).grid(row=1, column=0, padx=(0, 6))
         ttk.Button(bar, text="2) ตั้งมาตราส่วน (คลิก 2 จุดบนแผนที่)", command=self.start_scale_mode).grid(row=1, column=1, padx=(0, 6))
         ttk.Label(bar, text="พิกเซลต่อเมตร").grid(row=1, column=2, padx=(10, 2))
         ent = ttk.Entry(bar, textvariable=self.scale_var, width=10)
         ent.grid(row=1, column=3)
         ent.bind("<Return>", lambda e: self.scale_from_entry())
         ent.bind("<FocusOut>", lambda e: self.scale_from_entry())
-        ttk.Label(bar, text="Frame").grid(row=1, column=4, padx=(14, 2))
-        ttk.Entry(bar, textvariable=self.frame_var, width=8).grid(row=1, column=5)
-        ttk.Button(bar, text="โหลด", command=lambda: self._load_frame(self.frame_var.get())).grid(row=1, column=6, padx=(4, 10))
+        ttk.Label(bar, text="Frame กล้อง").grid(row=2, column=0, sticky="e", padx=(0, 2), pady=(6, 0))
+        ttk.Entry(bar, textvariable=self.frame_var, width=8).grid(row=2, column=1, sticky="w", pady=(6, 0))
+        ttk.Button(bar, text="โหลด", command=lambda: self._load_frame(self.frame_var.get())).grid(row=2, column=2, sticky="w", pady=(6, 0))
+        ttk.Label(bar, text="Frame แผนที่ (เมื่อแผนที่เป็นวิดีโอ)").grid(row=2, column=3, columnspan=2, sticky="e", padx=(14, 2), pady=(6, 0))
+        ttk.Entry(bar, textvariable=self.map_frame_var, width=8).grid(row=2, column=5, sticky="w", pady=(6, 0))
+        ttk.Button(bar, text="โหลด", command=lambda: self.set_map_frame(self.map_frame_var.get())).grid(row=2, column=6, sticky="w", padx=(4, 0), pady=(6, 0))
         ttk.Button(bar, text="ย้อนจุดล่าสุด", command=self.undo).grid(row=1, column=7, padx=2)
         ttk.Button(bar, text="ล้างจุด", command=self.reset).grid(row=1, column=8, padx=2)
         ttk.Button(bar, text="บันทึก", command=self.save).grid(row=1, column=10, padx=2)
@@ -1773,21 +1814,44 @@ class ReferenceMapDialog:
             self._render("cam")
 
     def choose_map(self):
-        path = filedialog.askopenfilename(parent=self.top, title="เลือกภาพแผนที่ (Topview)",
-                                          filetypes=[("Image", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff"), ("All files", "*.*")])
+        path = filedialog.askopenfilename(parent=self.top, title="เลือกแผนที่ (ภาพ Topview หรือวิดีโอโดรน)",
+                                          filetypes=[("Image or video", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.mp4 *.mov *.avi *.mkv *.m4v"),
+                                                     ("All files", "*.*")])
         if path:
             self.set_map(path)
 
-    def set_map(self, path):
-        img = cv2.imread(path)
+    def set_map(self, path, frame=None):
+        """The map = an image file, or a frame (0-based; default the middle) of a video such as a drone clip."""
+        img = load_reference_map_image(path, frame)
         if img is None:
-            self.msg_var.set("เปิดภาพแผนที่ไม่ได้: " + path)
+            self.msg_var.set("เปิดแผนที่ไม่ได้: " + path)
             return False
         if path != self.map_path:                       # a different picture: old map clicks and scale no longer fit
             self.pairs = []
             self.scale = None
             self.scale_var.set("")
         self.map_path, self.map_img = path, img
+        self.map_frame = frame if is_video_file(path) else None
+        if is_video_file(path):
+            self.map_frame_var.set("" if frame is None else str(int(frame) + 1))
+            self.msg_var.set("แผนที่เป็นวิดีโอ: ใช้เฟรมกลาง เลือกเฟรมอื่นได้ที่ช่อง Frame แผนที่ "
+                             "(เลือกเฟรมที่ไม่มีตัวอักษรทับและโดรนนิ่ง)")
+        self.refresh()
+        return True
+
+    def set_map_frame(self, text):
+        """Another frame of a video map (1-based number as typed by the user)."""
+        if not self.map_path or not is_video_file(self.map_path):
+            self.msg_var.set("แผนที่ปัจจุบันไม่ใช่วิดีโอ")
+            return False
+        try:
+            frame = int(float(str(text).strip())) - 1
+        except ValueError:
+            frame = None
+        img = load_reference_map_image(self.map_path, frame)
+        if img is None:
+            return False
+        self.map_img, self.map_frame = img, frame
         self.refresh()
         return True
 
@@ -1916,7 +1980,7 @@ class ReferenceMapDialog:
             return None
 
     def result(self):
-        return {"map_path": self.map_path, "scale": self.scale, "pairs": [list(p) for p in self.pairs]}
+        return {"map_path": self.map_path, "map_frame": self.map_frame, "scale": self.scale, "pairs": [list(p) for p in self.pairs]}
 
     def refresh(self):
         for name in ("cam", "map"):
@@ -2454,6 +2518,7 @@ class Run1App:
         self.run3_refmap_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["refmap_enabled"])
         self.run3_refmap_path_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_path"])
         self.run3_refmap_scale_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_scale"])
+        self.run3_refmap_frame_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_frame"])
         self.run3_refmap_pairs_var = tk.StringVar(value=RUN3_DEFAULTS["refmap_pairs"])
         self.run3_refmap_status_var = tk.StringVar(value="")
         self.run3_lc_along_limit_var = tk.StringVar(value=RUN3_DEFAULTS["lc_along_limit_m"])
@@ -4318,6 +4383,7 @@ class Run1App:
                 "refmap_enabled": self.run3_refmap_enabled_var.get(),
                 "refmap_path": self.run3_refmap_path_var.get(),
                 "refmap_scale": self.run3_refmap_scale_var.get(),
+                "refmap_frame": self.run3_refmap_frame_var.get(),
                 "refmap_pairs": self.run3_refmap_pairs_var.get(),
                 "lc_along_limit_m": self.run3_lc_along_limit_var.get(),
                 "lc_max_lateral_m": self.run3_lc_max_lateral_var.get(),
@@ -4498,6 +4564,7 @@ class Run1App:
                 ("refmap_enabled", self.run3_refmap_enabled_var),
                 ("refmap_path", self.run3_refmap_path_var),
                 ("refmap_scale", self.run3_refmap_scale_var),
+                ("refmap_frame", self.run3_refmap_frame_var),
                 ("refmap_pairs", self.run3_refmap_pairs_var),
                 ("lc_along_limit_m", self.run3_lc_along_limit_var),
                 ("lc_max_lateral_m", self.run3_lc_max_lateral_var),
@@ -5255,7 +5322,12 @@ class Run1App:
             pairs = [p for p in pairs if len(p) == 4]
         except (ValueError, TypeError):
             pairs = []
-        return {"map_path": str(self.run3_refmap_path_var.get() or "").strip(), "scale": scale, "pairs": pairs}
+        try:
+            frame = int(float(str(self.run3_refmap_frame_var.get()).strip())) - 1
+            frame = frame if frame >= 0 else None
+        except ValueError:
+            frame = None
+        return {"map_path": str(self.run3_refmap_path_var.get() or "").strip(), "scale": scale, "pairs": pairs, "map_frame": frame}
 
     def _run3_refmap_matrix(self, silent=False):
         """Camera pixel -> metre homography from the reference map (None / ValueError when it is not complete)."""
@@ -5269,7 +5341,7 @@ class Run1App:
                 raise ValueError("Reference map: at least 4 matching points are needed")
             cal = reference_map_calibration([p[:2] for p in st["pairs"]], [p[2:] for p in st["pairs"]], st["scale"])
             return {"H": cal["H"], "rms_m": cal["rms_m"], "errors_m": cal["errors_m"],
-                    "map": {"path": st["map_path"], "scale": st["scale"]}, "points": [tuple(p[:2]) for p in st["pairs"]]}
+                    "map": {"path": st["map_path"], "scale": st["scale"], "frame": st["map_frame"]}, "points": [tuple(p[:2]) for p in st["pairs"]]}
         except Exception:
             if silent:
                 return None
@@ -5296,6 +5368,7 @@ class Run1App:
         def on_save(res):
             self.run3_refmap_path_var.set(res["map_path"])
             self.run3_refmap_scale_var.set(f"{res['scale']:.6f}")
+            self.run3_refmap_frame_var.set("" if res.get("map_frame") is None else str(int(res["map_frame"]) + 1))
             self.run3_refmap_pairs_var.set(json.dumps([[round(v, 2) for v in p] for p in res["pairs"]]))
             self.run3_refmap_enabled_var.set(True)
             self.refresh_refmap_status()
@@ -7846,7 +7919,7 @@ class Run1App:
         persp = c.get("perspective") or {}
         map_img = None
         if persp.get("map"):                                  # a true top-view picture: use it as the map
-            map_img = cv2.imread(persp["map"]["path"])
+            map_img = load_reference_map_image(persp["map"]["path"], persp["map"].get("frame"))
         bg = map_img if map_img is not None else self._run3_topview_background(video_path, min(t_all), max(t_all))
         bg_used = False
         if bg is not None:

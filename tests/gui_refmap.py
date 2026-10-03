@@ -158,6 +158,41 @@ check("Topview video drawn on the map", ok and fr is not None and fr.std() > 8, 
 # the map shows through (light grid lines of the map exist in the frame)
 check("the map is the background", ok and (fr > 150).any(axis=2).sum() > 500)
 
+# ---- the map can also be a VIDEO (a drone clip): one chosen frame is the map
+map_video = os.path.join(tmp, "drone_ไทย.mp4")                       # (non-ASCII name on purpose)
+vw = cv2.VideoWriter(map_video, cv2.VideoWriter_fourcc(*"mp4v"), 10, (1200, 800))
+other = np.full((800, 1200, 3), 40, np.uint8)
+for k in range(30):
+    vw.write(map_img if k < 15 else other)                          # frames 1-15 = the grid map, 16-30 = dark
+vw.release()
+check("is_video_file", m.is_video_file(map_video) and not m.is_video_file(map_path))
+first = m.load_reference_map_image(map_video, 3)
+last = m.load_reference_map_image(map_video, 25)
+check("video map: frame choice", first is not None and last is not None and abs(float(first.mean()) - float(map_img.mean())) < 6
+      and abs(float(last.mean()) - 40.0) < 6, f"first {first.mean():.1f} last {last.mean():.1f}")
+check("image map with a non-ASCII path loads", m.load_reference_map_image(map_path) is not None)
+dlg2 = app.open_reference_map()
+check("video map accepted by the dialog", dlg2.set_map(map_video, 2) and dlg2.map_frame == 2 and dlg2.pairs == [], str(dlg2.map_frame))
+dlg2.set_scale_from_points((100, 100), (300, 100), 10.0)
+for c_, p_ in zip(cam_pts, map_pts):
+    dlg2.add_camera_point(*c_)
+    dlg2.add_map_point(*p_)
+check("map frame can be changed", dlg2.set_map_frame("25") and dlg2.map_frame == 24 and abs(float(dlg2.map_img.mean()) - 40.0) < 6)
+dlg2.set_map_frame("3")
+check("video map: save", dlg2.save() is True)
+st2 = app._run3_refmap_state()
+check("video map: path and frame are kept in the settings", st2["map_path"] == map_video and st2["map_frame"] == 2, str(st2["map_frame"]))
+persp2 = app._run3_get_perspective_matrix(silent=False)
+check("video map: calibration works", persp2 is not None and persp2["map"]["frame"] == 2)
+cfg3 = dict(cfg2)
+cfg3["perspective"] = persp2
+out3 = tempfile.mkdtemp(prefix="pk_tv_", dir=tmp)
+vid3 = app._run3_write_topview_video(tracks, cfg3, out3, video_path)
+cap = cv2.VideoCapture(vid3)
+ok3, fr3 = cap.read()
+cap.release()
+check("Topview video drawn on the video map", ok3 and fr3 is not None and fr3.std() > 8)
+
 root.destroy()
 print("ALL OK" if not failures else "FAILED: " + ", ".join(failures))
 sys.exit(1 if failures else 0)
