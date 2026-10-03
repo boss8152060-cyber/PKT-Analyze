@@ -782,5 +782,33 @@ class ShortDuplicateTracks(unittest.TestCase):
         self.assertEqual(self.F(fb, {1: 50, 2: 40}), {})
 
 
+class TopviewTests(unittest.TestCase):
+    def test_canvas_covers_the_points_and_is_even(self):
+        cv = CORE["topview_canvas"]([(0, 0), (40, 0), (40, 20), (0, 20)] * 30, max_px=1000, margin_m=2.0)
+        self.assertEqual(cv["w"] % 2, 0)
+        self.assertEqual(cv["h"] % 2, 0)
+        px = CORE["topview_px"](cv, [(0, 0), (40, 20)])
+        self.assertTrue((px >= 0).all())
+        self.assertLessEqual(px[:, 0].max(), cv["w"])
+        self.assertLessEqual(px[:, 1].max(), cv["h"])
+        self.assertAlmostEqual(cv["scale"] * (40 + 4), 1000, delta=2)       # the long side fills max_px
+
+    def test_canvas_ignores_a_far_outlier(self):
+        pts = [(x * 0.1, 0.0) for x in range(400)] + [(5000.0, 0.0)]
+        cv = CORE["topview_canvas"](pts, max_px=1000)
+        self.assertGreater(cv["scale"], 10)                                 # not squeezed to fit the outlier
+
+    def test_rect_follows_the_heading(self):
+        r = CORE["oriented_rect"]((10, 5), (1.0, 0.0), 4.0, 2.0)
+        self.assertAlmostEqual(r[:, 0].max() - r[:, 0].min(), 4.0)
+        self.assertAlmostEqual(r[:, 1].max() - r[:, 1].min(), 2.0)
+        u = (math.sqrt(0.5), math.sqrt(0.5))
+        d = CORE["oriented_rect"]((0, 0), u, 4.0, 2.0)
+        side = np_dist = ((d[0] - d[1]) ** 2).sum() ** 0.5
+        self.assertAlmostEqual(side, 2.0)                                   # first edge = the width
+        self.assertAlmostEqual(((d[1] - d[2]) ** 2).sum() ** 0.5, 4.0)      # second edge = the length
+        self.assertTrue(CORE["oriented_rect"]((0, 0), None, 3.0, 1.0).shape == (4, 2))
+
+
 if __name__ == "__main__":
     unittest.main()

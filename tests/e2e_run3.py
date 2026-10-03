@@ -238,6 +238,12 @@ def scene1(app):
     ae = [float(r["Lateral_Clearance_m"]) for r in lc if r["Pair_ID"] == "1_5" and r["Zone"] == "Zone 4"]
     check("Lateral Clearance A-E zone 4 = 1.6 - 1.3 = 0.30 m", bool(ae) and all(abs(v - 0.30) < 0.03 for v in ae),
           f"n={len(ae)}" + (f" mean={sum(ae)/len(ae):.3f}" if ae else ""))
+    tvr = read_csv(os.path.join(out, "Detection_Records_Topview.csv"))
+    check("Topview records: one row per observed point, in metres", len(tvr) > 0 and {"x_m", "y_m", "cx_m", "cy_m"} <= set(tvr[0]),
+          str(len(tvr)))
+    tvv = os.path.join(out, "Tracking_Topview.mp4")
+    check("Topview video written (plain grid when the video file is unknown)", os.path.isfile(tvv) and os.path.getsize(tvv) > 1000,
+          str(os.path.getsize(tvv) if os.path.isfile(tvv) else "missing"))
     pr = read_csv(os.path.join(out, "Lateral_Clearance_Pairs.csv"))
     check("Lateral Clearance pair summary rows (A-B x3, A-E x2, B-E x2, D-E x1)", len(pr) == 8, str([(r['Pair_ID'], r['Zone']) for r in pr]))
     # motorcycle-pairs-only switch: only the pairs that include a motorcycle remain
