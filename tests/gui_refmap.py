@@ -317,7 +317,9 @@ dlg6.reset()
 dlg6.scale = None
 dlg6.scale_var.set("")
 dlg6.refresh()
-check("zones are on the map right away (node mode is on by itself)", dlg6.node_mode_var.get() and len(dlg6.nodes) == 8)
+dlg6.node_mode_var.set(True)                                   # (the zone-corner mode is not shown in the lean dialog; the code is still tested)
+dlg6.toggle_node_mode()
+check("zone-corner mode: the zones are on the map", dlg6.node_mode_var.get() and len(dlg6.nodes) == 8)
 mh_, mw_ = dlg6.map_img.shape[:2]
 pos0 = [dlg6.predicted_map(i) for i in range(8)]
 check("first layout: every corner has a place on the map, inside it", all(q is not None and 0 <= q[0] < mw_ and 0 <= q[1] < mh_ for q in pos0))
@@ -358,7 +360,6 @@ for e in dlg6.edges[1:]:
     dlg6.set_distance(e["key"], real)
 rows = dlg6.edge_rows()
 check("all distances entered and the measured ones agree", all(r[5] == "ตรง" for r in rows), str([r[5] for r in rows]))
-check("the table shows the rows", len(dlg6.tree.get_children()) == 9)
 e3 = dlg6.edges[3]
 dlg6.set_distance(e3["key"], 1.6 * (math.hypot(truth6[e3["a"]][0] - truth6[e3["b"]][0], truth6[e3["a"]][1] - truth6[e3["b"]][1]) / 20.0))
 bad_rows = [r for r in dlg6.edge_rows() if r[5] == "ตรวจจุด!"]
@@ -372,7 +373,7 @@ check("the distances are in the result", len(saved_state["distances"]) == 8 and 
 check("save keeps pairs, scale and distances in the settings", dlg6.save() is True
       and len(app._run3_refmap_state()["distances"]) == 8 and len(app._run3_refmap_state()["pairs"]) == 8)
 dlg7 = app.open_reference_map()
-check("a new dialog brings the distances and the corners back", len(dlg7.distances) == 8 and len(dlg7.pairs) == 8 and dlg7.node_mode_var.get())
+check("a new dialog brings the distances and the corners back", len(dlg7.distances) == 8 and len(dlg7.pairs) == 8)
 dlg7.close()
 
 # ---- automatic alignment (ECC on road-edge images): a textured map, a camera seeing it, clicks that are ~0.6 m off
@@ -636,6 +637,34 @@ dlgM = app.open_reference_map()
 dlgM.node_mode_var.set(False)
 check("a reopened dialog brings the lens back", dlgM.lens is not None and dlgM.cam_wh == (CAM_W, CAM_H) or dlgM.cam_wh[0] > 0)
 dlgM.close()
+
+# ---- Fig. 2 style: red = clicked, blue = reprojected, with the error; the lens preview and typed lens values
+dlgF = app.open_reference_map()
+dlgF.node_mode_var.set(False)
+dlgF.reset()
+dlgF.refine = None
+dlgF.lens = None
+dlgF.set_map(tex_path)
+dlgF.set_scale_from_points((100, 100), (300, 100), 10.0)
+for c_, p_ in zip(cam_l, map_l):
+    dlgF.add_camera_point(*c_)
+    dlgF.add_map_point(*p_)
+root.update()
+cam_view = dlgF.last_render["cam"]
+red = ((cam_view[..., 2] > 200) & (cam_view[..., 1] < 60) & (cam_view[..., 0] < 60)).sum()
+blue = ((cam_view[..., 0] > 200) & (cam_view[..., 1] < 120) & (cam_view[..., 2] < 60)).sum()
+check("the camera picture shows the clicked points in red and the reprojected ones in blue", red > 20 and blue > 20, f"red {red} blue {blue}")
+check("the lean dialog has no node mode, no table, no snapping controls", not dlgF.node_mode_var.get() and not hasattr(dlgF, "tree") and not hasattr(dlgF, "snap_button"))
+check("preview without a lens says so", dlgF.preview_lens() is None and "เลนส์" in dlgF.msg_var.get())
+check("lens values typed by hand are accepted", dlgF.set_lens_manual("0.85", "-0.45") and dlgF.lens == (0.85, -0.45) and dlgF.lens_f_var.get() == "0.850")
+check("a lens that folds the picture is refused", dlgF.set_lens_manual("0.3", "-0.9") is False and dlgF.lens == (0.85, -0.45))
+check("garbage is refused", dlgF.set_lens_manual("abc", "-0.4") is False)
+pv_l = dlgF.preview_lens()
+check("the before/after picture of the lens is shown", pv_l is not None and len(pv_l.photos) == 2)
+pv_l.destroy()
+dlgF.clear_lens()
+check("clear lens", dlgF.lens is None and "ยังไม่แก้เลนส์" in dlgF.lens_msg_var.get())
+dlgF.close()
 
 # ---- the map can also be a VIDEO (a drone clip): one chosen frame is the map
 map_video = os.path.join(tmp, "drone_ไทย.mp4")                       # (non-ASCII name on purpose)
