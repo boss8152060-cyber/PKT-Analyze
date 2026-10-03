@@ -8212,30 +8212,11 @@ class Run1App:
         lengths, widths = c["lengths"], c["widths"]
         trails = defaultdict(deque)
         speed_hist = defaultdict(deque)
-        src = cv2.VideoCapture(video_path) if aspect else None          # the vehicles' own pictures come from the recorded video
-        src_pos = [-1]
-
-        def source_frame(idx):
-            """Frame `idx` of the recorded video (read forward; frames in between are skipped, not decoded)."""
-            if src is None or idx < 0:
-                return None
-            if idx <= src_pos[0] or idx - src_pos[0] > 120:
-                src.set(cv2.CAP_PROP_POS_FRAMES, idx)
-                src_pos[0] = idx - 1
-            while src_pos[0] < idx - 1:
-                if not src.grab():
-                    return None
-                src_pos[0] += 1
-            ok_, im_ = src.read()
-            src_pos[0] = idx
-            return im_ if ok_ else None
-
         try:
             for fr in frames:
                 img = base.copy()
                 now = per_frame[fr][0][2]
-                shot = source_frame(fr if (fr >= 0 and vfps and fr < 10 ** 7 and abs(fr / vfps - now) < 1.0) else int(round(now * vfps))) if vfps else None
-                sprites, marks = [], []
+                marks = []
                 for tid, cls, t, m, h, bb, rec in per_frame[fr]:
                     pt = topview_px(cv, [m])[0]
                     trails[tid].append(tuple(pt))
@@ -8249,21 +8230,6 @@ class Run1App:
                     if len(hist) >= 2 and hist[-1][0] > hist[0][0]:
                         spd = math.hypot(hist[-1][1][0] - hist[0][1][0], hist[-1][1][1] - hist[0][1][1]) / (hist[-1][0] - hist[0][0]) * 3.6
                     marks.append((tid, cls, pt, rec, spd))
-                    if shot is not None and bb is not None:
-                        x1_, y1_, x2_, y2_ = [int(round(v)) for v in bb]
-                        x1_, y1_ = max(0, x1_), max(0, y1_)
-                        x2_, y2_ = min(shot.shape[1], x2_), min(shot.shape[0], y2_)
-                        if x2_ - x1_ >= 4 and y2_ - y1_ >= 4:
-                            ln = lengths.get(cls) or 4.5
-                            sw = max(6, int(round(ln * cv["scale"] * 0.8)))             # about as wide as the vehicle is long
-                            sh = max(6, int(round(sw * (y2_ - y1_) / float(x2_ - x1_))))
-                            sprites.append((pt, cv2.resize(shot[y1_:y2_, x1_:x2_], (sw, sh), interpolation=cv2.INTER_AREA)))
-                for pt, sp in sorted(sprites, key=lambda it: it[0][1]):          # nearer (lower) vehicles on top
-                    sh_, sw_ = sp.shape[:2]
-                    x0, y0 = int(round(pt[0] - sw_ / 2.0)), int(round(pt[1] - sh_ * 0.85))
-                    ax0, ay0, ax1, ay1 = max(0, x0), max(0, y0), min(W, x0 + sw_), min(H, y0 + sh_)
-                    if ax1 > ax0 and ay1 > ay0:
-                        img[ay0:ay1, ax0:ax1] = sp[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0]
                 for tid, cls, pt, rec, spd in marks:
                     if flag("draw_trail", False) and len(trails[tid]) > 1:
                         cv2.polylines(img, [np.round(np.array(trails[tid])).astype(np.int32).reshape(-1, 1, 2)], False, (255, 0, 255), 2, cv2.LINE_AA)
@@ -8296,8 +8262,6 @@ class Run1App:
                 writer.write(img)
         finally:
             writer.release()
-            if src is not None:
-                src.release()
         return out_path
 
     def _run3_from_metric(self, pts_m, c):
