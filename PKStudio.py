@@ -1809,6 +1809,88 @@ def refine_reference_map(cam_img, map_img, h_px, mask_polys=None, model="affine"
             "before": cv2.addWeighted(map_s, 0.5, warp0, 0.5, 0), "after": cv2.addWeighted(map_s, 0.5, warp1, 0.5, 0)}
 
 
+SNAP_COLORS = {"Zone 1": (255, 200, 0), "Zone 2": (0, 255, 255), "Zone 3": (0, 165, 255), "Zone 4": (255, 0, 255),
+               "Zone 5": (0, 255, 0), "Zone 6": (255, 255, 0), "Zone 7": (0, 0, 255)}
+
+
+def snap_zones_to_road(map_img, zone_polys, px_per_m, grow_m=1.2, thr=12.0, work_width=1920):
+    """Fit hand-drawn zones to the road surface of the (top-view) map picture, automatically.
+    Each zone is grown from its own core (the polygon shrunk by 0.8 m) into the pixels whose COLOUR is like the zone's
+    own surface (a trimmed Gaussian in Lab, so lane paint, vehicles and shadows inside it do not matter), at most
+    `grow_m` metres beyond the drawn polygon; parts of the polygon on kerb / pavement / grass (a different colour) are
+    cut off. Paint gaps and vehicle holes are closed, then neighbouring zones are separated at the boundary the drawn
+    polygons had (a pixel goes to the zone whose drawn polygon is nearest).
+    zone_polys = {name: Nx2 map pixels (full resolution)}. Returns {"polys": {name: Nx2 map px (full res)},
+    "status": {name: "snapped" / "kept" (not trusted: the zone keeps its drawn shape)}, "area_m2": {name: (drawn, snapped)},
+    "overlay": picture with the drawn (white) and snapped (colour) outlines around the zones}."""
+    mh0, mw0 = map_img.shape[:2]
+    f = min(1.0, float(work_width) / mw0)
+    img = cv2.resize(map_img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA) if f < 1.0 else map_img.copy()
+    mh, mw = img.shape[:2]
+    sc = float(px_per_m) * f
+    lab = cv2.cvtColor(cv2.GaussianBlur(img, (0, 0), 1.5), cv2.COLOR_BGR2LAB).astype(np.float32)
+    polys = {n: np.asarray(q, dtype=float) * f for n, q in zone_polys.items() if len(q) >= 3}
+    if not polys:
+        return None
+    ell = lambda px: cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(px) | 1, int(px) | 1))
+    drawn = {}
+    for n, q in polys.items():
+        m0 = np.zeros((mh, mw), np.uint8)
+        cv2.fillPoly(m0, [np.round(q).astype(np.int32)], 255)
+        drawn[n] = m0
+    grown = {}
+    for n, m0 in drawn.items():
+        seed = cv2.erode(m0, ell(max(3, 0.8 * sc)))
+        if int((seed > 0).sum()) < 500:
+            seed = m0
+        px = lab[seed > 0]
+        d = np.linalg.norm(px - np.median(px, axis=0), axis=1)
+        keep = px[d <= np.percentile(d, 70)]
+        mu = keep.mean(axis=0)
+        icov = np.linalg.inv(np.cov(keep.T) + np.eye(3) * 4.0)
+        cand = cv2.dilate(m0, ell(2 * int(grow_m * sc) + 1))
+        diff = lab - mu
+        sim = ((np.einsum("ijk,kl,ijl->ij", diff, icov, diff) < thr) & (cand > 0)).astype(np.uint8) * 255
+        kc = max(3, 0.6 * sc)
+        sim = cv2.morphologyEx(sim, cv2.MORPH_CLOSE, ell(kc))
+        cnt_n, lbl, _, _ = cv2.connectedComponentsWithStats(sim)
+        best = max(range(1, cnt_n), key=lambda i: int(((lbl == i) & (seed > 0)).sum()), default=None)
+        comp = ((lbl == best).astype(np.uint8) * 255) if best else sim
+        holes_n, hl, hst, _ = cv2.connectedComponentsWithStats(cv2.bitwise_not(comp))
+        for i in range(1, holes_n):
+            x, y, w, h, a = hst[i]
+            if x > 0 and y > 0 and x + w < mw and y + h < mh and a < (3.0 * sc) ** 2:      # vehicles, markings
+                comp[hl == i] = 255
+        grown[n] = cv2.morphologyEx(comp, cv2.MORPH_OPEN, ell(kc))
+    names = list(grown)
+    dist = {n: cv2.distanceTransform(cv2.bitwise_not(drawn[n]), cv2.DIST_L2, 5) for n in names}
+    stack = np.stack([np.where(grown[n] > 0, dist[n], 1e9) for n in names])
+    owner, has = np.argmin(stack, axis=0), stack.min(axis=0) < 1e8
+    out, status, areas = {}, {}, {}
+    over = img.copy()
+    for i, n in enumerate(names):
+        m = ((owner == i) & has).astype(np.uint8) * 255
+        a0, a1 = float((drawn[n] > 0).sum()), float((m > 0).sum())
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        ok = bool(cnts) and 0.4 * a0 <= a1 <= 3.0 * a0
+        if ok:
+            ap = cv2.approxPolyDP(max(cnts, key=cv2.contourArea), 0.25 * sc, True).reshape(-1, 2).astype(float)
+            ok = len(ap) >= 3
+        out[n] = (ap if ok else polys[n]) / f
+        status[n] = "snapped" if ok else "kept"
+        areas[n] = (a0 / sc ** 2, a1 / sc ** 2)
+        cv2.polylines(over, [np.round(polys[n]).astype(np.int32).reshape(-1, 1, 2)], True, (255, 255, 255), 1, cv2.LINE_AA)
+        col = SNAP_COLORS.get(n, (255, 255, 255)) if ok else (128, 128, 128)
+        cv2.polylines(over, [np.round(out[n] * f).astype(np.int32).reshape(-1, 1, 2)], True, col, 2, cv2.LINE_AA)
+        c = polys[n].mean(axis=0)
+        cv2.putText(over, n.replace("Zone ", "Z"), (int(c[0]) - 8, int(c[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2, cv2.LINE_AA)
+    allp = np.vstack([q for q in polys.values()])
+    pad = 5.0 * sc
+    x0, y0 = np.maximum(allp.min(axis=0) - pad, 0).astype(int)
+    x1, y1 = np.minimum(allp.max(axis=0) + pad, [mw, mh]).astype(int)
+    return {"polys": out, "status": status, "area_m2": areas, "overlay": over[y0:y1, x0:x1]}
+
+
 class ReferenceMapDialog:
     """Reference-map calibration: a true top-view picture of the site (e.g. a drone frame) is the MAP. The user
     (1) sets the map scale with two points of known distance, (2) clicks the same ground points on the camera frame
@@ -1831,6 +1913,8 @@ class ReferenceMapDialog:
         self.zone_nodes = {}                             # zone name -> [node index of each vertex]
         self.edges = []                                  # [{"a": node, "b": node, "key": "Z3.1|Z3.2", "label": "Z3.1 – Z3.2"}]
         self.refine = state.get("refine")                # automatic correction in map pixels (3x3) or None
+        self.snapped_map = None                          # zone name -> polygon in map pixels after the automatic snap to the road
+        self._snap_job = None
         self._refine_job = None
         self.layout_rot = 0                              # first layout of the zone corners on the map: turned by rot x 90 deg
         self.layout_flip = False
@@ -1931,6 +2015,9 @@ class ReferenceMapDialog:
         ttk.Label(auto, text="rigid = เลื่อน+หมุน · affine = +ย่อขยาย (แนะนำ) · homography = เต็มรูป (เสี่ยงเพี้ยนที่ขอบ)",
                   foreground="#666666").pack(side="left")
         ttk.Button(auto, text="ล้างการปรับอัตโนมัติ", command=self.clear_refine).pack(side="left", padx=10)
+        self.snap_button = ttk.Button(auto, text="⚡ ปรับโซนให้ชิดถนนอัตโนมัติ", command=self.snap_zones)
+        self.snap_button.pack(side="left", padx=(16, 4))
+        ttk.Button(auto, text="คืนโซนเดิม", command=self.clear_snapped).pack(side="left")
         ttk.Button(bar, text="พลิกผังโซน", command=self.flip_layout).grid(row=3, column=6, sticky="w", pady=(4, 0))
         ttk.Label(bar, textvariable=self.node_msg_var, foreground="#444444").grid(row=4, column=6, columnspan=6, sticky="w", padx=(8, 0), pady=(4, 0))
         ttk.Button(bar, text="บันทึก", command=self.save).grid(row=2, column=10, padx=2)
@@ -2348,6 +2435,14 @@ class ReferenceMapDialog:
                 cv2.polylines(out, [qc], True, (80, 220, 80), 1, cv2.LINE_AA)
                 cx_, cy_ = qc.reshape(-1, 2).mean(axis=0)
                 cv2.putText(out, zname.replace("Zone ", "Z"), (int(cx_) - 8, int(cy_) + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 220, 80), 1, cv2.LINE_AA)
+        if self.snapped_map is not None and cal is not None:
+            camz = self.zones_in_camera() or {}
+            for zname, q in self.snapped_map.items():
+                arr = np.asarray(q, dtype=float) if name == "map" else np.asarray(camz.get(zname, []), dtype=float)
+                if len(arr) < 3:
+                    continue
+                qc = np.round(arr * k + np.array([ox, oy])).astype(np.int32).reshape(-1, 1, 2)
+                cv2.polylines(out, [qc], True, (0, 215, 255), 2, cv2.LINE_AA)
         pts = []
         for n, p in enumerate(self.pairs, 1):
             err = cal["errors_m"][n - 1] if cal is not None and n - 1 < len(cal["errors_m"]) else None
@@ -2781,6 +2876,105 @@ class ReferenceMapDialog:
         except ValueError:
             return None
 
+    # ----- zones fitted to the road surface of the map -----
+    def _cal_h(self):
+        cal = self.calibration()
+        return None if cal is None else cal["H"]
+
+    def zones_in_camera(self):
+        """The snapped zones as camera-picture pixels {name: [(x, y), ...]} (None when not snapped / no calibration)."""
+        h = self._cal_h()
+        if self.snapped_map is None or h is None:
+            return None
+        inv = np.linalg.inv(h)
+        return {n: [(int(round(x)), int(round(y))) for x, y in apply_homography(inv, np.asarray(q, dtype=float) / self.scale)]
+                for n, q in self.snapped_map.items()}
+
+    def snap_zones(self, blocking=False, grow_m=1.2, thr=12.0):
+        """Fit the zones to the road surface of the map automatically (zones drawn on the camera picture, carried to
+        the map by the current calibration). In the program it runs in a thread and a before/after picture is shown;
+        blocking=True (tests) returns the result."""
+        h = self._cal_h()
+        if h is None or self.map_img is None:
+            self.msg_var.set("ต้องมีคู่จุดครบ 4 คู่ มาตราส่วน และแผนที่ก่อน จึงปรับโซนให้ชิดถนนได้")
+            return None
+        zp = {z: apply_homography(h, np.asarray(poly, dtype=float)) * self.scale for z, poly in self._zone_polys()}
+        if not zp:
+            self.msg_var.set("ยังไม่ได้โหลดไฟล์โซน (แท็บ ② ทางแยก)")
+            return None
+        mp = self.map_img.copy()
+        if blocking:
+            return snap_zones_to_road(mp, zp, self.scale, grow_m, thr)
+        if self._snap_job is not None:
+            return None
+        self.msg_var.set("กำลังปรับโซนให้ชิดพื้นถนนบนแผนที่ (ไม่กี่วินาที)…")
+        self.snap_button.config(state="disabled")
+        box = {}
+
+        def work():
+            try:
+                box["res"] = snap_zones_to_road(mp, zp, self.scale, grow_m, thr)
+            except Exception as exc:
+                box["err"] = str(exc)
+
+        th = threading.Thread(target=work, daemon=True)
+        th.start()
+        self._snap_job = (th, box)
+        self.top.after(200, self._poll_snap)
+        return None
+
+    def _poll_snap(self):
+        job = self._snap_job
+        if job is None:
+            return
+        th, box = job
+        if th.is_alive():
+            self.top.after(200, self._poll_snap)
+            return
+        self._snap_job = None
+        try:
+            self.snap_button.config(state="normal")
+        except tk.TclError:
+            return
+        if box.get("res") is None:
+            self.msg_var.set("ปรับโซนไม่สำเร็จ (" + box.get("err", "ไม่พบพื้นผิวถนนที่ใช้ได้") + ")")
+            return
+        self._show_snap_preview(box["res"])
+
+    def snap_summary(self, res):
+        lines = []
+        for n, st in res["status"].items():
+            a0, a1 = res["area_m2"][n]
+            lines.append(f"{n.replace('Zone ', 'Z')}: {a0:.0f} → {a1:.0f} ตร.ม. " + ("(ชิดถนนแล้ว)" if st == "snapped" else "(ผลไม่น่าเชื่อถือ ใช้รูปเดิม)"))
+        return " · ".join(lines)
+
+    def apply_snapped(self, res):
+        self.snapped_map = {n: np.asarray(q, dtype=float) for n, q in res["polys"].items()}
+        self.refresh()
+        self.msg_var.set("ใช้โซนที่ชิดถนนแล้ว (กดบันทึกเพื่อเขียนเป็นไฟล์โซนใหม่ *_mapfit.json — ไฟล์เดิมไม่ถูกแตะ; ต้องรันตรวจจับใหม่) · " + self.snap_summary(res))
+
+    def clear_snapped(self):
+        self.snapped_map = None
+        self.refresh()
+
+    def _show_snap_preview(self, res):
+        pv = tk.Toplevel(self.top)
+        pv.title("โซนที่ปรับให้ชิดถนนอัตโนมัติ")
+        pv.transient(self.top)
+        im = res["overlay"]
+        k = min(1100.0 / im.shape[1], 560.0 / im.shape[0], 2.5)
+        im = cv2.resize(im, (int(im.shape[1] * k), int(im.shape[0] * k)), interpolation=cv2.INTER_CUBIC)
+        ok, buf = cv2.imencode(".png", im)
+        pv.photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
+        tk.Label(pv, image=pv.photo).grid(row=0, column=0, padx=6, pady=6)
+        ttk.Label(pv, text="เส้นขาว = โซนเดิม · เส้นสี = โซนที่ชิดถนน (เทา = ใช้รูปเดิม เพราะผลไม่น่าเชื่อถือ)\n" + self.snap_summary(res),
+                  wraplength=1100, justify="left").grid(row=1, column=0, padx=8)
+        row = ttk.Frame(pv)
+        row.grid(row=2, column=0, pady=8)
+        ttk.Button(row, text="ใช้โซนนี้", command=lambda: (self.apply_snapped(res), pv.destroy())).pack(side="left", padx=8)
+        ttk.Button(row, text="ไม่ใช้", command=pv.destroy).pack(side="left", padx=8)
+        self.preview = pv
+
     # ----- automatic alignment of the camera picture onto the map -----
     def clear_refine(self):
         self.refine = None
@@ -2879,7 +3073,8 @@ class ReferenceMapDialog:
 
     def result(self):
         return {"map_path": self.map_path, "map_frame": self.map_frame, "scale": self.scale, "pairs": [list(p) for p in self.pairs],
-                "distances": dict(self.distances), "refine": None if self.refine is None else np.asarray(self.refine, dtype=float)}
+                "distances": dict(self.distances), "refine": None if self.refine is None else np.asarray(self.refine, dtype=float),
+                "zones": self.zones_in_camera()}
 
     def refresh(self):
         cal = self._cal = self.calibration()
@@ -6286,6 +6481,54 @@ class Run1App:
                 return None
             raise
 
+    def _apply_map_adjusted_zones(self, zones_cam):
+        """Zones adjusted on the reference map, as camera-picture pixels. All current zones are written to a new
+        file `<zone file>_mapfit.json` (the original is not touched) in the video's real pixel size, and loaded."""
+        src = self.zone_line_config_var.get().strip()
+        data = {"zones": [], "lines": {}}
+        if src and os.path.isfile(src):
+            with open(src, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        video = str(self.video_var.get() or "").strip()
+        w, h = self._actual_video_size()
+        if not (w and h):
+            w, h = data.get("frame_width"), data.get("frame_height")
+        meta = {}
+        for item in data.get("zones", []) if isinstance(data.get("zones"), list) else []:
+            n = self._normalize_zone_item(item)
+            if n:
+                meta[n["name"]] = item
+        current = {z: [tuple(map(float, pt)) for pt in pts] for z, pts in self.zones.items() if len(pts) >= 3}
+        current.update({z: [tuple(map(float, pt)) for pt in pts] for z, pts in zones_cam.items()})
+        out_zones = []
+        for name in ZONE_NAMES:
+            pts = current.get(name)
+            if not pts:
+                continue
+            item = dict(meta.get(name, {"id": name.replace("Zone ", "zone_"), "name": name, "color_bgr": [0, 200, 0],
+                                        "show_label": True, "reference_frame_index": 0}))
+            area = 0.5 * abs(sum(x1 * y2 - x2 * y1 for (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1])))
+            item.update({"name": name, "points": [[int(round(x)), int(round(y))] for x, y in pts],
+                         "points_norm": [[round(x / w, 6), round(y / h, 6)] for x, y in pts] if w and h else [],
+                         "area_px": float(area)})
+            out_zones.append(item)
+        data["zones"] = out_zones
+        data["frame_width"], data["frame_height"] = int(w), int(h)
+        if video:
+            data["video_path"] = video
+        base, ext = os.path.splitext(src if src else os.path.join(os.path.dirname(video) or ".", "zones.json"))
+        base = base[:-7] if base.endswith("_mapfit") else base
+        path = base + "_mapfit.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        self.zone_line_config_var.set(path)
+        self._load_pkstudio_json(path)
+        self.refresh_measurement_status()
+        messagebox.showinfo("แก้โซนบนแผนที่แล้ว",
+                            "บันทึกโซนที่แก้เป็นไฟล์ใหม่ (ไฟล์เดิมไม่ถูกแตะ) และโหลดมาใช้แล้ว:\n\n" + path +
+                            "\n\nต้องรันตรวจจับใหม่ โซนใหม่จึงมีผลกับ Movement และตัวชี้วัด")
+        return path
+
     def refresh_refmap_status(self):
         if not bool(self.run3_refmap_enabled_var.get()):
             self.run3_refmap_status_var.set("")
@@ -6311,6 +6554,8 @@ class Run1App:
             self.run3_refmap_pairs_var.set(json.dumps([[round(v, 2) for v in p] for p in res["pairs"]]))
             self.run3_refmap_distances_var.set(json.dumps({k: round(float(v), 4) for k, v in (res.get("distances") or {}).items()}))
             self.run3_refmap_refine_var.set("" if res.get("refine") is None else json.dumps([float(v) for v in np.asarray(res["refine"]).ravel()]))
+            if res.get("zones"):
+                self._apply_map_adjusted_zones(res["zones"])
             self.run3_refmap_enabled_var.set(True)
             self.refresh_refmap_status()
 

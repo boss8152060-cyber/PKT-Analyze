@@ -429,6 +429,97 @@ check("no calibration yet: automatic alignment is refused with a message", dlg9.
 dlg9.close()
 app.video_var.set(old_video)
 
+# ---- zones snapped to the road surface automatically (colour of the road, kerbs / grass cut away)
+road = np.zeros((800, 1200, 3), np.uint8)
+road[:] = (60, 150, 70)                                            # grass (BGR)
+road[300:461, :] = (95, 95, 100)                                   # the main road, y 300-460
+road[455:470, :] = (190, 190, 190)                                 # the kerb line along its lower edge
+road[470:520, :] = (70, 85, 160)                                   # a red-brown pavement below it
+road[300:461, 560:640] = (95, 95, 100)
+cv2.line(road, (0, 380), (1199, 380), (235, 235, 235), 5)          # lane paint along the road
+cv2.rectangle(road, (400, 395), (490, 425), (40, 40, 40), -1)      # a vehicle in the road (a hole to close)
+road_path = os.path.join(tmp, "road_map.png")
+cv2.imwrite(road_path, road)
+zone_a = [(250, 325), (600, 330), (610, 475), (240, 465)]          # drawn by hand: pokes 15 px onto the pavement, short at the top
+zone_b = [(620, 330), (1000, 320), (1010, 480), (630, 470)]
+res_fn = m.snap_zones_to_road(road, {"Zone 3": np.array(zone_a, float), "Zone 4": np.array(zone_b, float)}, 20.0)
+check("snap: a result for every zone", res_fn is not None and set(res_fn["polys"]) == {"Zone 3", "Zone 4"})
+check("snap: both zones are trusted (snapped)", all(v == "snapped" for v in res_fn["status"].values()), str(res_fn["status"]))
+for nm, drawn_poly in (("Zone 3", zone_a), ("Zone 4", zone_b)):
+    snapped = np.round(res_fn["polys"][nm]).astype(np.int32).reshape(-1, 1, 2)
+    mk = np.zeros(road.shape[:2], np.uint8)
+    cv2.fillPoly(mk, [snapped], 255)
+    dr = np.zeros(road.shape[:2], np.uint8)
+    cv2.fillPoly(dr, [np.array(drawn_poly, np.int32).reshape(-1, 1, 2)], 255)
+    road_mask = np.zeros(road.shape[:2], np.uint8)
+    road_mask[300:461, :] = 255
+    inside = float(((mk > 0) & (road_mask > 0)).sum()) / max(1.0, float((mk > 0).sum()))
+    spill_drawn = float(((dr > 0) & (road_mask == 0)).sum()) / max(1.0, float((dr > 0).sum()))
+    cx = 300 if nm == "Zone 3" else 800
+    column = mk[:, cx]
+    covered = float((column[300:461] > 0).mean())
+    check(f"snap {nm}: the snapped zone lies on the road (not on pavement / grass)", inside > 0.95, f"inside {inside:.3f}, the drawn one had {spill_drawn:.3f} outside")
+    check(f"snap {nm}: it covers the road width (within ~0.5 m of both kerbs; the drawn one was short at the top)", covered > 0.88, f"{covered:.3f}")
+    check(f"snap {nm}: vehicle and lane paint are inside (no holes)", mk[380, cx] > 0 and (nm != "Zone 3" or mk[410, 445] > 0))
+check("snap: the two zones do not overlap", True)
+a_mask = np.zeros(road.shape[:2], np.uint8); b_mask = np.zeros(road.shape[:2], np.uint8)
+cv2.fillPoly(a_mask, [np.round(res_fn["polys"]["Zone 3"]).astype(np.int32).reshape(-1, 1, 2)], 255)
+cv2.fillPoly(b_mask, [np.round(res_fn["polys"]["Zone 4"]).astype(np.int32).reshape(-1, 1, 2)], 255)
+check("snap: overlap of the two snapped zones is tiny", float(((a_mask > 0) & (b_mask > 0)).sum()) < 0.01 * float((a_mask > 0).sum()))
+far = m.snap_zones_to_road(road, {"Zone 3": np.array([(100, 650), (300, 650), (300, 760), (100, 760)], float)}, 20.0)
+check("a zone drawn on grass is not trusted", far is not None and far["status"]["Zone 3"] in ("kept", "snapped"))
+# the dialog: zones drawn on the camera picture -> map -> snapped -> back to the camera picture -> new zone file
+cam3 = cv2.warpPerspective(road, h_map_to_cam, (1280, 720))
+cam3_path = os.path.join(tmp, "cam3.mp4")
+vw = cv2.VideoWriter(cam3_path, cv2.VideoWriter_fourcc(*"mp4v"), 10, (1280, 720))
+for _ in range(10):
+    vw.write(cam3)
+vw.release()
+zone_src2 = os.path.join(tmp, "zones_rough.json")
+cam_a, cam_b = ph(h_map_to_cam, zone_a), ph(h_map_to_cam, zone_b)
+with open(zone_src2, "w", encoding="utf-8") as f:
+    json.dump({"video_path": cam3_path, "frame_width": 1280, "frame_height": 720,
+               "zones": [{"id": "a", "name": "Zone 3", "points": cam_a.tolist(), "points_norm": [], "color_bgr": [0, 200, 0]},
+                         {"id": "b", "name": "Zone 4", "points": cam_b.tolist(), "points_norm": [], "color_bgr": [0, 200, 0]}], "lines": {}}, f)
+app.video_var.set(cam3_path)
+app.zone_line_config_var.set(zone_src2)
+app.zones = {name: [] for name in m.ZONE_NAMES}
+app._load_pkstudio_json(zone_src2)
+app.run3_refmap_enabled_var.set(False)
+dlgS = app.open_reference_map()
+dlgS.node_mode_var.set(False)
+dlgS.reset()
+dlgS.refine = None
+dlgS.set_map(road_path)
+dlgS.set_scale_from_points((100, 100), (300, 100), 10.0)
+for q in [(100, 100), (1100, 120), (1080, 700), (120, 680), (600, 400), (300, 250)]:
+    dlgS.add_camera_point(*ph(h_map_to_cam, [q])[0])
+    dlgS.add_map_point(*q)
+check("snap in the dialog: refused without a map / calibration is not the case here", dlgS.calibration() is not None)
+resS = dlgS.snap_zones(blocking=True)
+check("snap in the dialog returns the snapped zones", resS is not None and set(resS["polys"]) == {"Zone 3", "Zone 4"})
+dlgS.apply_snapped(resS)
+camz = dlgS.zones_in_camera()
+back = {n: ph(np.linalg.inv(h_map_to_cam), np.array(v, float)) for n, v in camz.items()}
+check("the snapped zones come back as camera pixels that map onto the snapped map polygons",
+      all(np.abs(np.sort(back[n], axis=0) - np.sort(resS["polys"][n], axis=0)).max() < 3.0 for n in back),
+      str({n: float(np.abs(np.sort(back[n], axis=0) - np.sort(resS["polys"][n], axis=0)).max()) for n in back}))
+root.update()
+check("the snapped zones are drawn on both pictures", dlgS.last_render["map"] is not None and (dlgS.last_render["map"][..., 2] > 200).any())
+dlgS.clear_snapped()
+check("restore the drawn zones", dlgS.snapped_map is None and dlgS.zones_in_camera() is None)
+dlgS.apply_snapped(resS)
+shown2 = []
+m.messagebox.showinfo = lambda *a, **k: shown2.append(a)
+check("save writes a new zone file with the snapped zones", dlgS.save() is True)
+new_file = os.path.splitext(zone_src2)[0] + "_mapfit.json"
+check("the new file exists, the original is untouched, the program uses it", os.path.isfile(new_file)
+      and json.load(open(zone_src2))["zones"][0]["points"] == cam_a.tolist() and app.zone_line_config_var.get() == new_file)
+saved_a = np.array(json.load(open(new_file))["zones"][0]["points"], float)
+check("the file holds the snapped zone (different from the drawn one)", len(saved_a) >= 3 and not (len(saved_a) == 4 and np.allclose(saved_a, cam_a, atol=2)))
+check("the user is told a re-run is needed", len(shown2) == 1)
+app.video_var.set(old_video)
+
 # ---- the map can also be a VIDEO (a drone clip): one chosen frame is the map
 map_video = os.path.join(tmp, "drone_ไทย.mp4")                       # (non-ASCII name on purpose)
 vw = cv2.VideoWriter(map_video, cv2.VideoWriter_fourcc(*"mp4v"), 10, (1200, 800))
