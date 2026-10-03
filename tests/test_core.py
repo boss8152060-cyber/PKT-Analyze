@@ -7,6 +7,7 @@ PKStudio.py starts a GUI/CUDA bootstrap when imported, so the tests exec only
 the region between the CORE-BEGIN / CORE-END markers.
 """
 import math
+import numpy as np
 import os
 import unittest
 
@@ -808,6 +809,94 @@ class TopviewTests(unittest.TestCase):
         self.assertAlmostEqual(side, 2.0)                                   # first edge = the width
         self.assertAlmostEqual(((d[1] - d[2]) ** 2).sum() ** 0.5, 4.0)      # second edge = the length
         self.assertTrue(CORE["oriented_rect"]((0, 0), None, 3.0, 1.0).shape == (4, 2))
+
+
+class LensTests(unittest.TestCase):
+    SIZE = (1920, 1080)
+    GOPRO_WIDE = (0.50, 0.0, 0.0)                    # a plain equidistant fisheye of about 113 degrees across (GoPro Wide, 16:9)
+
+    @staticmethod
+    def grid_lines(lens, size=(1920, 1080), n=5):
+        """Straight lines of a rectilinear grid, as the lens records them (distorted)."""
+        out = []
+        for x in np.linspace(-1100, 1100, n):
+            pts = np.column_stack([np.full(14, 960.0 + x), np.linspace(-500, 1580, 14)])
+            out.append(CORE["lens_distort"](pts, size, lens))
+        for y in np.linspace(-300, 1380, n):
+            pts = np.column_stack([np.linspace(-1000, 2900, 14), np.full(14, y)])
+            out.append(CORE["lens_distort"](pts, size, lens))
+        # keep only what the camera actually sees
+        keep = []
+        for l in out:
+            m_ = (l[:, 0] > 5) & (l[:, 0] < size[0] - 5) & (l[:, 1] > 5) & (l[:, 1] < size[1] - 5)
+            if m_.sum() >= 4:
+                keep.append(l[m_])
+        return keep
+
+    def test_round_trip(self):
+        pts = np.array([[100.0, 80], [960, 540], [1850, 1000], [300, 900], [40, 40]])
+        for lens in ((0.5, 0.0, 0.0), (0.55, -0.05, 0.0), (0.6, 0.1, 0.02), (1.0, 0.0), (0.45, 0.03)):
+            d = CORE["lens_distort"](pts, self.SIZE, lens)
+            u = CORE["lens_undistort"](d, self.SIZE, lens)
+            np.testing.assert_allclose(u, pts, atol=1e-4)
+
+    def test_the_centre_does_not_move_and_the_fisheye_pulls_the_edges_in(self):
+        c = CORE["lens_distort"]([[960.0, 540.0]], self.SIZE, self.GOPRO_WIDE)[0]
+        np.testing.assert_allclose(c, [960, 540], atol=1e-9)
+        far = CORE["lens_distort"]([[1800.0, 540.0]], self.SIZE, self.GOPRO_WIDE)[0][0]
+        self.assertLess(far, 1800.0)                                                    # tan(theta) > theta: compressed at the edges
+
+    def test_small_field_of_view_is_nearly_rectilinear(self):
+        d = CORE["lens_distort"]([[1000.0, 600.0]], self.SIZE, (2.0, 0.0, 0.0))[0]
+        np.testing.assert_allclose(d, [1000.0, 600.0], atol=0.2)
+
+    def test_valid_and_invalid_lenses(self):
+        self.assertTrue(CORE["lens_is_valid"](self.SIZE, self.GOPRO_WIDE))
+        self.assertTrue(CORE["lens_is_valid"](self.SIZE, (0.40, 0.0, 0.0)))             # ~ 170 degrees
+        self.assertFalse(CORE["lens_is_valid"](self.SIZE, (0.25, 0.0, 0.0)))            # the corner ray would be beyond 87 degrees
+        self.assertFalse(CORE["lens_is_valid"](self.SIZE, (0.5, -2.0, 0.0)))            # folds
+        self.assertFalse(CORE["lens_is_valid"](self.SIZE, (0.0, 0.0, 0.0)))
+
+    def test_bend_measure(self):
+        straight = [np.column_stack([np.linspace(0, 100, 8), np.linspace(0, 50, 8)])]
+        self.assertLess(CORE["line_bend"](straight), 1e-9)
+        bent = [np.column_stack([np.linspace(0, 100, 8), 20 * np.sin(np.linspace(0, 3, 8))])]
+        self.assertGreater(CORE["line_bend"](bent), 0.02)
+
+    def test_the_lens_is_found_from_straight_lines(self):
+        lines = self.grid_lines(self.GOPRO_WIDE)
+        self.assertGreaterEqual(len(lines), 6)
+        est = CORE["estimate_lens_from_lines"](lines, self.SIZE)
+        self.assertIsNotNone(est)
+        self.assertGreater(est["bend_before"], 0.01)                                    # the lens really bends them
+        self.assertLess(est["bend_after"], 0.15 * est["bend_before"])
+        self.assertAlmostEqual(est["lens"][0], self.GOPRO_WIDE[0], delta=0.04)
+        # points seen by the camera are straightened to where they really are (judge by the positions, not by the parameters)
+        pts = np.column_stack([np.full(10, 400.0), np.linspace(100, 900, 10)])
+        d = CORE["lens_distort"](pts, self.SIZE, self.GOPRO_WIDE)
+        und = CORE["lens_undistort"](d, self.SIZE, est["lens"])
+        self.assertLess(CORE["line_bend"]([und]), 0.003)
+
+    def test_noise_in_the_clicks_is_tolerated(self):
+        rng = np.random.default_rng(4)
+        lines = [l + rng.normal(0, 1.0, l.shape) for l in self.grid_lines((0.55, -0.05, 0.0))]
+        est = CORE["estimate_lens_from_lines"](lines, self.SIZE)
+        self.assertIsNotNone(est)
+        self.assertLess(est["bend_after"], 0.3 * est["bend_before"])
+
+    def test_k2_option_works(self):
+        est = CORE["estimate_lens_from_lines"](self.grid_lines((0.55, 0.06, 0.03)), self.SIZE, use_k2=True)
+        self.assertIsNotNone(est)
+        self.assertLess(est["bend_after"], 0.25 * est["bend_before"])
+
+    def test_no_lens_for_lines_that_are_already_straight(self):
+        self.assertIsNone(CORE["estimate_lens_from_lines"](self.grid_lines((3.0, 0.0, 0.0)), self.SIZE))
+
+    def test_too_few_lines_or_points(self):
+        one = self.grid_lines(self.GOPRO_WIDE)[:1]
+        self.assertIsNone(CORE["estimate_lens_from_lines"](one, self.SIZE))
+        short = [l[:2] for l in self.grid_lines(self.GOPRO_WIDE)]
+        self.assertIsNone(CORE["estimate_lens_from_lines"](short, self.SIZE))
 
 
 if __name__ == "__main__":
