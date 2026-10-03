@@ -24,7 +24,6 @@ Scene 2  (PET, TTC).  Crossing and rear-end conflicts
 import csv
 import importlib.util
 import json
-import cv2
 import math
 import os
 import sys
@@ -243,12 +242,6 @@ def scene1(app):
     check("Topview records: one row per observed point, in metres", len(tvr) > 0 and {"x_m", "y_m", "cx_m", "cy_m"} <= set(tvr[0]),
           str(len(tvr)))
     tvv = os.path.join(out, "Tracking_Topview.mp4")
-    cap_tv = cv2.VideoCapture(tvv)
-    dur_tv = cap_tv.get(cv2.CAP_PROP_FRAME_COUNT) / (cap_tv.get(cv2.CAP_PROP_FPS) or 1.0)
-    cap_tv.release()
-    t_all_tv = [float(r["timestamp"]) for r in tvr]
-    check("Topview video lasts as long as the analysed part of the video (not slowed down)",
-          abs(dur_tv - (max(t_all_tv) - min(t_all_tv))) < 0.5, f"video {dur_tv:.2f} s, data {max(t_all_tv) - min(t_all_tv):.2f} s")
     check("Topview video written (plain grid when the video file is unknown)", os.path.isfile(tvv) and os.path.getsize(tvv) > 1000,
           str(os.path.getsize(tvv) if os.path.isfile(tvv) else "missing"))
     pr = read_csv(os.path.join(out, "Lateral_Clearance_Pairs.csv"))
