@@ -224,6 +224,73 @@ check("a poor calibration asks before saving (and 'no' keeps the dialog)", dlg3.
 m.messagebox.askyesno = orig_ask
 dlg3.close()
 
+# ---- zone corners as the camera-side reference points: only the map is clicked
+map_z3 = [(300, 200), (700, 180), (900, 300), (880, 500), (500, 560), (280, 420)]
+map_z4 = [(900, 300), (1100, 320), (1120, 520), (880, 500)]                # shares 2 corners with Zone 3
+app.zones["Zone 3"] = [tuple(q) for q in ph(h_map_to_cam, map_z3)]
+app.zones["Zone 4"] = [tuple(q) for q in ph(h_map_to_cam, map_z4)]
+dlg5 = app.open_reference_map()
+dlg5.reset()
+dlg5.set_scale_from_points((100, 100), (300, 100), 10.0)
+check("zone corners become reference points (shared corners once)", len(dlg5.nodes) == 8, str([n["label"] for n in dlg5.nodes]))
+truth = {}
+for i, nd in enumerate(dlg5.nodes):
+    z = int(nd["zone"].split()[-1])
+    truth[i] = (map_z3 if z == 3 else map_z4)[nd["idx"]]
+dlg5.node_mode_var.set(True)
+check("node mode starts on the first corner", dlg5.toggle_node_mode() and dlg5.active_node == 0)
+root.update()
+cvm5 = dlg5.canvases["map"]
+kk, oxx, oyy = dlg5.view["map"]
+for i in range(4):                                                # 4 corners: click only the map, the camera side is already known
+    check(f"corner {i + 1}: the active one is next", dlg5.active_node == i)
+    tx, ty = truth[i]
+    cvm5.event_generate("<ButtonPress-1>", x=int(tx * kk + oxx), y=int(ty * kk + oyy))
+    cvm5.event_generate("<ButtonRelease-1>", x=int(tx * kk + oxx), y=int(ty * kk + oyy))
+    root.update()
+check("4 map clicks = 4 pairs with the corner positions as camera points", len(dlg5.pairs) == 4
+      and all(abs(dlg5.pairs[i][0] - dlg5.nodes[i]["cam"][0]) < 0.01 for i in range(4)))
+check("the calibration is ready", dlg5.calibration() is not None)
+pred = [dlg5.predicted_map(i) for i in range(4, 8)]
+check("the remaining corners show on the map where the calibration puts them",
+      all(q is not None and abs(q[0] - truth[i][0]) < 3 and abs(q[1] - truth[i][1]) < 3 for q, i in zip(pred, range(4, 8))),
+      str([(q, truth[i]) for q, i in zip(pred, range(4, 8))]))
+# drag a predicted corner marker to its place with the mouse -> it becomes a pair
+root.update()
+kk, oxx, oyy = dlg5.view["map"]
+px_, py_ = dlg5.predicted_map(4)
+sx, sy = int(px_ * kk + oxx), int(py_ * kk + oyy)
+tx, ty = truth[4]
+cvm5.event_generate("<ButtonPress-1>", x=sx, y=sy)
+cvm5.event_generate("<B1-Motion>", x=int(tx * kk + oxx) + 1, y=int(ty * kk + oyy) + 1)
+cvm5.event_generate("<ButtonRelease-1>", x=int(tx * kk + oxx) + 1, y=int(ty * kk + oyy) + 1)
+root.update()
+check("dragging a corner marker creates its pair", len(dlg5.pairs) == 5 and dlg5.node_pair_index(4) == 4, str(len(dlg5.pairs)))
+# drag an already paired corner: its map position follows
+root.update()
+kk, oxx, oyy = dlg5.view["map"]                                   # (the canvas may have been resized by the changing label)
+j = dlg5.node_pair_index(0)
+before = list(dlg5.pairs[j][2:])
+bx, by = int(before[0] * kk + oxx), int(before[1] * kk + oyy)
+cvm5.event_generate("<ButtonPress-1>", x=bx, y=by)
+cvm5.event_generate("<B1-Motion>", x=bx + 12, y=by + 8)
+cvm5.event_generate("<ButtonRelease-1>", x=bx + 12, y=by + 8)
+root.update()
+check("dragging a paired corner moves its map point to the pointer", abs(dlg5.pairs[j][2] - (bx + 12 - oxx) / kk) < 0.6 and abs(dlg5.pairs[j][3] - (by + 8 - oyy) / kk) < 0.6, str(dlg5.pairs[j][2:]))
+dlg5.assign_node(0, *truth[0])
+check("skip a corner", dlg5.select_node(5) and dlg5.skip_node() and 5 in dlg5.skipped_nodes and dlg5.active_node != 5)
+# the camera picture: clicking a corner selects it
+rootk, cox, coy = dlg5.view["cam"]
+nx, ny = dlg5.nodes[6]["cam"]
+dlg5.canvases["cam"].event_generate("<ButtonPress-1>", x=int(nx * rootk + cox), y=int(ny * rootk + coy))
+dlg5.canvases["cam"].event_generate("<ButtonRelease-1>", x=int(nx * rootk + cox), y=int(ny * rootk + coy))
+root.update()
+check("clicking a corner on the camera picture selects it (no stray point)", dlg5.active_node == 6 and dlg5.pending_cam is None)
+a_ = dlg5.last_render["map"]
+check("node markers are drawn on the map", a_ is not None and a_.std() > 5)
+check("the progress text counts the corners", "จับคู่แล้ว 5" in dlg5.node_msg_var.get(), dlg5.node_msg_var.get())
+dlg5.close()
+
 # ---- the map can also be a VIDEO (a drone clip): one chosen frame is the map
 map_video = os.path.join(tmp, "drone_ไทย.mp4")                       # (non-ASCII name on purpose)
 vw = cv2.VideoWriter(map_video, cv2.VideoWriter_fourcc(*"mp4v"), 10, (1200, 800))

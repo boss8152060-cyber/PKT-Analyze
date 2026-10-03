@@ -1743,6 +1743,11 @@ class ReferenceMapDialog:
         self.photos = {}
         self.last_render = {}
         self._cal = None                                 # the current calibration (set by refresh)
+        self.nodes = []                                  # zone corners = camera-side reference points that are already known
+        self.skipped_nodes = set()
+        self.active_node = None
+        self._ndrag = None                               # ("pair", j) / ("node", i) while a marker is dragged on the map
+        self._ndrag_pos = None
         self._pan = None
         self._slider_busy = False
         self._seek_after = {}
@@ -1762,11 +1767,14 @@ class ReferenceMapDialog:
         self.top.dialog = self                       # (lets the tests reach the object)
         self.msg_var = tk.StringVar(value="")
         self.show_zones_var = tk.BooleanVar(value=True)
+        self.node_mode_var = tk.BooleanVar(value=False)
+        self.node_msg_var = tk.StringVar(value="")
         self.del_var = tk.StringVar(value="")
         self.scale_var = tk.StringVar(value=f"{self.scale:.4f}" if self.scale else "")
         self.frame_text = {"cam": tk.StringVar(value=""), "map": tk.StringVar(value="")}
         self.frame_label = {"cam": tk.StringVar(value=""), "map": tk.StringVar(value="")}
         self._build()
+        self._build_nodes()
         self.set_camera_frame(None)
         if self.map_path and os.path.isfile(self.map_path):
             self._open_map_source(self.map_path)
@@ -1802,6 +1810,10 @@ class ReferenceMapDialog:
         de.grid(row=3, column=3, sticky="w", pady=(4, 0))
         de.bind("<Return>", lambda e: self.delete_pair(self.del_var.get()))
         ttk.Button(bar, text="ลบ", width=5, command=lambda: self.delete_pair(self.del_var.get())).grid(row=3, column=4, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(bar, text="ใช้มุมโซนเป็นจุดอ้างอิง (ฝั่งกล้องกำหนดให้แล้ว — คลิกที่แผนที่อย่างเดียว)", variable=self.node_mode_var,
+                        command=self.toggle_node_mode).grid(row=4, column=0, columnspan=5, sticky="w", pady=(4, 0))
+        ttk.Button(bar, text="ข้ามมุมนี้", command=self.skip_node).grid(row=4, column=5, sticky="w", pady=(4, 0))
+        ttk.Label(bar, textvariable=self.node_msg_var, foreground="#444444").grid(row=4, column=6, columnspan=6, sticky="w", padx=(8, 0), pady=(4, 0))
         ttk.Button(bar, text="บันทึก", command=self.save).grid(row=2, column=10, padx=2)
         ttk.Button(bar, text="ยกเลิก", command=self.close).grid(row=2, column=11, padx=2)
         bar.columnconfigure(9, weight=1)
@@ -1846,7 +1858,8 @@ class ReferenceMapDialog:
             for text, kind, amount in (("◀◀ -5 วิ", "sec", -5), ("◀ -1 เฟรม", "frame", -1), ("+1 เฟรม ▶", "frame", 1), ("+5 วิ ▶▶", "sec", 5)):
                 ttk.Button(sb, text=text, command=lambda n=name, k=kind, a=amount: self.step(n, k, a)).pack(side="left", padx=2)
             ttk.Label(sb, textvariable=self.frame_label[name], foreground="#666666").pack(side="left", padx=8)
-        ttk.Label(top, textvariable=self.msg_var, padding=(8, 4), wraplength=1250, justify="left").pack(fill="x")
+        # fixed height: a changing message must never resize the pictures under the mouse
+        tk.Label(top, textvariable=self.msg_var, height=3, anchor="nw", wraplength=1250, justify="left", padx=8, pady=4).pack(fill="x")
 
     # ----- frames (camera video, and a map that is a video) -----
     def _fps_total(self, name):
@@ -2071,9 +2084,27 @@ class ReferenceMapDialog:
 
     # ----- mouse -----
     def _press(self, name, ex, ey, always_pan):
+        if name == "map" and self.node_mode_var.get() and not always_pan:
+            hit = self._hit_node_marker(ex, ey)
+            if hit is not None:
+                self._ndrag, self._ndrag_pos = hit, None
+                return
         self._pan = {"name": name, "x": ex, "y": ey, "x0": ex, "y0": ey, "moved": bool(always_pan), "always": bool(always_pan)}
 
     def _drag(self, name, ex, ey):
+        if self._ndrag is not None and name == "map":
+            v = self.view.get("map")
+            if v is not None:
+                k, ox, oy = v
+                h, w = self.map_img.shape[:2]
+                x, y = min(max((ex - ox) / k, 0), w - 1), min(max((ey - oy) / k, 0), h - 1)
+                if self._ndrag[0] == "pair":
+                    self.pairs[self._ndrag[1]][2:] = [float(x), float(y)]
+                    self.refresh()
+                else:
+                    self._ndrag_pos = (float(x), float(y))
+                    self._render("map")
+            return
         p = self._pan
         if p is None or p["name"] != name:
             return
@@ -2084,6 +2115,14 @@ class ReferenceMapDialog:
             p["x"], p["y"] = ex, ey
 
     def _release(self, name, ex, ey):
+        if self._ndrag is not None:
+            kind, idx = self._ndrag
+            pos, self._ndrag, self._ndrag_pos = self._ndrag_pos, None, None
+            if kind == "node" and pos is not None:
+                self.assign_node(idx, *pos)                # a dragged, not yet paired corner becomes a pair
+            else:
+                self.refresh()
+            return
         p, self._pan = self._pan, None
         if p is not None and p["moved"]:
             return                                       # it was a drag, not a click
@@ -2097,6 +2136,16 @@ class ReferenceMapDialog:
         x, y = (ex - ox) / k, (ey - oy) / k
         img = self._image(name)
         if img is None or not (0 <= x < img.shape[1] and 0 <= y < img.shape[0]):
+            return
+        if self.node_mode_var.get() and not (name == "map" and self.scale_mode):
+            if name == "cam":                                          # a corner on the camera picture = the one to match next
+                i = self._nearest_node(ex, ey, "cam")
+                if i is not None:
+                    self.select_node(i)
+            elif self.active_node is not None:                         # the map click = where that corner is on the ground
+                self.assign_node(self.active_node, x, y)
+            else:
+                self.msg_var.set("ทุกมุมโซนจับคู่หรือข้ามแล้ว — ลากจุดบนแผนที่เพื่อปรับ หรือเลือกมุมบนภาพกล้องเพื่อจับคู่ใหม่")
             return
         if name == "cam":
             self.add_camera_point(x, y)
@@ -2164,12 +2213,142 @@ class ReferenceMapDialog:
             if -20 <= c[0] <= cw + 20 and -20 <= c[1] <= ch + 20:
                 cv2.circle(out, c, 6, col, 2, cv2.LINE_AA)
                 cv2.putText(out, label, (c[0] + 8, c[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
+        if self.node_mode_var.get():                         # zone corners that are not paired yet
+            for i, nd in enumerate(self.nodes):
+                if self.node_pair_index(i) is not None:
+                    continue
+                if name == "cam":
+                    q = nd["cam"]
+                else:
+                    q = self.predicted_map(i)
+                    if q is None:
+                        continue
+                c = (int(q[0] * k + ox), int(q[1] * k + oy))
+                if not (-20 <= c[0] <= cw + 20 and -20 <= c[1] <= ch + 20):
+                    continue
+                if i == self.active_node:
+                    cv2.circle(out, c, 11, (0, 140, 255), 3, cv2.LINE_AA)
+                    cv2.putText(out, nd["label"], (c[0] + 12, c[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 140, 255), 2, cv2.LINE_AA)
+                else:
+                    cv2.rectangle(out, (c[0] - 5, c[1] - 5), (c[0] + 5, c[1] + 5), (190, 190, 190), 1)
+                    cv2.putText(out, nd["label"], (c[0] + 8, c[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (190, 190, 190), 1, cv2.LINE_AA)
         cv2.putText(out, f"zoom x{self.zoom[name]:.1f}", (6, ch - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
         self.last_render[name] = out                       # (what the canvas shows; lets the tests look at the picture)
         ok, buf = cv2.imencode(".png", out)
         photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
         self.photos[name] = photo
         cvs.create_image(0, 0, anchor="nw", image=photo)
+
+    # ----- zone corners as the camera-side reference points -----
+    def _build_nodes(self, merge_px=8.0):
+        """The corners of the zones drawn on the camera picture (shared corners of neighbouring zones counted once)."""
+        self.nodes = []
+        for zname, poly in self._zone_polys():
+            num = zname.replace("Zone ", "")
+            for i, pt in enumerate(poly):
+                if any(math.hypot(pt[0] - n["cam"][0], pt[1] - n["cam"][1]) < merge_px for n in self.nodes):
+                    continue
+                self.nodes.append({"zone": zname, "idx": i, "label": f"Z{num}.{i + 1}", "cam": (float(pt[0]), float(pt[1]))})
+
+    def node_pair_index(self, i):
+        cx, cy = self.nodes[i]["cam"]
+        for j, p in enumerate(self.pairs):
+            if abs(p[0] - cx) < 0.01 and abs(p[1] - cy) < 0.01:
+                return j
+        return None
+
+    def predicted_map(self, i):
+        """Where corner i should be on the map according to the current calibration (None without one)."""
+        if self._ndrag is not None and self._ndrag == ("node", i) and self._ndrag_pos is not None:
+            return self._ndrag_pos
+        if self._cal is None:
+            return None
+        return tuple(apply_homography(self._cal["H"], [self.nodes[i]["cam"]])[0] * self.scale)
+
+    def _next_unpaired(self, after=-1):
+        n = len(self.nodes)
+        for step in range(1, n + 1):
+            i = (after + step) % n
+            if self.node_pair_index(i) is None and i not in self.skipped_nodes:
+                return i
+        return None
+
+    def toggle_node_mode(self):
+        if self.node_mode_var.get():
+            if not self.nodes:
+                self.node_mode_var.set(False)
+                self.msg_var.set("ยังไม่ได้โหลดไฟล์โซน (แท็บ ② ทางแยก) จึงไม่มีมุมโซนให้ใช้")
+                return False
+            self.skipped_nodes = set()
+            self.active_node = self._next_unpaired(-1)
+            self.msg_var.set("มุมโซนส้ม = มุมที่ต้องจับคู่ (ตำแหน่งบนภาพกล้องกำหนดให้แล้ว) คลิกบนแผนที่ที่ตำแหน่งเดียวกันบนพื้นถนน "
+                             "— ข้ามมุมที่ไม่ตรงลักษณะถนนได้ · เมื่อจับคู่ครบ 4 มุมแล้ว มุมที่เหลือจะแสดงบนแผนที่ที่ตำแหน่งโดยประมาณ ลากไปให้ตรงได้เลย")
+        self.refresh()
+        return True
+
+    def select_node(self, i):
+        if 0 <= i < len(self.nodes):
+            self.skipped_nodes.discard(i)
+            self.active_node = i
+            self.refresh()
+            return True
+        return False
+
+    def skip_node(self):
+        if self.active_node is None:
+            return False
+        self.skipped_nodes.add(self.active_node)
+        self.active_node = self._next_unpaired(self.active_node)
+        self.refresh()
+        return True
+
+    def assign_node(self, i, mx, my):
+        """Corner i is at map pixel (mx, my): add (or move) the pair whose camera point is that corner."""
+        if not (0 <= i < len(self.nodes)):
+            return False
+        cx, cy = self.nodes[i]["cam"]
+        j = self.node_pair_index(i)
+        if j is None:
+            self.pairs.append([cx, cy, float(mx), float(my)])
+        else:
+            self.pairs[j][2:] = [float(mx), float(my)]
+        self.skipped_nodes.discard(i)
+        if self.active_node == i or self.active_node is None:
+            self.active_node = self._next_unpaired(i)
+        self.refresh()
+        return True
+
+    def _nearest_node(self, ex, ey, name, radius=12):
+        v = self.view.get(name)
+        if v is None:
+            return None
+        k, ox, oy = v
+        best = None
+        for i, nd in enumerate(self.nodes):
+            q = nd["cam"] if name == "cam" else self.predicted_map(i)
+            if q is None:
+                continue
+            d = math.hypot(q[0] * k + ox - ex, q[1] * k + oy - ey)
+            if d <= radius and (best is None or d < best[0]):
+                best = (d, i)
+        return None if best is None else best[1]
+
+    def _hit_node_marker(self, ex, ey, radius=11):
+        """A map marker that can be dragged: a paired corner (moves its pair) or a not yet paired one (becomes a pair)."""
+        v = self.view.get("map")
+        if v is None:
+            return None
+        k, ox, oy = v
+        best = None
+        for i in range(len(self.nodes)):
+            j = self.node_pair_index(i)
+            q = self.pairs[j][2:] if j is not None else self.predicted_map(i)
+            if q is None:
+                continue
+            d = math.hypot(q[0] * k + ox - ex, q[1] * k + oy - ey)
+            if d <= radius and (best is None or d < best[0]):
+                best = (d, ("pair", j) if j is not None else ("node", i))
+        return None if best is None else best[1]
 
     def _zone_polys(self):
         try:
@@ -2271,6 +2450,9 @@ class ReferenceMapDialog:
 
     def refresh(self):
         cal = self._cal = self.calibration()
+        paired = sum(1 for i in range(len(self.nodes)) if self.node_pair_index(i) is not None)
+        self.node_msg_var.set(f"มุมโซน {len(self.nodes)} จุด · จับคู่แล้ว {paired} · ข้าม {len(self.skipped_nodes)}"
+                              + (f" · ตอนนี้: {self.nodes[self.active_node]['label']}" if self.node_mode_var.get() and self.active_node is not None else ""))
         for name in ("cam", "map"):
             if getattr(self, "canvases", None):
                 self._render(name)
