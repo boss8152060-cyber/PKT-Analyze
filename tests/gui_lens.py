@@ -286,6 +286,38 @@ for g_ in road_ground:
 check("the road lines land on the right metres (even bent by the lens between the clicks)", all(hit), f"{sum(hit)}/{len(hit)}")
 check("the map-style Topview has no camera photo (plain background away from the lines)", float(np.abs(fm[5:25, 5:60].astype(float) - 38).mean()) < 40)
 
+# ---- the road line types (Thai road markings) are drawn in their own style
+canvas_ = np.full((60 * len(m.ROAD_LINE_TYPES), 900, 3), 38, np.uint8)
+SC = 20.0                                                          # px per metre
+dash_cov = {}
+for n_, kind_ in enumerate(m.ROAD_LINE_TYPES):
+    y_ = 30 + 60 * n_
+    m.draw_road_line(canvas_, np.array([[10.0, y_], [880.0, y_]]), kind_, SC)
+    row = canvas_[y_ - 12:y_ + 13, 10:880].astype(int)
+    dash_cov[kind_] = float((np.abs(row - 38).sum(axis=2).max(axis=0) > 40).mean())
+if os.environ.get("PK_DEBUG_SAVE"):
+    cv2.imwrite(os.environ["PK_DEBUG_SAVE"].replace(".png", "_types.png"), canvas_)
+check("solid lines cover the whole length, dashed ones about a third", dash_cov["white_solid"] > 0.97 and dash_cov["yellow_solid"] > 0.97 and 0.2 < dash_cov["white_dashed"] < 0.45 and 0.2 < dash_cov["yellow_dashed"] < 0.45, str({k: round(v, 2) for k, v in dash_cov.items()}))
+yy = lambda kind: 30 + 60 * list(m.ROAD_LINE_TYPES).index(kind)
+px_ = lambda kind, x: canvas_[yy(kind), x].astype(int)
+check("yellow is yellow, blue is blue", px_("yellow_solid", 400)[2] > 200 and px_("yellow_solid", 400)[0] < 50 and px_("blue_motorcycle", 400)[0] > 200 and px_("blue_motorcycle", 400)[2] < 80)
+dbl = canvas_[yy("yellow_double") - 12:yy("yellow_double") + 13, 400].astype(int)
+bright = np.nonzero(np.abs(dbl - 38).sum(axis=1) > 80)[0]
+check("the double yellow line is two lines with a gap", len(bright) >= 2 and np.ptp(bright) >= 4 and (np.diff(bright) > 1).any(), f"rows {bright.tolist()}")
+kw = canvas_[yy("kerb_red_white"), 10:880].astype(int)
+check("the red-white kerb alternates red and white", (kw[:, 2] > 200).any() and ((kw[:, 0] > 200) & (kw[:, 1] > 200)).any())
+app.set_road_lines([[(10.0, 10.0), (100.0, 20.0)]])                      # the old format (a bare list of points) still loads
+check("an old-format road line loads as a white solid line", app.get_road_lines()[0]["type"] == "white_solid")
+dlg2 = m.RoadLineDialog(app, video, app.set_road_lines)
+dlg2.set_type("blue_motorcycle")
+dlg2.add_point(100, 100); dlg2.add_point(300, 120)
+dlg2.new_line()
+dlg2.set_type("yellow_double")
+dlg2.add_point(100, 200); dlg2.add_point(300, 220)
+check("each line keeps its own type", [k for k, l in zip(dlg2.types, dlg2.lines) if len(l) >= 2] == ["blue_motorcycle", "yellow_double"], str(dlg2.types))
+dlg2.apply()
+check("the types are saved with the lines", [d["type"] for d in app.get_road_lines()] == ["blue_motorcycle", "yellow_double"])
+
 check("the Topview has the video's shape", abs(Wf / Hf - CW / CH) < 0.02, f"{Wf}x{Hf}")
 vid_b = app._run3_write_topview_video(tr, dict(base_cfg, lens=None, lens_size=None), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video)
 ncc_b = ncc_of(vid_b)
