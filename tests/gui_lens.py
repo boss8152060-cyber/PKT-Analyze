@@ -318,6 +318,33 @@ check("each line keeps its own type", [k for k, l in zip(dlg2.types, dlg2.lines)
 dlg2.apply()
 check("the types are saved with the lines", [d["type"] for d in app.get_road_lines()] == ["blue_motorcycle", "yellow_double"])
 
+# ---- one tool for both jobs: the same clicks give the road lines AND the lens
+app.clear_lens_values()
+app.clear_road_lines()
+ud = app.open_road_line_tool()
+root.update()
+check("the combined tool opens without a lens", ud is not None and ud.lens is None)
+for i_, pts_ in enumerate(lines):
+    if i_:
+        ud.new_line()
+    ud.set_type("white_solid" if i_ % 2 else "yellow_solid")
+    for x_, y_ in pts_:
+        ud.add_point(x_, y_)
+ud.new_line()
+ud.set_type("kerb_red_white")
+ud.straight_var.set(False)
+ud._on_straight_changed()
+wavy = m.lens_distort(np.column_stack([np.linspace(100, 1100, 8), 400 + 60 * np.sin(np.linspace(0, 6, 8))]), (CW, CH), LENS)
+for x_, y_ in wavy:
+    ud.add_point(x_, y_)
+check("a curved line marked 'not straight' is left out of the lens estimate", len(ud.usable_lines()) == len(lines))
+est_u = ud.estimate()
+check("the lens is found from the same clicks", est_u is not None and abs(est_u["lens"][0] - LENS[0]) < 0.05, "" if est_u is None else f"f {est_u['lens'][0]:.3f}")
+check("applying sets the lens and the road lines together", ud.apply() and app._run3_lens_params()[0] is not None and len(app.get_road_lines()) == len(lines) + 1)
+rl_ = app.get_road_lines()
+check("the straight flag and the type are kept per line", [d["straight"] for d in rl_] == [True] * len(lines) + [False] and rl_[-1]["type"] == "kerb_red_white")
+app.set_lens_values(LENS)
+
 check("the Topview has the video's shape", abs(Wf / Hf - CW / CH) < 0.02, f"{Wf}x{Hf}")
 vid_b = app._run3_write_topview_video(tr, dict(base_cfg, lens=None, lens_size=None), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video)
 ncc_b = ncc_of(vid_b)
