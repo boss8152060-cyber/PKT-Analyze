@@ -1223,7 +1223,7 @@ TOPVIEW_CLASS_COLORS = {            # BGR
 TOPVIEW_DEFAULT_COLOR = (230, 230, 230)
 
 
-def topview_canvas(points_m, max_px=1280, margin_m=3.0, min_span_m=10.0):
+def topview_canvas(points_m, max_px=1280, margin_m=3.0, min_span_m=10.0, aspect=None):
     """Canvas for a Topview picture of metric points (N x 2): px/m, the metric origin of the top-left pixel and the
     picture size. Outliers are ignored (0.5 / 99.5 percentiles); the picture size is made even."""
     p = np.asarray(points_m, dtype=float).reshape(-1, 2)
@@ -1233,6 +1233,10 @@ def topview_canvas(points_m, max_px=1280, margin_m=3.0, min_span_m=10.0):
     lo = np.percentile(p, 0.5, axis=0) - margin_m
     hi = np.percentile(p, 99.5, axis=0) + margin_m
     span = np.maximum(hi - lo, min_span_m)
+    if aspect:                                  # same width : height as the video (e.g. 16:9), the area is centred in it
+        want = np.array([max(span[0], span[1] * aspect), max(span[1], span[0] / aspect)])
+        lo = lo - (want - span) / 2.0
+        span = want
     scale = float(max_px) / float(span.max())
     w, h = int(math.ceil(span[0] * scale)), int(math.ceil(span[1] * scale))
     return {"scale": scale, "xmin": float(lo[0]), "ymin": float(lo[1]), "w": w + (w % 2), "h": h + (h % 2)}
@@ -7983,7 +7987,11 @@ class Run1App:
                     fr = int(float(r.get("frame", "")))
                 except (TypeError, ValueError):
                     fr = int(round(r["_timestamp"] * 1000))
-                per_frame[fr].append((tid, cls, r["_timestamp"], r["_m"], h))
+                try:
+                    bb = (float(r["bbox_x1"]), float(r["bbox_y1"]), float(r["bbox_x2"]), float(r["bbox_y2"]))
+                except (KeyError, TypeError, ValueError):
+                    bb = None
+                per_frame[fr].append((tid, cls, r["_timestamp"], r["_m"], h, bb))
                 all_pts.append(r["_m"])
         if not per_frame:
             return None
@@ -7991,7 +7999,15 @@ class Run1App:
         for zname, poly in self._zone_polygons():
             zone_m.append((zname, self._run3_to_metric(np.asarray(poly, dtype=float), c)))
             all_pts.extend(map(tuple, zone_m[-1][1]))
-        cv = topview_canvas(all_pts, max_px)
+        aspect, vfps = None, 0.0
+        if video_path and os.path.isfile(video_path):
+            cap0 = cv2.VideoCapture(video_path)
+            vw, vh = cap0.get(cv2.CAP_PROP_FRAME_WIDTH), cap0.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            vfps = cap0.get(cv2.CAP_PROP_FPS) or 0.0
+            cap0.release()
+            if vw > 0 and vh > 0:
+                aspect = vw / vh                # the Topview has the same shape as the video that was recorded
+        cv = topview_canvas(all_pts, max_px, aspect=aspect)
         W, H = cv["w"], cv["h"]
         # static layer: background, grid, zones
         base = np.full((H, W, 3), 38, np.uint8)
@@ -8058,12 +8074,32 @@ class Run1App:
             raise RuntimeError("Unable to create Tracking_Topview.mp4")
         lengths, widths = c["lengths"], c["widths"]
         trails = defaultdict(deque)
+        src = cv2.VideoCapture(video_path) if aspect else None          # the vehicles' own pictures come from the recorded video
+        src_pos = [-1]
+
+        def source_frame(idx):
+            """Frame `idx` of the recorded video (read forward; frames in between are skipped, not decoded)."""
+            if src is None or idx < 0:
+                return None
+            if idx <= src_pos[0] or idx - src_pos[0] > 120:
+                src.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                src_pos[0] = idx - 1
+            while src_pos[0] < idx - 1:
+                if not src.grab():
+                    return None
+                src_pos[0] += 1
+            ok_, im_ = src.read()
+            src_pos[0] = idx
+            return im_ if ok_ else None
+
         try:
             for fr in frames:
                 img = base.copy()
                 now = per_frame[fr][0][2]
                 drawn = []
-                for tid, cls, t, m, h in per_frame[fr]:
+                shot = source_frame(fr if (fr >= 0 and vfps and fr < 10 ** 7 and abs(fr / vfps - now) < 1.0) else int(round(now * vfps))) if vfps else None
+                sprites = []
+                for tid, cls, t, m, h, bb in per_frame[fr]:
                     pt = topview_px(cv, [m])[0]
                     trails[tid].append((t, pt))
                     while trails[tid] and trails[tid][0][0] < t - trail_s:
@@ -8074,10 +8110,24 @@ class Run1App:
                     box = np.round(topview_px(cv, oriented_rect(m, h, ln, wd))).astype(np.int32).reshape(-1, 1, 2)
                     nose = topview_px(cv, [np.asarray(m, dtype=float) + np.asarray(h if h else (1.0, 0.0), dtype=float) * (ln * 0.5)])[0]
                     drawn.append((tid, col, box, pt, nose))
+                    if shot is not None and bb is not None:
+                        x1_, y1_, x2_, y2_ = [int(round(v)) for v in bb]
+                        x1_, y1_ = max(0, x1_), max(0, y1_)
+                        x2_, y2_ = min(shot.shape[1], x2_), min(shot.shape[0], y2_)
+                        if x2_ - x1_ >= 4 and y2_ - y1_ >= 4:
+                            sw = max(6, int(np.ptp(box.reshape(-1, 2)[:, 0])))          # the vehicle as wide as its footprint, standing on it
+                            sh = max(6, int(round(sw * (y2_ - y1_) / float(x2_ - x1_))))
+                            sprites.append((pt, cv2.resize(shot[y1_:y2_, x1_:x2_], (sw, sh), interpolation=cv2.INTER_AREA), pt[1]))
                 fill = img.copy()                                     # vehicles as translucent footprints, like cars on a map
                 for tid, col, box, pt, nose in drawn:
                     cv2.fillPoly(fill, [box], col)
                 img = cv2.addWeighted(fill, 0.35, img, 0.65, 0)
+                for pt, sp, _y in sorted(sprites, key=lambda it: it[2]):          # nearer (lower) vehicles on top
+                    sh_, sw_ = sp.shape[:2]
+                    x0, y0 = int(round(pt[0] - sw_ / 2.0)), int(round(pt[1] - sh_ * 0.85))
+                    ax0, ay0, ax1, ay1 = max(0, x0), max(0, y0), min(W, x0 + sw_), min(H, y0 + sh_)
+                    if ax1 > ax0 and ay1 > ay0:
+                        img[ay0:ay1, ax0:ax1] = sp[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0]
                 for tid, col, box, pt, nose in drawn:
                     if len(trails[tid]) > 1:
                         cv2.polylines(img, [np.round(np.array([q for _, q in trails[tid]])).astype(np.int32).reshape(-1, 1, 2)],
@@ -8090,6 +8140,8 @@ class Run1App:
                 writer.write(img)
         finally:
             writer.release()
+            if src is not None:
+                src.release()
         return out_path
 
     def _run3_from_metric(self, pts_m, c):
