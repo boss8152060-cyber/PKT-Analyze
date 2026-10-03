@@ -8005,15 +8005,17 @@ class Run1App:
                 metres = np.stack([xs.ravel() / cv["scale"] + cv["xmin"], ys.ravel() / cv["scale"] + cv["ymin"]], axis=1)
                 campx = self._run3_from_metric(metres, c).reshape(H, W, 2).astype(np.float32)
                 warped = cv2.remap(bg, campx[..., 0], campx[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(38, 38, 38))
-                roi = np.zeros((H, W), np.uint8)                   # the study area stays bright; the stretched far field fades out
+                roi = np.zeros((H, W), np.uint8)                   # the study area stays bright; everything above the ground (stretched by the projection) is blanked
                 for zname, pts in zone_m:
                     cv2.fillPoly(roi, [np.round(topview_px(cv, pts)).astype(np.int32).reshape(-1, 1, 2)], 255)
-                for q in topview_px(cv, np.asarray(all_pts, dtype=float)[::5]):
-                    cv2.circle(roi, (int(round(q[0])), int(round(q[1]))), 2, 255, -1)
-                grow = max(3, int(2 * 7.0 * cv["scale"])) | 1                  # (a kernel diameter: the study area is grown by 7 m)
+                for rows_ in tracks.values():                      # whole tracks (lines between points), so sparse points leave no holes
+                    pm = [r_["_m"] for r_ in rows_ if r_.get("_m") is not None]
+                    if pm:
+                        cv2.polylines(roi, [np.round(topview_px(cv, np.asarray(pm, dtype=float))).astype(np.int32).reshape(-1, 1, 2)], False, 255, 3)
+                grow = max(3, int(2 * 2.5 * cv["scale"])) | 1                  # (a kernel diameter: the study area is grown by 2.5 m)
                 roi = cv2.dilate(roi, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow)))
-                roi = cv2.GaussianBlur(roi, (0, 0), max(2.0, 2.0 * cv["scale"])).astype(np.float32) / 255.0
-                factor = (0.30 + 0.70 * roi)[..., None]
+                roi = cv2.GaussianBlur(roi, (0, 0), max(2.0, 0.7 * cv["scale"])).astype(np.float32) / 255.0
+                factor = np.clip(roi * 1.6 - 0.15, 0.0, 1.0)[..., None]   # beyond the road: flat colour, no stretched buildings/trees
                 base = (warped.astype(np.float32) * factor + 38.0 * (1.0 - factor)).astype(np.uint8)
                 bg_used = True
             except Exception:
