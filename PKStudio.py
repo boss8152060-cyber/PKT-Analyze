@@ -1742,6 +1742,7 @@ class ReferenceMapDialog:
         self.zoom = {"cam": 1.0, "map": 1.0}
         self.photos = {}
         self.last_render = {}
+        self._cal = None                                 # the current calibration (set by refresh)
         self._pan = None
         self._slider_busy = False
         self._seek_after = {}
@@ -1760,6 +1761,8 @@ class ReferenceMapDialog:
         self.top.protocol("WM_DELETE_WINDOW", self.close)
         self.top.dialog = self                       # (lets the tests reach the object)
         self.msg_var = tk.StringVar(value="")
+        self.show_zones_var = tk.BooleanVar(value=True)
+        self.del_var = tk.StringVar(value="")
         self.scale_var = tk.StringVar(value=f"{self.scale:.4f}" if self.scale else "")
         self.frame_text = {"cam": tk.StringVar(value=""), "map": tk.StringVar(value="")}
         self.frame_label = {"cam": tk.StringVar(value=""), "map": tk.StringVar(value="")}
@@ -1792,6 +1795,13 @@ class ReferenceMapDialog:
         ttk.Button(bar, text="รีเซ็ต View", command=self.reset_views).grid(row=2, column=4, padx=(14, 2))
         ttk.Button(bar, text="ย้อนจุดล่าสุด", command=self.undo).grid(row=2, column=5, padx=2)
         ttk.Button(bar, text="ล้างจุด", command=self.reset).grid(row=2, column=6, padx=2)
+        ttk.Checkbutton(bar, text="แสดงโซนบนภาพ (ตรวจว่าตรงถนนไหม)", variable=self.show_zones_var,
+                        command=self.reset_views_keep).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(bar, text="ลบจุดเลขที่").grid(row=3, column=2, sticky="e", padx=(10, 2), pady=(4, 0))
+        de = ttk.Entry(bar, textvariable=self.del_var, width=6)
+        de.grid(row=3, column=3, sticky="w", pady=(4, 0))
+        de.bind("<Return>", lambda e: self.delete_pair(self.del_var.get()))
+        ttk.Button(bar, text="ลบ", width=5, command=lambda: self.delete_pair(self.del_var.get())).grid(row=3, column=4, sticky="w", pady=(4, 0))
         ttk.Button(bar, text="บันทึก", command=self.save).grid(row=2, column=10, padx=2)
         ttk.Button(bar, text="ยกเลิก", command=self.close).grid(row=2, column=11, padx=2)
         bar.columnconfigure(9, weight=1)
@@ -2122,9 +2132,25 @@ class ReferenceMapDialog:
             ex_, ey_ = min(dw, cw - dx), min(dh, ch - dy)
             if ex_ > sx0 and ey_ > sy0:
                 out[dy + sy0:dy + ey_, dx + sx0:dx + ex_] = res[sy0:ey_, sx0:ex_]
+        cal = self._cal
+        if self.show_zones_var.get():                        # the zones through the current calibration: do they sit on the road?
+            for zname, poly in self._zone_polys():
+                if name == "cam":
+                    q = np.asarray(poly, dtype=float)
+                elif cal is not None:
+                    q = apply_homography(cal["H"], np.asarray(poly, dtype=float)) * self.scale
+                else:
+                    continue
+                qc = np.round(q * k + np.array([ox, oy])).astype(np.int32).reshape(-1, 1, 2)
+                cv2.polylines(out, [qc], True, (80, 220, 80), 1, cv2.LINE_AA)
+                cx_, cy_ = qc.reshape(-1, 2).mean(axis=0)
+                cv2.putText(out, zname.replace("Zone ", "Z"), (int(cx_) - 8, int(cy_) + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 220, 80), 1, cv2.LINE_AA)
         pts = []
         for n, p in enumerate(self.pairs, 1):
-            pts.append((str(n), p[:2] if name == "cam" else p[2:], (0, 255, 255)))
+            err = cal["errors_m"][n - 1] if cal is not None and n - 1 < len(cal["errors_m"]) else None
+            col = (0, 255, 255) if err is None else ((0, 220, 0) if err < 0.15 else ((0, 165, 255) if err < 0.40 else (0, 0, 255)))
+            lab = str(n) if err is None else f"{n} {err * 100:.0f}cm"
+            pts.append((lab, p[:2] if name == "cam" else p[2:], col))
         if name == "cam" and self.pending_cam is not None:
             pts.append((str(len(self.pairs) + 1), self.pending_cam, (0, 140, 255)))
         if name == "map":
@@ -2144,6 +2170,29 @@ class ReferenceMapDialog:
         photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
         self.photos[name] = photo
         cvs.create_image(0, 0, anchor="nw", image=photo)
+
+    def _zone_polys(self):
+        try:
+            return [(z, [tuple(map(float, pt)) for pt in poly]) for z, poly in self.app._zone_polygons()]
+        except Exception:
+            return []
+
+    def reset_views_keep(self):
+        for name in ("cam", "map"):
+            self._render(name)
+
+    def delete_pair(self, number):
+        """Remove point pair number `number` (1-based, as drawn on the pictures)."""
+        try:
+            i = int(float(str(number).strip())) - 1
+        except ValueError:
+            return False
+        if not (0 <= i < len(self.pairs)):
+            return False
+        self.pairs.pop(i)
+        self.del_var.set("")
+        self.refresh()
+        return True
 
     # ----- logic (no clicking needed) -----
     def add_camera_point(self, x, y):
@@ -2221,15 +2270,18 @@ class ReferenceMapDialog:
         return {"map_path": self.map_path, "map_frame": self.map_frame, "scale": self.scale, "pairs": [list(p) for p in self.pairs]}
 
     def refresh(self):
+        cal = self._cal = self.calibration()
         for name in ("cam", "map"):
             if getattr(self, "canvases", None):
                 self._render(name)
-        cal = self.calibration()
         n = len(self.pairs)
         if cal is not None:
             worst = max(cal["errors_m"])
+            near = [p[1] for p in self.pairs]
             self.msg_var.set(f"{n} คู่จุด · ความคลาดเคลื่อนเฉลี่ย {cal['rms_m'] * 100:.1f} ซม. · แย่สุด {worst * 100:.1f} ซม. "
-                             f"(จุดที่ {cal['errors_m'].index(worst) + 1}) — ถ้าสูงเกินไป ลองลบจุดล่าสุดหรือเลือกจุดใหม่ที่อยู่บนพื้นถนนจริง")
+                             f"(จุดที่ {cal['errors_m'].index(worst) + 1}) · จุดเขียว <15 ซม., ส้ม <40 ซม., แดง ≥40 ซม. — "
+                             "ควรเฉลี่ยไม่เกิน ~20–30 ซม.; ลบ/คลิปจุดสีแดงใหม่ (ช่อง ลบจุดเลขที่) และเพิ่มจุดให้กระจายทั่วภาพ "
+                             f"รวมส่วนใกล้กล้อง (ตอนนี้จุดอยู่ช่วงแถว y = {min(near):.0f}–{max(near):.0f} พิกเซล)")
         else:
             need_ = []
             if self.map_img is None:
@@ -2254,6 +2306,12 @@ class ReferenceMapDialog:
         cal = self.calibration()
         if cal is None:
             messagebox.showwarning("แผนที่อ้างอิง", self.msg_var.get(), parent=self.top)
+            return False
+        if cal["rms_m"] > 0.30 and not messagebox.askyesno(
+                "ความคลาดเคลื่อนสูง",
+                f"ความคลาดเคลื่อนเฉลี่ย {cal['rms_m'] * 100:.0f} ซม. (แย่สุด {max(cal['errors_m']) * 100:.0f} ซม.)\n\n"
+                "ตำแหน่งรถ ระยะ และความเร็วจะคลาดเคลื่อนตามนี้ และโซนจะไม่ทับถนนบนแผนที่\n"
+                "ปรับจุดสีแดงก่อนจะดีกว่า — บันทึกทั้งอย่างนี้เลยไหม?", parent=self.top):
             return False
         self.on_save(self.result())
         self.close()

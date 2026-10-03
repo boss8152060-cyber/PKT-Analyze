@@ -193,6 +193,37 @@ check("Topview video drawn on the map", ok and fr is not None and fr.std() > 8, 
 # the map shows through (light grid lines of the map exist in the frame)
 check("the map is the background", ok and (fr > 150).any(axis=2).sum() > 500)
 
+# ---- zones over the pictures, error colours, delete a point, warning on a poor calibration
+app.zones["Zone 3"] = [(300, 200), (900, 200), (900, 500), (300, 500)]
+dlg3 = app.open_reference_map()
+dlg3.reset()
+dlg3.set_scale_from_points((100, 100), (300, 100), 10.0)
+for c_, p_ in zip(cam_pts, map_pts):
+    dlg3.add_camera_point(*c_)
+    dlg3.add_map_point(*p_)
+root.update()
+on = dlg3.last_render["map"].copy()
+dlg3.show_zones_var.set(False)
+dlg3.reset_views_keep()
+off = dlg3.last_render["map"].copy()
+check("zones are drawn on the map through the calibration (and can be switched off)", (on != off).any())
+check("zone polygon through the calibration lands where the camera zone is on the ground",
+      all(len(poly) == 4 for _, poly in dlg3._zone_polys()))
+# a deliberately wrong pair -> a red point with a big error
+dlg3.show_zones_var.set(True)
+dlg3.add_camera_point(*cam_pts[0]); dlg3.add_map_point(map_pts[0][0] + 400, map_pts[0][1] + 300)
+bad = dlg3.calibration()
+check("a wrong pair shows a clearly larger error", bad is not None and max(bad["errors_m"]) > 0.5 and bad["errors_m"][-1] == max(bad["errors_m"]) or max(bad["errors_m"]) > 0.5)
+check("delete a pair by its number", dlg3.delete_pair("7") and len(dlg3.pairs) == 6 and dlg3.delete_pair("99") is False)
+check("after deleting the wrong pair the calibration is exact again", dlg3.calibration()["rms_m"] < 0.01)
+dlg3.add_camera_point(*cam_pts[1]); dlg3.add_map_point(map_pts[1][0] + 600, map_pts[1][1] + 500)
+asked = []
+orig_ask = m.messagebox.askyesno
+m.messagebox.askyesno = lambda *a, **k: (asked.append(a[0]) or False)
+check("a poor calibration asks before saving (and 'no' keeps the dialog)", dlg3.save() is False and len(asked) == 1)
+m.messagebox.askyesno = orig_ask
+dlg3.close()
+
 # ---- the map can also be a VIDEO (a drone clip): one chosen frame is the map
 map_video = os.path.join(tmp, "drone_ไทย.mp4")                       # (non-ASCII name on purpose)
 vw = cv2.VideoWriter(map_video, cv2.VideoWriter_fourcc(*"mp4v"), 10, (1200, 800))
