@@ -451,6 +451,8 @@ RUN3_DEFAULTS = {
     # Optional road-plane perspective calibration. Disabled by default because
     # image points and real dimensions are site/video-specific and were not
     # supplied in the research documents.
+    "cal_mode": "rect",                     # ground calibration: "rect" = 4 corners of a rectangle; "zones" = zone corners + typed edge lengths
+    "zone_ground": "",                      # JSON of the "zones" calibration: points (zone corners) and edges (direction A/B, real length)
     "perspective_enabled": False,
     "perspective_p1": "",
     "perspective_p2": "",
@@ -545,6 +547,7 @@ CONFLICT_ZONE_IDS = (3, 6)              # V28: conflict zones (PET / TTC); ordin
 ZONE_NAMES = [f"Zone {i}" for i in ZONE_IDS]
 
 # ==== CORE-BEGIN (pure logic, no GUI: unit-tested by tests/test_core.py) ====
+import json
 import math
 import re
 import numpy as np
@@ -1210,6 +1213,299 @@ def zone_metric_transform(src_pts, lengths, base_pts):
 
 def zone_metric_points(transform, pts):
     return apply_homography(transform["H"], pts) @ transform["Q"] + transform["t"]
+def parse_ground_distances(text, labels=None):
+    """'P1-P2=17, Z1.1-Z1.2=8.4' -> ([(i, j, metres)], [pieces that could not be read]). `labels` = the names of the ground points in order
+    (e.g. ['Z1.1', 'Z1.2', ...]); without it only 'P<number>' / a bare number (counted from 1) is understood."""
+    lab = {str(l).upper(): k for k, l in enumerate(labels)} if labels else None
+    tok = r"([A-Za-z]{0,2}\d+(?:\.\d+)?)"
+    pat = re.compile(tok + r"\s*(?:-|\u2013|\u2192|>|~|to)\s*" + tok + r"\s*(?:=|:)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|\u0e21\.?)?")
+
+    def index(t):
+        t = t.upper()
+        if t[0].isdigit():
+            t = "P" + t
+        if lab is not None:
+            return lab.get(t)
+        return int(t[1:]) - 1 if (t.startswith("P") and t[1:].isdigit() and int(t[1:]) >= 1) else None
+
+    out, bad = [], []
+    for piece in re.split(r"[,;\n]+", str(text or "")):
+        piece = piece.strip()
+        if not piece:
+            continue
+        m_ = pat.fullmatch(piece)
+        i = index(m_.group(1)) if m_ else None
+        j = index(m_.group(2)) if m_ else None
+        if m_ is None or i is None or j is None or i == j or float(m_.group(3)) <= 0:
+            bad.append(piece)
+        else:
+            out.append((i, j, float(m_.group(3))))
+    return out, bad
+
+
+def format_ground_distances(dists, labels=None):
+    name = (lambda k: labels[k]) if labels else (lambda k: f"P{k + 1}")
+    return ", ".join(f"{name(i)}-{name(j)}={d:g}" for i, j, d in dists)
+
+
+def encode_ground_points(pts, labels):
+    return json.dumps([{"l": str(l), "p": [round(float(x), 2), round(float(y), 2)]} for (x, y), l in zip(pts, labels)])
+
+
+def decode_ground_points(text):
+    """Saved ground points -> ([(x, y)], [labels]); the older format (a list of [x, y]) gets the labels P1, P2 ..."""
+    try:
+        data = json.loads(text or "[]")
+    except (ValueError, TypeError):
+        return [], []
+    pts, labels = [], []
+    for n, item in enumerate(data, start=1):
+        try:
+            if isinstance(item, dict):
+                pts.append((float(item["p"][0]), float(item["p"][1])))
+                labels.append(str(item.get("l", f"P{n}")))
+            else:
+                pts.append((float(item[0]), float(item[1])))
+                labels.append(f"P{n}")
+        except (KeyError, TypeError, ValueError, IndexError):
+            return [], []
+    return pts, labels
+
+
+# ---------------- Ground plane from road geometry (parallel / perpendicular lines + real distances) ----------------
+# A map-like ground picture: the lines along the main road (group A) must come out parallel AND horizontal, the lines across it
+# (group B) parallel AND vertical, and every real distance the user measured between two clicked ground points must be right.
+# Any number of ground points and distances can be used (a least-squares fit, not four corners only).
+def _gp_norm(pts, size):
+    c = np.array([size[0] / 2.0, size[1] / 2.0])
+    return (np.asarray(pts, dtype=float).reshape(-1, 2) - c) / float(size[0])
+
+
+def _gp_apply(h, p):
+    p = np.asarray(p, dtype=float).reshape(-1, 2)
+    q = np.c_[p, np.ones(len(p))] @ np.asarray(h, dtype=float).T
+    return q[:, :2] / np.where(np.abs(q[:, 2:3]) < 1e-12, 1e-12, q[:, 2:3])
+
+
+def _gp_h(x):
+    return np.array([[x[0], x[1], x[2]], [x[3], x[4], x[5]], [x[6], x[7], 1.0]])
+
+
+def _levenberg(fun, x0, iters=80):
+    """Small Levenberg-Marquardt (numeric Jacobian). Returns (x, sum of squares)."""
+    x = np.asarray(x0, dtype=float).copy()
+    r = np.asarray(fun(x), dtype=float)
+    cost = float(r @ r)
+    lam = 1e-3
+    for _ in range(iters):
+        jac = np.empty((len(r), len(x)))
+        for k in range(len(x)):
+            step = 1e-6 * max(1.0, abs(x[k]))
+            xp = x.copy()
+            xp[k] += step
+            jac[:, k] = (np.asarray(fun(xp), dtype=float) - r) / step
+        a, g = jac.T @ jac, jac.T @ r
+        improved = False
+        for _ in range(14):
+            try:
+                dx = np.linalg.solve(a + lam * np.diag(np.maximum(np.diag(a), 1e-9)), -g)
+            except np.linalg.LinAlgError:
+                lam *= 10.0
+                continue
+            xn = x + dx
+            rn = np.asarray(fun(xn), dtype=float)
+            if np.all(np.isfinite(rn)) and float(rn @ rn) < cost:
+                gain = cost - float(rn @ rn)
+                x, r, cost, improved = xn, rn, float(rn @ rn), True
+                lam = max(lam / 3.0, 1e-12)
+                break
+            lam *= 4.0
+        if not improved or gain < 1e-14 * max(cost, 1e-12):
+            break
+    return x, cost
+
+
+def _gp_line(pts):
+    """Homogeneous line through the points (least squares), unit normal."""
+    q = np.asarray(pts, dtype=float)
+    c = q.mean(axis=0)
+    vt = np.linalg.svd(q - c, full_matrices=False)[2]
+    n = vt[-1]
+    return np.array([n[0], n[1], -float(n @ c)])
+
+
+def _gp_vanishing_point(lines):
+    """Homogeneous point where the lines (nearly) meet: smallest singular vector of the stacked line vectors."""
+    ls = np.array([_gp_line(l) for l in lines])
+    return np.linalg.svd(ls, full_matrices=True)[2][-1]
+
+
+def _gp_init_from_directions(la, lb, pts_n, dists):
+    va, vb = _gp_vanishing_point(la), _gp_vanishing_point(lb)
+    horizon = np.cross(va, vb)
+    if abs(horizon[2]) < 1e-9 * max(1e-12, float(np.hypot(horizon[0], horizon[1]))):
+        return None
+    hp = np.array([[1.0, 0, 0], [0, 1.0, 0], [horizon[0] / horizon[2], horizon[1] / horizon[2], 1.0]])
+    da, db = va[:2] / np.hypot(*va[:2]), vb[:2] / np.hypot(*vb[:2])
+    d = np.array([[da[0], db[0]], [da[1], db[1]]])
+    if abs(np.linalg.det(d)) < 1e-6:
+        return None
+    h1 = np.eye(3)
+    h1[:2, :2] = np.linalg.inv(d)
+    h1 = h1 @ hp
+    ratios = []
+    for i, j, dist in dists:
+        a, b = _gp_apply(h1, pts_n[[i, j]])
+        n = float(np.hypot(*(a - b)))
+        if n > 1e-9:
+            ratios.append(dist / n)
+    if not ratios:
+        return None
+    return np.diag([np.median(ratios), np.median(ratios), 1.0]) @ h1
+
+
+def _gp_dlt(src, dst):
+    rows = []
+    for (x, y), (u, v) in zip(src, dst):
+        rows.append([x, y, 1, 0, 0, 0, -u * x, -u * y, -u])
+        rows.append([0, 0, 0, x, y, 1, -v * x, -v * y, -v])
+    h = np.linalg.svd(np.array(rows, dtype=float))[2][-1].reshape(3, 3)
+    return h / h[2, 2] if abs(h[2, 2]) > 1e-12 else None
+
+
+def _gp_init_from_layout(pts_n, dists):
+    """Candidate starting homographies when only distances are known: lay the points out with those distances (a few random
+    starts, the folded layouts have a larger error), then fit a homography image -> layout."""
+    n = len(pts_n)
+    if n < 4:
+        return []
+    mean_d = float(np.mean([d for _, _, d in dists]))
+    rng = np.random.default_rng(7)
+
+    def stress(v):
+        x = v.reshape(n, 2)
+        return np.array([np.hypot(*(x[i] - x[j])) - d for i, j, d in dists])
+
+    found = []
+    for _ in range(14):
+        x, c = _levenberg(stress, rng.normal(0, mean_d, 2 * n), 60)
+        found.append((c, x.reshape(n, 2)))
+    found.sort(key=lambda t: t[0])
+    out = []
+    for c, x in found[:4]:
+        h = _gp_dlt(pts_n, x)
+        if h is not None:
+            out.append(h)
+    return out
+
+
+def solve_ground_homography(points, dists, lines_a, lines_b, size):
+    """Homography image -> road plane in metres (x along the main road, y across it, y down like the picture).
+    points: N x 2 ground points in the straightened picture (lens already removed); dists: [(i, j, metres)] between those points;
+    lines_a / lines_b: lists of point arrays (straightened picture) of the lines along / across the main road.
+    Returns {"H", "rms_dist_m", "dist_report", "line_rms_m", "method", ...} or {"error": text}."""
+    pts = np.asarray(points, dtype=float).reshape(-1, 2)
+    dists = [(int(i), int(j), float(d)) for i, j, d in dists if d > 0 and int(i) != int(j) and 0 <= int(i) < len(pts) and 0 <= int(j) < len(pts)]
+    if not dists:
+        return {"error": "ต้องมีระยะจริงอย่างน้อย 1 ค่า (ระหว่างจุดพื้น 2 จุด)"}
+    pts_n = _gp_norm(pts, size)
+    la = [_gp_norm(l, size) for l in lines_a if len(l) >= 2]
+    lb = [_gp_norm(l, size) for l in lines_b if len(l) >= 2]
+    have_dirs = len(la) >= 2 and len(lb) >= 2
+    if (la or lb) and not have_dirs:
+        return {"error": "เส้นขนานต้องมีอย่างน้อย 2 เส้นในแต่ละทิศ (ตามถนนหลัก และตั้งฉาก) ตอนนี้มี %d และ %d เส้น" % (len(la), len(lb))}
+    if not have_dirs and len(pts) < 4:
+        return {"error": "ถ้าไม่มีเส้นขนาน/ตั้งฉาก ต้องมีจุดพื้นอย่างน้อย 4 จุดและระยะระหว่างจุดให้พอ (อย่างน้อย 5 ค่าสำหรับ 4 จุด)"}
+    starts = []
+    if have_dirs:
+        h0 = _gp_init_from_directions(la, lb, pts_n, dists)
+        if h0 is not None:
+            starts.append(h0)
+    if not have_dirs:
+        starts.extend(_gp_init_from_layout(pts_n, dists))
+    if not starts:
+        return {"error": "เริ่มคำนวณไม่ได้: เส้นสองกลุ่มขนานกันในภาพ หรือจุดและระยะไม่พอ"}
+    w_d, w_l = 3.0, 1.0
+
+    def residuals(x):
+        h = _gp_h(x)
+        out = []
+        if dists:
+            m = _gp_apply(h, pts_n)
+            for i, j, d in dists:
+                out.append(w_d * (float(np.hypot(*(m[i] - m[j]))) - d))
+        for l in la:
+            y = _gp_apply(h, l)[:, 1]
+            out.extend(w_l * (y - y.mean()))
+        for l in lb:
+            xx = _gp_apply(h, l)[:, 0]
+            out.extend(w_l * (xx - xx.mean()))
+        return np.array(out, dtype=float)
+
+    best = None
+    for h0 in starts:
+        x0 = (h0 / h0[2, 2]).ravel()[:8]
+        x, c = _levenberg(residuals, x0, 100)
+        if np.isfinite(c) and (best is None or c < best[0]):
+            best = (c, x)
+    if best is None:
+        return {"error": "คำนวณไม่ลู่เข้า — ตรวจจุดและระยะ"}
+    x = best[1]
+    # is everything determined? (gauge: shift 2, + turn 1 when no direction lines)
+    r0 = residuals(x)
+    jac = np.empty((len(r0), 8))
+    for k in range(8):
+        step = 1e-6 * max(1.0, abs(x[k]))
+        xp = x.copy()
+        xp[k] += step
+        jac[:, k] = (residuals(xp) - r0) / step
+    sv = np.linalg.svd(jac, compute_uv=False)
+    needed = 8 - 2 - (0 if have_dirs else 1)
+    if int((sv > 1e-5 * sv[0]).sum()) < needed:
+        return {"error": "ข้อมูลยังไม่พอที่จะกำหนดสเกลและสัดส่วนของพื้น — เพิ่มระยะจริง (ควรมีทั้งตามแนวถนนและตั้งฉากกับถนน) หรือเพิ่มเส้น/จุด"}
+    h = _gp_h(x)
+    # orientation: same handedness as the picture, the main road pointing the way it points in the picture, origin = first point
+    c0 = np.zeros((1, 2))
+    e = 1e-3
+    jm = np.array([(_gp_apply(h, c0 + [e, 0])[0] - _gp_apply(h, c0 - [e, 0])[0]) / (2 * e), (_gp_apply(h, c0 + [0, e])[0] - _gp_apply(h, c0 - [0, e])[0]) / (2 * e)]).T
+    sv_j = np.linalg.svd(jm, compute_uv=False)
+    if sv_j[0] <= 0 or sv_j[1] < 0.02 * sv_j[0]:
+        return {"error": "สัดส่วนพื้นที่ได้แบนผิดปกติ — ข้อมูลยังไม่พอ ใส่ระยะจริงเพิ่ม (ทั้งตามแนวถนนและตั้งฉากกับถนน) หรือตรวจจุดที่คลิก"}
+    if np.linalg.det(jm) < 0:
+        h = np.diag([1.0, -1.0, 1.0]) @ h
+        jm = np.diag([1.0, -1.0]) @ jm
+    if not have_dirs:                                                # turn so that point 1 -> point 2 of the first distance points along +x
+        i, j, _ = dists[0]
+        a, b = _gp_apply(h, pts_n[[i, j]])
+        ang = -math.atan2(b[1] - a[1], b[0] - a[0])
+        rot = np.array([[math.cos(ang), -math.sin(ang), 0], [math.sin(ang), math.cos(ang), 0], [0, 0, 1.0]])
+        h = rot @ h
+    else:
+        jm_ = np.array([(_gp_apply(h, c0 + [e, 0])[0] - _gp_apply(h, c0 - [e, 0])[0]) / (2 * e), (_gp_apply(h, c0 + [0, e])[0] - _gp_apply(h, c0 - [0, e])[0]) / (2 * e)]).T
+        want = jm_[0, 0] if abs(jm_[0, 0]) >= abs(jm_[0, 1]) else jm_[0, 1]
+        if want < 0:
+            h = np.diag([-1.0, -1.0, 1.0]) @ h
+    origin = _gp_apply(h, pts_n[:1])[0] if len(pts_n) else np.zeros(2)
+    h = np.array([[1, 0, -origin[0]], [0, 1, -origin[1]], [0, 0, 1.0]]) @ h
+    t = np.array([[1.0 / size[0], 0, -0.5], [0, 1.0 / size[0], -size[1] / (2.0 * size[0])], [0, 0, 1.0]])   # pixel -> normalised
+    h_pix = h @ t
+    m = _gp_apply(h, pts_n)
+    report = [{"i": i, "j": j, "given_m": d, "got_m": float(np.hypot(*(m[i] - m[j])))} for i, j, d in dists]
+    rms_d = float(np.sqrt(np.mean([(r["got_m"] - r["given_m"]) ** 2 for r in report])))
+
+    def line_rms(group, axis):
+        out = []
+        for l in group:
+            v = _gp_apply(h, l)[:, axis]
+            out.append(float(np.sqrt(np.mean((v - v.mean()) ** 2))))
+        return out
+
+    return {"H": h_pix / h_pix[2, 2], "rms_dist_m": rms_d, "dist_report": report,
+            "line_rms_m": {"A": line_rms(la, 1), "B": line_rms(lb, 0)},
+            "method": "directions+distances" if have_dirs else "distances",
+            "n_points": int(len(pts)), "n_dists": len(dists), "n_lines_a": len(la), "n_lines_b": len(lb)}
+
+
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -1602,6 +1898,257 @@ class ClipPlayerDialog:
         except Exception:
             pass
         self.top.destroy()
+
+
+class ZoneGroundDialog:
+    """Perspective Calibration from the zones that are already drawn: their corners are the ground points, so nothing is clicked;
+    type the real length of the zone edges you know and mark which edges run ALONG the main road (A) and which ACROSS it (B).
+    One ground transform is fitted to all of it (parallel A, parallel + perpendicular B, every typed length right). The same window
+    then checks the result: the size in metres of every zone edge."""
+
+    DIR_LABELS = {"A": "A ตามถนนหลัก", "B": "B ตั้งฉากถนน", "": "- ไม่ใช้"}
+    COLORS = {"A": (255, 140, 40), "B": (60, 200, 60), "": (160, 160, 160)}                      # BGR
+
+    def __init__(self, app, video_path, on_apply, initial=None):
+        self.app, self.on_apply = app, on_apply
+        cap = cv2.VideoCapture(video_path)
+        total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, total // 2)
+        ok, self.img = cap.read()
+        cap.release()
+        if not ok:
+            self.img = np.full((720, 1280, 3), 60, np.uint8)
+        self.size = (self.img.shape[1], self.img.shape[0])
+        self.last_result = None
+        self.edges = self._build_edges(initial or {})
+        self.top = tk.Toplevel(app.root)
+        self.top.title("ปรับเทียบจากโซน — มุมโซนเป็นจุดพื้น + ความยาวขอบโซน")
+        sw, sh = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
+        self.top.geometry(f"{min(1400, sw - 40)}x{min(860, sh - 90)}+10+10")
+        self.top.protocol("WM_DELETE_WINDOW", self.close)
+        self.top.dialog = self
+        self.msg_var = tk.StringVar(value="")
+        self._build()
+        self.refresh()
+
+    # ----- data -----
+    def _build_edges(self, initial):
+        """One entry per zone edge: label of both corners, their pixels, the direction (A/B/'') and the typed length ('' = unknown)."""
+        saved = {(e["a"], e["b"]): e for e in initial.get("edges", []) if "a" in e and "b" in e}
+        edges = []
+        for zname in ZONE_NAMES:
+            poly = self.app.zones.get(zname, [])
+            if len(poly) < 3:
+                continue
+            num = zname.split()[-1]
+            n = len(poly)
+            for k in range(n):
+                a, b = f"Z{num}.{k + 1}", f"Z{num}.{(k + 1) % n + 1}"
+                pa, pb = tuple(float(v) for v in poly[k]), tuple(float(v) for v in poly[(k + 1) % n])
+                ang = abs(math.degrees(math.atan2(pb[1] - pa[1], pb[0] - pa[0]))) % 180.0
+                flat = min(ang, 180.0 - ang)                              # angle to the picture's horizontal: clear cases only, the rest is left to the user
+                guess = "A" if flat <= 20.0 else ("B" if flat >= 60.0 else "")
+                old = saved.get((a, b)) or saved.get((b, a)) or {}
+                edges.append({"zone": zname, "a": a, "b": b, "pa": pa, "pb": pb,
+                              "dir": old.get("dir", guess), "len": (f"{old['len']:g}" if old.get("len") else "")})
+        return edges
+
+    def set_edge(self, a, b, length=None, direction=None):
+        """Type the length of the edge a-b (metres, None = leave) and/or its direction ('A', 'B' or '')."""
+        for e in self.edges:
+            if {e["a"], e["b"]} == {a, b}:
+                if length is not None:
+                    e["len"] = f"{float(length):g}" if length else ""
+                    if hasattr(self, "len_vars"):
+                        self.len_vars[(e["a"], e["b"])].set(e["len"])
+                if direction is not None:
+                    e["dir"] = direction
+                    if hasattr(self, "dir_vars"):
+                        self.dir_vars[(e["a"], e["b"])].set(self.DIR_LABELS[direction])
+                return True
+        return False
+
+    def _read_vars(self):
+        if hasattr(self, "len_vars"):
+            for e in self.edges:
+                e["len"] = self.len_vars[(e["a"], e["b"])].get().strip()
+                label = self.dir_vars[(e["a"], e["b"])].get()
+                e["dir"] = next((k for k, v in self.DIR_LABELS.items() if v == label), "")
+
+    def _points(self):
+        pts, labels = [], []
+        for zname in ZONE_NAMES:
+            poly = self.app.zones.get(zname, [])
+            if len(poly) < 3:
+                continue
+            for k, (x, y) in enumerate(poly, start=1):
+                labels.append(f"Z{zname.split()[-1]}.{k}")
+                pts.append((float(x), float(y)))
+        return pts, labels
+
+    def compute(self):
+        """Fit the ground transform to the typed data -> (result dict of solve_ground_homography, text report)."""
+        self._read_vars()
+        pts, labels = self._points()
+        index = {l: k for k, l in enumerate(labels)}
+        dists, la, lb, bad = [], [], [], []
+        for e in self.edges:
+            i, j = index[e["a"]], index[e["b"]]
+            if e["len"]:
+                try:
+                    v = float(e["len"])
+                    if v <= 0:
+                        raise ValueError
+                    dists.append((i, j, v))
+                except ValueError:
+                    bad.append(f"{e['a']}-{e['b']}: '{e['len']}'")
+            if e["dir"] == "A":
+                la.append([pts[i], pts[j]])
+            elif e["dir"] == "B":
+                lb.append([pts[i], pts[j]])
+        if bad:
+            return {"error": "ความยาวอ่านไม่ได้: " + "; ".join(bad)}, "ความยาวอ่านไม่ได้: " + "; ".join(bad)
+        res = solve_ground_homography(pts, dists, la, lb, self.size)
+        if "error" in res:
+            return res, res["error"]
+        mapped = apply_homography(res["H"], pts)
+        lines = [f"ใช้ {len(dists)} ความยาว · เส้นตามถนน {len(la)} · ตั้งฉาก {len(lb)} · วิธี {res['method']}",
+                 f"คลาดความยาวที่พิมพ์ เฉลี่ย {res['rms_dist_m']:.2f} ม."]
+        worst = max(res["dist_report"], key=lambda r: abs(r["got_m"] - r["given_m"]))
+        lines.append(f"แย่สุด {labels[worst['i']]}–{labels[worst['j']]}: ใส่ {worst['given_m']:g} ม. ได้ {worst['got_m']:.2f} ม.")
+        lines.append("")
+        lines.append("ขนาดจริงของขอบโซนที่คำนวณได้ (เมตร):")
+        for zname in ZONE_NAMES:
+            es = [e for e in self.edges if e["zone"] == zname]
+            if not es:
+                continue
+            parts = []
+            for e in es:
+                d = float(np.hypot(*(mapped[index[e["a"]]] - mapped[index[e["b"]]])))
+                typed = f" (ใส่ {float(e['len']):g})" if e["len"] else ""
+                parts.append(f"{e['a'].split('.')[1]}→{e['b'].split('.')[1]} {d:.1f}{typed}")
+            lines.append(f"  {zname}: " + " · ".join(parts))
+        lines.append("")
+        tilt = []
+        for e in self.edges:
+            if e["dir"] in ("A", "B"):
+                v = mapped[index[e["b"]]] - mapped[index[e["a"]]]
+                dev = abs(math.degrees(math.atan2(v[1], v[0]))) % 180.0
+                dev = min(dev, 180.0 - dev) if e["dir"] == "A" else abs(90.0 - dev)
+                tilt.append((dev, e))
+        tilt.sort(key=lambda t: -t[0])
+        if tilt:
+            lines.append("ขอบที่เบี่ยงจากแนวถนนมากที่สุด (ควรใกล้ 0°): " + ", ".join(f"{e['a']}-{e['b']} {d:.0f}°" for d, e in tilt[:3]))
+        warn = []
+        if res["rms_dist_m"] > 0.5:
+            warn.append("คลาดความยาวเกิน 0.5 ม. — ตรวจความยาวที่พิมพ์ หรือทิศ A/B ของขอบ")
+        if tilt and tilt[0][0] > 15:
+            warn.append("มีขอบที่เบี่ยงเกิน 15° — ขอบนั้นอาจไม่ขนาน/ตั้งฉากจริง ลองเลือก - ไม่ใช้")
+        return res, "\n".join(lines + [""] + warn if warn else lines)
+
+    # ----- window -----
+    def _build(self):
+        top = self.top
+        ttk.Label(top, text=("มุมของโซนที่วาดไว้เป็นจุดพื้นให้แล้ว (ชื่อ Z<โซน>.<มุม>) · ใส่ความยาวจริง (เมตร) ของขอบโซนที่รู้ · "
+                             "เลือกทิศของแต่ละขอบ: A = ตามถนนหลัก, B = ตั้งฉากถนน (เดาให้เฉพาะขอบที่ชัดเจนจากมุมในภาพ ที่เหลือเป็น - ไม่ใช้ แก้ได้) · "
+                             "ต้องมีความยาวทั้งทิศ A และทิศ B อย่างน้อยทิศละ 1 ค่า แล้วกด คำนวณ/ตรวจ"),
+                  wraplength=1340, justify="left").pack(anchor="w", padx=8, pady=(6, 2))
+        body = ttk.Frame(top)
+        body.pack(fill="both", expand=True, padx=8)
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="both", expand=True)
+        self.canvas = tk.Canvas(left, width=700, height=400, bg="#202020", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", lambda e: self.refresh())
+        self.report = tk.Text(left, height=11, wrap="word")
+        self.report.pack(fill="x", pady=(4, 0))
+        right = ttk.Frame(body)
+        right.pack(side="left", fill="y", padx=(8, 0))
+        cv_ = tk.Canvas(right, width=470, highlightthickness=0)
+        sb = ttk.Scrollbar(right, orient="vertical", command=cv_.yview)
+        inner = ttk.Frame(cv_)
+        inner.bind("<Configure>", lambda e: cv_.configure(scrollregion=cv_.bbox("all")))
+        cv_.create_window((0, 0), window=inner, anchor="nw")
+        cv_.configure(yscrollcommand=sb.set)
+        cv_.pack(side="left", fill="y", expand=True)
+        sb.pack(side="right", fill="y")
+        self.len_vars, self.dir_vars = {}, {}
+        ttk.Label(inner, text="ขอบโซน", width=22).grid(row=0, column=0, sticky="w")
+        ttk.Label(inner, text="ทิศ", width=14).grid(row=0, column=1, sticky="w")
+        ttk.Label(inner, text="ยาวจริง (ม.)").grid(row=0, column=2, sticky="w")
+        for r, e in enumerate(self.edges, start=1):
+            ttk.Label(inner, text=f"{e['zone']}  {e['a']}→{e['b']}", width=22).grid(row=r, column=0, sticky="w", pady=1)
+            dv = tk.StringVar(value=self.DIR_LABELS[e["dir"]])
+            cb = ttk.Combobox(inner, textvariable=dv, values=list(self.DIR_LABELS.values()), state="readonly", width=14)
+            cb.grid(row=r, column=1, sticky="w")
+            cb.bind("<<ComboboxSelected>>", lambda ev: self.refresh())
+            lv = tk.StringVar(value=e["len"])
+            ent = ttk.Entry(inner, textvariable=lv, width=9)
+            ent.grid(row=r, column=2, sticky="w", padx=4)
+            ent.bind("<KeyRelease>", lambda ev: self.refresh())
+            self.dir_vars[(e["a"], e["b"])] = dv
+            self.len_vars[(e["a"], e["b"])] = lv
+        bar = ttk.Frame(top)
+        bar.pack(fill="x", padx=8, pady=6)
+        ttk.Button(bar, text="คำนวณ / ตรวจ", command=self.check).pack(side="left")
+        ttk.Label(bar, textvariable=self.msg_var, foreground="#a00").pack(side="left", padx=10)
+        ttk.Button(bar, text="ปิด", command=self.close).pack(side="right")
+        ttk.Button(bar, text="ใช้ค่านี้ (ปรับเทียบ)", command=self.apply).pack(side="right", padx=6)
+
+    def refresh(self):
+        if not getattr(self, "canvas", None):
+            return
+        self._read_vars()
+        cw, ch = max(100, self.canvas.winfo_width()), max(100, self.canvas.winfo_height())
+        w, h = self.size
+        k = min(cw / float(w), ch / float(h))
+        out = np.full((ch, cw, 3), 32, np.uint8)
+        res = cv2.resize(self.img, (max(1, int(w * k)), max(1, int(h * k))), interpolation=cv2.INTER_AREA)
+        out[:res.shape[0], :res.shape[1]] = res[:ch, :cw]
+        for e in self.edges:
+            pa = (int(e["pa"][0] * k), int(e["pa"][1] * k))
+            pb = (int(e["pb"][0] * k), int(e["pb"][1] * k))
+            cv2.line(out, pa, pb, self.COLORS[e["dir"]], 3 if e["len"] else 1, cv2.LINE_AA)
+            if e["len"]:
+                cv2.putText(out, f"{e['len']} m", ((pa[0] + pb[0]) // 2 + 3, (pa[1] + pb[1]) // 2 - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+        seen = set()
+        for e in self.edges:
+            for lab, pt in ((e["a"], e["pa"]), (e["b"], e["pb"])):
+                if lab not in seen:
+                    seen.add(lab)
+                    cv2.circle(out, (int(pt[0] * k), int(pt[1] * k)), 3, (0, 140, 255), -1, cv2.LINE_AA)
+                    cv2.putText(out, lab, (int(pt[0] * k) + 4, int(pt[1] * k) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 200, 255), 1, cv2.LINE_AA)
+        self.last_render = out
+        ok, buf = cv2.imencode(".png", out)
+        self.photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+
+    def check(self):
+        res, text = self.compute()
+        self.last_result = res
+        self.report.delete("1.0", "end")
+        self.report.insert("end", text)
+        self.msg_var.set("" if "error" not in res else res["error"])
+        return res
+
+    def apply(self):
+        res = self.check()
+        if "error" in res:
+            messagebox.showerror("ปรับเทียบจากโซน", res["error"], parent=self.top)
+            return False
+        pts, labels = self._points()
+        data = {"points": [{"l": l, "p": [round(x, 2), round(y, 2)]} for (x, y), l in zip(pts, labels)],
+                "edges": [{"a": e["a"], "b": e["b"], "dir": e["dir"], "len": (float(e["len"]) if e["len"] else None)} for e in self.edges]}
+        self.on_apply(data, res)
+        self.close()
+        return True
+
+    def close(self):
+        try:
+            self.top.destroy()
+        except tk.TclError:
+            pass
 
 
 class BackgroundFrameReader:
@@ -2092,6 +2639,8 @@ class Run1App:
         self.run3_ldp_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["ldp_enabled"])
         self.run3_ppm_var = tk.StringVar(value=RUN3_DEFAULTS["ppm"])
         self.run3_perspective_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["perspective_enabled"])
+        self.run3_cal_mode_var = tk.StringVar(value=RUN3_DEFAULTS["cal_mode"])
+        self.run3_zone_ground_var = tk.StringVar(value=RUN3_DEFAULTS["zone_ground"])
         self.run3_perspective_p1_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p1"])
         self.run3_perspective_p2_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p2"])
         self.run3_perspective_p3_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p3"])
@@ -2434,6 +2983,26 @@ class Run1App:
         ttk.Checkbutton(cal, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=r, column=0, sticky="w", pady=(6, 4))
         ttk.Label(cal, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง (P1→P2 ต้องขนานแนวถนน)", foreground=gray).grid(row=r, column=1, columnspan=2, sticky="w", pady=(6, 4))
         ttk.Button(cal, text="🎯 Perspective / PPM Calibration", command=self.open_perspective_calibration).grid(row=r, column=3, sticky="e", pady=(6, 4))
+        r += 1
+        zrow = ttk.Frame(cal)
+        zrow.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(2, 4))
+        ttk.Button(zrow, text="📐 ปรับเทียบจากโซน…", command=self.open_zone_ground_calibration).pack(side="left")
+        self.cal_mode_text = tk.StringVar(value="")
+        ttk.Label(zrow, textvariable=self.cal_mode_text, foreground="#0a7a3d").pack(side="left", padx=10)
+        ttk.Label(zrow, text="ใช้มุมของโซนเป็นจุดพื้น ใส่ความยาวจริงของขอบโซนที่รู้ (ไม่ต้องคลิกซ้ำ) และตรวจขนาดโซนเป็นเมตรให้", foreground=gray).pack(side="left", padx=4)
+
+        def _refresh_cal_mode(*_):
+            if str(self.run3_cal_mode_var.get()) == "zones" and bool(self.run3_perspective_enabled_var.get()):
+                try:
+                    n = len([e for e in json.loads(self.run3_zone_ground_var.get() or "{}").get("edges", []) if e.get("len")])
+                except (ValueError, TypeError):
+                    n = 0
+                self.cal_mode_text.set(f"ใช้อยู่: ปรับเทียบจากโซน ({n} ความยาว)")
+            else:
+                self.cal_mode_text.set("ใช้อยู่: " + ("สี่เหลี่ยม 4 จุด" if bool(self.run3_perspective_enabled_var.get()) else "PPM"))
+        for v_ in (self.run3_cal_mode_var, self.run3_zone_ground_var, self.run3_perspective_enabled_var):
+            v_.trace_add("write", _refresh_cal_mode)
+        _refresh_cal_mode()
         r += 1
         for (la, va, lb, vb) in (("P1", self.run3_perspective_p1_var, "P2", self.run3_perspective_p2_var),
                                  ("P3", self.run3_perspective_p3_var, "P4", self.run3_perspective_p4_var)):
@@ -3942,6 +4511,8 @@ class Run1App:
                 "ldp_enabled": self.run3_ldp_enabled_var.get(),
                 "ppm": self.run3_ppm_var.get(),
                 "perspective_enabled": self.run3_perspective_enabled_var.get(),
+                "cal_mode": self.run3_cal_mode_var.get(),
+                "zone_ground": self.run3_zone_ground_var.get(),
                 "perspective_p1": self.run3_perspective_p1_var.get(),
                 "perspective_p2": self.run3_perspective_p2_var.get(),
                 "perspective_p3": self.run3_perspective_p3_var.get(),
@@ -4104,6 +4675,8 @@ class Run1App:
                 ("ldp_enabled", self.run3_ldp_enabled_var),
                 ("ppm", self.run3_ppm_var),
                 ("perspective_enabled", self.run3_perspective_enabled_var),
+                ("cal_mode", self.run3_cal_mode_var),
+                ("zone_ground", self.run3_zone_ground_var),
                 ("perspective_p1", self.run3_perspective_p1_var),
                 ("perspective_p2", self.run3_perspective_p2_var),
                 ("perspective_p3", self.run3_perspective_p3_var),
@@ -4774,6 +5347,7 @@ class Run1App:
             self.run3_perspective_l34_var.set(f"{l34:g}")
             self.run3_perspective_l41_var.set(f"{l41:g}")
             self.run3_perspective_enabled_var.set(True)
+            self.run3_cal_mode_var.set("rect")
 
             edge_specs = [(0,1,l12),(1,2,l23),(2,3,l34),(3,0,l41)]
             edge_ppm = []
@@ -4875,9 +5449,85 @@ class Run1App:
             raise ValueError(f"Perspective correction: {label} must be x,y in pixels")
         return float(parts[0]), float(parts[1])
 
+    def open_zone_ground_calibration(self):
+        video = str(self.video_var.get() or "").strip()
+        if not video or not os.path.isfile(video):
+            messagebox.showerror("ปรับเทียบจากโซน", "เลือกวิดีโอก่อน (ใช้เฟรมจากวิดีโอนี้)")
+            return None
+        if not any(len(self.zones.get(z, [])) >= 3 for z in ZONE_NAMES):
+            messagebox.showerror("ปรับเทียบจากโซน", "ยังไม่มีโซนที่วาดไว้ — โหลดไฟล์โซนก่อน (แท็บ ② ไฟล์โซนและเส้น)")
+            return None
+        try:
+            initial = json.loads(self.run3_zone_ground_var.get() or "{}")
+        except (ValueError, TypeError):
+            initial = {}
+        return ZoneGroundDialog(self, video, self.save_zone_ground, initial=initial)
+
+    def save_zone_ground(self, data, res):
+        """The 'zones' calibration is taken over: mode zones, Perspective on, the PPM fallback set from the typed lengths."""
+        self.run3_zone_ground_var.set(json.dumps(data))
+        self.run3_cal_mode_var.set("zones")
+        self.run3_perspective_enabled_var.set(True)
+        pts = {p["l"]: p["p"] for p in data["points"]}
+        ppm = [math.hypot(pts[e["b"]][0] - pts[e["a"]][0], pts[e["b"]][1] - pts[e["a"]][1]) / e["len"] for e in data["edges"] if e.get("len")]
+        if ppm:
+            self.run3_ppm_var.set(f"{sum(ppm) / len(ppm):.6f}")
+        self.run3_result_text.set(f"Perspective จากโซน: {res['n_dists']} ความยาว, คลาดเฉลี่ย {res['rms_dist_m']:.2f} ม.")
+
+    def _run3_zone_ground_inputs(self):
+        """From the saved 'zones' calibration: points (x, y), distances [(i, j, m)], lines A / B (2-point lines), edge list."""
+        try:
+            data = json.loads(self.run3_zone_ground_var.get() or "{}")
+        except (ValueError, TypeError):
+            data = {}
+        pts, labels = [], []
+        for item in data.get("points", []):
+            labels.append(str(item["l"]))
+            pts.append((float(item["p"][0]), float(item["p"][1])))
+        index = {l: k for k, l in enumerate(labels)}
+        dists, la, lb, edges = [], [], [], []
+        for e in data.get("edges", []):
+            if e.get("a") not in index or e.get("b") not in index:
+                continue
+            i, j = index[e["a"]], index[e["b"]]
+            edges.append((e["a"], e["b"], str(e.get("dir", "")), e.get("len")))
+            if e.get("len"):
+                dists.append((i, j, float(e["len"])))
+            if e.get("dir") == "A":
+                la.append([pts[i], pts[j]])
+            elif e.get("dir") == "B":
+                lb.append([pts[i], pts[j]])
+        return pts, labels, dists, la, lb, edges
+
+    def _run3_zone_ground_perspective(self, silent=False):
+        """The ground transform from the zone corners + typed edge lengths (see solve_ground_homography)."""
+        try:
+            pts, labels, dists, la, lb, edges = self._run3_zone_ground_inputs()
+            size = tuple(v for v in self._actual_video_size() if v) or (1920, 1080)
+            if len(size) != 2:
+                size = (1920, 1080)
+            key = (tuple(pts), tuple(dists), tuple(tuple(l) for l in la), tuple(tuple(l) for l in lb), size)
+            cache = getattr(self, "_zg_cache", None)
+            if cache is not None and cache[0] == key:
+                res = cache[1]
+            else:
+                res = solve_ground_homography(pts, dists, la, lb, size)
+                self._zg_cache = (key, res)
+            if "error" in res:
+                raise ValueError("Perspective correction (zones): " + res["error"])
+            mp = apply_homography(res["H"], pts)
+            return {"H": res["H"], "length_m": float(np.ptp(mp[:, 0])), "width_m": float(np.ptp(mp[:, 1])), "points": pts[:4],
+                    "four_side_lengths_m": [], "method": res["method"], "fit": res}
+        except Exception:
+            if silent:
+                return None
+            raise
+
     def _run3_get_perspective_matrix(self, silent=False):
         if not bool(self.run3_perspective_enabled_var.get()):
             return None
+        if str(self.run3_cal_mode_var.get()) == "zones":
+            return self._run3_zone_ground_perspective(silent)
         try:
             p1 = self._run3_parse_xy(self.run3_perspective_p1_var.get(), "P1")
             p2 = self._run3_parse_xy(self.run3_perspective_p2_var.get(), "P2")
@@ -8443,7 +9093,9 @@ class Run1App:
             "program_version": "PK Studio V28",
             "site_id": c["site_id"],
             "inputs": {"detection": det_path, "id_zone_summary": id_path, "zone_summary": zone_path},
-            "calibration": {"mode": self._run3_calibration_mode(c), "ppm": c["ppm"],
+            "calibration": {"mode": self._run3_calibration_mode(c), "method": (c["perspective"] or {}).get("method", "rect4" if c["perspective"] else "ppm"),
+                            "fit": {k: v for k, v in ((c["perspective"] or {}).get("fit") or {}).items() if k in ("rms_dist_m", "line_rms_m", "n_points", "n_dists")},
+                            "ppm": c["ppm"],
                             "perspective_enabled": c["perspective_enabled"],
                             "perspective_configured": c["perspective"] is not None,
                             "road_direction_angle_deg": c["axis_deg"],
