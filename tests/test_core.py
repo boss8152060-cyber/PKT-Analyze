@@ -7,6 +7,7 @@ PKStudio.py starts a GUI/CUDA bootstrap when imported, so the tests exec only
 the region between the CORE-BEGIN / CORE-END markers.
 """
 import math
+import numpy as np
 import os
 import unittest
 
@@ -833,6 +834,76 @@ class OutsideZonePlanTests(unittest.TestCase):
         self.assertEqual(self.P("hide", False), {"point": False, "object": False})
         self.assertEqual(self.P("show", False), {"point": True, "object": True})
         self.assertEqual(self.P("unknown", False), {"point": True, "object": False})        # an unreadable setting = the old behaviour
+
+
+class AlignTests(unittest.TestCase):
+    """Align: pairs of points (video pixels -> drone pixels), kinds as in a GIS georeferencer."""
+    SIZE = (1920, 1080)
+
+    @staticmethod
+    def grid(n_x=4, n_y=3):
+        xs, ys = np.linspace(200, 1700, n_x), np.linspace(250, 900, n_y)
+        return np.array([(a, b) for a in xs for b in ys], dtype=float)
+
+    def project(self, pts):
+        h = CORE["homography_from_points"]([(0, 0), (1920, 0), (1920, 1080), (0, 1080)], [(300, 200), (1500, 260), (1700, 900), (150, 800)])
+        return CORE["apply_homography"](h, pts)
+
+    def distort(self, pts, k1):
+        """Straightened -> as a lens with the radial trend k1 records them (Newton on the radius)."""
+        c = np.array([960.0, 540.0])
+        x = (np.asarray(pts, float) - c) / 960.0
+        ru = np.sqrt((x ** 2).sum(1))
+        rd = ru.copy()
+        for _ in range(60):
+            rd = np.maximum(rd - (rd * (1 + k1 * rd ** 2) - ru) / (1 + 3 * k1 * rd ** 2), 0)
+        sc = np.where(ru > 1e-12, rd / np.where(ru > 1e-12, ru, 1.0), 1.0)
+        return x * sc[:, None] * 960.0 + c
+
+    def test_helmert_affine_projective_are_exact_on_their_own_kind(self):
+        src = self.grid()
+        th = 0.3
+        sim = np.array([[math.cos(th), -math.sin(th)], [math.sin(th), math.cos(th)]]) * 0.8
+        for kind, dst in (("helmert", src @ sim.T + [40, -25]),
+                          ("affine", src @ np.array([[0.9, 0.2], [-0.1, 1.1]]).T + [5, 9]),
+                          ("projective", self.project(src))):
+            rep = CORE["transform_report"](kind, src, dst, self.SIZE)
+            self.assertNotIn("error", rep, kind)
+            self.assertLess(rep["rms"], 1e-3, kind)
+            self.assertLess(rep["loo_rms"], 1e-2, kind)
+
+    def test_a_projective_cannot_follow_a_bent_picture_but_poly_tps_and_lens_can(self):
+        src = self.grid(5, 4)
+        dst = self.project(self.distort(src, 0.25))                       # camera tilt AND a barrel lens
+        rms = {k: CORE["transform_report"](k, src, dst, self.SIZE) for k in ("projective", "lens", "poly3", "tps")}
+        self.assertGreater(rms["projective"]["rms"], 2.0)
+        self.assertLess(rms["lens"]["rms"], 0.5 * rms["projective"]["rms"])
+        self.assertLess(rms["tps"]["rms"], 0.5)                           # exact at the pairs (rubber sheet)
+        self.assertGreater(rms["tps"]["loo_rms"], rms["tps"]["rms"])      # but the honest accuracy (leave one out) is worse
+        self.assertLess(rms["lens"]["loo_rms"], rms["projective"]["loo_rms"])
+
+    def test_too_few_pairs_say_so(self):
+        src = self.grid(2, 2)
+        self.assertIn("error", CORE["fit_transform"]("poly2", src, src, self.SIZE))
+        self.assertIn("error", CORE["fit_transform"]("projective", src[:3], src[:3], self.SIZE))
+        rep = CORE["transform_report"]("projective", src, self.project(src), self.SIZE)
+        self.assertIsNone(rep["loo_rms"])                                  # 4 pairs for 4 needed: no leave-one-out
+
+    def test_align_to_metres_scale_rotation_origin(self):
+        src = self.grid()
+        dst = src * 0.5 + [100, 50]                                       # a scaled copy
+        data = {"pairs": [{"s": list(s_), "d": list(d_)} for s_, d_ in zip(src, dst)], "kind": "affine", "scale": 0.1, "rot_deg": 0.0,
+                "origin": list(dst[0]), "video_size": list(self.SIZE)}
+        cfg = CORE["align_build"](data)
+        self.assertNotIn("error", cfg)
+        m = CORE["align_apply"](cfg, src)
+        self.assertAlmostEqual(m[0, 0], 0.0, delta=1e-6)                                   # the origin is the first pair
+        self.assertAlmostEqual(float(np.hypot(*(m[1] - m[0]))), float(np.hypot(*((src[1] - src[0]) * 0.5))) * 0.1, delta=1e-6)
+        data["rot_deg"] = 90.0                                                              # the road runs down the drone picture: turn it horizontal
+        m90 = CORE["align_apply"](CORE["align_build"](data), src)
+        self.assertAlmostEqual(float(np.hypot(*(m90[1] - m90[0]))), float(np.hypot(*(m[1] - m[0]))), delta=1e-6)
+        self.assertAlmostEqual(m90[1, 0], m[1, 1], delta=1e-6)
+        self.assertIn("error", CORE["align_build"](dict(data, scale=0)))
 
 
 if __name__ == "__main__":
