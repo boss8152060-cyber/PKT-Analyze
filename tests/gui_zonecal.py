@@ -130,6 +130,14 @@ dlg3.close()
 app.run3_cal_mode_var.set("rect")
 check("with the mode 'rect' the zone calibration is not used", app._run3_snapshot_config()["perspective"] is None or "fit" not in app._run3_snapshot_config()["perspective"])
 
+# the page shows only the block of the chosen method (no 4-corner fields next to the zone calibration)
+app.run3_cal_mode_var.set("zones")
+root.update()
+check("zones mode: the zone block is shown, the 4-corner fields are hidden", app.cal_zone_frame.winfo_manager() == "grid" and app.cal_rect_frame.winfo_manager() == "")
+app.run3_cal_mode_var.set("rect")
+root.update()
+check("rect mode: the 4-corner fields are shown, the zone block is hidden", app.cal_rect_frame.winfo_manager() == "grid" and app.cal_zone_frame.winfo_manager() == "")
+
 # the window layout: no two widgets in one grid cell
 def overlaps(container):
     cells, bad = {}, []

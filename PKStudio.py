@@ -2981,43 +2981,61 @@ class Run1App:
         ttk.Entry(cal, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=r, column=2, sticky="w", pady=4)
         r += 1
         ttk.Checkbutton(cal, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=r, column=0, sticky="w", pady=(6, 4))
-        ttk.Label(cal, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง (P1→P2 ต้องขนานแนวถนน)", foreground=gray).grid(row=r, column=1, columnspan=2, sticky="w", pady=(6, 4))
-        ttk.Button(cal, text="🎯 Perspective / PPM Calibration", command=self.open_perspective_calibration).grid(row=r, column=3, sticky="e", pady=(6, 4))
+        modef = ttk.Frame(cal)
+        modef.grid(row=r, column=1, columnspan=2, sticky="w", pady=(6, 4))
+        ttk.Label(modef, text="วิธีปรับเทียบ:").pack(side="left", padx=(0, 6))
+        ttk.Radiobutton(modef, text="จากโซน (ใส่ความยาวขอบโซน)", variable=self.run3_cal_mode_var, value="zones").pack(side="left", padx=4)
+        ttk.Radiobutton(modef, text="สี่เหลี่ยม 4 จุด", variable=self.run3_cal_mode_var, value="rect").pack(side="left", padx=4)
+        ttk.Button(cal, text="🎯 4 จุด / PPM / รายโซน…", command=self.open_perspective_calibration).grid(row=r, column=3, sticky="e", pady=(6, 4))
         r += 1
-        zrow = ttk.Frame(cal)
-        zrow.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(2, 4))
-        ttk.Button(zrow, text="📐 ปรับเทียบจากโซน…", command=self.open_zone_ground_calibration).pack(side="left")
+        zonef = ttk.Frame(cal)
+        zonef.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(2, 4))
+        ttk.Button(zonef, text="📐 ปรับเทียบจากโซน…", command=self.open_zone_ground_calibration).pack(side="left")
         self.cal_mode_text = tk.StringVar(value="")
-        ttk.Label(zrow, textvariable=self.cal_mode_text, foreground="#0a7a3d").pack(side="left", padx=10)
-        ttk.Label(zrow, text="ใช้มุมของโซนเป็นจุดพื้น ใส่ความยาวจริงของขอบโซนที่รู้ (ไม่ต้องคลิกซ้ำ) และตรวจขนาดโซนเป็นเมตรให้", foreground=gray).pack(side="left", padx=4)
+        ttk.Label(zonef, textvariable=self.cal_mode_text, foreground="#0a7a3d").pack(side="left", padx=10)
+        ttk.Label(zonef, text="มุมของโซนเป็นจุดพื้นให้เอง ใส่ความยาวจริงของขอบโซนที่รู้ และตรวจขนาดโซนเป็นเมตรให้", foreground=gray).pack(side="left", padx=4)
+        r += 1
+        rectf = ttk.Frame(cal)
+        rectf.grid(row=r, column=0, columnspan=4, sticky="ew")
+        for col in (1, 3):
+            rectf.columnconfigure(col, weight=1)
+        rr = 0
+        ttk.Label(rectf, text="ใช้จุดอ้างอิง 4 จุดบนระนาบถนนที่ทราบระยะจริง (P1→P2 ต้องขนานแนวถนน) — ตั้งค่าด้วยปุ่ม \"4 จุด / PPM / รายโซน…\"", foreground=gray).grid(row=rr, column=0, columnspan=4, sticky="w")
+        rr += 1
+        for (la, va, lb, vb) in (("P1", self.run3_perspective_p1_var, "P2", self.run3_perspective_p2_var),
+                                 ("P3", self.run3_perspective_p3_var, "P4", self.run3_perspective_p4_var)):
+            ttk.Label(rectf, text=la).grid(row=rr, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(rectf, textvariable=va, width=18, state="readonly").grid(row=rr, column=1, sticky="w", pady=2)
+            ttk.Label(rectf, text=lb).grid(row=rr, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(rectf, textvariable=vb, width=18, state="readonly").grid(row=rr, column=3, sticky="w", pady=2)
+            rr += 1
+        for (la, va, lb, vb) in (("ระยะจริง P1→P2 (m)", self.run3_perspective_l12_var, "ระยะจริง P2→P3 (m)", self.run3_perspective_l23_var),
+                                 ("ระยะจริง P3→P4 (m)", self.run3_perspective_l34_var, "ระยะจริง P4→P1 (m)", self.run3_perspective_l41_var)):
+            ttk.Label(rectf, text=la).grid(row=rr, column=0, sticky="w", padx=4, pady=2)
+            ttk.Entry(rectf, textvariable=va, width=18).grid(row=rr, column=1, sticky="w", pady=2)
+            ttk.Label(rectf, text=lb).grid(row=rr, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(rectf, textvariable=vb, width=18).grid(row=rr, column=3, sticky="w", pady=2)
+            rr += 1
+
+        self.cal_zone_frame, self.cal_rect_frame = zonef, rectf
 
         def _refresh_cal_mode(*_):
-            if str(self.run3_cal_mode_var.get()) == "zones" and bool(self.run3_perspective_enabled_var.get()):
+            zones_mode = str(self.run3_cal_mode_var.get()) == "zones"
+            if zones_mode:
+                zonef.grid()
+                rectf.grid_remove()
                 try:
                     n = len([e for e in json.loads(self.run3_zone_ground_var.get() or "{}").get("edges", []) if e.get("len")])
                 except (ValueError, TypeError):
                     n = 0
-                self.cal_mode_text.set(f"ใช้อยู่: ปรับเทียบจากโซน ({n} ความยาว)")
+                self.cal_mode_text.set(f"ปรับเทียบจากโซน: ใช้ {n} ความยาว" if n else "ยังไม่ได้ใส่ความยาวขอบโซน — กดปุ่มเพื่อเริ่ม")
             else:
-                self.cal_mode_text.set("ใช้อยู่: " + ("สี่เหลี่ยม 4 จุด" if bool(self.run3_perspective_enabled_var.get()) else "PPM"))
-        for v_ in (self.run3_cal_mode_var, self.run3_zone_ground_var, self.run3_perspective_enabled_var):
+                zonef.grid_remove()
+                rectf.grid()
+        for v_ in (self.run3_cal_mode_var, self.run3_zone_ground_var):
             v_.trace_add("write", _refresh_cal_mode)
         _refresh_cal_mode()
         r += 1
-        for (la, va, lb, vb) in (("P1", self.run3_perspective_p1_var, "P2", self.run3_perspective_p2_var),
-                                 ("P3", self.run3_perspective_p3_var, "P4", self.run3_perspective_p4_var)):
-            ttk.Label(cal, text=la).grid(row=r, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(cal, textvariable=va, width=18, state="readonly").grid(row=r, column=1, sticky="w", pady=2)
-            ttk.Label(cal, text=lb).grid(row=r, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(cal, textvariable=vb, width=18, state="readonly").grid(row=r, column=3, sticky="w", pady=2)
-            r += 1
-        for (la, va, lb, vb) in (("ระยะจริง P1→P2 (m)", self.run3_perspective_l12_var, "ระยะจริง P2→P3 (m)", self.run3_perspective_l23_var),
-                                 ("ระยะจริง P3→P4 (m)", self.run3_perspective_l34_var, "ระยะจริง P4→P1 (m)", self.run3_perspective_l41_var)):
-            ttk.Label(cal, text=la).grid(row=r, column=0, sticky="w", padx=4, pady=2)
-            ttk.Entry(cal, textvariable=va, width=18).grid(row=r, column=1, sticky="w", pady=2)
-            ttk.Label(cal, text=lb).grid(row=r, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(cal, textvariable=vb, width=18).grid(row=r, column=3, sticky="w", pady=2)
-            r += 1
 
         ttk.Label(cal, textvariable=self.run3_zone_cal_text, foreground="#0a7a3d").grid(row=r, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
