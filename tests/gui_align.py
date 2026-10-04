@@ -6,6 +6,7 @@ A synthetic site: a ground plane seen by a tilted camera with a barrel lens (the
 Run from the Run folder:   python tests/gui_align.py
 """
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -146,6 +147,55 @@ check("the alignment survives saving and loading the settings", app2.run3_align_
 cfg2 = app2._run3_snapshot_config()
 check("and gives the same metres", np.abs(app2._run3_to_metric(video_px(test_g), cfg2) - got).max() < 1e-9)
 
+# ---- the zone corners as pins: the video side comes from the zone file, only the drone side is clicked (or skipped)
+z2 = [(10.0, 5.0), (24.0, 5.0), (24.0, 12.0), (10.0, 12.0)]
+z3 = [(24.0, 5.0), (38.0, 5.0), (38.0, 12.0), (24.0, 12.0)]                                # shares two corners with zone 2
+app.zones = {name: [] for name in m.ZONE_NAMES}
+app.zones["Zone 2"] = [tuple(float(v) for v in q) for q in video_px(z2)]
+app.zones["Zone 3"] = [tuple(float(v) for v in q) for q in video_px(z3)]
+orig_align = app.run3_align_var.get()
+app.run3_align_var.set("")
+app.run3_align_enabled_var.set(False)
+dp = app.open_align()
+root.update()
+dp.load_drone(drone_file)
+dp.set_scale_from_points((100, 100), (300, 100), 10.0)
+check("the zone corners become pins; a corner shared by two zones is ONE pin", len(dp.pins) == 6 and any("=" in pin["l"] for pin in dp.pins), str([pin["l"] for pin in dp.pins]))
+dp.set_mode_pins()
+check("the first pin waits for its place on the drone picture", dp.pin_index == 0 and "Z2.1" in dp.msg_var.get(), dp.msg_var.get())
+true_d = {pin["l"].split("=")[0]: pin for pin in dp.pins}
+corners = {"Z2.1": z2[0], "Z2.2": z2[1], "Z2.3": z2[2], "Z2.4": z2[3], "Z3.2": z3[1], "Z3.3": z3[2]}
+n0 = len(dp.pairs)
+dp.click_drone(*drone_px([corners["Z2.1"]])[0])
+check("a click on the drone picture makes a pair whose video side is the zone corner from the file", len(dp.pairs) == n0 + 1 and dp.pairs[-1].get("l") == "Z2.1"
+      and abs(dp.pairs[-1]["s"][0] - video_px([corners["Z2.1"]])[0][0]) < 1e-6)
+check("the next pin comes up by itself", dp.pin_index == 1)
+dp.skip_pin()
+check("a skipped pin is skipped (not a pair) and the next one comes up", dp.pins[1]["state"] == "skip" and dp.pin_index == 2 and len(dp.pairs) == n0 + 1)
+for label in ("Z2.3", "Z2.4", "Z3.2", "Z3.3"):
+    dp.click_drone(*drone_px([corners[label]])[0])
+c = dp.pin_status()
+check("the progress counts done / skipped / left", c == {"todo": 0, "done": 5, "skip": 1}, str(c))
+check("the table shows the name of a zone-corner pair", any(dp.tree.item(i, "values")[3] == "Z2.3" for i in dp.tree.get_children()))
+dp.delete_pair(len(dp.pairs) - 1)
+check("deleting a zone-corner pair puts its pin back to 'to do'", dp.pin_status()["todo"] == 1 and dp.pin_index is not None)
+dp.goto_pin(-1)
+check("a skipped pin can be taken up again with the arrows", dp.pins[1]["state"] in ("todo", "skip"))
+dp.set_kind("helmert")
+dp.pairs = [q for q in dp.pairs if q.get("l")]                                                # only the zone pins now
+dp.set_kind("affine")
+check("the pins alone can already give a report", dp.report is not None and "error" not in dp.report, str(dp.report.get("error") if dp.report else ""))
+dp.apply()
+saved_pairs = json.loads(app.run3_align_var.get())
+check("the pairs keep their zone-corner names and the skipped pins are saved", all(q.get("l") for q in saved_pairs["pairs"]) and len(saved_pairs["skipped"]) >= 0)
+dq = app.open_align()
+root.update()
+check("opening again: the pins done / skipped come back as they were", dq.pin_status()["done"] == len([q for q in saved_pairs["pairs"] if q.get("l")]) and len(dq.pins) == 6)
+dq.close()
+app.zones = {name: [] for name in m.ZONE_NAMES}
+app.run3_align_var.set(orig_align)                                                       # back to the lens alignment for the tests below
+app.run3_align_enabled_var.set(True)
+app._align_cache = None
 # a video of another size: the video points are scaled
 app._actual_video_size = lambda: (CW * 2, CH * 2)
 app._align_cache = None
