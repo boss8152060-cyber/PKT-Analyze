@@ -146,6 +146,61 @@ check("the alignment survives saving and loading the settings", app2.run3_align_
 cfg2 = app2._run3_snapshot_config()
 check("and gives the same metres", np.abs(app2._run3_to_metric(video_px(test_g), cfg2) - got).max() < 1e-9)
 
+# ---- zones: the corners drawn on the video appear as pins; the place they SHOULD have is clicked on the drone picture ----
+import json
+zone_src = os.path.join(tmp, "zones.json")
+true_rects = {"Zone 2": [(6, 6), (18, 6), (18, 12), (6, 12)], "Zone 3": [(18, 6), (34, 6), (34, 12), (18, 12)]}
+rng = np.random.default_rng(5)
+zones_json = {"video_path": video, "frame_width": CW, "frame_height": CH, "lines": {}, "zones": []}
+for name, g in true_rects.items():
+    drawn = video_px(g) + rng.normal(0, 14, (4, 2))                                          # the corners were drawn a little off the lane edges
+    zones_json["zones"].append({"name": name, "id": f"z_{name[-1]}", "points": [[int(round(a)), int(round(b))] for a, b in drawn], "color_bgr": [0, 200, 0], "show_label": True})
+with open(zone_src, "w", encoding="utf-8") as f:
+    json.dump(zones_json, f)
+app.zone_line_config_var.set(zone_src)
+app.load_pkstudio_zones()
+zd = app.open_align()
+root.update()
+check("the corners of the drawn zones are the pins", [p_["label"] for p_ in zd.zone_pins] == ["Z2.1", "Z2.2", "Z2.3", "Z2.4", "Z3.1", "Z3.2", "Z3.3", "Z3.4"])
+zd.mode_var.set("zones")
+zd.select_pin(0)
+root.update()
+check("the zone mode draws the pins on both pictures", zd.vpane.last_render is not None and zd.dpane.last_render is not None and len(zd._pred) == 8)
+check("no zone can be saved before every corner has a place", zd.save_zones() is None)
+order = [(n, k) for n in true_rects for k in range(4)]
+for n, k in order:
+    zd.click_drone(*drone_px([true_rects[n][k]])[0])                                         # the pins are placed in order, each click moves on
+check("the pins advance by themselves and all eight are placed", all(p_["target"] for p_ in zd.zone_pins) and zd._pin_text(0).startswith("✓"))
+orig_text = open(zone_src, encoding="utf-8").read()
+newp = zd.new_zone_polygons()
+check("both zones get a new video polygon with extra points on the edges", set(newp) == {"Zone 2", "Zone 3"} and all(len(v) == 16 for v in newp.values()), str({k: len(v) for k, v in newp.items()}))
+cfg_z = app._run3_snapshot_config()
+for name, g in true_rects.items():
+    mm = app._run3_to_metric(np.array(newp[name]), cfg_z)
+    xs_ = mm[:, 0]
+    ys_ = mm[:, 1]
+    w_, h_ = float(np.ptp(xs_)), float(np.ptp(ys_))
+    want_w, want_h = g[1][0] - g[0][0], g[2][1] - g[1][1]
+    check(f"{name}: the new polygon is the rectangle on the road ({want_w:g} x {want_h:g} m)", abs(w_ - want_w) < 0.25 and abs(h_ - want_h) < 0.25, f"{w_:.2f} x {h_:.2f}")
+old_poly = np.array(app.zones["Zone 2"], float)
+mo = app._run3_to_metric(old_poly, cfg_z)
+check("the zone as it was drawn is NOT a clean rectangle (that was the problem)", float(np.ptp(mo[:, 0])) > 12.3 or float(np.ptp(mo[:, 1])) > 6.3 or abs(mo[1, 1] - mo[0, 1]) > 0.3)
+path = zd.save_zones()
+check("a NEW zone file is written next to the old one and loaded", path is not None and path.endswith("_aligned.json") and os.path.isfile(path) and app.zone_line_config_var.get() == path)
+check("the original zone file is untouched", open(zone_src, encoding="utf-8").read() == orig_text)
+saved_z = json.load(open(path, encoding="utf-8"))
+check("the new file keeps the format (names, points, points_norm, area, frame size)", [z["name"] for z in saved_z["zones"]] == ["Zone 2", "Zone 3"] and len(saved_z["zones"][0]["points"]) == 16
+      and len(saved_z["zones"][0]["points_norm"]) == 16 and saved_z["zones"][0]["area_px"] > 0 and saved_z["frame_width"] == CW)
+check("the program now uses the new zones", len(app.zones["Zone 2"]) == 16 and len(app.zones["Zone 3"]) == 16)
+n_before = len(zd._all_pairs())
+zd.zone_gcp_var.set(True)
+root.update()
+check("ticking 'use the placed pins as control points' adds them to the fit", len(zd._all_pairs()) == n_before + 8 and "error" not in zd.report)
+zd.zone_gcp_var.set(False)
+zd.clear_pins()
+check("clearing the pins starts again", not any(p_["target"] for p_ in zd.zone_pins))
+zd.close()
+
 # a video of another size: the video points are scaled
 app._actual_video_size = lambda: (CW * 2, CH * 2)
 app._align_cache = None
