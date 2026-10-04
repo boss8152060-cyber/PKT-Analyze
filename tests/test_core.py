@@ -896,6 +896,43 @@ class GroundPlaneTests(unittest.TestCase):
             self.assertAlmostEqual(float(np.hypot(*(mp[0] - mp[1]))), 12.0, delta=0.15)
             self.assertAlmostEqual(float(np.hypot(*(mp[1] - mp[2]))), 6.0, delta=0.1)
 
+    def test_radial_lens_round_trip_and_centre_stays(self):
+        pts = np.array([[960.0, 540.0], [100.0, 80.0], [1800.0, 1000.0], [960.0, 20.0]])
+        d = CORE["radial_distort"](pts, self.SIZE, 0.2, 0.05)
+        back = CORE["radial_undistort"](d, self.SIZE, 0.2, 0.05)
+        self.assertLess(np.abs(back - pts).max(), 1e-6)
+        self.assertLess(np.abs(CORE["radial_undistort"](np.array([[960.0, 540.0]]), self.SIZE, 0.5) - [960.0, 540.0]).max(), 1e-9)
+        self.assertGreater(np.hypot(*(d[1] - [960.0, 540.0])), 0.0)
+        self.assertLess(np.hypot(*(d[1] - [960.0, 540.0])), np.hypot(*(pts[1] - [960.0, 540.0])))         # barrel: the edges are packed
+
+    def test_the_lens_trend_is_found_from_zone_lengths(self):
+        wide = CORE["homography_from_points"]([(0, 0), (60, 0), (60, 20), (0, 20)], [(150, 500), (1800, 420), (1900, 900), (60, 950)])
+        zones = {"L": [(6, 6), (18, 6), (18, 12), (6, 12)], "R": [(42, 6), (54, 6), (54, 12), (42, 12)], "M": [(24, 8), (36, 8), (36, 14), (24, 14)]}
+        allp = [q for g in zones.values() for q in g]
+        for k_true in (0.15, 0.30):
+            pts = CORE["radial_distort"](CORE["apply_homography"](wide, np.array(allp, float)), self.SIZE, k_true)
+            dists, la, lb, k = [], [], [], 0
+            for g in zones.values():
+                for a_, b_ in ((0, 1), (1, 2), (2, 3), (3, 0)):
+                    i, j = k + a_, k + b_
+                    dists.append((i, j, float(np.hypot(*(np.array(g[a_]) - np.array(g[b_]))))))
+                    (la if a_ in (0, 2) else lb).append([pts[i], pts[j]])
+                k += 4
+            fit = CORE["fit_radial_lens"](pts, dists, la, lb, self.SIZE)
+            self.assertNotIn("error", fit)
+            self.assertAlmostEqual(fit["k1"], k_true, delta=0.06)
+            self.assertLess(fit["rms_after_m"], 0.5 * fit["rms_before_m"])
+        straight = CORE["apply_homography"](wide, np.array(allp, float))                          # no lens: nothing to find
+        dists, la, lb, k = [], [], [], 0
+        for g in zones.values():
+            for a_, b_ in ((0, 1), (1, 2), (2, 3), (3, 0)):
+                i, j = k + a_, k + b_
+                dists.append((i, j, float(np.hypot(*(np.array(g[a_]) - np.array(g[b_]))))))
+                (la if a_ in (0, 2) else lb).append([straight[i], straight[j]])
+            k += 4
+        fit0 = CORE["fit_radial_lens"](straight, dists, la, lb, self.SIZE)
+        self.assertLess(fit0["rms_before_m"], 0.05)
+
     def test_a_zone_without_both_directions_has_no_own_transform(self):
         pts = self.to_img(self.PLANE, 0.0)
         edges = [(0, 1, "A", 30.0), (1, 2, "", 20.0), (2, 3, "A", 30.0), (3, 0, "", 20.0)]

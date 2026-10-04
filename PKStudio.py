@@ -451,6 +451,8 @@ RUN3_DEFAULTS = {
     # Optional road-plane perspective calibration. Disabled by default because
     # image points and real dimensions are site/video-specific and were not
     # supplied in the research documents.
+    "lens_k1": "",                          # radial trend of the lens (blank = none): see radial_undistort; set by the zone calibration window
+    "lens_k2": "",
     "cal_mode": "rect",                     # ground calibration: "rect" = 4 corners of a rectangle; "zones" = zone corners + typed edge lengths
     "zone_ground": "",                      # JSON of the "zones" calibration: points (zone corners) and edges (direction A/B, real length)
     "perspective_enabled": False,
@@ -1506,6 +1508,74 @@ def solve_ground_homography(points, dists, lines_a, lines_b, size):
             "n_points": int(len(pts)), "n_dists": len(dists), "n_lines_a": len(la), "n_lines_b": len(lb)}
 
 
+# ---------------- Radial lens trend ----------------
+# A wide lens packs the same real length into fewer pixels the further it is from the centre of the picture (in every direction).
+# Model: a recorded point at the normalised radius r (r = 1 at the left / right edge of the picture, measured from the centre) stands
+# for the straightened radius r (1 + k1 r^2 + k2 r^4). k1 > 0 = barrel (the edges are packed), 0 = nothing. The centre stays exact.
+def radial_undistort(pts, size, k1, k2=0.0):
+    p = np.asarray(pts, dtype=float).reshape(-1, 2)
+    c = np.array([size[0] / 2.0, size[1] / 2.0])
+    half = size[0] / 2.0
+    x = (p - c) / half
+    r2 = (x ** 2).sum(axis=1, keepdims=True)
+    return x * (1.0 + k1 * r2 + k2 * r2 ** 2) * half + c
+
+
+def radial_distort(pts, size, k1, k2=0.0):
+    """The inverse of radial_undistort (Newton on the radius): straightened pixels -> as a lens with that trend records them."""
+    p = np.asarray(pts, dtype=float).reshape(-1, 2)
+    c = np.array([size[0] / 2.0, size[1] / 2.0])
+    half = size[0] / 2.0
+    x = (p - c) / half
+    ru = np.sqrt((x ** 2).sum(axis=1))
+    rd = ru.copy()
+    for _ in range(60):
+        f = rd * (1.0 + k1 * rd ** 2 + k2 * rd ** 4) - ru
+        d = 1.0 + 3.0 * k1 * rd ** 2 + 5.0 * k2 * rd ** 4
+        rd = np.maximum(rd - f / np.where(np.abs(d) < 1e-6, 1e-6, d), 0.0)
+    scale = np.where(ru > 1e-12, rd / np.where(ru > 1e-12, ru, 1.0), 1.0)
+    return x * scale[:, None] * half + c
+
+
+def fit_radial_lens(points, dists, lines_a, lines_b, size, k_range=(-0.10, 0.80)):
+    """Find the radial trend k1 that makes the typed lengths and the parallel / perpendicular lines agree best (the ground fit of
+    solve_ground_homography is redone for every k1). Returns {"k1", "rms_before_m", "rms_after_m", "res", "res_before"} or {"error": text}."""
+    pts = np.asarray(points, dtype=float).reshape(-1, 2)
+    la = [np.asarray(l, dtype=float) for l in lines_a]
+    lb = [np.asarray(l, dtype=float) for l in lines_b]
+
+    def run(k1):
+        return solve_ground_homography(radial_undistort(pts, size, k1), dists, [radial_undistort(l, size, k1) for l in la],
+                                       [radial_undistort(l, size, k1) for l in lb], size)
+
+    def cost(res, k1):
+        if "error" in res:
+            return None
+        lr = res["line_rms_m"]["A"] + res["line_rms_m"]["B"]
+        return res["rms_dist_m"] + (float(np.mean(lr)) if lr else 0.0) + 0.05 * k1 * k1
+
+    base = run(0.0)
+    if "error" in base:
+        return base
+    best = (cost(base, 0.0), 0.0, base)
+    for k1 in np.arange(k_range[0], k_range[1] + 1e-9, 0.02):
+        res = run(float(k1))
+        c_ = cost(res, float(k1))
+        if c_ is not None and c_ < best[0]:
+            best = (c_, float(k1), res)
+    step = 0.01
+    for _ in range(10):                                           # refine around the best value
+        improved = False
+        for cand in (best[1] + step, best[1] - step):
+            res = run(cand)
+            c_ = cost(res, cand)
+            if c_ is not None and c_ < best[0]:
+                best, improved = (c_, cand, res), True
+        if not improved:
+            step /= 2.0
+    return {"k1": best[1], "rms_before_m": base["rms_dist_m"], "rms_after_m": best[2]["rms_dist_m"], "res": best[2], "res_before": base}
+
+
 def zone_metric_transform_poly(corners, edges, base_pts, size):
     """Per-zone calibration for a zone with any number of corners (4 or more). corners = N x 2 pixels; edges = [(i, j, 'A'|'B'|'', metres or None)]
     between corner indices; base_pts = the same corners in the common metric frame of the base calibration; size = (width, height).
@@ -1948,6 +2018,8 @@ class ZoneGroundDialog:
         self.last_result = None
         self.edges = self._build_edges(initial or {})
         self.per_zone_var = None                                   # (set in _build) tick: own calibration for every zone with enough lengths
+        self.lens_var = None                                       # (set in _build) tick: estimate the radial lens trend from the typed lengths
+        self.lens_k1 = 0.0
         self.top = tk.Toplevel(app.root)
         self.top.title("ปรับเทียบจากโซน — มุมโซนเป็นจุดพื้น + ความยาวขอบโซน")
         sw, sh = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
@@ -2017,6 +2089,8 @@ class ZoneGroundDialog:
         """Own calibration of every zone that has enough typed lengths: {zone name: transform dict or {'error': ...}} (needs the base fit)."""
         pts, labels = self._points()
         index = {l: k for k, l in enumerate(labels)}
+        pts = [tuple(q) for q in (self.und_points if getattr(self, "und_points", None) is not None else np.asarray(pts, float))]
+        raw = dict(zip(labels, self._points()[0]))
         base = apply_homography(base_res["H"], pts)
         out = {}
         for zname in ZONE_NAMES:
@@ -2040,7 +2114,7 @@ class ZoneGroundDialog:
                 continue
             out[zname] = zone_metric_transform_poly([pts[g] for g in idx], edges, [base[g] for g in idx], self.size)
             out[zname]["_edges"] = edges
-            out[zname]["_corners"] = [pts[g] for g in idx]
+            out[zname]["_corners"] = [raw[labels[g]] for g in idx]                       # as recorded (the lens trend is applied again at use)
             out[zname]["_labels"] = [labels[g] for g in idx]
         return out
 
@@ -2066,12 +2140,27 @@ class ZoneGroundDialog:
                 lb.append([pts[i], pts[j]])
         if bad:
             return {"error": "ความยาวอ่านไม่ได้: " + "; ".join(bad)}, "ความยาวอ่านไม่ได้: " + "; ".join(bad)
+        self.lens_k1 = 0.0
+        lens_note = []
+        if self.lens_var is None or self.lens_var.get():
+            fit = fit_radial_lens(pts, dists, la, lb, self.size)
+            helps = "error" not in fit and abs(fit["k1"]) >= 0.03 and fit["rms_before_m"] - fit["rms_after_m"] > 0.08 and fit["rms_after_m"] < 0.75 * fit["rms_before_m"]
+            if helps:                                              # only a clear improvement counts (a few typed lengths could be bent to fit noise)
+                self.lens_k1 = float(fit["k1"])
+                lens_note.append(f"เลนส์แบบรัศมี k1 = {self.lens_k1:.3f} (กลางภาพแม่นสุด ยิ่งไกลกลางภาพ 1 ม. ยิ่งกินพิกเซลน้อยลง) — คลาดความยาวลดจาก "
+                                 f"{fit['rms_before_m']:.2f} เป็น {fit['rms_after_m']:.2f} ม.")
+            elif "error" not in fit:
+                lens_note.append("ไม่พบความโค้งแบบรัศมีที่ช่วยให้ความยาวตรงขึ้น (ค่าที่ได้ใกล้ 0) — ความคลาดไม่ได้มาจากเลนส์เป็นหลัก")
+        pts = radial_undistort(pts, self.size, self.lens_k1) if self.lens_k1 else np.asarray(pts, float)
+        la = [radial_undistort(l, self.size, self.lens_k1) if self.lens_k1 else np.asarray(l, float) for l in la]
+        lb = [radial_undistort(l, self.size, self.lens_k1) if self.lens_k1 else np.asarray(l, float) for l in lb]
+        self.und_points = pts
         res = solve_ground_homography(pts, dists, la, lb, self.size)
         if "error" in res:
             return res, res["error"]
         mapped = apply_homography(res["H"], pts)
         lines = [f"ใช้ {len(dists)} ความยาว · เส้นตามถนน {len(la)} · ตั้งฉาก {len(lb)} · วิธี {res['method']}",
-                 f"คลาดความยาวที่พิมพ์ เฉลี่ย {res['rms_dist_m']:.2f} ม."]
+                 f"คลาดความยาวที่พิมพ์ เฉลี่ย {res['rms_dist_m']:.2f} ม."] + lens_note
         worst = max(res["dist_report"], key=lambda r: abs(r["got_m"] - r["given_m"]))
         lines.append(f"แย่สุด {labels[worst['i']]}–{labels[worst['j']]}: ใส่ {worst['given_m']:g} ม. ได้ {worst['got_m']:.2f} ม.")
         lines.append("")
@@ -2163,6 +2252,8 @@ class ZoneGroundDialog:
             self.len_vars[(e["a"], e["b"])] = lv
         bar = ttk.Frame(top)
         bar.pack(fill="x", padx=8, pady=6)
+        self.lens_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="ประมาณความโค้งแบบรัศมี (กลางภาพแม่นสุด ขอบเพี้ยนไปเรื่อย ๆ)", variable=self.lens_var, command=self.check).pack(side="left", padx=(0, 10))
         self.per_zone_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(bar, text="แยกรายโซน (โซนที่ใส่ความยาวพอ ใช้การแปลงของโซนเอง — ตามความโค้งของภาพได้ดีกว่า)", variable=self.per_zone_var,
                         command=self.check).pack(side="left", padx=(0, 10))
@@ -2225,6 +2316,7 @@ class ZoneGroundDialog:
                 corners, labels, edges = tr["_corners"], tr["_labels"], tr["_edges"]
                 zones_out[num] = {"kind": "poly", "points": [[round(float(x), 2), round(float(y), 2)] for x, y in corners], "labels": labels,
                                   "edges": [{"i": i, "j": j, "dir": dr, "len": d} for i, j, dr, d in edges]}
+        data["lens_k1"] = self.lens_k1
         self.on_apply(data, res, zones_out)
         self.close()
         return True
@@ -2725,6 +2817,8 @@ class Run1App:
         self.run3_ppm_var = tk.StringVar(value=RUN3_DEFAULTS["ppm"])
         self.run3_perspective_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["perspective_enabled"])
         self.run3_cal_mode_var = tk.StringVar(value=RUN3_DEFAULTS["cal_mode"])
+        self.run3_lens_k1_var = tk.StringVar(value=RUN3_DEFAULTS["lens_k1"])
+        self.run3_lens_k2_var = tk.StringVar(value=RUN3_DEFAULTS["lens_k2"])
         self.run3_zone_ground_var = tk.StringVar(value=RUN3_DEFAULTS["zone_ground"])
         self.run3_perspective_p1_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p1"])
         self.run3_perspective_p2_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p2"])
@@ -4615,6 +4709,8 @@ class Run1App:
                 "ppm": self.run3_ppm_var.get(),
                 "perspective_enabled": self.run3_perspective_enabled_var.get(),
                 "cal_mode": self.run3_cal_mode_var.get(),
+                "lens_k1": self.run3_lens_k1_var.get(),
+                "lens_k2": self.run3_lens_k2_var.get(),
                 "zone_ground": self.run3_zone_ground_var.get(),
                 "perspective_p1": self.run3_perspective_p1_var.get(),
                 "perspective_p2": self.run3_perspective_p2_var.get(),
@@ -4780,6 +4876,8 @@ class Run1App:
                 ("ppm", self.run3_ppm_var),
                 ("perspective_enabled", self.run3_perspective_enabled_var),
                 ("cal_mode", self.run3_cal_mode_var),
+                ("lens_k1", self.run3_lens_k1_var),
+                ("lens_k2", self.run3_lens_k2_var),
                 ("zone_ground", self.run3_zone_ground_var),
                 ("perspective_p1", self.run3_perspective_p1_var),
                 ("perspective_p2", self.run3_perspective_p2_var),
@@ -5620,6 +5718,9 @@ class Run1App:
             self.run3_zone_calibrations.pop(key, None)
         for key, cal in (zones_out or {}).items():
             self.run3_zone_calibrations[key] = cal
+        k1 = float(data.pop("lens_k1", 0.0) or 0.0)
+        self.run3_lens_k1_var.set(f"{k1:.4f}" if abs(k1) >= 0.02 else "")      # the radial trend found from the typed lengths (blank = none)
+        self.run3_lens_k2_var.set("")
         self.run3_zone_ground_var.set(json.dumps(data))
         self.run3_cal_mode_var.set("zones")
         self.run3_perspective_enabled_var.set(True)
@@ -5629,6 +5730,24 @@ class Run1App:
             self.run3_ppm_var.set(f"{sum(ppm) / len(ppm):.6f}")
         self.run3_result_text.set(f"Perspective จากโซน: {res['n_dists']} ความยาว, คลาดเฉลี่ย {res['rms_dist_m']:.2f} ม."
                                   + (f" · แยกรายโซน {len(zones_out)} โซน" if zones_out else ""))
+
+    def _run3_lens_params(self):
+        """(k1, k2, picture size) of the radial lens trend, or None when none is set / the video size is unknown."""
+        try:
+            k1 = float(str(self.run3_lens_k1_var.get()).strip() or 0.0)
+            k2 = float(str(self.run3_lens_k2_var.get()).strip() or 0.0)
+        except ValueError:
+            return None
+        if abs(k1) < 1e-9 and abs(k2) < 1e-9:
+            return None
+        size = tuple(v for v in self._actual_video_size() if v)
+        return (k1, k2, size) if len(size) == 2 else None
+
+    def _run3_und(self, pts):
+        """Pixels as recorded -> straightened pixels with the lens trend that is set (no change without one)."""
+        lp = self._run3_lens_params()
+        a = np.asarray(pts, dtype=float).reshape(-1, 2)
+        return radial_undistort(a, lp[2], lp[0], lp[1]) if lp else a
 
     def _run3_zone_ground_inputs(self):
         """From the saved 'zones' calibration: points (x, y), distances [(i, j, m)], lines A / B (2-point lines), edge list."""
@@ -5662,16 +5781,17 @@ class Run1App:
             size = tuple(v for v in self._actual_video_size() if v) or (1920, 1080)
             if len(size) != 2:
                 size = (1920, 1080)
-            key = (tuple(pts), tuple(dists), tuple(tuple(l) for l in la), tuple(tuple(l) for l in lb), size)
+            lens = self._run3_lens_params()
+            key = (tuple(pts), tuple(dists), tuple(tuple(l) for l in la), tuple(tuple(l) for l in lb), size, lens)
             cache = getattr(self, "_zg_cache", None)
             if cache is not None and cache[0] == key:
                 res = cache[1]
             else:
-                res = solve_ground_homography(pts, dists, la, lb, size)
+                res = solve_ground_homography(self._run3_und(pts), dists, [self._run3_und(l) for l in la], [self._run3_und(l) for l in lb], size)
                 self._zg_cache = (key, res)
             if "error" in res:
                 raise ValueError("Perspective correction (zones): " + res["error"])
-            mp = apply_homography(res["H"], pts)
+            mp = apply_homography(res["H"], self._run3_und(pts))
             return {"H": res["H"], "length_m": float(np.ptp(mp[:, 0])), "width_m": float(np.ptp(mp[:, 1])), "points": pts[:4],
                     "four_side_lengths_m": [], "method": res["method"], "fit": res}
         except Exception:
@@ -5705,7 +5825,7 @@ class Run1App:
                 width_m = float(self.run3_perspective_width_var.get())
             if length_m <= 0 or width_m <= 0:
                 raise ValueError("Perspective correction: calibration lengths must be > 0")
-            src = np.float32([p1,p2,p3,p4])
+            src = np.float32(self._run3_und([p1, p2, p3, p4]))
             dst = np.float32([[0,0],[length_m,0],[length_m,width_m],[0,width_m]])
             H = cv2.getPerspectiveTransform(src, dst)
             return {"H": H, "length_m": length_m, "width_m": width_m, "points": [p1,p2,p3,p4], "four_side_lengths_m": raw4}
@@ -8064,6 +8184,7 @@ class Run1App:
             "ppm": ppm,
             "perspective_enabled": bool(self.run3_perspective_enabled_var.get()),
             "perspective": self._run3_get_perspective_matrix(silent=True),
+            "lens": (lambda lp: (lp[0], lp[1], lp[2]) if lp else None)(self._run3_lens_params()),
             "axis_deg": num(self.run3_lateral_axis_angle_var, 0.0) or 0.0,
             "speed_zones": zones_of(self.run3_speed_zone_vars),
             "speed_smoothing_samples": max(1, int(num(self.run3_speed_smoothing_var, 5) or 1)),
@@ -8115,6 +8236,13 @@ class Run1App:
     def _run3_qc_calibration(c):
         return "Perspective_Not_Calibrated" if (c["perspective_enabled"] and c["perspective"] is None) else ""
 
+    @staticmethod
+    def _run3_und_c(pts, c):
+        """Pixels -> straightened pixels with the lens trend stored in the run's config (no change without one)."""
+        lens = c.get("lens")
+        a = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+        return radial_undistort(a, lens[2], lens[0], lens[1]) if lens else a
+
     def _run3_to_metric(self, pts, c):
         """Pixel points (N x 2) -> road-aligned metric points (N x 2).
 
@@ -8127,6 +8255,7 @@ class Run1App:
         pts = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
         if len(pts) == 0:
             return pts
+        pts = self._run3_und_c(pts, c)
         persp = c["perspective"]
         if persp is not None:
             mapped = cv2.perspectiveTransform(pts.reshape(-1, 1, 2).astype(np.float32), persp["H"])
@@ -8201,9 +8330,10 @@ class Run1App:
         info = {}
         for z, cal in (c.get("zone_calibrations") or {}).items():
             base_corners = self._run3_to_metric(cal["points"], c)
+            und_pts = self._run3_und_c(cal["points"], c)
             if cal.get("kind") == "poly":
                 size = tuple(v for v in self._actual_video_size() if v) or (1920, 1080)
-                tr = zone_metric_transform_poly(cal["points"], cal["edges"], base_corners, size if len(size) == 2 else (1920, 1080))
+                tr = zone_metric_transform_poly(und_pts, cal["edges"], base_corners, size if len(size) == 2 else (1920, 1080))
                 if "error" in tr:
                     log.warning("Zone %s own calibration not used: %s", z, tr["error"])
                     info[f"Zone {z}"] = {"error": tr["error"]}
@@ -8211,12 +8341,12 @@ class Run1App:
                 info[f"Zone {z}"] = {"alignment_rms_m": round(tr["rms"], 3), "length_m": round(tr["length_m"], 2), "width_m": round(tr["width_m"], 2),
                                      "fit_rms_m": round(tr["fit"]["rms_dist_m"], 3)}
             else:
-                tr = zone_metric_transform(cal["points"], cal["lengths"], base_corners)
+                tr = zone_metric_transform(und_pts, cal["lengths"], base_corners)
                 info[f"Zone {z}"] = {"alignment_rms_m": round(tr["rms"], 3), "length_m": tr["length_m"], "width_m": tr["width_m"]}
             for src, dst in (("_point", "_m"), ("_center", "_mc")):
                 idx = [i for i, r in enumerate(rows_all) if r.get("_zone_num") == z and r.get(src) is not None]
                 if idx:
-                    mapped = zone_metric_points(tr, [rows_all[i][src] for i in idx])
+                    mapped = zone_metric_points(tr, self._run3_und_c([rows_all[i][src] for i in idx], c))
                     for j, i in enumerate(idx):
                         rows_all[i][dst] = (float(mapped[j, 0]), float(mapped[j, 1]))
         self._run3_zone_cal_info = info
@@ -9264,7 +9394,7 @@ class Run1App:
             "program_version": "PK Studio V28",
             "site_id": c["site_id"],
             "inputs": {"detection": det_path, "id_zone_summary": id_path, "zone_summary": zone_path},
-            "calibration": {"mode": self._run3_calibration_mode(c), "method": (c["perspective"] or {}).get("method", "rect4" if c["perspective"] else "ppm"),
+            "calibration": {"mode": self._run3_calibration_mode(c), "lens_k1": (c["lens"][0] if c.get("lens") else None), "method": (c["perspective"] or {}).get("method", "rect4" if c["perspective"] else "ppm"),
                             "fit": {k: v for k, v in ((c["perspective"] or {}).get("fit") or {}).items() if k in ("rms_dist_m", "line_rms_m", "n_points", "n_dists")},
                             "ppm": c["ppm"],
                             "perspective_enabled": c["perspective_enabled"],
