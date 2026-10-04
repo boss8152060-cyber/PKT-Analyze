@@ -7,6 +7,7 @@ settings and that Run 3 then maps pixels to the true metres.
 Run from the Run folder:   python tests/gui_zonecal.py
 """
 import importlib.util
+import math
 import os
 import sys
 import tempfile
@@ -129,6 +130,59 @@ dlg3.close()
 # the old four-corner window switches the mode back (set by hand here: its window code is covered by smoke_gui / gui_layout)
 app.run3_cal_mode_var.set("rect")
 check("with the mode 'rect' the zone calibration is not used", app._run3_snapshot_config()["perspective"] is None or "fit" not in app._run3_snapshot_config()["perspective"])
+
+# ---- a bent picture: every zone gets its own transform (the page then shows ONE summary line)
+CENTRE = np.array([CW / 2.0, CH / 2.0])
+WIDE = cv2.getPerspectiveTransform(np.float32([(0, 0), (60, 0), (60, 20), (0, 20)]), np.float32([(100, 330), (1200, 280), (1260, 600), (40, 630)]))
+
+
+def bent_px(g):
+    q = cv2.perspectiveTransform(np.asarray(g, float).reshape(-1, 1, 2), WIDE).reshape(-1, 2)
+    x = (q - CENTRE) / (CW / 2.0)
+    return x * (1 - 0.18 * (x ** 2).sum(1, keepdims=True)) * (CW / 2.0) + CENTRE
+
+
+BENT = {"Zone 2": [(6, 6), (18, 6), (18, 12), (6, 12)], "Zone 3": [(24, 8), (36, 8), (36, 14), (24, 14)], "Zone 4": [(42, 6), (54, 6), (54, 12), (42, 12)]}
+app.zones = {name: [] for name in m.ZONE_NAMES}
+for name, g in BENT.items():
+    app.zones[name] = [tuple(float(v) for v in q) for q in bent_px(g)]
+app.run3_zone_calibrations = {}
+app.run3_cal_mode_var.set("rect")
+app.run3_zone_ground_var.set("")
+dz = app.open_zone_ground_calibration()
+root.update()
+for name in BENT:
+    num = name.split()[-1]
+    dz.set_edge(f"Z{num}.1", f"Z{num}.2", 12, "A")
+    dz.set_edge(f"Z{num}.2", f"Z{num}.3", 6, "B")
+    dz.set_edge(f"Z{num}.3", f"Z{num}.4", 12, "A")
+    dz.set_edge(f"Z{num}.4", f"Z{num}.1", 6, "B")
+resb = dz.check()
+check("bent picture: the one global map is off in a zone (that is why zones get their own)", "error" not in resb and resb["rms_dist_m"] > 0.3, f"{resb.get('rms_dist_m')}")
+check("every zone has its own fit in the report", set(dz.zone_results) == {"Zone 2", "Zone 3", "Zone 4"} and all("error" not in v for v in dz.zone_results.values()) and "แยกรายโซน" in dz.report.get("1.0", "end"))
+check("applying saves the zones' own calibrations", dz.apply() is True and set(app.run3_zone_calibrations) == {"2", "3", "4"} and all(v["kind"] == "poly" for v in app.run3_zone_calibrations.values()))
+page = app.cal_mode_text.get()
+check("the page names the base and the zones with their own calibration in ONE line", "ฐาน" in page and "Zone 2" in page and "Zone 4" in page, page)
+cfgb = app._run3_snapshot_config()
+check("Run 3 gets the zones' own calibrations", set(cfgb["zone_calibrations"]) == {2, 3, 4} and cfgb["zone_calibrations"][3].get("kind") == "poly")
+tracks = {1: [{"_point": tuple(bent_px([(26, 9)])[0]), "_center": tuple(bent_px([(26, 9)])[0]), "_zone_num": 3},
+              {"_point": tuple(bent_px([(34, 13)])[0]), "_center": tuple(bent_px([(34, 13)])[0]), "_zone_num": 3}],
+          2: [{"_point": tuple(bent_px([(44, 7)])[0]), "_center": tuple(bent_px([(44, 7)])[0]), "_zone_num": 4},
+              {"_point": tuple(bent_px([(52, 11)])[0]), "_center": tuple(bent_px([(52, 11)])[0]), "_zone_num": 4}]}
+app._run3_attach_metric(tracks, cfgb)
+d_mid = float(np.hypot(*(np.array(tracks[1][0]["_m"]) - np.array(tracks[1][1]["_m"]))))
+d_right = float(np.hypot(*(np.array(tracks[2][0]["_m"]) - np.array(tracks[2][1]["_m"]))))
+true_mid, true_right = math.hypot(8, 4), math.hypot(8, 4)
+check("inside a zone the distances are right (the middle zone and the zone at the picture's edge)", abs(d_mid - true_mid) < 0.25 and abs(d_right - true_right) < 0.25, f"{d_mid:.2f} / {d_right:.2f} (true {true_mid:.2f})")
+dz2 = app.open_zone_ground_calibration()
+root.update()
+check("reopening keeps the typed lengths", dz2.len_vars[("Z3.1", "Z3.2")].get() == "12")
+dz2.per_zone_var.set(False)
+dz2.apply()
+check("without the tick the zones' own calibrations are removed again", app.run3_zone_calibrations == {})
+app.zones = {name: [] for name in m.ZONE_NAMES}
+for name, g in ZONES.items():
+    app.zones[name] = [tuple(int(round(v)) for v in q) for q in to_px(g)]
 
 # the page shows only the block of the chosen method (no 4-corner fields next to the zone calibration)
 app.run3_cal_mode_var.set("zones")
