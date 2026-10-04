@@ -7,6 +7,7 @@ PKStudio.py starts a GUI/CUDA bootstrap when imported, so the tests exec only
 the region between the CORE-BEGIN / CORE-END markers.
 """
 import math
+import numpy as np
 import os
 import unittest
 
@@ -780,6 +781,94 @@ class ShortDuplicateTracks(unittest.TestCase):
         self.assertEqual(set(out), {2})
         fb = {f: [(1, self.BOX), (2, self.BOX)] for f in range(9)}                   # 9 shared frames of a long track: kept
         self.assertEqual(self.F(fb, {1: 50, 2: 40}), {})
+
+
+class GroundPlaneTests(unittest.TestCase):
+    """The ground plane from road geometry: parallel / perpendicular lines + real distances, any number of points."""
+    SIZE = (1920, 1080)
+    # a 30 m x 20 m patch of road seen from the side (plane -> picture)
+    PLANE = [(0, 0), (30, 0), (30, 20), (0, 20)]
+    IMAGE = [(300, 500), (1600, 420), (1850, 900), (100, 950)]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.h_img = CORE["homography_from_points"](cls.PLANE, cls.IMAGE)         # plane (m) -> picture (px)
+
+    def to_img(self, pts, noise=0.0, seed=1):
+        q = CORE["apply_homography"](self.h_img, np.asarray(pts, dtype=float))
+        return q + np.random.default_rng(seed).normal(0, noise, q.shape)
+
+    def lines(self, noise=0.0):
+        a = [self.to_img([(x, y) for x in np.linspace(1, 29, 8)], noise, k) for k, y in enumerate((3, 10, 17))]       # along the road
+        b = [self.to_img([(x, y) for y in np.linspace(1, 19, 8)], noise, 10 + k) for k, x in enumerate((4, 15, 26))]    # across it
+        return a, b
+
+    def test_lines_and_four_sides_give_the_true_plane(self):
+        a, b = self.lines(0.5)
+        pts = self.to_img(self.PLANE, 0.5, 5)
+        out = CORE["solve_ground_homography"](pts, [(0, 1, 30), (1, 2, 20), (2, 3, 30), (3, 0, 20)], a, b, self.SIZE)
+        self.assertNotIn("error", out)
+        test_plane = np.array([[5, 4], [25, 6], [12, 16], [28, 18], [2, 12]], dtype=float)
+        got = CORE["apply_homography"](out["H"], self.to_img(test_plane))
+        self.assertLess(np.abs(got - test_plane).max(), 0.15)                      # the x axis is the road, the first point is the origin
+        self.assertLess(out["rms_dist_m"], 0.15)
+
+    def test_straight_lines_come_out_straight_and_square(self):
+        a, b = self.lines(0.5)
+        out = CORE["solve_ground_homography"](self.to_img(self.PLANE, 0.5, 5), [(0, 1, 30), (1, 2, 20)], a, b, self.SIZE)
+        self.assertNotIn("error", out)
+        m_a = CORE["apply_homography"](out["H"], a[0])
+        self.assertLess(np.ptp(m_a[:, 1]), 0.3)                                     # a road line is horizontal in the map
+        m_b = CORE["apply_homography"](out["H"], b[2])
+        self.assertLess(np.ptp(m_b[:, 0]), 0.3)                                     # a cross line is vertical
+        self.assertLess(max(out["line_rms_m"]["A"] + out["line_rms_m"]["B"]), 0.2)
+
+    def test_more_than_four_points_with_distances_only(self):
+        truth = np.array([[0, 0], [30, 0], [30, 20], [0, 20], [15, 0], [15, 20], [8, 10]], dtype=float)
+        pts = self.to_img(truth, 0.4, 3)
+        dists = [(i, j, float(np.hypot(*(truth[i] - truth[j])))) for i in range(7) for j in range(i + 1, 7)]
+        out = CORE["solve_ground_homography"](pts, dists, [], [], self.SIZE)
+        self.assertNotIn("error", out)
+        test_plane = np.array([[5, 4], [25, 6], [12, 16], [28, 18]], dtype=float)
+        got = CORE["apply_homography"](out["H"], self.to_img(test_plane))
+        for i in range(4):                                                            # distances right (the frame is free)
+            for j in range(i + 1, 4):
+                self.assertAlmostEqual(float(np.hypot(*(got[i] - got[j]))), float(np.hypot(*(test_plane[i] - test_plane[j]))), delta=0.25)
+
+    def test_one_distance_is_not_enough_for_the_shape(self):
+        a, b = self.lines(0.3)
+        out = CORE["solve_ground_homography"](self.to_img(self.PLANE, 0.3, 5), [(0, 1, 30)], a, b, self.SIZE)
+        self.assertIn("error", out)                                                   # the length : width ratio is not fixed
+
+    def test_too_few_lines_or_points(self):
+        a, b = self.lines(0.3)
+        self.assertIn("error", CORE["solve_ground_homography"](self.to_img(self.PLANE), [(0, 1, 30), (1, 2, 20)], a[:2], b[:1], self.SIZE))
+        self.assertIn("error", CORE["solve_ground_homography"](self.to_img(self.PLANE[:3]), [(0, 1, 30), (1, 2, 20)], [], [], self.SIZE))
+        self.assertIn("error", CORE["solve_ground_homography"](self.to_img(self.PLANE), [], a, b, self.SIZE))
+
+    def test_distances_are_read_with_point_names(self):
+        labels = ["Z1.1", "Z1.2", "Z2.1"]
+        d, bad = CORE["parse_ground_distances"]("Z1.1-Z1.2=12.5, z1.2 - Z2.1 : 8 m; Z1.1-Z9.9=3, nonsense", labels)
+        self.assertEqual([(i, j, round(v, 1)) for i, j, v in d], [(0, 1, 12.5), (1, 2, 8.0)])
+        self.assertEqual(bad, ["Z1.1-Z9.9=3", "nonsense"])
+        d2, bad2 = CORE["parse_ground_distances"]("P1-P2=17, 2-3 = 8.4; P1\u2192P4=3 m, P2-P2=4")
+        self.assertEqual([(i, j, round(v, 1)) for i, j, v in d2], [(0, 1, 17.0), (1, 2, 8.4), (0, 3, 3.0)])
+        self.assertEqual(bad2, ["P2-P2=4"])
+        self.assertEqual(CORE["format_ground_distances"]([(0, 1, 12.5)], labels), "Z1.1-Z1.2=12.5")
+
+    def test_ground_points_keep_their_names_and_the_old_format_loads(self):
+        txt = CORE["encode_ground_points"]([(10.0, 20.5), (30.0, 40.0)], ["Z1.1", "P1"])
+        self.assertEqual(CORE["decode_ground_points"](txt), ([(10.0, 20.5), (30.0, 40.0)], ["Z1.1", "P1"]))
+        self.assertEqual(CORE["decode_ground_points"]("[[1, 2], [3, 4]]"), ([(1.0, 2.0), (3.0, 4.0)], ["P1", "P2"]))
+        self.assertEqual(CORE["decode_ground_points"]("garbage"), ([], []))
+
+    def test_a_wrong_distance_shows_in_the_report(self):
+        a, b = self.lines(0.3)
+        out = CORE["solve_ground_homography"](self.to_img(self.PLANE, 0.3, 5), [(0, 1, 30), (1, 2, 20), (2, 3, 30), (3, 0, 20), (0, 2, 50)], a, b, self.SIZE)
+        self.assertNotIn("error", out)
+        worst = max(out["dist_report"], key=lambda r: abs(r["got_m"] - r["given_m"]))
+        self.assertEqual((worst["i"], worst["j"]), (0, 2))                          # the diagonal is really 36.06 m, not 50 m
+        self.assertGreater(abs(worst["got_m"] - worst["given_m"]), 2.0)
 
 
 if __name__ == "__main__":
