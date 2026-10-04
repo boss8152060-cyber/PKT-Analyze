@@ -311,7 +311,7 @@ _bootstrap_cuda_environment()
 # ============================================================
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import cv2
 import torch
@@ -453,6 +453,8 @@ RUN3_DEFAULTS = {
     # Optional road-plane perspective calibration. Disabled by default because
     # image points and real dimensions are site/video-specific and were not
     # supplied in the research documents.
+    "align_enabled": False,                 # use the Align result (video pixels -> the drone's plane) instead of PPM / Perspective
+    "align_data": "",                       # JSON of the Align result (the pairs of points, the kind of transformation, the scale)
     "perspective_enabled": False,
     "perspective_p1": "",
     "perspective_p2": "",
@@ -1269,6 +1271,197 @@ def outside_zone_plan(mode, inside, zones_available=True):
     return {"point": True, "object": False}
 
 
+# ---------------- Align: video pixels -> the drone picture (like the georeferencer of a GIS / ALIGN in CAD) ----------------
+# Pairs of points (the same ground spot in the video frame and in the drone picture) give a transformation; the kind is chosen like in QGIS:
+# helmert (move + turn + scale), affine, projective (camera tilt), lens (radial trend + projective), poly2, poly3, tps (thin plate spline,
+# "rubber sheet": exact at the points, free between them). The drone picture is used ONLY to make the pairs, never at analysis time.
+ALIGN_KINDS = {
+    "helmert": (2, "ย้าย + หมุน + ย่อขยาย (Helmert)"),
+    "affine": (3, "ยืดเอียง (Affine, Polynomial 1)"),
+    "projective": (4, "แก้มุมกล้อง (Projective)"),
+    "lens": (6, "แก้มุมกล้อง + ความโค้งแบบรัศมี (Projective + เลนส์)"),
+    "poly2": (6, "ยืดโค้ง (Polynomial 2)"),
+    "poly3": (10, "ยืดโค้งมาก (Polynomial 3)"),
+    "tps": (6, "ยืดเป็นช่วง (Thin Plate Spline / rubber sheet)"),
+}
+
+
+def radial_undistort(pts, size, k1, k2=0.0):
+    """Radial trend of a wide lens: a recorded point at the normalised radius r (r = 1 at the left / right edge, from the centre of the
+    picture) stands for the straightened radius r (1 + k1 r^2 + k2 r^4). The centre stays exact."""
+    p = np.asarray(pts, dtype=float).reshape(-1, 2)
+    c = np.array([size[0] / 2.0, size[1] / 2.0])
+    half = size[0] / 2.0
+    x = (p - c) / half
+    r2 = (x ** 2).sum(axis=1, keepdims=True)
+    return x * (1.0 + k1 * r2 + k2 * r2 ** 2) * half + c
+
+
+def _al_norm(p):
+    p = np.asarray(p, dtype=float).reshape(-1, 2)
+    c = p.mean(axis=0)
+    sc = max(float(np.abs(p - c).max()), 1e-9)
+    return (p - c) / sc, c, sc
+
+
+def _al_terms(x, y, degree):
+    cols = [np.ones_like(x)]
+    for d in range(1, degree + 1):
+        for i in range(d + 1):
+            cols.append(x ** (d - i) * y ** i)
+    return np.stack(cols, axis=1)
+
+
+def _al_tps_kernel(r2):
+    return np.where(r2 > 1e-18, 0.5 * r2 * np.log(np.where(r2 > 1e-18, r2, 1.0)), 0.0)
+
+
+def fit_transform(kind, src, dst, size=None):
+    """Fit one transformation from the pairs src (video pixels) -> dst (drone pixels). Returns a model dict or {"error": text}."""
+    src = np.asarray(src, dtype=float).reshape(-1, 2)
+    dst = np.asarray(dst, dtype=float).reshape(-1, 2)
+    n = len(src)
+    if kind not in ALIGN_KINDS:
+        return {"error": f"unknown kind {kind}"}
+    need = ALIGN_KINDS[kind][0]
+    if n < need or len(dst) != n:
+        return {"error": f"ต้องมีคู่จุดอย่างน้อย {need} คู่ (ตอนนี้ {n})"}
+    if kind == "lens":
+        if size is None:
+            return {"error": "lens needs the picture size"}
+        best = None
+        for k1 in np.arange(-0.10, 0.80 + 1e-9, 0.02):
+            m_ = fit_transform("projective", radial_undistort(src, size, float(k1)), dst)
+            if "error" in m_:
+                continue
+            e = float(np.sqrt(np.mean(np.sum((apply_transform(m_, radial_undistort(src, size, float(k1))) - dst) ** 2, axis=1))))
+            if best is None or e < best[0]:
+                best = (e, float(k1), m_)
+        if best is None:
+            return {"error": "projective part failed"}
+        step = 0.01
+        for _ in range(8):
+            improved = False
+            for cand in (best[1] + step, best[1] - step):
+                m_ = fit_transform("projective", radial_undistort(src, size, cand), dst)
+                if "error" in m_:
+                    continue
+                e = float(np.sqrt(np.mean(np.sum((apply_transform(m_, radial_undistort(src, size, cand)) - dst) ** 2, axis=1))))
+                if e < best[0] - 1e-12:
+                    best, improved = (e, cand, m_), True
+            if not improved:
+                step /= 2.0
+        return {"kind": "lens", "k1": best[1], "size": tuple(size), "inner": best[2]}
+    sn, sc_, ss = _al_norm(src)
+    dn, dc_, ds = _al_norm(dst)
+    model = {"kind": kind, "sc": sc_, "ss": ss, "dc": dc_, "ds": ds}
+    x, y = sn[:, 0], sn[:, 1]
+    if kind == "helmert":
+        a = np.zeros((2 * n, 4))
+        a[0::2] = np.stack([x, -y, np.ones(n), np.zeros(n)], axis=1)
+        a[1::2] = np.stack([y, x, np.zeros(n), np.ones(n)], axis=1)
+        sol = np.linalg.lstsq(a, dn.reshape(-1), rcond=None)[0]
+        model["p"] = sol
+    elif kind in ("affine", "poly2", "poly3"):
+        degree = {"affine": 1, "poly2": 2, "poly3": 3}[kind]
+        t = _al_terms(x, y, degree)
+        if n < t.shape[1]:
+            return {"error": f"ต้องมีคู่จุดอย่างน้อย {t.shape[1]} คู่"}
+        model["p"] = np.linalg.lstsq(t, dn, rcond=None)[0]
+        model["degree"] = degree
+    elif kind == "projective":
+        h = homography_from_points(sn, dn)
+        if not np.all(np.isfinite(h)):
+            return {"error": "คำนวณ Projective ไม่ได้ (จุดอยู่ในแนวเดียวกัน?)"}
+        model["h"] = h
+    elif kind == "tps":
+        k = _al_tps_kernel(((sn[:, None, :] - sn[None, :, :]) ** 2).sum(axis=2))
+        lam = 1e-4
+        p_ = np.c_[np.ones(n), x, y]
+        big = np.zeros((n + 3, n + 3))
+        big[:n, :n] = k + lam * np.eye(n)
+        big[:n, n:] = p_
+        big[n:, :n] = p_.T
+        rhs = np.zeros((n + 3, 2))
+        rhs[:n] = dn
+        try:
+            sol = np.linalg.solve(big, rhs)
+        except np.linalg.LinAlgError:
+            return {"error": "คำนวณ TPS ไม่ได้ (จุดซ้ำหรืออยู่ในแนวเดียวกัน)"}
+        model["w"], model["a"], model["sn"] = sol[:n], sol[n:], sn
+    return model
+
+
+def apply_transform(model, pts):
+    """Video pixels -> drone pixels with a fitted model."""
+    p = np.asarray(pts, dtype=float).reshape(-1, 2)
+    if model["kind"] == "lens":
+        return apply_transform(model["inner"], radial_undistort(p, model["size"], model["k1"]))
+    pn = (p - model["sc"]) / model["ss"]
+    x, y = pn[:, 0], pn[:, 1]
+    kind = model["kind"]
+    if kind == "helmert":
+        a, b, tx, ty = model["p"]
+        out = np.stack([a * x - b * y + tx, b * x + a * y + ty], axis=1)
+    elif kind in ("affine", "poly2", "poly3"):
+        out = _al_terms(x, y, model["degree"]) @ model["p"]
+    elif kind == "projective":
+        out = apply_homography(model["h"], pn)
+    else:                                                                    # tps
+        k = _al_tps_kernel(((pn[:, None, :] - model["sn"][None, :, :]) ** 2).sum(axis=2))
+        out = k @ model["w"] + np.c_[np.ones(len(pn)), x, y] @ model["a"]
+    return out * model["ds"] + model["dc"]
+
+
+def transform_report(kind, src, dst, size=None):
+    """How well a kind fits the pairs: per-pair residual (in the unit of dst) and the leave-one-out residual (each pair predicted by a fit
+    WITHOUT it - the honest accuracy; None for a kind that cannot be fitted without one pair). {"error"} when it cannot be fitted."""
+    src = np.asarray(src, dtype=float).reshape(-1, 2)
+    dst = np.asarray(dst, dtype=float).reshape(-1, 2)
+    model = fit_transform(kind, src, dst, size)
+    if "error" in model:
+        return model
+    res = np.hypot(*(apply_transform(model, src) - dst).T)
+    loo = None
+    if len(src) > ALIGN_KINDS[kind][0]:
+        loo = []
+        for i in range(len(src)):
+            keep = np.arange(len(src)) != i
+            m_ = fit_transform(kind, src[keep], dst[keep], size)
+            loo.append(float(np.hypot(*(apply_transform(m_, src[i:i + 1])[0] - dst[i]))) if "error" not in m_ else None)
+        loo = loo if all(v is not None for v in loo) else None
+    return {"model": model, "residuals": [float(v) for v in res], "rms": float(np.sqrt(np.mean(res ** 2))),
+            "loo": loo, "loo_rms": (float(np.sqrt(np.mean(np.square(loo)))) if loo else None)}
+
+
+def align_build(data):
+    """The saved alignment ({pairs, kind, scale (m per drone pixel), rot_deg, origin, video_size}) -> a usable config or {"error"}."""
+    try:
+        pairs = data["pairs"]
+        src = np.array([q["s"] for q in pairs], dtype=float).reshape(-1, 2)
+        dst = np.array([q["d"] for q in pairs], dtype=float).reshape(-1, 2)
+        kind = data.get("kind", "projective")
+        scale = float(data.get("scale") or 0.0)
+    except (KeyError, TypeError, ValueError):
+        return {"error": "ข้อมูลการจัดแนวอ่านไม่ได้"}
+    if scale <= 0:
+        return {"error": "ยังไม่ได้ตั้งสเกลของภาพโดรน (เมตรต่อพิกเซล)"}
+    model = fit_transform(kind, src, dst, tuple(data["video_size"]) if data.get("video_size") else None)
+    if "error" in model:
+        return model
+    return {"model": model, "kind": kind, "scale": scale, "rot_deg": float(data.get("rot_deg") or 0.0),
+            "origin": tuple(float(v) for v in (data.get("origin") or dst[0])), "n_pairs": int(len(src))}
+
+
+def align_apply(cfg, pts):
+    """Video pixels -> metres in the drone's plane (x along the main road after the rotation, y across, like the picture)."""
+    d = apply_transform(cfg["model"], pts)
+    v = (d - np.array(cfg["origin"])) * cfg["scale"]
+    th = math.radians(cfg["rot_deg"])
+    c, s_ = math.cos(th), math.sin(th)
+    return np.stack([v[:, 0] * c + v[:, 1] * s_, -v[:, 0] * s_ + v[:, 1] * c], axis=1)
+
+
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -1661,6 +1854,452 @@ class ClipPlayerDialog:
         except Exception:
             pass
         self.top.destroy()
+
+
+def read_picture_any(path, frame=None):
+    """A picture file (any letters in the path) or a frame of a video -> BGR array or None."""
+    if not path or not os.path.isfile(path):
+        return None
+    if os.path.splitext(path)[1].lower() in (".mp4", ".mov", ".avi", ".mkv", ".m4v"):
+        cap = cv2.VideoCapture(path)
+        try:
+            total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
+            idx = max(0, min(total - 1, int(frame) - 1)) if frame not in (None, "") else total // 2
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, fr = cap.read()
+            return fr if ok else None
+        finally:
+            cap.release()
+    try:
+        return cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
+
+class _ZoomPane:
+    """A picture with wheel zoom at the pointer, drag to pan and a click callback (picture coordinates) + an overlay hook."""
+
+    def __init__(self, parent, width, height, on_click, overlay):
+        self.canvas = tk.Canvas(parent, width=width, height=height, bg="#202020", highlightthickness=0)
+        self.on_click, self.overlay = on_click, overlay
+        self.img = None
+        self.zoom, self.fit_k, self.view = 1.0, 1.0, None
+        self._pan = None
+        self.photo = None
+        self.last_render = None
+        c = self.canvas
+        c.bind("<Configure>", lambda e: self._on_configure())
+        c.bind("<ButtonPress-1>", lambda e: self._press(e.x, e.y))
+        c.bind("<B1-Motion>", lambda e: self._drag(e.x, e.y))
+        c.bind("<ButtonRelease-1>", lambda e: self._release(e.x, e.y))
+        for b in (2, 3):
+            c.bind(f"<ButtonPress-{b}>", lambda e: self._press(e.x, e.y, True))
+            c.bind(f"<B{b}-Motion>", lambda e: self._drag(e.x, e.y))
+        c.bind("<MouseWheel>", lambda e: self.zoom_at(e.x, e.y, 1 if e.delta > 0 else -1))
+        c.bind("<Button-4>", lambda e: self.zoom_at(e.x, e.y, 1))
+        c.bind("<Button-5>", lambda e: self.zoom_at(e.x, e.y, -1))
+
+    def size(self):
+        return max(50, self.canvas.winfo_width()), max(50, self.canvas.winfo_height())
+
+    def set_image(self, img):
+        self.img = img
+        self.zoom, self.view = 1.0, None
+        self.refresh()
+
+    def _fit(self):
+        cw, ch = self.size()
+        h, w = self.img.shape[:2]
+        self.fit_k = min(cw / float(w), ch / float(h))
+        return self.fit_k, (cw - w * self.fit_k) / 2.0, (ch - h * self.fit_k) / 2.0
+
+    def _on_configure(self):
+        if self.zoom <= 1.0:
+            self.view = None
+        self.refresh()
+
+    def to_image(self, ex, ey):
+        k, ox, oy = self.view
+        return (ex - ox) / k, (ey - oy) / k
+
+    def to_view(self, x, y):
+        k, ox, oy = self.view
+        return int(round(x * k + ox)), int(round(y * k + oy))
+
+    def zoom_at(self, ex, ey, steps):
+        if self.img is None or self.view is None:
+            return False
+        k, ox, oy = self.view
+        z_new = min(40.0, max(1.0, self.zoom * (1.25 ** steps)))
+        if z_new == self.zoom:
+            return False
+        px, py = (ex - ox) / k, (ey - oy) / k
+        self.zoom = z_new
+        if z_new == 1.0:
+            self.view = None
+        else:
+            k2 = self.fit_k * z_new
+            self.view = (k2, ex - px * k2, ey - py * k2)
+        self.refresh()
+        return True
+
+    def _press(self, ex, ey, always_pan=False):
+        self._pan = {"x": ex, "y": ey, "x0": ex, "y0": ey, "moved": bool(always_pan)}
+
+    def _drag(self, ex, ey):
+        p = self._pan
+        if p is None or self.view is None:
+            return
+        if not p["moved"] and (abs(ex - p["x0"]) > 4 or abs(ey - p["y0"]) > 4) and self.zoom > 1.0:
+            p["moved"] = True
+        if p["moved"]:
+            k, ox, oy = self.view
+            self.view = (k, ox + ex - p["x"], oy + ey - p["y"])
+            p["x"], p["y"] = ex, ey
+            self.refresh()
+
+    def _release(self, ex, ey):
+        p, self._pan = self._pan, None
+        if p is None or p["moved"] or self.img is None or self.view is None:
+            return
+        x, y = self.to_image(ex, ey)
+        h, w = self.img.shape[:2]
+        if 0 <= x < w and 0 <= y < h:
+            self.on_click(x, y)
+
+    def refresh(self):
+        if self.img is None or not self.canvas.winfo_exists():
+            return
+        if self.view is None:
+            self.view = self._fit()
+        k, ox, oy = self.view
+        cw, ch = self.size()
+        h, w = self.img.shape[:2]
+        out = np.full((ch, cw, 3), 32, np.uint8)
+        ix0, iy0 = max(0, int(math.floor(-ox / k))), max(0, int(math.floor(-oy / k)))
+        ix1, iy1 = min(w, int(math.ceil((cw - ox) / k))), min(h, int(math.ceil((ch - oy) / k)))
+        if ix1 > ix0 and iy1 > iy0:
+            res = cv2.resize(self.img[iy0:iy1, ix0:ix1], (max(1, int(round((ix1 - ix0) * k))), max(1, int(round((iy1 - iy0) * k)))),
+                             interpolation=cv2.INTER_AREA if k < 1 else cv2.INTER_LINEAR)
+            dx, dy = int(round(ix0 * k + ox)), int(round(iy0 * k + oy))
+            sx0, sy0 = max(0, -dx), max(0, -dy)
+            ex_, ey_ = min(res.shape[1], cw - dx), min(res.shape[0], ch - dy)
+            if ex_ > sx0 and ey_ > sy0:
+                out[dy + sy0:dy + ey_, dx + sx0:dx + ex_] = res[sy0:ey_, sx0:ex_]
+        self.overlay(out, self)
+        self.last_render = out
+        ok, buf = cv2.imencode(".png", out)
+        self.photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+
+
+class AlignDialog:
+    """Align (like the georeferencer of a GIS / ALIGN in CAD): click a spot on the ground in the VIDEO frame (left), then the same spot in the
+    DRONE picture (right) = one pair. With enough pairs the video pixels are transformed to the drone's plane (metres). Choose the kind of
+    transformation (move/turn/scale ... projective ... lens ... polynomial ... rubber sheet) and see the error of every pair and of
+    the kind itself (leave-one-out = the honest accuracy). The drone picture is used only here; the saved result is just numbers."""
+
+    def __init__(self, app, video_path, on_apply, initial=None):
+        self.app, self.on_apply, self.video_path = app, on_apply, video_path
+        initial = initial or {}
+        self.pairs = [{"s": tuple(q["s"]), "d": tuple(q["d"])} for q in initial.get("pairs", [])]
+        self.pending = None
+        self.scale = float(initial.get("scale") or 0.0)
+        self.rot_deg = float(initial.get("rot_deg") or 0.0)
+        self.kind = initial.get("kind", "projective") if initial.get("kind") in ALIGN_KINDS else "projective"
+        self.mode_points = []                                    # clicks of the scale / road-direction measurement (drone picture)
+        self.drone_path = (initial.get("drone") or {}).get("path", "")
+        self.drone_img = None
+        self.report = None
+        self.top = tk.Toplevel(app.root)
+        self.top.title("จัดแนวกับภาพโดรน (Align)")
+        sw, sh = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
+        self.top.geometry(f"{min(1500, sw - 30)}x{min(930, sh - 80)}+10+10")
+        self.top.protocol("WM_DELETE_WINDOW", self.close)
+        self.top.dialog = self
+        self.msg_var = tk.StringVar(value="")
+        self.mode_var = tk.StringVar(value="pairs")
+        self.kind_var = tk.StringVar(value=ALIGN_KINDS[self.kind][1])
+        self.scale_var = tk.StringVar(value=(f"{self.scale:.6g}" if self.scale else ""))
+        self.frame_var = tk.StringVar(value="")
+        self.dframe_var = tk.StringVar(value=str((initial.get("drone") or {}).get("frame", "")))
+        self.dpath_var = tk.StringVar(value=self.drone_path)
+        cap = cv2.VideoCapture(video_path)
+        self.total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
+        cap.release()
+        self.video_img = None
+        self._build()
+        self.load_video_frame(initial.get("video_frame"))
+        if self.drone_path:
+            self.load_drone(self.drone_path, self.dframe_var.get() or None)
+        self.refresh_all()
+
+    # ----- pictures -----
+    def load_video_frame(self, frame=None):
+        img = read_picture_any(self.video_path, frame)
+        if img is None:
+            return False
+        self.video_img = img
+        self.frame_var.set(str(frame if frame not in (None, "") else self.total // 2 + 1))
+        self.vpane.set_image(img)
+        return True
+
+    def load_drone(self, path, frame=None):
+        img = read_picture_any(path, frame)
+        if img is None:
+            self.msg_var.set("เปิดภาพโดรนไม่ได้")
+            return False
+        self.drone_img, self.drone_path = img, path
+        self.dpath_var.set(path)
+        self.dpane.set_image(img)
+        return True
+
+    def choose_drone(self):
+        path = filedialog.askopenfilename(parent=self.top, title="เลือกภาพหรือวิดีโอโดรน",
+                                          filetypes=[("ภาพ/วิดีโอ", "*.jpg *.jpeg *.png *.webp *.bmp *.mp4 *.mov *.avi"), ("ทั้งหมด", "*.*")])
+        if path:
+            self.load_drone(path, self.dframe_var.get() or None)
+
+    # ----- pairs -----
+    def click_video(self, x, y):
+        if self.mode_var.get() != "pairs":
+            self.msg_var.set("โหมดนี้คลิกบนภาพโดรน (ขวา) — เปลี่ยนเป็น 'คู่จุด' เพื่อคลิกภาพวิดีโอ")
+            return
+        self.pending = (float(x), float(y))
+        self.msg_var.set(f"จุดวิดีโอ #{len(self.pairs) + 1} แล้ว — คลิกจุดเดียวกันในภาพโดรน (ขวา)")
+        self.refresh_all()
+
+    def click_drone(self, x, y):
+        mode = self.mode_var.get()
+        if mode == "pairs":
+            if self.pending is None:
+                self.msg_var.set("คลิกจุดในภาพวิดีโอ (ซ้าย) ก่อน แล้วคลิกจุดเดียวกันในภาพโดรน")
+                return
+            self.add_pair(self.pending, (float(x), float(y)))
+            self.pending = None
+        else:
+            self.mode_points.append((float(x), float(y)))
+            if len(self.mode_points) == 2:
+                a, b = self.mode_points
+                self.mode_points = []
+                if mode == "scale":
+                    L = simpledialog.askfloat("สเกลภาพโดรน", "ความยาวจริงระหว่างสองจุดที่คลิก (เมตร):", parent=self.top, minvalue=0.001)
+                    if L:
+                        self.set_scale_from_points(a, b, L)
+                else:
+                    self.set_road_direction(a, b)
+                self.mode_var.set("pairs")
+            else:
+                self.msg_var.set("คลิกจุดที่สองบนภาพโดรน")
+        self.refresh_all()
+
+    def add_pair(self, s_pt, d_pt):
+        self.pairs.append({"s": tuple(float(v) for v in s_pt), "d": tuple(float(v) for v in d_pt)})
+        self.msg_var.set(f"คู่ที่ {len(self.pairs)} แล้ว")
+        self.refresh_all()
+
+    def delete_pair(self, index=None):
+        if index is None:
+            sel = self.tree.selection()
+            index = int(self.tree.item(sel[0], "values")[0]) - 1 if sel else len(self.pairs) - 1
+        if 0 <= index < len(self.pairs):
+            self.pairs.pop(index)
+        self.refresh_all()
+
+    def set_scale_from_points(self, a, b, length_m):
+        d = math.hypot(b[0] - a[0], b[1] - a[1])
+        if d <= 0 or length_m <= 0:
+            return False
+        self.scale = float(length_m) / d
+        self.scale_var.set(f"{self.scale:.6g}")
+        self.msg_var.set(f"สเกล = {self.scale:.5f} เมตรต่อพิกเซลโดรน")
+        return True
+
+    def set_road_direction(self, a, b):
+        """Turn the plane so that the main road (drone points a -> b) runs along +x."""
+        self.rot_deg = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+        self.msg_var.set(f"ทิศถนนหลัก {self.rot_deg:.1f}° — หมุนให้ถนนเป็นแนวนอน")
+        return True
+
+    def set_kind(self, kind):
+        self.kind = kind
+        self.kind_var.set(ALIGN_KINDS[kind][1])
+        self.refresh_all()
+
+    def _read_scale(self):
+        try:
+            v = float(self.scale_var.get().strip())
+            if v > 0:
+                self.scale = v
+        except ValueError:
+            pass
+
+    # ----- numbers -----
+    def compute(self):
+        """Report of the chosen kind + the comparison of every kind that can be fitted. Units: metres when the scale is set, else drone pixels."""
+        self._read_scale()
+        unit = self.scale if self.scale > 0 else 1.0
+        if not self.pairs:
+            self.report = {"error": "ยังไม่มีคู่จุด"}
+            return self.report
+        src = np.array([q["s"] for q in self.pairs])
+        dst = np.array([q["d"] for q in self.pairs])
+        size = (self.video_img.shape[1], self.video_img.shape[0]) if self.video_img is not None else (1920, 1080)
+        rep = transform_report(self.kind, src, dst, size)
+        if "error" in rep:
+            self.report = rep
+            return rep
+        rep["unit"] = "m" if self.scale > 0 else "px"
+        rep["residuals_u"] = [v * unit for v in rep["residuals"]]
+        rep["loo_u"] = [v * unit for v in rep["loo"]] if rep["loo"] else None
+        rep["rms_u"] = rep["rms"] * unit
+        rep["loo_rms_u"] = rep["loo_rms"] * unit if rep["loo_rms"] is not None else None
+        rep["compare"] = []
+        for k in ALIGN_KINDS:
+            r = transform_report(k, src, dst, size)
+            if "error" not in r:
+                rep["compare"].append((k, r["rms"] * unit, r["loo_rms"] * unit if r["loo_rms"] is not None else None))
+        self.report = rep
+        return rep
+
+    def refresh_all(self):
+        if not getattr(self, "tree", None):
+            return
+        rep = self.compute()
+        self.tree.delete(*self.tree.get_children())
+        unit_txt = "ซม." if self.scale > 0 else "px"
+        mult = 100.0 if self.scale > 0 else 1.0
+        if "error" not in rep:
+            for i, q in enumerate(self.pairs):
+                loo = rep["loo_u"][i] * mult if rep["loo_u"] else None
+                self.tree.insert("", "end", values=(i + 1, f"{rep['residuals_u'][i] * mult:.1f}", "-" if loo is None else f"{loo:.1f}"))
+            lines = [f"ชนิด: {ALIGN_KINDS[self.kind][1]} · {len(self.pairs)} คู่ · คลาดเฉลี่ย {rep['rms_u'] * mult:.1f} {unit_txt}"
+                     + (f" · เว้นจุดตรวจ {rep['loo_rms_u'] * mult:.1f} {unit_txt}" if rep["loo_rms_u"] is not None else " · (ยังไม่พอจะตรวจแบบเว้นจุด)")]
+            if rep["loo_rms_u"] is not None and rep["loo_rms_u"] > 3.0 * max(rep["rms_u"], 1e-9) and rep["loo_rms_u"] * mult > 3:
+                lines.append("⚠ ค่าเว้นจุดตรวจสูงกว่าค่าที่พอดีมาก = ชนิดนี้ซับซ้อนเกินจำนวนจุด (ตามจุดแต่ผิดระหว่างจุด) — เพิ่มจุด หรือเลือกชนิดที่ง่ายกว่า")
+            lines.append("เทียบทุกชนิด (คลาดเฉลี่ย / เว้นจุดตรวจ):")
+            for k, a, b in rep["compare"]:
+                mark = "  ◀ ใช้อยู่" if k == self.kind else ""
+                lines.append(f"  {ALIGN_KINDS[k][1]}: {a * mult:.1f} / " + ("-" if b is None else f"{b * mult:.1f}") + f" {unit_txt}{mark}")
+            if self.scale <= 0:
+                lines.append("ยังไม่ได้ตั้งสเกลของภาพโดรน (เมตรต่อพิกเซล) — ตั้งก่อนกด ใช้ค่านี้")
+        else:
+            lines = [rep["error"]]
+        self.report_text.config(state="normal")
+        self.report_text.delete("1.0", "end")
+        self.report_text.insert("end", "\n".join(lines))
+        self.report_text.config(state="disabled")
+        self.vpane.refresh()
+        self.dpane.refresh()
+
+    # ----- overlays -----
+    def _draw_video(self, out, pane):
+        for i, q in enumerate(self.pairs):
+            p = pane.to_view(*q["s"])
+            cv2.circle(out, p, 6, (0, 140, 255), -1, cv2.LINE_AA)
+            cv2.putText(out, str(i + 1), (p[0] + 8, p[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2, cv2.LINE_AA)
+        if self.pending is not None:
+            p = pane.to_view(*self.pending)
+            cv2.circle(out, p, 9, (0, 255, 255), 2, cv2.LINE_AA)
+
+    def _draw_drone(self, out, pane):
+        rep = self.report if (self.report and "error" not in self.report) else None
+        for i, q in enumerate(self.pairs):
+            p = pane.to_view(*q["d"])
+            if rep:                                                  # where the transformation puts the video point: the gap is the error
+                try:
+                    m_ = apply_transform(rep["model"], np.array([q["s"]]))[0]
+                    pm = pane.to_view(*m_)
+                    cv2.line(out, p, pm, (0, 0, 255), 1, cv2.LINE_AA)
+                    cv2.drawMarker(out, pm, (0, 0, 255), cv2.MARKER_CROSS, 9, 1, cv2.LINE_AA)
+                except Exception:
+                    pass
+            cv2.circle(out, p, 6, (0, 255, 0), -1, cv2.LINE_AA)
+            cv2.putText(out, str(i + 1), (p[0] + 8, p[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
+        for q in self.mode_points:
+            cv2.circle(out, pane.to_view(*q), 7, (255, 0, 255), 2, cv2.LINE_AA)
+
+    # ----- window -----
+    def _build(self):
+        top = self.top
+        ttk.Label(top, text=("1) เลือกภาพ/วิดีโอโดรน  2) คลิกจุดบนพื้นถนนในภาพวิดีโอ (ซ้าย) แล้วคลิกจุดเดียวกันในภาพโดรน (ขวา) = 1 คู่ "
+                             "(มุมทางม้าลาย ปลายขีดเส้นประ มุมขอบทาง ฝาท่อ — ไม่ใช่ตึก/ต้นไม้)  3) ตั้งสเกลภาพโดรน (วัดจากความยาวจริง)  "
+                             "4) เลือกชนิดการแปลง ดูความคลาด แล้วกด ใช้ค่านี้  ·  ล้อเมาส์ = ซูม · ลาก = เลื่อนภาพ"), wraplength=1440, justify="left").pack(anchor="w", padx=8, pady=(6, 2))
+        bar = ttk.Frame(top)
+        bar.pack(fill="x", padx=8)
+        ttk.Label(bar, text="เฟรมวิดีโอ").pack(side="left")
+        ttk.Entry(bar, textvariable=self.frame_var, width=7).pack(side="left", padx=4)
+        ttk.Button(bar, text="โหลด", command=lambda: self.load_video_frame(self.frame_var.get() or None) and self.refresh_all()).pack(side="left", padx=(0, 18))
+        ttk.Label(bar, text="ภาพ/วิดีโอโดรน").pack(side="left")
+        ttk.Entry(bar, textvariable=self.dpath_var, width=48).pack(side="left", padx=4)
+        ttk.Button(bar, text="เลือก…", command=self.choose_drone).pack(side="left")
+        ttk.Label(bar, text="เฟรม (ถ้าเป็นวิดีโอ)").pack(side="left", padx=(10, 2))
+        ttk.Entry(bar, textvariable=self.dframe_var, width=6).pack(side="left")
+        ttk.Button(bar, text="โหลด", command=lambda: self.load_drone(self.dpath_var.get(), self.dframe_var.get() or None) and self.refresh_all()).pack(side="left", padx=4)
+        panes = ttk.Frame(top)
+        panes.pack(fill="both", expand=True, padx=8, pady=4)
+        panes.columnconfigure(0, weight=1)
+        panes.columnconfigure(1, weight=1)
+        panes.rowconfigure(1, weight=1)
+        ttk.Label(panes, text="วิดีโอข้างทาง (จุดต้นทาง)").grid(row=0, column=0, sticky="w")
+        ttk.Label(panes, text="ภาพโดรน (จุดปลายทาง)").grid(row=0, column=1, sticky="w")
+        self.vpane = _ZoomPane(panes, 700, 380, self.click_video, self._draw_video)
+        self.vpane.canvas.grid(row=1, column=0, sticky="nsew", padx=(0, 4))
+        self.dpane = _ZoomPane(panes, 700, 380, self.click_drone, self._draw_drone)
+        self.dpane.canvas.grid(row=1, column=1, sticky="nsew", padx=(4, 0))
+        low = ttk.Frame(top)
+        low.pack(fill="x", padx=8, pady=(0, 4))
+        left = ttk.Frame(low)
+        left.pack(side="left", fill="y")
+        ttk.Label(left, text="ชนิดการแปลง").grid(row=0, column=0, sticky="w")
+        cb = ttk.Combobox(left, textvariable=self.kind_var, values=[v[1] for v in ALIGN_KINDS.values()], state="readonly", width=46)
+        cb.grid(row=0, column=1, columnspan=3, sticky="w", padx=4)
+        cb.bind("<<ComboboxSelected>>", lambda e: self.set_kind(next(k for k, v in ALIGN_KINDS.items() if v[1] == self.kind_var.get())))
+        ttk.Label(left, text="สเกลภาพโดรน (ม./พิกเซล)").grid(row=1, column=0, sticky="w", pady=2)
+        ent = ttk.Entry(left, textvariable=self.scale_var, width=12)
+        ent.grid(row=1, column=1, sticky="w", padx=4)
+        ent.bind("<KeyRelease>", lambda e: self.refresh_all())
+        ttk.Radiobutton(left, text="คู่จุด", variable=self.mode_var, value="pairs").grid(row=2, column=0, sticky="w")
+        ttk.Radiobutton(left, text="วัดสเกล (คลิก 2 จุดบนภาพโดรน แล้วใส่ความยาว)", variable=self.mode_var, value="scale").grid(row=2, column=1, columnspan=3, sticky="w")
+        ttk.Radiobutton(left, text="ทิศถนนหลัก (คลิก 2 จุดตามถนน ซ้าย→ขวา)", variable=self.mode_var, value="road").grid(row=3, column=1, columnspan=3, sticky="w")
+        ttk.Button(left, text="ลบคู่ที่เลือก", command=self.delete_pair).grid(row=4, column=0, pady=4, sticky="w")
+        ttk.Button(left, text="ใช้ค่านี้", command=self.apply).grid(row=4, column=1, padx=4, sticky="w")
+        ttk.Button(left, text="ปิด", command=self.close).grid(row=4, column=2, sticky="w")
+        self.tree = ttk.Treeview(low, columns=("n", "res", "loo"), show="headings", height=6)
+        for col, text, w in (("n", "คู่", 40), ("res", "คลาด (ซม.)", 90), ("loo", "เว้นจุด (ซม.)", 100)):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=w, anchor="center")
+        self.tree.pack(side="left", padx=10, fill="y")
+        self.report_text = tk.Text(low, height=8, width=70, wrap="word", state="disabled")
+        self.report_text.pack(side="left", fill="both", expand=True)
+        tk.Label(top, textvariable=self.msg_var, anchor="w", foreground="#a00").pack(fill="x", padx=8)
+
+    def apply(self):
+        rep = self.compute()
+        if "error" in rep:
+            messagebox.showerror("จัดแนวกับภาพโดรน", rep["error"], parent=self.top)
+            return False
+        if self.scale <= 0:
+            messagebox.showerror("จัดแนวกับภาพโดรน", "ตั้งสเกลภาพโดรนก่อน (วัดสเกล: คลิก 2 จุดบนภาพโดรน แล้วใส่ความยาวจริง)", parent=self.top)
+            return False
+        data = {"pairs": [{"s": list(q["s"]), "d": list(q["d"])} for q in self.pairs], "kind": self.kind, "scale": self.scale, "rot_deg": self.rot_deg,
+                "origin": list(self.pairs[0]["d"]), "video_size": [self.video_img.shape[1], self.video_img.shape[0]],
+                "video_frame": self.frame_var.get(), "drone": {"path": self.drone_path, "frame": self.dframe_var.get()},
+                "info": {"rms_m": rep["rms_u"], "loo_rms_m": rep["loo_rms_u"], "unit": rep["unit"]}}
+        cfg = align_build(data)
+        if "error" in cfg:
+            messagebox.showerror("จัดแนวกับภาพโดรน", cfg["error"], parent=self.top)
+            return False
+        self.on_apply(data)
+        self.close()
+        return True
+
+    def close(self):
+        try:
+            self.top.destroy()
+        except tk.TclError:
+            pass
 
 
 class BackgroundFrameReader:
@@ -2153,6 +2792,8 @@ class Run1App:
         self.run3_ldp_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["ldp_enabled"])
         self.run3_ppm_var = tk.StringVar(value=RUN3_DEFAULTS["ppm"])
         self.run3_perspective_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["perspective_enabled"])
+        self.run3_align_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["align_enabled"])
+        self.run3_align_var = tk.StringVar(value=RUN3_DEFAULTS["align_data"])
         self.run3_perspective_p1_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p1"])
         self.run3_perspective_p2_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p2"])
         self.run3_perspective_p3_var = tk.StringVar(value=RUN3_DEFAULTS["perspective_p3"])
@@ -2504,6 +3145,19 @@ class Run1App:
         r += 1
         ttk.Checkbutton(cal, text="สร้างวิดีโอ Topview (Tracking_Topview.mp4)", variable=self.run3_topview_video_var).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(cal, text="วาดจากพิกัดเมตรเดียวกับที่ตัวชี้วัดใช้ (ไฟล์ Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
+        r += 1
+        alignf = ttk.LabelFrame(cal, text="จัดแนวกับภาพโดรน (Align) — แปลงพิกัดวิดีโอให้ตรงกับผังจริงของโดรน (ภาพโดรนใช้เฉพาะตอนจัดแนว)", padding=4)
+        alignf.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 2))
+        ttk.Button(alignf, text="🧭 จัดแนว…", command=self.open_align).pack(side="left")
+        ttk.Checkbutton(alignf, text="ใช้ผลการจัดแนวแทน PPM / Perspective", variable=self.run3_align_enabled_var).pack(side="left", padx=10)
+        self.align_status_var = tk.StringVar(value="")
+        ttk.Label(alignf, textvariable=self.align_status_var, foreground="#0a7a3d").pack(side="left", padx=6)
+
+        def _refresh_align_status(*_):
+            self.align_status_var.set(self._align_status_text())
+        for v_ in (self.run3_align_var, self.run3_align_enabled_var):
+            v_.trace_add("write", _refresh_align_status)
+        _refresh_align_status()
         r += 1
         ttk.Checkbutton(cal, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=r, column=0, sticky="w", pady=(6, 4))
         ttk.Label(cal, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง (P1→P2 ต้องขนานแนวถนน)", foreground=gray).grid(row=r, column=1, columnspan=2, sticky="w", pady=(6, 4))
@@ -4019,6 +4673,8 @@ class Run1App:
                 "ldp_enabled": self.run3_ldp_enabled_var.get(),
                 "ppm": self.run3_ppm_var.get(),
                 "perspective_enabled": self.run3_perspective_enabled_var.get(),
+                "align_enabled": self.run3_align_enabled_var.get(),
+                "align_data": self.run3_align_var.get(),
                 "perspective_p1": self.run3_perspective_p1_var.get(),
                 "perspective_p2": self.run3_perspective_p2_var.get(),
                 "perspective_p3": self.run3_perspective_p3_var.get(),
@@ -4184,6 +4840,8 @@ class Run1App:
                 ("ldp_enabled", self.run3_ldp_enabled_var),
                 ("ppm", self.run3_ppm_var),
                 ("perspective_enabled", self.run3_perspective_enabled_var),
+                ("align_enabled", self.run3_align_enabled_var),
+                ("align_data", self.run3_align_var),
                 ("perspective_p1", self.run3_perspective_p1_var),
                 ("perspective_p2", self.run3_perspective_p2_var),
                 ("perspective_p3", self.run3_perspective_p3_var),
@@ -4956,6 +5614,71 @@ class Run1App:
             raise ValueError(f"Perspective correction: {label} must be x,y in pixels")
         return float(parts[0]), float(parts[1])
 
+    def _align_status_text(self):
+        try:
+            data = json.loads(self.run3_align_var.get() or "{}")
+        except (ValueError, TypeError):
+            data = {}
+        if not data.get("pairs"):
+            return "ยังไม่ได้จัดแนว"
+        info = data.get("info", {})
+        kind = ALIGN_KINDS.get(data.get("kind", ""), (0, data.get("kind", "")))[1]
+        txt = f"{kind} · {len(data['pairs'])} คู่"
+        if info.get("rms_m") is not None:
+            txt += f" · คลาดเฉลี่ย {info['rms_m'] * 100:.0f} ซม."
+        if info.get("loo_rms_m") is not None:
+            txt += f" (เว้นจุดตรวจ {info['loo_rms_m'] * 100:.0f} ซม.)"
+        return txt + ("" if self.run3_align_enabled_var.get() else " — ยังไม่ได้ติ๊กใช้")
+
+    def open_align(self):
+        video = str(self.video_var.get() or "").strip()
+        if not video or not os.path.isfile(video):
+            messagebox.showerror("จัดแนวกับภาพโดรน", "เลือกวิดีโอก่อน (ใช้เฟรมจากวิดีโอนี้)")
+            return None
+        try:
+            initial = json.loads(self.run3_align_var.get() or "{}")
+        except (ValueError, TypeError):
+            initial = {}
+        return AlignDialog(self, video, self.save_align, initial=initial)
+
+    def save_align(self, data):
+        self.run3_align_var.set(json.dumps(data))
+        self.run3_align_enabled_var.set(True)
+        self._align_cache = None
+        info = data.get("info", {})
+        self.run3_result_text.set(f"จัดแนวกับภาพโดรน: {len(data['pairs'])} คู่" + (f", คลาดเฉลี่ย {info['rms_m'] * 100:.0f} ซม." if info.get("rms_m") is not None else ""))
+
+    def _run3_align_cfg(self, silent=False):
+        """The usable Align config (see align_build) when 'use the Align result' is ticked, else None. The pairs were clicked on a frame of
+        a given size; for a video of another size the video points are scaled."""
+        if not bool(self.run3_align_enabled_var.get()):
+            return None
+        try:
+            text = self.run3_align_var.get()
+            key = (text, tuple(self._actual_video_size()))
+            cache = getattr(self, "_align_cache", None)
+            if cache is not None and cache[0] == key:
+                cfg = cache[1]
+            else:
+                data = json.loads(text or "{}")
+                if not data.get("pairs"):
+                    raise ValueError("Align: ยังไม่มีคู่จุด — เปิด \"จัดแนว…\" ก่อน หรือเอาติ๊กออก")
+                aw, ah = self._actual_video_size()
+                vw, vh = (data.get("video_size") or [aw, ah])
+                if aw and ah and vw and vh and (aw != vw or ah != vh):
+                    for q in data["pairs"]:
+                        q["s"] = [q["s"][0] * aw / float(vw), q["s"][1] * ah / float(vh)]
+                    data["video_size"] = [aw, ah]
+                cfg = align_build(data)
+                self._align_cache = (key, cfg)
+            if "error" in cfg:
+                raise ValueError("Align: " + cfg["error"])
+            return cfg
+        except Exception:
+            if silent:
+                return None
+            raise
+
     def _run3_get_perspective_matrix(self, silent=False):
         if not bool(self.run3_perspective_enabled_var.get()):
             return None
@@ -5032,6 +5755,8 @@ class Run1App:
         if not self.run3_site_id_var.get().strip():
             raise ValueError("Run 3 Site_ID is required when Run 3 is enabled.")
 
+        if self.run3_align_enabled_var.get():
+            self._run3_align_cfg(silent=False)
         if self.run3_perspective_enabled_var.get():
             self._run3_get_perspective_matrix(silent=False)
 
@@ -7339,6 +8064,7 @@ class Run1App:
             "ppm": ppm,
             "perspective_enabled": bool(self.run3_perspective_enabled_var.get()),
             "perspective": self._run3_get_perspective_matrix(silent=True),
+            "align": self._run3_align_cfg(silent=True),
             "axis_deg": num(self.run3_lateral_axis_angle_var, 0.0) or 0.0,
             "speed_zones": zones_of(self.run3_speed_zone_vars),
             "speed_smoothing_samples": max(1, int(num(self.run3_speed_smoothing_var, 5) or 1)),
@@ -7385,10 +8111,14 @@ class Run1App:
 
     @staticmethod
     def _run3_calibration_mode(c):
+        if c.get("align") is not None:
+            return "Align_" + c["align"]["kind"]
         return "Perspective_Homography" if c["perspective"] is not None else "PPM_Only"
 
     @staticmethod
     def _run3_qc_calibration(c):
+        if c.get("align") is not None:
+            return ""
         return "Perspective_Not_Calibrated" if (c["perspective_enabled"] and c["perspective"] is None) else ""
 
     def _run3_to_metric(self, pts, c):
@@ -7403,6 +8133,8 @@ class Run1App:
         pts = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
         if len(pts) == 0:
             return pts
+        if c.get("align") is not None:                                    # the Align result: video pixels -> metres in the drone's plane
+            return align_apply(c["align"], pts)
         persp = c["perspective"]
         if persp is not None:
             mapped = cv2.perspectiveTransform(pts.reshape(-1, 1, 2).astype(np.float32), persp["H"])
@@ -8760,7 +9492,7 @@ class Run1App:
             "program_version": "PK Studio V28",
             "site_id": c["site_id"],
             "inputs": {"detection": det_path, "id_zone_summary": id_path, "zone_summary": zone_path},
-            "calibration": {"mode": self._run3_calibration_mode(c), "ppm": c["ppm"],
+            "calibration": {"mode": self._run3_calibration_mode(c), "align": ({"kind": c["align"]["kind"], "pairs": c["align"]["n_pairs"], "m_per_drone_px": c["align"]["scale"]} if c.get("align") else None), "ppm": c["ppm"],
                             "perspective_enabled": c["perspective_enabled"],
                             "perspective_configured": c["perspective"] is not None,
                             "road_direction_angle_deg": c["axis_deg"],
