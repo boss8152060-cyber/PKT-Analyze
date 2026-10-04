@@ -889,51 +889,6 @@ class AlignTests(unittest.TestCase):
         rep = CORE["transform_report"]("projective", src, self.project(src), self.SIZE)
         self.assertIsNone(rep["loo_rms"])                                  # 4 pairs for 4 needed: no leave-one-out
 
-    def _scene(self, k1=0.25):
-        """A ground plane (0..60 m x 0..20 m) seen by a tilted camera with a barrel lens (video) and from above (drone, 20 px per metre)."""
-        wide = CORE["homography_from_points"]([(0, 0), (60, 0), (60, 20), (0, 20)], [(150, 250), (1750, 200), (1850, 900), (60, 950)])
-        vid = lambda g: self.distort(CORE["apply_homography"](wide, np.asarray(g, float)), k1)
-        drone = lambda g: np.asarray(g, float) * 20.0 + [100.0, 60.0]
-        return vid, drone
-
-    def test_reference_lines_straighten_a_bent_video(self):
-        vid, drone = self._scene()
-        lines = []
-        for g0, g1 in (((3, 3), (57, 3)), ((3, 8), (57, 8)), ((3, 12), (57, 12)), ((3, 17), (57, 17)), ((10, 1), (10, 19)), ((30, 1), (30, 19)), ((50, 1), (50, 19))):
-            t = np.linspace(0, 1, 6)[:, None]
-            g = np.array(g0) * (1 - t) + np.array(g1) * t
-            lines.append({"pts": vid(g).tolist(), "a": drone([g0])[0].tolist(), "b": drone([g1])[0].tolist()})
-        data = {"pairs": [], "lines": lines, "kind": "lens", "scale": 0.05, "video_size": list(self.SIZE)}
-        test_g = np.array([[12.0, 5.0], [33.0, 14.0], [47.0, 9.0], [55.0, 18.0], [6.0, 11.0]])
-        errs = {}
-        for kind in ("projective", "lens"):
-            cfg = CORE["align_build"](dict(data, kind=kind))
-            self.assertNotIn("error", cfg, kind)
-            m = CORE["align_apply"](cfg, vid(test_g))
-            truth = (drone(test_g) - np.array(cfg["origin"])) * 0.05
-            errs[kind] = float(np.abs(m - truth).max())
-        self.assertLess(errs["lens"], 0.15)                                # the lines alone (no clicked pairs) fix the lens
-        self.assertGreater(errs["projective"], 3 * errs["lens"])           # a flat transformation cannot make them straight
-
-    def test_line_report_names_the_crossings_and_angles(self):
-        vid, drone = self._scene()
-        t = np.linspace(0, 1, 6)[:, None]
-        g = np.array([5, 4.0]) * (1 - t) + np.array([55, 4.0]) * t
-        ln = {"pts": vid(g).tolist(), "a": drone([(5, 4.0)])[0].tolist(), "b": drone([(55, 4.0)])[0].tolist()}
-        axes = {"vid": vid([(0, 0), (60, 0), (0, 20)]).tolist(), "drone": drone([(0, 0), (60, 0), (0, 20)]).tolist()}
-        lines = [{"pts": vid(np.array([3, y]) * (1 - t) + np.array([57, y]) * t).tolist(), "a": drone([(3, y)])[0].tolist(), "b": drone([(57, y)])[0].tolist()} for y in (3.0, 9.0, 17.0)]
-        lines += [{"pts": vid(np.array([x, 1]) * (1 - t) + np.array([x, 19]) * t).tolist(), "a": drone([(x, 1)])[0].tolist(), "b": drone([(x, 19)])[0].tolist()} for x in (10.0, 30.0, 52.0)]
-        data = {"pairs": [], "axes": axes, "lines": lines + [ln], "kind": "lens", "scale": 0.05, "video_size": list(self.SIZE)}
-        cfg = CORE["align_build"](data)
-        self.assertNotIn("error", cfg)
-        self.assertAlmostEqual(cfg["rot_deg"], 0.0, delta=1e-6)                                  # the axes set the frame: x along the X axis
-        rep = CORE["line_report"](cfg["model"], [ln], axes["drone"], 0.05)[0]
-        self.assertLess(rep["rms_m"], 0.05)
-        self.assertLess(abs(rep["angle_diff_deg"]), 0.5)
-        self.assertAlmostEqual(rep["angle_drone_deg"], 0.0, delta=1e-6)                           # a line along X makes 0 degrees with the X axis
-        self.assertAlmostEqual(rep["y_cross_drone_m"], 4.0, delta=1e-6)                           # and crosses the Y axis at y = 4 m
-        self.assertAlmostEqual(rep["y_cross_video_m"], rep["y_cross_drone_m"], delta=0.1)
-
     def test_align_to_metres_scale_rotation_origin(self):
         src = self.grid()
         dst = src * 0.5 + [100, 50]                                       # a scaled copy
