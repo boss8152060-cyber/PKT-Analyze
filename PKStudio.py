@@ -5153,19 +5153,10 @@ class Run1App:
             return ("ปรับเทียบรายโซนแล้ว: " + ", ".join(f"Zone {z}" for z in zs)) if zs else "ยังไม่มีการปรับเทียบรายโซน"
 
         def zone_quad_points(key):
-            """The 4 corners of Zone <key> as drawn (a zone with more corners is reduced to its 4 main corners); [] when there are none."""
+            """The 4 corners of Zone <key> as drawn; [] when the zone has no corners or MORE than 4 (such a zone is calibrated in the
+            "ปรับเทียบจากโซน" window, which takes every corner)."""
             poly = self.zones.get(f"Zone {key}", [])
-            if len(poly) < 4:
-                return []
-            if len(poly) == 4:
-                return [(float(x), float(y)) for x, y in poly]
-            cnt = np.array(poly, dtype=np.float32).reshape(-1, 1, 2)
-            peri = cv2.arcLength(cnt, True)
-            for eps in np.linspace(0.005, 0.30, 80) * peri:
-                ap = cv2.approxPolyDP(cnt, float(eps), True)
-                if len(ap) == 4:
-                    return [(float(q[0][0]), float(q[0][1])) for q in ap]
-            return []
+            return [(float(x), float(y)) for x, y in poly] if len(poly) == 4 else []
 
         def on_mode_change(event=None):
             ctx["drafts"][ctx["mode"]] = current_data()
@@ -5189,6 +5180,11 @@ class Run1App:
                 load_data({"points": saved["points"], "lengths": saved["lengths"]} if saved else ({"points": quad} if quad else {}))
             apply_button.config(text="✅ Apply Calibration" if key == "base" else "✅ บันทึกโซนนี้")
             delete_zone_button.state(["disabled"] if key == "base" else ["!disabled"])
+            if key != "base" and not self.run3_zone_calibrations.get(key) and len(self.zones.get(f"Zone {key}", [])) > 4 and not state["points"]:
+                mode_status_var.set(f"Zone {key} มี {len(self.zones[f'Zone {key}'])} มุม — หน้าต่างนี้รับได้ 4 จุด; โซนที่มีมากกว่า 4 มุมให้ใช้ปุ่ม \"📐 ปรับเทียบจากโซน…\" "
+                                    "(ใช้ทุกมุม ใส่ความยาวขอบแต่ละขอบ) หรือคลิก P1–P4 เองในหน้าต่างนี้")
+                render()
+                return
             if key != "base" and len(state["points"]) == 4 and not self.run3_zone_calibrations.get(key) and all(not v.get().strip() for v in length_vars):
                 pp = state["points"]
                 px = [math.hypot(pp[(i + 1) % 4][0] - pp[i][0], pp[(i + 1) % 4][1] - pp[i][1]) for i in range(4)]
@@ -5290,10 +5286,8 @@ class Run1App:
             for zname, zpts in self.zones.items():
                 if len(zpts) >= 3:
                     zarr = np.array([[int(x * scale), int(y * scale)] for x, y in zpts], np.int32)
-                    chosen = ctx["mode"] != "base" and str(zname) == f"Zone {ctx['mode']}"            # the zone being calibrated: always visible
-                    cv2.polylines(view, [zarr], True, (0, 255, 255) if chosen else (200, 200, 200), 3 if chosen else 2, cv2.LINE_AA)
-                    cv2.putText(view, str(zname).replace("Zone ", "Z"), (int(zarr[0][0]) + 4, int(zarr[0][1]) + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                                (0, 255, 255) if chosen else (210, 210, 210), 2 if chosen else 1, cv2.LINE_AA)
+                    cv2.polylines(view, [zarr], True, (150, 150, 150), 1, cv2.LINE_AA)
+                    cv2.putText(view, str(zname).replace("Zone ", "Z"), (int(zarr[0][0]) + 4, int(zarr[0][1]) + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (190, 190, 190), 1, cv2.LINE_AA)
             for zkey, zdat in self.run3_zone_calibrations.items():
                 if zkey == ctx["mode"]:
                     continue
