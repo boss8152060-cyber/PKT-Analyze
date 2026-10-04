@@ -345,6 +345,35 @@ rl_ = app.get_road_lines()
 check("the straight flag and the type are kept per line", [d["straight"] for d in rl_] == [True] * len(lines) + [False] and rl_[-1]["type"] == "kerb_red_white")
 app.set_lens_values(LENS)
 
+# ---- a line marked straight is drawn straight even when the clicks jitter
+rng_ = np.random.default_rng(3)
+g_line = np.column_stack([np.linspace(10.0, 40.0, 9), np.full(9, 23.0)])                      # a straight road edge (metres), far from the vehicle
+jit = to_rec(g_line) + rng_.normal(0, 3.0, (9, 2))                                          # clicked with ~3 px jitter (a nearly straight line)
+
+
+def drawn_wiggle(straight_flag):
+    cfg_ = dict(base_cfg, lens=LENS, lens_size=(CW, CH), topview_map=True,
+                road_lines=[{"type": "yellow_solid", "points": [tuple(q) for q in jit], "straight": straight_flag}])
+    v_ = app._run3_write_topview_video(tr, cfg_, tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video)
+    f_ = frame_of(v_).astype(np.uint8)
+    yel = (f_[..., 2] > 180) & (f_[..., 1] > 150) & (f_[..., 0] < 90)
+    yel &= (np.hypot(xs_ - car[0], ys_ - car[1]) > 150)                                     # not the vehicle's own yellow point
+    ys_i, xs_i = np.nonzero(yel)
+    if len(xs_i) < 50:
+        return None
+    if os.environ.get('PK_DEBUG_SAVE'):
+        cv2.imwrite(os.environ['PK_DEBUG_SAVE'].replace('.png', f'_w{int(straight_flag)}.png'), f_)
+    A = np.polyfit(xs_i, ys_i, 1)
+    return float(np.abs(ys_i - np.polyval(A, xs_i)).max())
+
+
+w_on, w_off = drawn_wiggle(True), drawn_wiggle(False)
+check("a line marked straight is drawn straight, the same clicks unmarked keep their wiggle", w_on is not None and w_off is not None and w_on < 6.0 and w_off > 4 * w_on, f"{w_on} px vs {w_off} px")
+ud3 = app.open_road_line_tool()
+root.update()
+check("kerb types default to 'not straight', markings to 'straight'", (ud3.set_type("kerb_black_white"), ud3.straight_var.get())[1] is False and (ud3.set_type("white_dashed"), ud3.straight_var.get())[1] is True)
+ud3.close()
+
 check("the Topview has the video's shape", abs(Wf / Hf - CW / CH) < 0.02, f"{Wf}x{Hf}")
 vid_b = app._run3_write_topview_video(tr, dict(base_cfg, lens=None, lens_size=None), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video)
 ncc_b = ncc_of(vid_b)
