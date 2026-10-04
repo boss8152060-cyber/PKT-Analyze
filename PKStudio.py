@@ -2107,6 +2107,22 @@ class AlignDialog:
             self.pairs.pop(index)
         self.refresh_all()
 
+    def worst_pairs(self, n=3):
+        """The pairs with the largest error (the leave-one-out error when it exists, else the fit error): [(number from 1, value in metres/px)]."""
+        rep = self.report
+        if not rep or "error" in rep:
+            return []
+        vals = rep["loo_u"] if rep.get("loo_u") else rep["residuals_u"]
+        order = sorted(range(len(vals)), key=lambda i: -vals[i])
+        return [(i + 1, vals[i]) for i in order[:n]]
+
+    def delete_worst(self):
+        w = self.worst_pairs(1)
+        if w:
+            self.delete_pair(w[0][0] - 1)
+            self.msg_var.set(f"ลบคู่ที่ {w[0][0]} (คลาดสูงสุด) แล้ว")
+        return bool(w)
+
     def set_scale_from_points(self, a, b, length_m):
         d = math.hypot(b[0] - a[0], b[1] - a[1])
         if d <= 0 or length_m <= 0:
@@ -2171,13 +2187,20 @@ class AlignDialog:
         unit_txt = "ซม." if self.scale > 0 else "px"
         mult = 100.0 if self.scale > 0 else 1.0
         if "error" not in rep:
-            for i, q in enumerate(self.pairs):
+            key_vals = rep["loo_u"] if rep["loo_u"] else rep["residuals_u"]
+            med = float(np.median(key_vals)) if len(key_vals) else 0.0
+            limit = max(2.5 * med, (0.30 if self.scale > 0 else 15.0))                 # a pair much worse than the others (>= 30 cm / 2.5 x the median)
+            for i in sorted(range(len(self.pairs)), key=lambda j: -key_vals[j]):          # the worst pair first
                 loo = rep["loo_u"][i] * mult if rep["loo_u"] else None
-                self.tree.insert("", "end", values=(i + 1, f"{rep['residuals_u'][i] * mult:.1f}", "-" if loo is None else f"{loo:.1f}"))
+                self.tree.insert("", "end", values=(i + 1, f"{rep['residuals_u'][i] * mult:.1f}", "-" if loo is None else f"{loo:.1f}"),
+                                 tags=(("bad",) if key_vals[i] >= limit else ()))
             lines = [f"ชนิด: {ALIGN_KINDS[self.kind][1]} · {len(self.pairs)} คู่ · คลาดเฉลี่ย {rep['rms_u'] * mult:.1f} {unit_txt}"
                      + (f" · เว้นจุดตรวจ {rep['loo_rms_u'] * mult:.1f} {unit_txt}" if rep["loo_rms_u"] is not None else " · (ยังไม่พอจะตรวจแบบเว้นจุด)")]
             if rep["loo_rms_u"] is not None and rep["loo_rms_u"] > 3.0 * max(rep["rms_u"], 1e-9) and rep["loo_rms_u"] * mult > 3:
                 lines.append("⚠ ค่าเว้นจุดตรวจสูงกว่าค่าที่พอดีมาก = ชนิดนี้ซับซ้อนเกินจำนวนจุด (ตามจุดแต่ผิดระหว่างจุด) — เพิ่มจุด หรือเลือกชนิดที่ง่ายกว่า")
+            w3 = self.worst_pairs(3)
+            if w3:
+                lines.append("คู่ที่คลาดสูงสุด: " + ", ".join(f"#{n} ({v * mult:.0f} {unit_txt})" for n, v in w3) + "  — ซูมตรวจจุดทั้งสองภาพ หรือลบ")
             lines.append("เทียบทุกชนิด (คลาดเฉลี่ย / เว้นจุดตรวจ):")
             for k, a, b in rep["compare"]:
                 mark = "  ◀ ใช้อยู่" if k == self.kind else ""
@@ -2264,14 +2287,19 @@ class AlignDialog:
         ttk.Radiobutton(left, text="วัดสเกล (คลิก 2 จุดบนภาพโดรน แล้วใส่ความยาว)", variable=self.mode_var, value="scale").grid(row=2, column=1, columnspan=3, sticky="w")
         ttk.Radiobutton(left, text="ทิศถนนหลัก (คลิก 2 จุดตามถนน ซ้าย→ขวา)", variable=self.mode_var, value="road").grid(row=3, column=1, columnspan=3, sticky="w")
         ttk.Button(left, text="ลบคู่ที่เลือก", command=self.delete_pair).grid(row=4, column=0, pady=4, sticky="w")
-        ttk.Button(left, text="ใช้ค่านี้", command=self.apply).grid(row=4, column=1, padx=4, sticky="w")
-        ttk.Button(left, text="ปิด", command=self.close).grid(row=4, column=2, sticky="w")
-        self.tree = ttk.Treeview(low, columns=("n", "res", "loo"), show="headings", height=6)
+        ttk.Button(left, text="ลบคู่ที่แย่สุด", command=self.delete_worst).grid(row=4, column=1, padx=4, sticky="w")
+        ttk.Button(left, text="ใช้ค่านี้", command=self.apply).grid(row=5, column=0, padx=0, sticky="w")
+        ttk.Button(left, text="ปิด", command=self.close).grid(row=5, column=1, padx=4, sticky="w")
+        self.tree = ttk.Treeview(low, columns=("n", "res", "loo"), show="headings", height=11)
+        self.tree.tag_configure("bad", foreground="#c00000")
+        sb = ttk.Scrollbar(low, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
         for col, text, w in (("n", "คู่", 40), ("res", "คลาด (ซม.)", 90), ("loo", "เว้นจุด (ซม.)", 100)):
             self.tree.heading(col, text=text)
             self.tree.column(col, width=w, anchor="center")
-        self.tree.pack(side="left", padx=10, fill="y")
-        self.report_text = tk.Text(low, height=8, width=70, wrap="word", state="disabled")
+        self.tree.pack(side="left", padx=(10, 0), fill="y")
+        sb.pack(side="left", fill="y", padx=(0, 10))
+        self.report_text = tk.Text(low, height=11, width=70, wrap="word", state="disabled")
         self.report_text.pack(side="left", fill="both", expand=True)
         tk.Label(top, textvariable=self.msg_var, anchor="w", foreground="#a00").pack(fill="x", padx=8)
 
