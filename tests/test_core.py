@@ -817,5 +817,23 @@ class TopviewTests(unittest.TestCase):
         self.assertTrue(CORE["oriented_rect"]((0, 0), None, 3.0, 1.0).shape == (4, 2))
 
 
+class OutsideZonePlanTests(unittest.TestCase):
+    P = staticmethod(lambda mode, inside, avail=True: CORE["outside_zone_plan"](mode, inside, avail))
+
+    def test_inside_a_zone_is_always_drawn_in_full(self):
+        for mode in ("dot", "hide", "show", "anything"):
+            self.assertEqual(self.P(mode, True), {"point": True, "object": True})
+
+    def test_no_zone_drawn_means_everything_is_drawn(self):
+        for mode in ("dot", "hide", "show"):
+            self.assertEqual(self.P(mode, False, False), {"point": True, "object": True})
+
+    def test_outside_every_zone(self):
+        self.assertEqual(self.P("dot", False), {"point": True, "object": False})           # the old behaviour: only the point
+        self.assertEqual(self.P("hide", False), {"point": False, "object": False})
+        self.assertEqual(self.P("show", False), {"point": True, "object": True})
+        self.assertEqual(self.P("unknown", False), {"point": True, "object": False})        # an unreadable setting = the old behaviour
+
+
 if __name__ == "__main__":
     unittest.main()

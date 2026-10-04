@@ -417,6 +417,8 @@ DEFAULT_SETTINGS = {
     "show_label_zone": True,
     "show_label_speed": True,
     "show_bbox": True,
+    "outside_zone_normal": "dot",           # vehicles outside every zone in the normal video: dot (point only) | hide | show
+    "outside_zone_xy": "show",              # the same for the X-Y video and picture
     "show_prefix_id": False,
     "show_prefix_class": False,
     "show_prefix_conf": False,
@@ -1253,6 +1255,20 @@ def oriented_rect(center, heading, length, width):
     c = np.asarray(center, dtype=float)
     hl, hw = length / 2.0, width / 2.0
     return np.array([c + hl * ux + hw * uy, c + hl * ux - hw * uy, c - hl * ux - hw * uy, c - hl * ux + hw * uy])
+def outside_zone_plan(mode, inside, zones_available=True):
+    """What is drawn for a vehicle. A vehicle inside a zone (or any vehicle when no zone is drawn) is always drawn in full.
+    Outside every zone:  mode 'dot'  = only the decision point (box, labels, trajectory hidden);
+                         mode 'hide' = nothing at all;   mode 'show' = in full, like a vehicle in a zone.
+    Returns {"point": draw the point, "object": draw box / labels / trajectory}."""
+    if not zones_available or inside:
+        return {"point": True, "object": True}
+    if mode == "hide":
+        return {"point": False, "object": False}
+    if mode == "show":
+        return {"point": True, "object": True}
+    return {"point": True, "object": False}
+
+
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -2116,6 +2132,8 @@ class Run1App:
         self.show_label_zone_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_label_zone"])
         self.show_label_speed_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_label_speed"])
         self.show_bbox_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_bbox"])
+        self.outside_zone_normal_var = tk.StringVar(value=DEFAULT_SETTINGS["outside_zone_normal"])
+        self.outside_zone_xy_var = tk.StringVar(value=DEFAULT_SETTINGS["outside_zone_xy"])
         self.show_prefix_id_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_prefix_id"])
         self.show_prefix_class_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_prefix_class"])
         self.show_prefix_conf_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_prefix_conf"])
@@ -2418,6 +2436,15 @@ class Run1App:
         ttk.Spinbox(fr, from_=0, to=100, increment=5, textvariable=self.zone_overlay_opacity_var, width=6).pack(side="left")
         ttk.Label(fr, text="(0 = ไม่เห็น, 100 = ชัดสุด)", foreground=gray).pack(side="left", padx=(6, 0))
         line("จุดตัดสินโซน", [("แสดงจุดที่ใช้ตัดสินว่ารถอยู่โซนไหน (เหลือง = อยู่ในโซน, วงแดง = ไม่อยู่ในโซนใด)", self.draw_center_var)], 6)
+        OUTSIDE = {"dot": "แสดงเฉพาะจุด (กรอบ ป้าย เส้นทางซ่อน)", "hide": "ซ่อนทั้งหมด (ไม่เห็นรถนอกโซนเลย)", "show": "แสดงเต็ม (กรอบ ป้าย เส้นทาง จุด)"}
+        fr = line("รถที่อยู่นอกโซน", [], 7)
+        for text, var in (("วิดีโอปกติ", self.outside_zone_normal_var), ("วิดีโอและภาพ X–Y", self.outside_zone_xy_var)):
+            ttk.Label(fr, text=text).pack(side="left", padx=(0, 4))
+            shown = tk.StringVar(value=OUTSIDE.get(var.get(), OUTSIDE["dot"]))
+            cb = ttk.Combobox(fr, textvariable=shown, values=list(OUTSIDE.values()), state="readonly", width=34)
+            cb.pack(side="left", padx=(0, 18))
+            cb.bind("<<ComboboxSelected>>", lambda e, v=var, sv=shown: v.set(next((k for k, t in OUTSIDE.items() if t == sv.get()), "dot")))
+            var.trace_add("write", lambda *_, v=var, sv=shown: sv.set(OUTSIDE.get(v.get(), OUTSIDE["dot"])))
         line("ป้ายบนตัวรถ", [("ID", self.show_label_id_var), ("Class", self.show_label_class_var), ("Conf", self.show_label_conf_var),
                              ("Zone", self.show_label_zone_var), ("Speed", self.show_label_speed_var), ("กรอบวัตถุ", self.show_bbox_var)], 4)
         line("ใส่ชื่อกำกับหน้าค่า", [("ID", self.show_prefix_id_var), ("Class", self.show_prefix_class_var), ("Conf", self.show_prefix_conf_var),
@@ -3356,6 +3383,7 @@ class Run1App:
             "show_zone_label_prefix": b(self.show_zone_label_prefix_var),
             "show_bbox": b(self.show_bbox_var),
             "show_decision_point": b(self.draw_center_var),
+            "outside_zone_normal": str(self.outside_zone_normal_var.get() or "dot"),
             "live_ppm": live_ppm,
         }
         for name in ("id", "class", "conf", "zone", "speed"):
@@ -3974,6 +4002,8 @@ class Run1App:
             "show_label_zone": self.show_label_zone_var.get(),
             "show_label_speed": self.show_label_speed_var.get(),
             "show_bbox": self.show_bbox_var.get(),
+            "outside_zone_normal": self.outside_zone_normal_var.get(),
+            "outside_zone_xy": self.outside_zone_xy_var.get(),
             "show_prefix_id": self.show_prefix_id_var.get(),
             "show_prefix_class": self.show_prefix_class_var.get(),
             "show_prefix_conf": self.show_prefix_conf_var.get(),
@@ -4124,6 +4154,8 @@ class Run1App:
             ("show_label_zone", self.show_label_zone_var),
             ("show_label_speed", self.show_label_speed_var),
             ("show_bbox", self.show_bbox_var),
+            ("outside_zone_normal", self.outside_zone_normal_var),
+            ("outside_zone_xy", self.outside_zone_xy_var),
             ("show_prefix_id", self.show_prefix_id_var),
             ("show_prefix_class", self.show_prefix_class_var),
             ("show_prefix_conf", self.show_prefix_conf_var),
@@ -6365,12 +6397,12 @@ class Run1App:
                                 confirmed_label = zone_track_state.get(track_id, {}).get("confirmed_zone")
 
                             zones_available = zones_available_run
-                            show_object = (
-                                not zones_available
-                                or confirmed_label is not None
-                            )
+                            # vehicles outside every zone: point only / nothing / in full (Settings: "รถที่อยู่นอกโซน")
+                            plan = outside_zone_plan(rt.get("outside_zone_normal", "dot"), confirmed_label is not None, zones_available)
+                            show_object = plan["object"]
+                            outside_full = zones_available and confirmed_label is None and plan["object"]
 
-                            if render_needed and rt.get("show_decision_point"):
+                            if render_needed and rt.get("show_decision_point") and plan["point"]:
                                 # The point that decides the zone: filled yellow = inside a zone, red ring = in no zone
                                 # (such a vehicle is not drawn at all, so this is the only way to see why).
                                 dpx, dpy = self.get_zone_reference_point(x1, y1, x2, y2)
@@ -6394,7 +6426,7 @@ class Run1App:
 
                                 if (
                                     settings["draw_trail"]
-                                    and confirmed_label
+                                    and (confirmed_label or outside_full)
                                     and track_id >= 0
                                     and track_id in trails
                                 ):
@@ -6408,7 +6440,7 @@ class Run1App:
                                             2
                                         )
 
-                                if confirmed_label:
+                                if confirmed_label or outside_full:
                                     # Individual vehicle label controls.
                                     # Live speed is display-only; research values remain
                                     # calculated by Run 3 from the stored trajectory.
@@ -7487,24 +7519,44 @@ class Run1App:
             base = cv2.addWeighted(zlayer, max(zone_alpha, 0.35), base, 1.0 - max(zone_alpha, 0.35), 0)
         cv2.putText(base, f"X-Y plane in metres (x right, y down) · {cv['scale']:.1f} px/m · {self._run3_calibration_mode(c)}", (6, 16),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
-        return {"cv": cv, "base": base, "W": W, "H": H, "per_frame": per_frame, "flag": flag, "dsp": dsp}
+        mode = str(dsp.get("outside_zone_xy", "show") or "show")
+        return {"cv": cv, "base": base, "W": W, "H": H, "per_frame": per_frame, "flag": flag, "dsp": dsp, "mode": mode, "zones": bool(zone_m)}
 
     def _run3_write_xy_plot(self, tracks, c, output_dir, video_path=None, display=None, max_px=1600):
         """Trajectory_XY.png: every track as a line on the X-Y plane (colour per ID, start dot + ID), zones and the metre grid."""
         scene = self._run3_topview_scene(tracks, c, video_path, display, max_px)
         if scene is None:
             return None
-        cv, img = scene["cv"], scene["base"].copy()
+        cv, img, mode = scene["cv"], scene["base"].copy(), scene["mode"]
         for k, (tid, rows) in enumerate(sorted(tracks.items(), key=lambda it: str(it[0]))):
-            pts = [r["_m"] for r in sorted((r for r in rows if r.get("_m") is not None), key=lambda r: r["_timestamp"])]
-            if not pts:
+            rs = sorted((r for r in rows if r.get("_m") is not None), key=lambda r: r["_timestamp"])
+            if not rs:
                 continue
             col = self.TOPVIEW_PALETTE[k % len(self.TOPVIEW_PALETTE)]
-            q = np.round(topview_px(cv, np.asarray(pts, dtype=float))).astype(np.int32)
-            if len(q) > 1:
-                cv2.polylines(img, [q.reshape(-1, 1, 2)], False, col, 2, cv2.LINE_AA)
-            cv2.circle(img, (int(q[0][0]), int(q[0][1])), 4, col, -1, cv2.LINE_AA)
-            cv2.putText(img, str(tid), (int(q[0][0]) + 5, int(q[0][1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
+            runs, cur, dots = [], [], []                       # runs of points that are drawn as a line; points drawn as dots only
+            for r in rs:
+                plan = outside_zone_plan(mode, str(r.get("zone", "")).strip() != "", scene["zones"])
+                if plan["object"]:
+                    cur.append(r["_m"])
+                else:
+                    if cur:
+                        runs.append(cur)
+                        cur = []
+                    if plan["point"]:
+                        dots.append(r["_m"])
+            if cur:
+                runs.append(cur)
+            for run in runs:
+                q = np.round(topview_px(cv, np.asarray(run, dtype=float))).astype(np.int32)
+                if len(q) > 1:
+                    cv2.polylines(img, [q.reshape(-1, 1, 2)], False, col, 2, cv2.LINE_AA)
+            for d in dots:
+                dq = topview_px(cv, [d])[0]
+                cv2.circle(img, (int(round(dq[0])), int(round(dq[1]))), 2, col, -1, cv2.LINE_AA)
+            if runs:
+                q0 = np.round(topview_px(cv, [runs[0][0]])[0]).astype(int)
+                cv2.circle(img, (int(q0[0]), int(q0[1])), 4, col, -1, cv2.LINE_AA)
+                cv2.putText(img, str(tid), (int(q0[0]) + 5, int(q0[1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
         out_path = os.path.join(output_dir, "Trajectory_XY.png")
         ok, buf = cv2.imencode(".png", img)
         if not ok:
@@ -7521,6 +7573,7 @@ class Run1App:
         if scene is None:
             return None
         cv, base, W, H, per_frame, flag, dsp = scene["cv"], scene["base"], scene["W"], scene["H"], scene["per_frame"], scene["flag"], scene["dsp"]
+        xy_mode, zones_exist = scene["mode"], scene["zones"]
         try:
             trail_n = max(1, int(float(dsp.get("trail_length", 30))))
         except (TypeError, ValueError):
@@ -7544,6 +7597,9 @@ class Run1App:
                 now = per_frame[fr][0][1]
                 marks = []
                 for tid, t, m, rec in per_frame[fr]:
+                    plan = outside_zone_plan(xy_mode, str(rec.get("zone", "")).strip() != "", zones_exist)
+                    if not plan["point"]:
+                        continue                                  # outside every zone and set to be hidden
                     pt = topview_px(cv, [m])[0]
                     trails[tid].append(tuple(pt))
                     while len(trails[tid]) > trail_n:
@@ -7555,15 +7611,17 @@ class Run1App:
                     spd = None
                     if len(hist) >= 2 and hist[-1][0] > hist[0][0]:
                         spd = math.hypot(hist[-1][1][0] - hist[0][1][0], hist[-1][1][1] - hist[0][1][1]) / (hist[-1][0] - hist[0][0]) * 3.6
-                    marks.append((tid, pt, rec, spd))
-                for tid, pt, rec, spd in marks:
-                    if flag("draw_trail", False) and len(trails[tid]) > 1:
+                    marks.append((tid, pt, rec, spd, plan["object"]))
+                for tid, pt, rec, spd, full in marks:
+                    if full and flag("draw_trail", False) and len(trails[tid]) > 1:
                         cv2.polylines(img, [np.round(np.array(trails[tid])).astype(np.int32).reshape(-1, 1, 2)], False, (255, 0, 255), 2, cv2.LINE_AA)
                     p_ = (int(round(pt[0])), int(round(pt[1])))
                     cv2.circle(img, p_, 7, (255, 255, 255), -1, cv2.LINE_AA)
                     inside = str(rec.get("zone", "")).strip() != ""
                     cv2.circle(img, p_, 5, (0, 255, 255) if inside else (0, 0, 255), -1 if inside else 2, cv2.LINE_AA)
                     parts = []
+                    if not full:
+                        continue                                  # outside every zone, point only
                     if flag("show_label_id", True):
                         parts.append(f"ID {tid}" if flag("show_prefix_id", False) else str(tid))
                     if flag("show_label_class", True):
