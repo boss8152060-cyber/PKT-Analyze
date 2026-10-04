@@ -251,6 +251,7 @@ def scene1(app):
           abs(dur_tv - (max(t_all_tv) - min(t_all_tv))) < 0.5, f"video {dur_tv:.2f} s, data {max(t_all_tv) - min(t_all_tv):.2f} s")
     check("Topview video written (plain grid when the video file is unknown)", os.path.isfile(tvv) and os.path.getsize(tvv) > 1000,
           str(os.path.getsize(tvv) if os.path.isfile(tvv) else "missing"))
+    check("Trajectory_XY.png (the X-Y plane picture) is written", os.path.isfile(os.path.join(out, "Trajectory_XY.png")) and os.path.getsize(os.path.join(out, "Trajectory_XY.png")) > 2000)
     pr = read_csv(os.path.join(out, "Lateral_Clearance_Pairs.csv"))
     check("Lateral Clearance pair summary rows (A-B x3, A-E x2, B-E x2, D-E x1)", len(pr) == 8, str([(r['Pair_ID'], r['Zone']) for r in pr]))
     # motorcycle-pairs-only switch: only the pairs that include a motorcycle remain
