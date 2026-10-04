@@ -471,6 +471,9 @@ RUN3_DEFAULTS = {
     "lens_k2": "",
     "topview_map": False,                   # Topview as a map: empty grid + the road lines clicked on the camera picture (no camera photo)
     "road_lines": "",                       # JSON: road lines clicked on the camera picture (pixels as recorded)
+    "cal_mode": "rect",                     # ground calibration: "rect" = 4 corners of a rectangle; "geometry" = parallel/perpendicular lines + distances
+    "ground_points": "",                    # JSON: ground points clicked on the camera picture (pixels as recorded), any number
+    "ground_dists": "",                     # real distances between them, e.g. "P1-P2=17, P2-P3=8.4"
     "topview_video": True,                  # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points)
     "lc_along_limit_m": "0",                # side-by-side window along the heading (m); 0 = auto (L_A + L_B) / 2
     "lc_max_lateral_m": "3.50",             # pairs further apart sideways than this (m) are unrelated; 0 = no limit
@@ -1383,6 +1386,259 @@ def estimate_lens_from_lines(lines, size, use_k2=False, min_gain=0.3):
     return {"lens": lens, "bend_before": before, "bend_after": after, "lines": len(lines), "points": int(sum(len(l) for l in lines))}
 
 
+def parse_ground_distances(text):
+    """'P1-P2=17, P2-P3=8.4' -> ([(0, 1, 17.0), (1, 2, 8.4)], [text pieces that could not be read]). Points are numbered from 1."""
+    out, bad = [], []
+    for piece in re.split(r"[,;\n]+", str(text or "")):
+        piece = piece.strip()
+        if not piece:
+            continue
+        m_ = re.fullmatch(r"[Pp]?\s*(\d+)\s*(?:-|\u2013|\u2192|>|to)\s*[Pp]?\s*(\d+)\s*(?:=|:)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|\u0e21\.?)?", piece)
+        if not m_ or int(m_.group(1)) == int(m_.group(2)) or int(m_.group(1)) < 1 or int(m_.group(2)) < 1 or float(m_.group(3)) <= 0:
+            bad.append(piece)
+        else:
+            out.append((int(m_.group(1)) - 1, int(m_.group(2)) - 1, float(m_.group(3))))
+    return out, bad
+
+
+def format_ground_distances(dists):
+    return ", ".join(f"P{i + 1}-P{j + 1}={d:g}" for i, j, d in dists)
+
+
+# ---------------- Ground plane from road geometry (parallel / perpendicular lines + real distances) ----------------
+# A map-like ground picture: the lines along the main road (group A) must come out parallel AND horizontal, the lines across it
+# (group B) parallel AND vertical, and every real distance the user measured between two clicked ground points must be right.
+# Any number of ground points and distances can be used (a least-squares fit, not four corners only).
+def _gp_norm(pts, size):
+    c = np.array([size[0] / 2.0, size[1] / 2.0])
+    return (np.asarray(pts, dtype=float).reshape(-1, 2) - c) / float(size[0])
+
+
+def _gp_apply(h, p):
+    p = np.asarray(p, dtype=float).reshape(-1, 2)
+    q = np.c_[p, np.ones(len(p))] @ np.asarray(h, dtype=float).T
+    return q[:, :2] / np.where(np.abs(q[:, 2:3]) < 1e-12, 1e-12, q[:, 2:3])
+
+
+def _gp_h(x):
+    return np.array([[x[0], x[1], x[2]], [x[3], x[4], x[5]], [x[6], x[7], 1.0]])
+
+
+def _levenberg(fun, x0, iters=80):
+    """Small Levenberg-Marquardt (numeric Jacobian). Returns (x, sum of squares)."""
+    x = np.asarray(x0, dtype=float).copy()
+    r = np.asarray(fun(x), dtype=float)
+    cost = float(r @ r)
+    lam = 1e-3
+    for _ in range(iters):
+        jac = np.empty((len(r), len(x)))
+        for k in range(len(x)):
+            step = 1e-6 * max(1.0, abs(x[k]))
+            xp = x.copy()
+            xp[k] += step
+            jac[:, k] = (np.asarray(fun(xp), dtype=float) - r) / step
+        a, g = jac.T @ jac, jac.T @ r
+        improved = False
+        for _ in range(14):
+            try:
+                dx = np.linalg.solve(a + lam * np.diag(np.maximum(np.diag(a), 1e-9)), -g)
+            except np.linalg.LinAlgError:
+                lam *= 10.0
+                continue
+            xn = x + dx
+            rn = np.asarray(fun(xn), dtype=float)
+            if np.all(np.isfinite(rn)) and float(rn @ rn) < cost:
+                gain = cost - float(rn @ rn)
+                x, r, cost, improved = xn, rn, float(rn @ rn), True
+                lam = max(lam / 3.0, 1e-12)
+                break
+            lam *= 4.0
+        if not improved or gain < 1e-14 * max(cost, 1e-12):
+            break
+    return x, cost
+
+
+def _gp_line(pts):
+    """Homogeneous line through the points (least squares), unit normal."""
+    q = np.asarray(pts, dtype=float)
+    c = q.mean(axis=0)
+    vt = np.linalg.svd(q - c, full_matrices=False)[2]
+    n = vt[-1]
+    return np.array([n[0], n[1], -float(n @ c)])
+
+
+def _gp_vanishing_point(lines):
+    """Homogeneous point where the lines (nearly) meet: smallest singular vector of the stacked line vectors."""
+    ls = np.array([_gp_line(l) for l in lines])
+    return np.linalg.svd(ls, full_matrices=True)[2][-1]
+
+
+def _gp_init_from_directions(la, lb, pts_n, dists):
+    va, vb = _gp_vanishing_point(la), _gp_vanishing_point(lb)
+    horizon = np.cross(va, vb)
+    if abs(horizon[2]) < 1e-9 * max(1e-12, float(np.hypot(horizon[0], horizon[1]))):
+        return None
+    hp = np.array([[1.0, 0, 0], [0, 1.0, 0], [horizon[0] / horizon[2], horizon[1] / horizon[2], 1.0]])
+    da, db = va[:2] / np.hypot(*va[:2]), vb[:2] / np.hypot(*vb[:2])
+    d = np.array([[da[0], db[0]], [da[1], db[1]]])
+    if abs(np.linalg.det(d)) < 1e-6:
+        return None
+    h1 = np.eye(3)
+    h1[:2, :2] = np.linalg.inv(d)
+    h1 = h1 @ hp
+    ratios = []
+    for i, j, dist in dists:
+        a, b = _gp_apply(h1, pts_n[[i, j]])
+        n = float(np.hypot(*(a - b)))
+        if n > 1e-9:
+            ratios.append(dist / n)
+    if not ratios:
+        return None
+    return np.diag([np.median(ratios), np.median(ratios), 1.0]) @ h1
+
+
+def _gp_dlt(src, dst):
+    rows = []
+    for (x, y), (u, v) in zip(src, dst):
+        rows.append([x, y, 1, 0, 0, 0, -u * x, -u * y, -u])
+        rows.append([0, 0, 0, x, y, 1, -v * x, -v * y, -v])
+    h = np.linalg.svd(np.array(rows, dtype=float))[2][-1].reshape(3, 3)
+    return h / h[2, 2] if abs(h[2, 2]) > 1e-12 else None
+
+
+def _gp_init_from_layout(pts_n, dists):
+    """Candidate starting homographies when only distances are known: lay the points out with those distances (a few random
+    starts, the folded layouts have a larger error), then fit a homography image -> layout."""
+    n = len(pts_n)
+    if n < 4:
+        return []
+    mean_d = float(np.mean([d for _, _, d in dists]))
+    rng = np.random.default_rng(7)
+
+    def stress(v):
+        x = v.reshape(n, 2)
+        return np.array([np.hypot(*(x[i] - x[j])) - d for i, j, d in dists])
+
+    found = []
+    for _ in range(14):
+        x, c = _levenberg(stress, rng.normal(0, mean_d, 2 * n), 60)
+        found.append((c, x.reshape(n, 2)))
+    found.sort(key=lambda t: t[0])
+    out = []
+    for c, x in found[:4]:
+        h = _gp_dlt(pts_n, x)
+        if h is not None:
+            out.append(h)
+    return out
+
+
+def solve_ground_homography(points, dists, lines_a, lines_b, size):
+    """Homography image -> road plane in metres (x along the main road, y across it, y down like the picture).
+    points: N x 2 ground points in the straightened picture (lens already removed); dists: [(i, j, metres)] between those points;
+    lines_a / lines_b: lists of point arrays (straightened picture) of the lines along / across the main road.
+    Returns {"H", "rms_dist_m", "dist_report", "line_rms_m", "method", ...} or {"error": text}."""
+    pts = np.asarray(points, dtype=float).reshape(-1, 2)
+    dists = [(int(i), int(j), float(d)) for i, j, d in dists if d > 0 and int(i) != int(j) and 0 <= int(i) < len(pts) and 0 <= int(j) < len(pts)]
+    if not dists:
+        return {"error": "ต้องมีระยะจริงอย่างน้อย 1 ค่า (ระหว่างจุดพื้น 2 จุด)"}
+    pts_n = _gp_norm(pts, size)
+    la = [_gp_norm(l, size) for l in lines_a if len(l) >= 2]
+    lb = [_gp_norm(l, size) for l in lines_b if len(l) >= 2]
+    have_dirs = len(la) >= 2 and len(lb) >= 2
+    if (la or lb) and not have_dirs:
+        return {"error": "เส้นขนานต้องมีอย่างน้อย 2 เส้นในแต่ละทิศ (ตามถนนหลัก และตั้งฉาก) ตอนนี้มี %d และ %d เส้น" % (len(la), len(lb))}
+    if not have_dirs and len(pts) < 4:
+        return {"error": "ถ้าไม่มีเส้นขนาน/ตั้งฉาก ต้องมีจุดพื้นอย่างน้อย 4 จุดและระยะระหว่างจุดให้พอ (อย่างน้อย 5 ค่าสำหรับ 4 จุด)"}
+    starts = []
+    if have_dirs:
+        h0 = _gp_init_from_directions(la, lb, pts_n, dists)
+        if h0 is not None:
+            starts.append(h0)
+    if not have_dirs:
+        starts.extend(_gp_init_from_layout(pts_n, dists))
+    if not starts:
+        return {"error": "เริ่มคำนวณไม่ได้: เส้นสองกลุ่มขนานกันในภาพ หรือจุดและระยะไม่พอ"}
+    w_d, w_l = 3.0, 1.0
+
+    def residuals(x):
+        h = _gp_h(x)
+        out = []
+        if dists:
+            m = _gp_apply(h, pts_n)
+            for i, j, d in dists:
+                out.append(w_d * (float(np.hypot(*(m[i] - m[j]))) - d))
+        for l in la:
+            y = _gp_apply(h, l)[:, 1]
+            out.extend(w_l * (y - y.mean()))
+        for l in lb:
+            xx = _gp_apply(h, l)[:, 0]
+            out.extend(w_l * (xx - xx.mean()))
+        return np.array(out, dtype=float)
+
+    best = None
+    for h0 in starts:
+        x0 = (h0 / h0[2, 2]).ravel()[:8]
+        x, c = _levenberg(residuals, x0, 100)
+        if np.isfinite(c) and (best is None or c < best[0]):
+            best = (c, x)
+    if best is None:
+        return {"error": "คำนวณไม่ลู่เข้า — ตรวจจุดและระยะ"}
+    x = best[1]
+    # is everything determined? (gauge: shift 2, + turn 1 when no direction lines)
+    r0 = residuals(x)
+    jac = np.empty((len(r0), 8))
+    for k in range(8):
+        step = 1e-6 * max(1.0, abs(x[k]))
+        xp = x.copy()
+        xp[k] += step
+        jac[:, k] = (residuals(xp) - r0) / step
+    sv = np.linalg.svd(jac, compute_uv=False)
+    needed = 8 - 2 - (0 if have_dirs else 1)
+    if int((sv > 1e-5 * sv[0]).sum()) < needed:
+        return {"error": "ข้อมูลยังไม่พอที่จะกำหนดสเกลและสัดส่วนของพื้น — เพิ่มระยะจริง (ควรมีทั้งตามแนวถนนและตั้งฉากกับถนน) หรือเพิ่มเส้น/จุด"}
+    h = _gp_h(x)
+    # orientation: same handedness as the picture, the main road pointing the way it points in the picture, origin = first point
+    c0 = np.zeros((1, 2))
+    e = 1e-3
+    jm = np.array([(_gp_apply(h, c0 + [e, 0])[0] - _gp_apply(h, c0 - [e, 0])[0]) / (2 * e), (_gp_apply(h, c0 + [0, e])[0] - _gp_apply(h, c0 - [0, e])[0]) / (2 * e)]).T
+    sv_j = np.linalg.svd(jm, compute_uv=False)
+    if sv_j[0] <= 0 or sv_j[1] < 0.02 * sv_j[0]:
+        return {"error": "สัดส่วนพื้นที่ได้แบนผิดปกติ — ข้อมูลยังไม่พอ ใส่ระยะจริงเพิ่ม (ทั้งตามแนวถนนและตั้งฉากกับถนน) หรือตรวจจุดที่คลิก"}
+    if np.linalg.det(jm) < 0:
+        h = np.diag([1.0, -1.0, 1.0]) @ h
+        jm = np.diag([1.0, -1.0]) @ jm
+    if not have_dirs:                                                # turn so that point 1 -> point 2 of the first distance points along +x
+        i, j, _ = dists[0]
+        a, b = _gp_apply(h, pts_n[[i, j]])
+        ang = -math.atan2(b[1] - a[1], b[0] - a[0])
+        rot = np.array([[math.cos(ang), -math.sin(ang), 0], [math.sin(ang), math.cos(ang), 0], [0, 0, 1.0]])
+        h = rot @ h
+    else:
+        jm_ = np.array([(_gp_apply(h, c0 + [e, 0])[0] - _gp_apply(h, c0 - [e, 0])[0]) / (2 * e), (_gp_apply(h, c0 + [0, e])[0] - _gp_apply(h, c0 - [0, e])[0]) / (2 * e)]).T
+        want = jm_[0, 0] if abs(jm_[0, 0]) >= abs(jm_[0, 1]) else jm_[0, 1]
+        if want < 0:
+            h = np.diag([-1.0, -1.0, 1.0]) @ h
+    origin = _gp_apply(h, pts_n[:1])[0] if len(pts_n) else np.zeros(2)
+    h = np.array([[1, 0, -origin[0]], [0, 1, -origin[1]], [0, 0, 1.0]]) @ h
+    t = np.array([[1.0 / size[0], 0, -0.5], [0, 1.0 / size[0], -size[1] / (2.0 * size[0])], [0, 0, 1.0]])   # pixel -> normalised
+    h_pix = h @ t
+    m = _gp_apply(h, pts_n)
+    report = [{"i": i, "j": j, "given_m": d, "got_m": float(np.hypot(*(m[i] - m[j])))} for i, j, d in dists]
+    rms_d = float(np.sqrt(np.mean([(r["got_m"] - r["given_m"]) ** 2 for r in report])))
+
+    def line_rms(group, axis):
+        out = []
+        for l in group:
+            v = _gp_apply(h, l)[:, axis]
+            out.append(float(np.sqrt(np.mean((v - v.mean()) ** 2))))
+        return out
+
+    return {"H": h_pix / h_pix[2, 2], "rms_dist_m": rms_d, "dist_report": report,
+            "line_rms_m": {"A": line_rms(la, 1), "B": line_rms(lb, 0)},
+            "method": "directions+distances" if have_dirs else "distances",
+            "n_points": int(len(pts)), "n_dists": len(dists), "n_lines_a": len(la), "n_lines_b": len(lb)}
+
+
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -2153,6 +2409,12 @@ def snap_straight(u):
     return np.stack([c + ax * t.min(), c + ax * t.max()])
 
 
+def road_line_group(item):
+    """'A' = along the main road, 'B' = across it (both used to make the ground picture square), '' = not used for that."""
+    g = str(item.get("group", item.get("g", ""))).upper() if isinstance(item, dict) else ""
+    return g if g in ("A", "B") else ""
+
+
 def road_line_straight(item):
     """Is this saved road line marked 'really straight' (it is then also used to estimate the lens)? Old formats: yes."""
     return bool(item.get("straight", item.get("s", True))) if isinstance(item, dict) else True
@@ -2207,7 +2469,7 @@ class RoadLineDialog(LensLineDialog):
     as the vehicles, so they always match the vehicle positions. Same view controls as the lens tool."""
 
     def __init__(self, app, video_path, on_apply, initial=None):
-        norm = [(normalize_road_line(it), road_line_straight(it)) for it in (initial or [])]
+        norm = [(normalize_road_line(it), road_line_straight(it), road_line_group(it)) for it in (initial or [])]
         super().__init__(app, video_path, on_apply)
         self.top.title("ปรับเทียบกล้อง — เลนส์ + พื้นถนน + เส้นถนน")
         sw_, sh_ = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
@@ -2216,10 +2478,12 @@ class RoadLineDialog(LensLineDialog):
         self._load_cal_from_app()
         self.types = [ROAD_LINE_DEFAULT]
         self.straight = [True]
+        self.groups = [""]
         if norm:
-            self.lines = [pts for (_, pts), _s in norm] + [[]]
-            self.types = [k for (k, _), _s in norm] + [self.type_key()]
-            self.straight = [st for _p, st in norm] + [bool(self.straight_var.get())]
+            self.lines = [pts for (_, pts), _s, _g in norm] + [[]]
+            self.types = [k for (k, _), _s, _g in norm] + [self.type_key()]
+            self.straight = [st for _p, st, _g in norm] + [bool(self.straight_var.get())]
+            self.groups = [g for _p, _s, g in norm] + [self.group_key()]
         try:
             lens_now, size_now = app._run3_lens_params()
         except Exception:
@@ -2228,26 +2492,43 @@ class RoadLineDialog(LensLineDialog):
             self.lens = tuple(lens_now)                      # the lens already set: the corrected picture can be shown at once
         self.refresh()
 
-    # ----- the 4 ground points (Perspective Calibration) -----
+    # ----- the ground points (any number) + the real distances between them -----
     def _load_cal_from_app(self):
         app = self.app
+        self.cal_pts = []
         try:
-            pts = [app._run3_parse_xy(v.get(), n) for v, n in ((app.run3_perspective_p1_var, "P1"), (app.run3_perspective_p2_var, "P2"),
-                                                                 (app.run3_perspective_p3_var, "P3"), (app.run3_perspective_p4_var, "P4"))]
-            self.cal_pts = [tuple(q) for q in pts]
-        except Exception:
+            pts = json.loads(app.run3_ground_points_var.get() or "[]")
+            self.cal_pts = [(float(x), float(y)) for x, y in pts]
+        except (ValueError, TypeError):
             self.cal_pts = []
+        if not self.cal_pts:                                           # an older, 4-corner calibration
+            try:
+                pts = [app._run3_parse_xy(v.get(), n) for v, n in ((app.run3_perspective_p1_var, "P1"), (app.run3_perspective_p2_var, "P2"),
+                                                                     (app.run3_perspective_p3_var, "P3"), (app.run3_perspective_p4_var, "P4"))]
+                self.cal_pts = [tuple(q) for q in pts]
+            except Exception:
+                self.cal_pts = []
+        text = app.run3_ground_dists_var.get().strip()
+        if not text and self.cal_pts:
+            try:
+                sides = [float(v.get()) for v in (app.run3_perspective_l12_var, app.run3_perspective_l23_var, app.run3_perspective_l34_var, app.run3_perspective_l41_var)]
+                text = format_ground_distances([(0, 1, sides[0]), (1, 2, sides[1]), (2, 3, sides[2]), (3, 0, sides[3])])
+            except ValueError:
+                text = ""
+        self.dists_var.set(text)
+
+    MAX_GROUND_POINTS = 12
 
     def add_cal_point(self, x, y):
-        """The next ground point P1..P4 (a point given in the corrected picture is carried back to the recorded one)."""
-        if len(self.cal_pts) >= 4:
-            self.msg_var.set("มีครบ 4 จุดแล้ว — กด ล้างจุด P เพื่อคลิกใหม่")
+        """The next ground point (a point given in the corrected picture is carried back to the recorded one)."""
+        if len(self.cal_pts) >= self.MAX_GROUND_POINTS:
+            self.msg_var.set(f"มีจุดพื้นครบ {self.MAX_GROUND_POINTS} จุดแล้ว — กด ล้างจุด P เพื่อคลิกใหม่")
             return False
         pt = (float(x), float(y))
         if self.fixed_var.get() and self.lens is not None:
             pt = tuple(lens_distort([pt], self.size, self.lens)[0])
         self.cal_pts.append(pt)
-        self.msg_var.set(f"จุด P{len(self.cal_pts)} แล้ว" + (" — ใส่ระยะจริงของ 4 ด้านแล้วกด ใช้ค่านี้" if len(self.cal_pts) == 4 else " (คลิกต่อ: P1→P2→P3→P4 ตามเข็ม/ทวนเข็ม โดย P1→P2 ขนานแนวถนน)"))
+        self.msg_var.set(f"จุด P{len(self.cal_pts)} แล้ว — จุดพื้นกี่จุดก็ได้ (4 จุดขึ้นไป) แล้วพิมพ์ระยะจริงระหว่างจุด เช่น P1-P2=17, P2-P3=8.4")
         self.refresh()
         return True
 
@@ -2275,46 +2556,86 @@ class RoadLineDialog(LensLineDialog):
         pts = np.asarray(self.cal_pts, dtype=float)
         shown = lens_undistort(pts, self.size, self.lens) if (show_fixed and self.lens is not None) else pts
         c = np.round(shown * k + np.array([ox, oy])).astype(np.int32)
-        if len(c) > 1:
-            cv2.polylines(out, [c.reshape(-1, 1, 2)], len(c) == 4, (0, 140, 255), 2, cv2.LINE_AA)
+        dists, _bad = parse_ground_distances(self.dists_var.get()) if hasattr(self, "dists_var") else ([], [])
+        for i, j, d in dists:                                           # a thin line + the value for every measured distance
+            if i < len(c) and j < len(c):
+                a_, b_ = tuple(int(v) for v in c[i]), tuple(int(v) for v in c[j])
+                cv2.line(out, a_, b_, (0, 140, 255), 1, cv2.LINE_AA)
+                cv2.putText(out, f"{d:g} m", ((a_[0] + b_[0]) // 2 + 4, (a_[1] + b_[1]) // 2 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1, cv2.LINE_AA)
         for n, q in enumerate(c, start=1):
             cv2.circle(out, (int(q[0]), int(q[1])), 7, (0, 140, 255), -1, cv2.LINE_AA)
             cv2.putText(out, f"P{n}", (int(q[0]) + 9, int(q[1]) - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2, cv2.LINE_AA)
 
+    def _fail(self, text):
+        self.msg_var.set(text)
+        messagebox.showerror("ปรับเทียบกล้อง", text, parent=self.top)
+        return None
+
     def _apply_perspective(self):
-        """Write the 4 ground points + real side lengths into the settings (as the Perspective Calibration window does).
-        Returns True when written, False when there is nothing to write, None when the input is incomplete (an error is shown)."""
+        """Write the ground calibration into the settings. Returns True when written, False when there is nothing to write, None when
+        the input is incomplete / does not work out (an error is shown and nothing is written)."""
         app = self.app
-        if not self.cal_pts and not any(v.get().strip() for v in self.len_vars):
+        text = self.dists_var.get().strip()
+        if not self.cal_pts and not text:
             return False
-        if len(self.cal_pts) != 4:
-            self.msg_var.set("ต้องคลิกจุด P ให้ครบ 4 จุด (หรือกด ล้างจุด P ถ้าไม่ใช้ Perspective)")
-            messagebox.showerror("ปรับเทียบกล้อง", self.msg_var.get(), parent=self.top)
-            return None
-        try:
-            l12, l23, l34, l41 = [float(v.get().strip()) for v in self.len_vars]
-            if min(l12, l23, l34, l41) <= 0:
-                raise ValueError
-        except ValueError:
-            self.msg_var.set("ใส่ระยะจริงของทั้ง 4 ด้าน (เมตร มากกว่า 0)")
-            messagebox.showerror("ปรับเทียบกล้อง", self.msg_var.get(), parent=self.top)
-            return None
-        pts = np.array(self.cal_pts, dtype=np.float32)
-        if abs(cv2.contourArea(pts.reshape((-1, 1, 2)))) < 100.0:
-            self.msg_var.set("จุดทั้ง 4 ใกล้กันเกินไป เลือกพื้นที่ถนนที่กว้างขึ้น")
-            messagebox.showerror("ปรับเทียบกล้อง", self.msg_var.get(), parent=self.top)
-            return None
-        length, width_m = (l12 + l34) / 2.0, (l23 + l41) / 2.0
-        for var, pt in zip((app.run3_perspective_p1_var, app.run3_perspective_p2_var, app.run3_perspective_p3_var, app.run3_perspective_p4_var), self.cal_pts):
-            var.set(f"{pt[0]:.3f},{pt[1]:.3f}")
-        app.run3_perspective_length_var.set(f"{length:g}")
-        app.run3_perspective_width_var.set(f"{width_m:g}")
-        for var, v in zip((app.run3_perspective_l12_var, app.run3_perspective_l23_var, app.run3_perspective_l34_var, app.run3_perspective_l41_var), (l12, l23, l34, l41)):
-            var.set(f"{v:g}")
+        dists, bad = parse_ground_distances(text)
+        if bad:
+            return self._fail("อ่านระยะไม่ได้: " + "; ".join(bad) + "  (รูปแบบ: P1-P2=17, P2-P3=8.4)")
+        if len(self.cal_pts) < 2 or not dists:
+            return self._fail("ต้องมีจุดพื้นอย่างน้อย 2 จุด และระยะจริงอย่างน้อย 1 ค่า (หรือกด ล้างจุด P ถ้าไม่ใช้)")
+        if any(i >= len(self.cal_pts) or j >= len(self.cal_pts) for i, j, _ in dists):
+            return self._fail("มีระยะที่อ้างถึงจุดที่ยังไม่ได้คลิก (ตรวจเลข P)")
+        self._sync_types()
+        la = [l for l, g in zip(self.lines, self.groups) if g == "A" and len(l) >= 2]
+        lb = [l for l, g in zip(self.lines, self.groups) if g == "B" and len(l) >= 2]
+        side_pairs = {frozenset(q) for q in ((0, 1), (1, 2), (2, 3), (3, 0))}
+        classic = (len(self.cal_pts) == 4 and not la and not lb and len(dists) == 4 and {frozenset((i, j)) for i, j, _ in dists} == side_pairs)
+        lens = self.lens
+        if lens is None:
+            try:
+                lens, lsize = app._run3_lens_params()
+                lens = lens if (lens is not None and tuple(lsize) == tuple(self.size)) else None
+            except Exception:
+                lens = None
+
+        def und(a):
+            a = np.asarray(a, dtype=float).reshape(-1, 2)
+            return lens_undistort(a, self.size, lens) if lens is not None else a
+
+        if classic:
+            pts = np.array(self.cal_pts, dtype=np.float32)
+            if abs(cv2.contourArea(pts.reshape((-1, 1, 2)))) < 100.0:
+                return self._fail("จุดทั้ง 4 ใกล้กันเกินไป เลือกพื้นที่ถนนที่กว้างขึ้น")
+            by_pair = {frozenset((i, j)): d for i, j, d in dists}
+            l12, l23, l34, l41 = by_pair[frozenset((0, 1))], by_pair[frozenset((1, 2))], by_pair[frozenset((2, 3))], by_pair[frozenset((3, 0))]
+            length, width_m = (l12 + l34) / 2.0, (l23 + l41) / 2.0
+            for var, pt in zip((app.run3_perspective_p1_var, app.run3_perspective_p2_var, app.run3_perspective_p3_var, app.run3_perspective_p4_var), self.cal_pts):
+                var.set(f"{pt[0]:.3f},{pt[1]:.3f}")
+            app.run3_perspective_length_var.set(f"{length:g}")
+            app.run3_perspective_width_var.set(f"{width_m:g}")
+            for var, v in zip((app.run3_perspective_l12_var, app.run3_perspective_l23_var, app.run3_perspective_l34_var, app.run3_perspective_l41_var), (l12, l23, l34, l41)):
+                var.set(f"{v:g}")
+            app.run3_cal_mode_var.set("rect")
+            info = "พื้น: สี่เหลี่ยม 4 จุด %g × %g ม." % (length, width_m)
+        else:
+            res = solve_ground_homography(und(self.cal_pts), dists, [und(l) for l in la], [und(l) for l in lb], self.size)
+            if "error" in res:
+                return self._fail(res["error"])
+            worst = max(res["dist_report"], key=lambda r: abs(r["got_m"] - r["given_m"]))
+            lrms = res["line_rms_m"]["A"] + res["line_rms_m"]["B"]
+            info = (f"พื้น: {res['method']} · จุด {res['n_points']} · ระยะ {res['n_dists']} ค่า คลาดระยะเฉลี่ย {res['rms_dist_m']:.2f} ม. "
+                    f"(แย่สุด P{worst['i'] + 1}-P{worst['j'] + 1}: ให้ {worst['given_m']:g} ได้ {worst['got_m']:.2f} ม.)"
+                    + (f" · เส้นคลาด {max(lrms):.2f} ม." if lrms else ""))
+            for var in (app.run3_perspective_p1_var, app.run3_perspective_p2_var, app.run3_perspective_p3_var, app.run3_perspective_p4_var,
+                        app.run3_perspective_l12_var, app.run3_perspective_l23_var, app.run3_perspective_l34_var, app.run3_perspective_l41_var):
+                var.set("")
+            app.run3_cal_mode_var.set("geometry")
+        app.run3_ground_points_var.set(json.dumps([[round(x, 2), round(y, 2)] for x, y in self.cal_pts]))
+        app.run3_ground_dists_var.set(format_ground_distances(dists))
         app.run3_perspective_enabled_var.set(True)
-        edge = [math.hypot(self.cal_pts[j][0] - self.cal_pts[i][0], self.cal_pts[j][1] - self.cal_pts[i][1]) / real
-                for (i, j), real in zip(((0, 1), (1, 2), (2, 3), (3, 0)), (l12, l23, l34, l41))]
-        app.run3_ppm_var.set(f"{sum(edge) / len(edge):.6f}")
+        ppm = [math.hypot(self.cal_pts[j][0] - self.cal_pts[i][0], self.cal_pts[j][1] - self.cal_pts[i][1]) / d for i, j, d in dists]
+        app.run3_ppm_var.set(f"{sum(ppm) / len(ppm):.6f}")
+        self.fit_info = info
         return True
 
     def type_key(self):
@@ -2332,11 +2653,34 @@ class RoadLineDialog(LensLineDialog):
             st.append(bool(self.straight_var.get()))
         del st[len(self.lines):]
         self.straight = st
+        gr = getattr(self, "groups", [])
+        while len(gr) < len(self.lines):
+            gr.append(self.group_key())
+        del gr[len(self.lines):]
+        self.groups = gr
 
     def set_type(self, kind):
         """The type of the line being drawn."""
         self.type_var.set(ROAD_LINE_TYPES[kind][0])
         self._on_type_changed()
+
+    GROUP_LABELS = {"": "ไม่ใช้ปรับสัดส่วนพื้น", "A": "A: ขนานกับถนนหลัก", "B": "B: ตั้งฉากกับถนนหลัก"}
+
+    def group_key(self):
+        label = self.group_var.get() if hasattr(self, "group_var") else ""
+        return next((k for k, v in self.GROUP_LABELS.items() if v == label), "")
+
+    def set_group(self, g):
+        """The direction group of the line being drawn (A = along the main road, B = across it)."""
+        self.group_var.set(self.GROUP_LABELS[g])
+        self._sync_types()
+        self.groups[-1] = g
+        self.refresh()
+
+    def _on_group_changed(self):
+        self._sync_types()
+        self.groups[-1] = self.group_key()
+        self.refresh()
 
     def _on_straight_changed(self):
         self._sync_types()
@@ -2394,12 +2738,17 @@ class RoadLineDialog(LensLineDialog):
         ttk.Radiobutton(modef, text="จุดพื้น P1–P4", variable=self.mode_var, value="points").pack(side="left", padx=4)
         ttk.Button(modef, text="ล้างจุด P", command=self.clear_cal_points).pack(side="left", padx=4)
         appv = self.app
-        self.len_vars = [appv.run3_perspective_l12_var, appv.run3_perspective_l23_var, appv.run3_perspective_l34_var, appv.run3_perspective_l41_var]
-        lenf = ttk.LabelFrame(bar, text="ระยะจริงของ 4 ด้านของสี่เหลี่ยมพื้น P1–P4 (เมตร) — ใช้แปลงภาพเป็นเมตร", padding=4)
+        self.group_var = tk.StringVar(value=self.GROUP_LABELS[""])
+        ttk.Label(bar, text="ทิศของเส้น").grid(row=3, column=6, sticky="e", padx=(10, 2))
+        gb = ttk.Combobox(bar, textvariable=self.group_var, values=list(self.GROUP_LABELS.values()), state="readonly", width=26)
+        gb.grid(row=3, column=7, columnspan=2, sticky="w")
+        gb.bind("<<ComboboxSelected>>", lambda e: self._on_group_changed())
+        self.dists_var = tk.StringVar(value="")
+        lenf = ttk.LabelFrame(bar, text="ระยะจริงระหว่างจุดพื้น (เมตร) — พิมพ์กี่ค่าก็ได้ ระหว่างจุดคู่ไหนก็ได้ เช่น  P1-P2=17, P2-P3=8.4, P1-P3=19", padding=4)
         lenf.grid(row=4, column=0, columnspan=9, sticky="ew", pady=(6, 0))
-        for lab, var in zip(("P1→P2", "P2→P3", "P3→P4", "P4→P1"), self.len_vars):
-            ttk.Label(lenf, text=lab).pack(side="left", padx=(6, 2))
-            ttk.Entry(lenf, textvariable=var, width=8).pack(side="left")
+        ent = ttk.Entry(lenf, textvariable=self.dists_var, width=110)
+        ent.pack(side="left", padx=4, fill="x", expand=True)
+        ent.bind("<KeyRelease>", lambda e: self.refresh())
         lensf = ttk.LabelFrame(bar, text="เลนส์ fisheye (ประมาณจากเส้นตรง หรือพิมพ์เอง — f เป็นเท่าของความกว้างภาพ เช่น 0.5 · เว้น f ว่าง = ไม่แก้)", padding=4)
         lensf.grid(row=5, column=0, columnspan=9, sticky="ew", pady=(6, 0))
         for lab, var in (("f", appv.run3_lens_f_var), ("k1", appv.run3_lens_k1_var), ("k2", appv.run3_lens_k2_var)):
@@ -2434,7 +2783,7 @@ class RoadLineDialog(LensLineDialog):
 
     def apply(self):
         self._sync_types()
-        use = [{"type": k, "points": l, "straight": st} for l, k, st in zip(self.lines, self.types, self.straight) if len(l) >= 2]
+        use = [{"type": k, "points": l, "straight": st, "group": g} for l, k, st, g in zip(self.lines, self.types, self.straight, self.groups) if len(l) >= 2]
         persp = self._apply_perspective()
         if persp is None:
             return False
@@ -2446,7 +2795,10 @@ class RoadLineDialog(LensLineDialog):
             self.on_apply(use)
         if self.lens is not None:
             self.app.set_lens_values(self.lens)
+        info = getattr(self, "fit_info", None)
         self.close()
+        if persp and info:
+            messagebox.showinfo("ปรับเทียบกล้อง", info, parent=self.app.root)
         return True
 
 
@@ -2955,6 +3307,9 @@ class Run1App:
         self.run3_topview_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["topview_video"])
         self.run3_topview_map_var = tk.BooleanVar(value=RUN3_DEFAULTS["topview_map"])
         self.run3_road_lines_var = tk.StringVar(value=RUN3_DEFAULTS["road_lines"])
+        self.run3_cal_mode_var = tk.StringVar(value=RUN3_DEFAULTS["cal_mode"])
+        self.run3_ground_points_var = tk.StringVar(value=RUN3_DEFAULTS["ground_points"])
+        self.run3_ground_dists_var = tk.StringVar(value=RUN3_DEFAULTS["ground_dists"])
         self.run3_lens_f_var = tk.StringVar(value=RUN3_DEFAULTS["lens_f"])
         self.run3_lens_k1_var = tk.StringVar(value=RUN3_DEFAULTS["lens_k1"])
         self.run3_lens_k2_var = tk.StringVar(value=RUN3_DEFAULTS["lens_k2"])
@@ -3303,7 +3658,7 @@ class Run1App:
         ttk.Label(adv, textvariable=self.road_lines_info_var, foreground=gray).pack(side="left", padx=6)
         for v_ in (self.run3_road_lines_var, self.run3_lens_f_var, self.run3_lens_k1_var, self.run3_lens_k2_var, self.run3_perspective_enabled_var,
                    self.run3_perspective_l12_var, self.run3_perspective_l23_var, self.run3_perspective_l34_var, self.run3_perspective_l41_var,
-                   self.run3_perspective_p1_var, self.run3_ppm_var):
+                   self.run3_perspective_p1_var, self.run3_ppm_var, self.run3_cal_mode_var, self.run3_ground_dists_var):
             v_.trace_add("write", lambda *_: self._refresh_cal_summary())
         self._refresh_road_lines_info()
         self._refresh_cal_summary()
@@ -4817,6 +5172,9 @@ class Run1App:
                 "topview_video": self.run3_topview_video_var.get(),
                 "topview_map": self.run3_topview_map_var.get(),
                 "road_lines": self.run3_road_lines_var.get(),
+                "cal_mode": self.run3_cal_mode_var.get(),
+                "ground_points": self.run3_ground_points_var.get(),
+                "ground_dists": self.run3_ground_dists_var.get(),
                 "lens_f": self.run3_lens_f_var.get(),
                 "lens_k1": self.run3_lens_k1_var.get(),
                 "lens_k2": self.run3_lens_k2_var.get(),
@@ -4998,6 +5356,9 @@ class Run1App:
                 ("topview_video", self.run3_topview_video_var),
                 ("topview_map", self.run3_topview_map_var),
                 ("road_lines", self.run3_road_lines_var),
+                ("cal_mode", self.run3_cal_mode_var),
+                ("ground_points", self.run3_ground_points_var),
+                ("ground_dists", self.run3_ground_dists_var),
                 ("lens_f", self.run3_lens_f_var),
                 ("lens_k1", self.run3_lens_k1_var),
                 ("lens_k2", self.run3_lens_k2_var),
@@ -5766,15 +6127,15 @@ class Run1App:
             for item in data:
                 kind, pts = normalize_road_line(item)
                 if len(pts) >= 2:
-                    out.append({"type": kind, "points": pts, "straight": road_line_straight(item)})
+                    out.append({"type": kind, "points": pts, "straight": road_line_straight(item), "group": road_line_group(item)})
             return out
         except (ValueError, TypeError):
             return []
 
     def set_road_lines(self, lines):
-        norm = [(normalize_road_line(it), road_line_straight(it)) for it in (lines or [])]
-        norm = [(k, pts, st) for (k, pts), st in norm if len(pts) >= 2]
-        self.run3_road_lines_var.set(json.dumps([{"t": k, "p": [[round(x, 1), round(y, 1)] for x, y in pts], "s": bool(st)} for k, pts, st in norm]) if norm else "")
+        norm = [(normalize_road_line(it), road_line_straight(it), road_line_group(it)) for it in (lines or [])]
+        norm = [(k, pts, st, g) for (k, pts), st, g in norm if len(pts) >= 2]
+        self.run3_road_lines_var.set(json.dumps([{"t": k, "p": [[round(x, 1), round(y, 1)] for x, y in pts], "s": bool(st), "g": g} for k, pts, st, g in norm]) if norm else "")
 
     def clear_road_lines(self):
         self.run3_road_lines_var.set("")
@@ -5784,7 +6145,12 @@ class Run1App:
         try:
             f = str(self.run3_lens_f_var.get()).strip()
             lens = (f"เลนส์: f={f}, k1={self.run3_lens_k1_var.get() or 0}" if f else "เลนส์: ไม่แก้")
-            if bool(self.run3_perspective_enabled_var.get()) and str(self.run3_perspective_p1_var.get()).strip():
+            if bool(self.run3_perspective_enabled_var.get()) and str(self.run3_cal_mode_var.get()) == "geometry":
+                lines_ = self.get_road_lines()
+                na, nb = sum(1 for l in lines_ if l.get("group") == "A"), sum(1 for l in lines_ if l.get("group") == "B")
+                nd = len(parse_ground_distances(self.run3_ground_dists_var.get())[0])
+                floor = f"พื้น: จากเส้นขนาน/ตั้งฉาก (ตามถนน {na} · ตั้งฉาก {nb} เส้น) + {nd} ระยะ"
+            elif bool(self.run3_perspective_enabled_var.get()) and str(self.run3_perspective_p1_var.get()).strip():
                 floor = f"พื้น: Perspective 4 จุด ({self.run3_perspective_length_var.get()}×{self.run3_perspective_width_var.get()} ม.)"
             elif str(self.run3_ppm_var.get()).strip():
                 floor = f"พื้น: PPM {self.run3_ppm_var.get()}"
@@ -5862,6 +6228,8 @@ class Run1App:
     def _run3_get_perspective_matrix(self, silent=False):
         if not bool(self.run3_perspective_enabled_var.get()):
             return None
+        if str(self.run3_cal_mode_var.get()) == "geometry":
+            return self._run3_geometry_perspective(silent)
         try:
             p1 = self._run3_parse_xy(self.run3_perspective_p1_var.get(), "P1")
             p2 = self._run3_parse_xy(self.run3_perspective_p2_var.get(), "P2")
@@ -5889,6 +6257,50 @@ class Run1App:
             dst = np.float32([[0,0],[length_m,0],[length_m,width_m],[0,width_m]])
             H = cv2.getPerspectiveTransform(src, dst)
             return {"H": H, "length_m": length_m, "width_m": width_m, "points": [p1,p2,p3,p4], "four_side_lengths_m": raw4}
+        except Exception:
+            if silent:
+                return None
+            raise
+
+    def _run3_ground_inputs(self):
+        """Ground points, distances and the two groups of lines of the 'geometry' calibration, all in recorded pixels."""
+        try:
+            pts = [(float(x), float(y)) for x, y in json.loads(self.run3_ground_points_var.get() or "[]")]
+        except (ValueError, TypeError):
+            pts = []
+        dists, bad = parse_ground_distances(self.run3_ground_dists_var.get())
+        lines = self.get_road_lines()
+        la = [[tuple(q) for q in l["points"]] for l in lines if l.get("group") == "A"]
+        lb = [[tuple(q) for q in l["points"]] for l in lines if l.get("group") == "B"]
+        return pts, dists, bad, la, lb
+
+    def _run3_geometry_perspective(self, silent=False):
+        """The ground transform from parallel / perpendicular road lines + real distances (see solve_ground_homography)."""
+        try:
+            pts, dists, bad, la, lb = self._run3_ground_inputs()
+            if bad:
+                raise ValueError("Perspective correction: cannot read the distance(s): " + "; ".join(bad))
+            lens_, lsize_ = self._run3_lens_params()
+            size = tuple(lsize_) if lens_ is not None else tuple(v for v in self._actual_video_size() if v) or (1920, 1080)
+            if len(size) != 2:
+                size = (1920, 1080)
+
+            def und(a):
+                a = np.asarray(a, dtype=float).reshape(-1, 2)
+                return lens_undistort(a, lsize_, lens_) if lens_ is not None else a
+
+            key = (tuple(pts), tuple(dists), tuple(tuple(l) for l in la), tuple(tuple(l) for l in lb), lens_, size)
+            cache = getattr(self, "_geo_cache", None)
+            if cache is not None and cache[0] == key:
+                res = cache[1]
+            else:
+                res = solve_ground_homography(und(pts), dists, [und(l) for l in la], [und(l) for l in lb], size)
+                self._geo_cache = (key, res)
+            if "error" in res:
+                raise ValueError("Perspective correction: " + res["error"])
+            mp = apply_homography(res["H"], und(pts)) if pts else np.zeros((1, 2))
+            return {"H": res["H"], "length_m": float(np.ptp(mp[:, 0])), "width_m": float(np.ptp(mp[:, 1])), "points": [tuple(q) for q in pts[:4]],
+                    "four_side_lengths_m": [], "method": res["method"], "fit": res}
         except Exception:
             if silent:
                 return None
