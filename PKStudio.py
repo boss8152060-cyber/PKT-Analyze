@@ -1506,6 +1506,32 @@ def solve_ground_homography(points, dists, lines_a, lines_b, size):
             "n_points": int(len(pts)), "n_dists": len(dists), "n_lines_a": len(la), "n_lines_b": len(lb)}
 
 
+def zone_metric_transform_poly(corners, edges, base_pts, size):
+    """Per-zone calibration for a zone with any number of corners (4 or more). corners = N x 2 pixels; edges = [(i, j, 'A'|'B'|'', metres or None)]
+    between corner indices; base_pts = the same corners in the common metric frame of the base calibration; size = (width, height).
+    The zone gets its OWN ground transform (parallel A edges, parallel + perpendicular B edges, every typed length right) and is then
+    moved rigidly (turn + shift, no scaling) to where the base calibration puts its corners: positions of different zones stay in one
+    frame while the scale and the perspective are those of the zone itself (a lens that bends the picture is followed zone by zone).
+    Returns a dict like zone_metric_transform (H, Q, t, rms, length_m, width_m) + 'fit', or {'error': text}."""
+    pts = np.asarray(corners, dtype=float).reshape(-1, 2)
+    dists = [(i, j, float(d)) for i, j, _dir, d in edges if d]
+    la = [[pts[i], pts[j]] for i, j, dr, _d in edges if dr == "A"]
+    lb = [[pts[i], pts[j]] for i, j, dr, _d in edges if dr == "B"]
+    res = solve_ground_homography(pts, dists, la, lb, size)
+    if "error" in res:
+        return res
+    g = apply_homography(res["H"], pts)
+    base = np.asarray(base_pts, dtype=float).reshape(-1, 2)
+    u, _, vt = np.linalg.svd((g - g.mean(0)).T @ (base - base.mean(0)))
+    q = u @ vt
+    if np.linalg.det(q) < 0:
+        u[:, -1] *= -1
+        q = u @ vt
+    t = base.mean(0) - g.mean(0) @ q
+    rms = float(np.sqrt(np.mean(np.sum((g @ q + t - base) ** 2, axis=1))))
+    return {"H": res["H"], "Q": q, "t": t, "rms": rms, "length_m": float(np.ptp(g[:, 0])), "width_m": float(np.ptp(g[:, 1])), "fit": res}
+
+
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -1921,6 +1947,7 @@ class ZoneGroundDialog:
         self.size = (self.img.shape[1], self.img.shape[0])
         self.last_result = None
         self.edges = self._build_edges(initial or {})
+        self.per_zone_var = None                                   # (set in _build) tick: own calibration for every zone with enough lengths
         self.top = tk.Toplevel(app.root)
         self.top.title("ปรับเทียบจากโซน — มุมโซนเป็นจุดพื้น + ความยาวขอบโซน")
         sw, sh = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
@@ -1986,6 +2013,37 @@ class ZoneGroundDialog:
                 pts.append((float(x), float(y)))
         return pts, labels
 
+    def zone_fits(self, base_res):
+        """Own calibration of every zone that has enough typed lengths: {zone name: transform dict or {'error': ...}} (needs the base fit)."""
+        pts, labels = self._points()
+        index = {l: k for k, l in enumerate(labels)}
+        base = apply_homography(base_res["H"], pts)
+        out = {}
+        for zname in ZONE_NAMES:
+            es = [e for e in self.edges if e["zone"] == zname]
+            if not es:
+                continue
+            idx = []
+            for e in es:
+                for lab in (e["a"], e["b"]):
+                    if index[lab] not in idx:
+                        idx.append(index[lab])
+            local = {g: k for k, g in enumerate(idx)}
+            edges = []
+            for e in es:
+                try:
+                    d = float(e["len"]) if e["len"] else None
+                except ValueError:
+                    d = None
+                edges.append((local[index[e["a"]]], local[index[e["b"]]], e["dir"], d))
+            if not any(ed[3] for ed in edges):
+                continue
+            out[zname] = zone_metric_transform_poly([pts[g] for g in idx], edges, [base[g] for g in idx], self.size)
+            out[zname]["_edges"] = edges
+            out[zname]["_corners"] = [pts[g] for g in idx]
+            out[zname]["_labels"] = [labels[g] for g in idx]
+        return out
+
     def compute(self):
         """Fit the ground transform to the typed data -> (result dict of solve_ground_homography, text report)."""
         self._read_vars()
@@ -2039,6 +2097,21 @@ class ZoneGroundDialog:
         tilt.sort(key=lambda t: -t[0])
         if tilt:
             lines.append("ขอบที่เบี่ยงจากแนวถนนมากที่สุด (ควรใกล้ 0°): " + ", ".join(f"{e['a']}-{e['b']} {d:.0f}°" for d, e in tilt[:3]))
+        self.zone_results = {}
+        if self.per_zone_var is None or self.per_zone_var.get():
+            self.zone_results = self.zone_fits(res)
+            if self.zone_results:
+                lines.append("")
+                lines.append("แยกรายโซน (แต่ละโซนมีการแปลงของตัวเอง):")
+                for zname in ZONE_NAMES:
+                    tr = self.zone_results.get(zname)
+                    if tr is None:
+                        continue
+                    if "error" in tr:
+                        lines.append(f"  {zname}: ใช้ค่าฐาน — {tr['error']}")
+                    else:
+                        lines.append(f"  {zname}: ใช้การแปลงของโซนเอง · คลาดความยาวที่ใส่ {tr['fit']['rms_dist_m']:.2f} ม. · ขนาด {tr['length_m']:.1f} × {tr['width_m']:.1f} ม. "
+                                     f"· ต่างจากฐาน (ตำแหน่ง) {tr['rms']:.2f} ม.")
         warn = []
         if res["rms_dist_m"] > 0.5:
             warn.append("คลาดความยาวเกิน 0.5 ม. — ตรวจความยาวที่พิมพ์ หรือทิศ A/B ของขอบ")
@@ -2090,6 +2163,9 @@ class ZoneGroundDialog:
             self.len_vars[(e["a"], e["b"])] = lv
         bar = ttk.Frame(top)
         bar.pack(fill="x", padx=8, pady=6)
+        self.per_zone_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="แยกรายโซน (โซนที่ใส่ความยาวพอ ใช้การแปลงของโซนเอง — ตามความโค้งของภาพได้ดีกว่า)", variable=self.per_zone_var,
+                        command=self.check).pack(side="left", padx=(0, 10))
         ttk.Button(bar, text="คำนวณ / ตรวจ", command=self.check).pack(side="left")
         ttk.Label(bar, textvariable=self.msg_var, foreground="#a00").pack(side="left", padx=10)
         ttk.Button(bar, text="ปิด", command=self.close).pack(side="right")
@@ -2140,7 +2216,16 @@ class ZoneGroundDialog:
         pts, labels = self._points()
         data = {"points": [{"l": l, "p": [round(x, 2), round(y, 2)]} for (x, y), l in zip(pts, labels)],
                 "edges": [{"a": e["a"], "b": e["b"], "dir": e["dir"], "len": (float(e["len"]) if e["len"] else None)} for e in self.edges]}
-        self.on_apply(data, res)
+        zones_out = {}
+        if self.per_zone_var.get():
+            for zname, tr in getattr(self, "zone_results", {}).items():
+                if "error" in tr:
+                    continue
+                num = zname.split()[-1]
+                corners, labels, edges = tr["_corners"], tr["_labels"], tr["_edges"]
+                zones_out[num] = {"kind": "poly", "points": [[round(float(x), 2), round(float(y), 2)] for x, y in corners], "labels": labels,
+                                  "edges": [{"i": i, "j": j, "dir": dr, "len": d} for i, j, dr, d in edges]}
+        self.on_apply(data, res, zones_out)
         self.close()
         return True
 
@@ -2849,7 +2934,8 @@ class Run1App:
             zc = sorted(int(k) for k in self.run3_zone_calibrations if str(k).isdigit())
             self.run3_zone_cal_text.set(
                 ("ปรับเทียบรายโซนแล้ว: " + ", ".join(f"Zone {z}" for z in zc) + " (ใช้แทนค่าฐานในโซนนั้น)") if zc else
-                "ยังไม่มีการปรับเทียบรายโซน (ใช้ค่าฐานทั้งภาพ) — เปิดหน้าต่างปรับเทียบ แล้วเลือก \"ปรับเทียบสำหรับ\" ที่โซนที่ต้องการ")
+                "ยังไม่มีการปรับเทียบรายโซน (ใช้ค่าฐานทั้งภาพ)")
+            self._refresh_cal_summary()
             n_clips = len(self.clips_panel.clips) if getattr(self, "clips_panel", None) else 0
             zones = sum(1 for v in self.zones.values() if len(v) >= 3)
             lines = sum(1 for v in self.lines.values() if len(v) >= 2)
@@ -2992,7 +3078,6 @@ class Run1App:
         zonef.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(2, 4))
         ttk.Button(zonef, text="📐 ปรับเทียบจากโซน…", command=self.open_zone_ground_calibration).pack(side="left")
         self.cal_mode_text = tk.StringVar(value="")
-        ttk.Label(zonef, textvariable=self.cal_mode_text, foreground="#0a7a3d").pack(side="left", padx=10)
         ttk.Label(zonef, text="มุมของโซนเป็นจุดพื้นให้เอง ใส่ความยาวจริงของขอบโซนที่รู้ และตรวจขนาดโซนเป็นเมตรให้", foreground=gray).pack(side="left", padx=4)
         r += 1
         rectf = ttk.Frame(cal)
@@ -3022,22 +3107,22 @@ class Run1App:
         def _refresh_cal_mode(*_):
             zones_mode = str(self.run3_cal_mode_var.get()) == "zones"
             if zones_mode:
-                zonef.grid()
                 rectf.grid_remove()
                 try:
                     n = len([e for e in json.loads(self.run3_zone_ground_var.get() or "{}").get("edges", []) if e.get("len")])
                 except (ValueError, TypeError):
                     n = 0
-                self.cal_mode_text.set(f"ปรับเทียบจากโซน: ใช้ {n} ความยาว" if n else "ยังไม่ได้ใส่ความยาวขอบโซน — กดปุ่มเพื่อเริ่ม")
+                zonef.grid()
             else:
                 zonef.grid_remove()
                 rectf.grid()
+            self._refresh_cal_summary()
         for v_ in (self.run3_cal_mode_var, self.run3_zone_ground_var):
             v_.trace_add("write", _refresh_cal_mode)
         _refresh_cal_mode()
         r += 1
 
-        ttk.Label(cal, textvariable=self.run3_zone_cal_text, foreground="#0a7a3d").grid(row=r, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(cal, textvariable=self.cal_mode_text, foreground="#0a7a3d", wraplength=1300, justify="left").grid(row=r, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         dims = self.section("ขนาดรถ (m) — กว้าง W / ยาว L (ใช้กับ Lateral Clearance และ TTC)")
         ttk.Label(dims, text="ชนิด").grid(row=0, column=0, sticky="w", padx=(0, 8))
@@ -4681,7 +4766,8 @@ class Run1App:
             zc = run3.get("zone_calibrations", {})
             self.run3_zone_calibrations = {
                 str(k): v for k, v in zc.items()
-                if isinstance(v, dict) and len(v.get("points", [])) == 4 and len(v.get("lengths", [])) == 4
+                if isinstance(v, dict) and ((len(v.get("points", [])) == 4 and len(v.get("lengths", [])) == 4)
+                                            or (v.get("kind") == "poly" and len(v.get("points", [])) >= 4 and v.get("edges")))
             } if isinstance(zc, dict) else {}
             mapping_pairs = [
                 ("site_id", self.run3_site_id_var),
@@ -5092,6 +5178,13 @@ class Run1App:
                 load_data(base_initial)
             else:
                 saved = self.run3_zone_calibrations.get(key)
+                if saved and saved.get("kind") == "poly":            # set with the zone calibration window: not editable here
+                    load_data({})
+                    apply_button.config(text="✅ บันทึกโซนนี้")
+                    delete_zone_button.state(["!disabled"])
+                    mode_status_var.set(f"Zone {key} ถูกปรับเทียบด้วยหน้าต่าง \"ปรับเทียบจากโซน\" (มุมโซน + ความยาวขอบ) — แก้ได้ที่นั่น; ปุ่มนี้ลบหรือบันทึกทับเป็นแบบ 4 จุดได้")
+                    render()
+                    return
                 quad = [] if saved else zone_quad_points(key)         # no saved calibration: the zone's own corners appear as P1-P4
                 load_data({"points": saved["points"], "lengths": saved["lengths"]} if saved else ({"points": quad} if quad else {}))
             apply_button.config(text="✅ Apply Calibration" if key == "base" else "✅ บันทึกโซนนี้")
@@ -5490,6 +5583,26 @@ class Run1App:
             raise ValueError(f"Perspective correction: {label} must be x,y in pixels")
         return float(parts[0]), float(parts[1])
 
+    def _refresh_cal_summary(self):
+        """One line for the whole calibration: the base (whole picture) and the zones that have their own."""
+        try:
+            if bool(self.run3_perspective_enabled_var.get()):
+                if str(self.run3_cal_mode_var.get()) == "zones":
+                    try:
+                        n = len([e for e in json.loads(self.run3_zone_ground_var.get() or "{}").get("edges", []) if e.get("len")])
+                    except (ValueError, TypeError):
+                        n = 0
+                    base = f"ฐาน (ทั้งภาพ): จากโซน {n} ความยาว" if n else "ฐาน (ทั้งภาพ): ยังไม่ได้ใส่ความยาวขอบโซน — กดปุ่ม 📐 เพื่อเริ่ม"
+                else:
+                    base = "ฐาน (ทั้งภาพ): สี่เหลี่ยม 4 จุด"
+            else:
+                base = "ฐาน (ทั้งภาพ): PPM"
+            zc = sorted(int(k) for k in self.run3_zone_calibrations if str(k).isdigit())
+            zones = ("รายโซน (ใช้แทนฐานในโซนนั้น): " + ", ".join(f"Zone {z}" for z in zc)) if zc else "รายโซน: ยังไม่มี (ใช้ฐานทั้งภาพ)"
+            self.cal_mode_text.set(base + "  ·  " + zones)
+        except (AttributeError, tk.TclError):
+            pass
+
     def open_zone_ground_calibration(self):
         video = str(self.video_var.get() or "").strip()
         if not video or not os.path.isfile(video):
@@ -5504,8 +5617,13 @@ class Run1App:
             initial = {}
         return ZoneGroundDialog(self, video, self.save_zone_ground, initial=initial)
 
-    def save_zone_ground(self, data, res):
-        """The 'zones' calibration is taken over: mode zones, Perspective on, the PPM fallback set from the typed lengths."""
+    def save_zone_ground(self, data, res, zones_out=None):
+        """The 'zones' calibration is taken over: mode zones, Perspective on, the PPM fallback set from the typed lengths; the zones that
+        have their own calibration from this window replace the earlier ones of the same kind (those of the 4-corner window stay)."""
+        for key in [k for k, v in self.run3_zone_calibrations.items() if v.get("kind") == "poly"]:
+            self.run3_zone_calibrations.pop(key, None)
+        for key, cal in (zones_out or {}).items():
+            self.run3_zone_calibrations[key] = cal
         self.run3_zone_ground_var.set(json.dumps(data))
         self.run3_cal_mode_var.set("zones")
         self.run3_perspective_enabled_var.set(True)
@@ -5513,7 +5631,8 @@ class Run1App:
         ppm = [math.hypot(pts[e["b"]][0] - pts[e["a"]][0], pts[e["b"]][1] - pts[e["a"]][1]) / e["len"] for e in data["edges"] if e.get("len")]
         if ppm:
             self.run3_ppm_var.set(f"{sum(ppm) / len(ppm):.6f}")
-        self.run3_result_text.set(f"Perspective จากโซน: {res['n_dists']} ความยาว, คลาดเฉลี่ย {res['rms_dist_m']:.2f} ม.")
+        self.run3_result_text.set(f"Perspective จากโซน: {res['n_dists']} ความยาว, คลาดเฉลี่ย {res['rms_dist_m']:.2f} ม."
+                                  + (f" · แยกรายโซน {len(zones_out)} โซน" if zones_out else ""))
 
     def _run3_zone_ground_inputs(self):
         """From the saved 'zones' calibration: points (x, y), distances [(i, j, m)], lines A / B (2-point lines), edge list."""
@@ -8068,6 +8187,11 @@ class Run1App:
             try:
                 z = int(key)
                 pts = [(float(a), float(b)) for a, b in cal["points"]]
+                if cal.get("kind") == "poly":                         # a zone with its own corners + typed edges (zone calibration window)
+                    edges = [(int(e["i"]), int(e["j"]), str(e.get("dir", "")), (float(e["len"]) if e.get("len") else None)) for e in cal["edges"]]
+                    if z in ZONE_IDS and len(pts) >= 4 and any(e[3] for e in edges):
+                        out[z] = {"points": pts, "edges": edges, "kind": "poly"}
+                    continue
                 lengths = [float(v) for v in cal["lengths"]]
             except (ValueError, TypeError, KeyError):
                 continue
@@ -8081,8 +8205,18 @@ class Run1App:
         info = {}
         for z, cal in (c.get("zone_calibrations") or {}).items():
             base_corners = self._run3_to_metric(cal["points"], c)
-            tr = zone_metric_transform(cal["points"], cal["lengths"], base_corners)
-            info[f"Zone {z}"] = {"alignment_rms_m": round(tr["rms"], 3), "length_m": tr["length_m"], "width_m": tr["width_m"]}
+            if cal.get("kind") == "poly":
+                size = tuple(v for v in self._actual_video_size() if v) or (1920, 1080)
+                tr = zone_metric_transform_poly(cal["points"], cal["edges"], base_corners, size if len(size) == 2 else (1920, 1080))
+                if "error" in tr:
+                    log.warning("Zone %s own calibration not used: %s", z, tr["error"])
+                    info[f"Zone {z}"] = {"error": tr["error"]}
+                    continue
+                info[f"Zone {z}"] = {"alignment_rms_m": round(tr["rms"], 3), "length_m": round(tr["length_m"], 2), "width_m": round(tr["width_m"], 2),
+                                     "fit_rms_m": round(tr["fit"]["rms_dist_m"], 3)}
+            else:
+                tr = zone_metric_transform(cal["points"], cal["lengths"], base_corners)
+                info[f"Zone {z}"] = {"alignment_rms_m": round(tr["rms"], 3), "length_m": tr["length_m"], "width_m": tr["width_m"]}
             for src, dst in (("_point", "_m"), ("_center", "_mc")):
                 idx = [i for i, r in enumerate(rows_all) if r.get("_zone_num") == z and r.get(src) is not None]
                 if idx:

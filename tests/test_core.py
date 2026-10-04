@@ -862,6 +862,46 @@ class GroundPlaneTests(unittest.TestCase):
         self.assertEqual(CORE["decode_ground_points"]("[[1, 2], [3, 4]]"), ([(1.0, 2.0), (3.0, 4.0)], ["P1", "P2"]))
         self.assertEqual(CORE["decode_ground_points"]("garbage"), ([], []))
 
+    def test_a_zone_of_its_own_follows_a_bent_picture(self):
+        """A barrel-bent picture cannot be fitted by one projective map; every zone with its own transform is right."""
+        centre = np.array([960.0, 540.0])
+
+        def bent(p, k=-0.18):
+            x = (np.asarray(p, float) - centre) / 960.0
+            return x * (1 + k * (x ** 2).sum(1, keepdims=True)) * 960.0 + centre
+
+        zones = {"L": [(6, 6), (18, 6), (18, 12), (6, 12)], "R": [(42, 6), (54, 6), (54, 12), (42, 12)], "M": [(24, 8), (36, 8), (36, 14), (24, 14)]}
+        allp = [q for g in zones.values() for q in g]
+        wide = CORE["homography_from_points"]([(0, 0), (60, 0), (60, 20), (0, 20)], [(150, 500), (1800, 420), (1900, 900), (60, 950)])
+        pts = bent(CORE["apply_homography"](wide, np.array(allp, float)))
+        dists, la, lb, ids = [], [], [], {}
+        k = 0
+        for name, g in zones.items():
+            ids[name] = list(range(k, k + 4))
+            for a_, b_ in ((0, 1), (1, 2), (2, 3), (3, 0)):
+                i, j = ids[name][a_], ids[name][b_]
+                dists.append((i, j, float(np.hypot(*(np.array(g[a_]) - np.array(g[b_]))))))
+                (la if a_ in (0, 2) else lb).append([pts[i], pts[j]])
+            k += 4
+        res = CORE["solve_ground_homography"](pts, dists, la, lb, self.SIZE)
+        self.assertNotIn("error", res)
+        base = CORE["apply_homography"](res["H"], pts)
+        size_of = lambda mp, n: float(np.hypot(*(mp[ids[n][0]] - mp[ids[n][1]])))
+        self.assertGreater(abs(size_of(base, "M") - 12.0), 0.8)                     # the one global map is wrong in the middle zone
+        for name, idx in ids.items():
+            edges = [(0, 1, "A", 12.0), (1, 2, "B", 6.0), (2, 3, "A", 12.0), (3, 0, "B", 6.0)]
+            tr = CORE["zone_metric_transform_poly"](pts[idx], edges, base[idx], self.SIZE)
+            self.assertNotIn("error", tr)
+            mp = CORE["apply_homography"](tr["H"], pts[idx]) @ tr["Q"] + tr["t"]
+            self.assertAlmostEqual(float(np.hypot(*(mp[0] - mp[1]))), 12.0, delta=0.15)
+            self.assertAlmostEqual(float(np.hypot(*(mp[1] - mp[2]))), 6.0, delta=0.1)
+
+    def test_a_zone_without_both_directions_has_no_own_transform(self):
+        pts = self.to_img(self.PLANE, 0.0)
+        edges = [(0, 1, "A", 30.0), (1, 2, "", 20.0), (2, 3, "A", 30.0), (3, 0, "", 20.0)]
+        tr = CORE["zone_metric_transform_poly"](pts, edges, np.array(self.PLANE, float), self.SIZE)
+        self.assertIn("error", tr)
+
     def test_a_wrong_distance_shows_in_the_report(self):
         a, b = self.lines(0.3)
         out = CORE["solve_ground_homography"](self.to_img(self.PLANE, 0.3, 5), [(0, 1, 30), (1, 2, 20), (2, 3, 30), (3, 0, 20), (0, 2, 50)], a, b, self.SIZE)
