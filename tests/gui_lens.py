@@ -374,6 +374,70 @@ root.update()
 check("kerb types default to 'not straight', markings to 'straight'", (ud3.set_type("kerb_black_white"), ud3.straight_var.get())[1] is False and (ud3.set_type("white_dashed"), ud3.straight_var.get())[1] is True)
 ud3.close()
 
+# ---- the combined calibration window: lens + ground points (Perspective) + road lines in one place
+def grid_overlaps(container):
+    cells, bad_ = {}, []
+    for child in container.winfo_children():
+        try:
+            if child.winfo_manager() != "grid":
+                continue
+            gi = child.grid_info()
+        except tk.TclError:
+            continue
+        r_, c_ = int(gi["row"]), int(gi["column"])
+        for rr in range(r_, r_ + int(gi.get("rowspan", 1))):
+            for cc in range(c_, c_ + int(gi.get("columnspan", 1))):
+                if (rr, cc) in cells:
+                    bad_.append(f"{child.winfo_class()} at {rr},{cc}")
+                cells[(rr, cc)] = child
+    for ch in container.winfo_children():
+        bad_.extend(grid_overlaps(ch))
+    return bad_
+
+
+app.clear_lens_values()
+app.clear_road_lines()
+for v_ in (app.run3_perspective_p1_var, app.run3_perspective_p2_var, app.run3_perspective_p3_var, app.run3_perspective_p4_var,
+           app.run3_perspective_l12_var, app.run3_perspective_l23_var, app.run3_perspective_l34_var, app.run3_perspective_l41_var):
+    v_.set("")
+app.run3_perspective_enabled_var.set(False)
+cd = app.open_road_line_tool()
+root.update()
+check("the calibration window: no two widgets share a grid cell", not grid_overlaps(cd.top), "; ".join(grid_overlaps(cd.top)[:4]))
+rect_g = np.array([[10.0, 8.0], [20.0, 8.0], [20.0, 14.0], [10.0, 14.0]])
+rect_rec = to_rec(rect_g)
+cd.mode_var.set("points")
+for q_ in rect_rec[:3]:
+    cd.add_point(*q_)
+for v_, val in zip(cd.len_vars, ("10", "6", "10", "6")):
+    v_.set(val)
+check("three ground points are not enough: nothing is written", cd.apply() is False and app.run3_perspective_p1_var.get() == "")
+cd.add_point(*rect_rec[3])
+check("a fifth ground point is refused", cd.add_point(5, 5) is False and len(cd.cal_pts) == 4)
+cd.mode_var.set("lines")
+cd.set_type("white_solid")
+cd.add_point(200, 200); cd.add_point(900, 220)
+cd.set_type("white_solid")
+cd.mode_var.set("points")
+cd.undo_point()
+check("undo in ground-point mode removes the last P", len(cd.cal_pts) == 3)
+cd.add_point(*rect_rec[3])
+cd.fixed_var.set(False)
+check("applying writes the perspective, the road lines and the lens in one go",
+      cd.apply() and app.run3_perspective_enabled_var.get() and app.run3_perspective_p4_var.get() != "" and len(app.get_road_lines()) >= 1)
+app._lens_size_override = (CW, CH)
+app.set_lens_values(LENS)
+cfg_c = app._run3_snapshot_config()
+mapped_c = app._run3_to_metric(rect_rec, cfg_c)
+check("the corners clicked in the window become the true rectangle", np.abs(mapped_c - np.array([[0, 0], [10, 0], [10, 6], [0, 6]], float)).max() < 0.02)
+check("the page shows one summary line of the calibration", "Perspective 4" in app.cal_summary_var.get() and "เส้นถนน" in app.cal_summary_var.get(), app.cal_summary_var.get())
+cd2 = app.open_road_line_tool()
+root.update()
+check("reopening the window shows the saved ground points again", len(cd2.cal_pts) == 4 and abs(cd2.cal_pts[0][0] - rect_rec[0][0]) < 0.01)
+cd2.close()
+app.clear_lens_values()
+app.set_lens_values(LENS)
+
 check("the Topview has the video's shape", abs(Wf / Hf - CW / CH) < 0.02, f"{Wf}x{Hf}")
 vid_b = app._run3_write_topview_video(tr, dict(base_cfg, lens=None, lens_size=None), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video)
 ncc_b = ncc_of(vid_b)

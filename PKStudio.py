@@ -2080,6 +2080,7 @@ class LensLineDialog:
                 t = d @ u
                 a, b = shown.mean(axis=0) + u * t.min(), shown.mean(axis=0) + u * t.max()
                 cv2.line(out, tuple(np.round(a * k + [ox, oy]).astype(int)), tuple(np.round(b * k + [ox, oy]).astype(int)), (255, 255, 255), 1, cv2.LINE_AA)
+        self._draw_extra(out, k, ox, oy, show_fixed)
         cv2.putText(out, f"zoom x{self.zoom:.1f}" + ("   corrected picture" if show_fixed else ""), (6, ch - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
         self.last_render = out
         ok, buf = cv2.imencode(".png", out)
@@ -2088,6 +2089,10 @@ class LensLineDialog:
         self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
         if not self.msg_var.get():
             self.msg_var.set("คลิกจุดตามแนวเส้นที่ตรงในโลกจริง")
+
+    def _draw_extra(self, out, k, ox, oy, show_fixed):
+        """Hook: draw more on the rendered picture (a subclass)."""
+        return None
 
     def reset_view_silent(self):
         cw, ch = self._canvas_size()
@@ -2204,7 +2209,11 @@ class RoadLineDialog(LensLineDialog):
     def __init__(self, app, video_path, on_apply, initial=None):
         norm = [(normalize_road_line(it), road_line_straight(it)) for it in (initial or [])]
         super().__init__(app, video_path, on_apply)
-        self.top.title("เลนส์ + เส้นถนน")
+        self.top.title("ปรับเทียบกล้อง — เลนส์ + พื้นถนน + เส้นถนน")
+        sw_, sh_ = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
+        self.top.geometry(f"{min(1150, sw_ - 40)}x{min(930, sh_ - 90)}+10+10")
+        self.cal_pts = []
+        self._load_cal_from_app()
         self.types = [ROAD_LINE_DEFAULT]
         self.straight = [True]
         if norm:
@@ -2218,6 +2227,95 @@ class RoadLineDialog(LensLineDialog):
         if lens_now is not None and tuple(size_now) == tuple(self.size):
             self.lens = tuple(lens_now)                      # the lens already set: the corrected picture can be shown at once
         self.refresh()
+
+    # ----- the 4 ground points (Perspective Calibration) -----
+    def _load_cal_from_app(self):
+        app = self.app
+        try:
+            pts = [app._run3_parse_xy(v.get(), n) for v, n in ((app.run3_perspective_p1_var, "P1"), (app.run3_perspective_p2_var, "P2"),
+                                                                 (app.run3_perspective_p3_var, "P3"), (app.run3_perspective_p4_var, "P4"))]
+            self.cal_pts = [tuple(q) for q in pts]
+        except Exception:
+            self.cal_pts = []
+
+    def add_cal_point(self, x, y):
+        """The next ground point P1..P4 (a point given in the corrected picture is carried back to the recorded one)."""
+        if len(self.cal_pts) >= 4:
+            self.msg_var.set("มีครบ 4 จุดแล้ว — กด ล้างจุด P เพื่อคลิกใหม่")
+            return False
+        pt = (float(x), float(y))
+        if self.fixed_var.get() and self.lens is not None:
+            pt = tuple(lens_distort([pt], self.size, self.lens)[0])
+        self.cal_pts.append(pt)
+        self.msg_var.set(f"จุด P{len(self.cal_pts)} แล้ว" + (" — ใส่ระยะจริงของ 4 ด้านแล้วกด ใช้ค่านี้" if len(self.cal_pts) == 4 else " (คลิกต่อ: P1→P2→P3→P4 ตามเข็ม/ทวนเข็ม โดย P1→P2 ขนานแนวถนน)"))
+        self.refresh()
+        return True
+
+    def clear_cal_points(self):
+        self.cal_pts = []
+        self.refresh()
+
+    def add_point(self, x, y):
+        if self.mode_var.get() == "points":
+            return self.add_cal_point(x, y)
+        return super().add_point(x, y)
+
+    def undo_point(self):
+        if self.mode_var.get() == "points":
+            if self.cal_pts:
+                self.cal_pts.pop()
+            self.refresh()
+            return
+        super().undo_point()
+        self._sync_types()
+
+    def _draw_extra(self, out, k, ox, oy, show_fixed):
+        if not getattr(self, "cal_pts", None):
+            return
+        pts = np.asarray(self.cal_pts, dtype=float)
+        shown = lens_undistort(pts, self.size, self.lens) if (show_fixed and self.lens is not None) else pts
+        c = np.round(shown * k + np.array([ox, oy])).astype(np.int32)
+        if len(c) > 1:
+            cv2.polylines(out, [c.reshape(-1, 1, 2)], len(c) == 4, (0, 140, 255), 2, cv2.LINE_AA)
+        for n, q in enumerate(c, start=1):
+            cv2.circle(out, (int(q[0]), int(q[1])), 7, (0, 140, 255), -1, cv2.LINE_AA)
+            cv2.putText(out, f"P{n}", (int(q[0]) + 9, int(q[1]) - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2, cv2.LINE_AA)
+
+    def _apply_perspective(self):
+        """Write the 4 ground points + real side lengths into the settings (as the Perspective Calibration window does).
+        Returns True when written, False when there is nothing to write, None when the input is incomplete (an error is shown)."""
+        app = self.app
+        if not self.cal_pts and not any(v.get().strip() for v in self.len_vars):
+            return False
+        if len(self.cal_pts) != 4:
+            self.msg_var.set("ต้องคลิกจุด P ให้ครบ 4 จุด (หรือกด ล้างจุด P ถ้าไม่ใช้ Perspective)")
+            messagebox.showerror("ปรับเทียบกล้อง", self.msg_var.get(), parent=self.top)
+            return None
+        try:
+            l12, l23, l34, l41 = [float(v.get().strip()) for v in self.len_vars]
+            if min(l12, l23, l34, l41) <= 0:
+                raise ValueError
+        except ValueError:
+            self.msg_var.set("ใส่ระยะจริงของทั้ง 4 ด้าน (เมตร มากกว่า 0)")
+            messagebox.showerror("ปรับเทียบกล้อง", self.msg_var.get(), parent=self.top)
+            return None
+        pts = np.array(self.cal_pts, dtype=np.float32)
+        if abs(cv2.contourArea(pts.reshape((-1, 1, 2)))) < 100.0:
+            self.msg_var.set("จุดทั้ง 4 ใกล้กันเกินไป เลือกพื้นที่ถนนที่กว้างขึ้น")
+            messagebox.showerror("ปรับเทียบกล้อง", self.msg_var.get(), parent=self.top)
+            return None
+        length, width_m = (l12 + l34) / 2.0, (l23 + l41) / 2.0
+        for var, pt in zip((app.run3_perspective_p1_var, app.run3_perspective_p2_var, app.run3_perspective_p3_var, app.run3_perspective_p4_var), self.cal_pts):
+            var.set(f"{pt[0]:.3f},{pt[1]:.3f}")
+        app.run3_perspective_length_var.set(f"{length:g}")
+        app.run3_perspective_width_var.set(f"{width_m:g}")
+        for var, v in zip((app.run3_perspective_l12_var, app.run3_perspective_l23_var, app.run3_perspective_l34_var, app.run3_perspective_l41_var), (l12, l23, l34, l41)):
+            var.set(f"{v:g}")
+        app.run3_perspective_enabled_var.set(True)
+        edge = [math.hypot(self.cal_pts[j][0] - self.cal_pts[i][0], self.cal_pts[j][1] - self.cal_pts[i][1]) / real
+                for (i, j), real in zip(((0, 1), (1, 2), (2, 3), (3, 0)), (l12, l23, l34, l41))]
+        app.run3_ppm_var.set(f"{sum(edge) / len(edge):.6f}")
+        return True
 
     def type_key(self):
         label = self.type_var.get()
@@ -2263,10 +2361,6 @@ class RoadLineDialog(LensLineDialog):
         self._sync_types()
         return ok
 
-    def undo_point(self):
-        super().undo_point()
-        self._sync_types()
-
     def delete_line(self):
         super().delete_line()
         self._sync_types()
@@ -2290,10 +2384,28 @@ class RoadLineDialog(LensLineDialog):
         ttk.Button(bar, text="รีเซ็ต View", command=self.reset_view).grid(row=1, column=3, padx=4)
         ttk.Button(bar, text="ประมาณเลนส์", command=self.estimate).grid(row=1, column=4, padx=(14, 4))
         ttk.Checkbutton(bar, text="ดูภาพที่แก้เลนส์แล้ว", variable=self.fixed_var, command=self.refresh).grid(row=1, column=5, padx=4)
-        ttk.Button(bar, text="ใช้ค่านี้ (เลนส์ + เส้น)", command=self.apply).grid(row=1, column=6, padx=(14, 4))
-        ttk.Button(bar, text="ปิด", command=self.close).grid(row=1, column=7, padx=4)
         self.straight_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(bar, text="เส้นนี้ตรงจริง (ใช้ประมาณเลนส์)", variable=self.straight_var, command=self._on_straight_changed).grid(row=3, column=3, columnspan=3, sticky="w", padx=(10, 2))
+        self.mode_var = tk.StringVar(value="lines")
+        modef = ttk.Frame(bar)
+        modef.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Label(modef, text="คลิกเพื่อ:").pack(side="left")
+        ttk.Radiobutton(modef, text="วาดเส้นถนน", variable=self.mode_var, value="lines").pack(side="left", padx=4)
+        ttk.Radiobutton(modef, text="จุดพื้น P1–P4", variable=self.mode_var, value="points").pack(side="left", padx=4)
+        ttk.Button(modef, text="ล้างจุด P", command=self.clear_cal_points).pack(side="left", padx=4)
+        appv = self.app
+        self.len_vars = [appv.run3_perspective_l12_var, appv.run3_perspective_l23_var, appv.run3_perspective_l34_var, appv.run3_perspective_l41_var]
+        lenf = ttk.LabelFrame(bar, text="ระยะจริงของ 4 ด้านของสี่เหลี่ยมพื้น P1–P4 (เมตร) — ใช้แปลงภาพเป็นเมตร", padding=4)
+        lenf.grid(row=4, column=0, columnspan=9, sticky="ew", pady=(6, 0))
+        for lab, var in zip(("P1→P2", "P2→P3", "P3→P4", "P4→P1"), self.len_vars):
+            ttk.Label(lenf, text=lab).pack(side="left", padx=(6, 2))
+            ttk.Entry(lenf, textvariable=var, width=8).pack(side="left")
+        lensf = ttk.LabelFrame(bar, text="เลนส์ fisheye (ประมาณจากเส้นตรง หรือพิมพ์เอง — f เป็นเท่าของความกว้างภาพ เช่น 0.5 · เว้น f ว่าง = ไม่แก้)", padding=4)
+        lensf.grid(row=5, column=0, columnspan=9, sticky="ew", pady=(6, 0))
+        for lab, var in (("f", appv.run3_lens_f_var), ("k1", appv.run3_lens_k1_var), ("k2", appv.run3_lens_k2_var)):
+            ttk.Label(lensf, text=lab).pack(side="left", padx=(6, 2))
+            ttk.Entry(lensf, textvariable=var, width=8).pack(side="left")
+        ttk.Button(lensf, text="ล้างเลนส์", command=appv.clear_lens_values).pack(side="left", padx=10)
         ttk.Label(bar, text="ชนิดเส้นที่กำลังวาด").grid(row=2, column=3, sticky="e", padx=(10, 2))
         self.type_var = tk.StringVar(value=ROAD_LINE_TYPES[ROAD_LINE_DEFAULT][0])
         cb = ttk.Combobox(bar, textvariable=self.type_var, values=[v[0] for v in ROAD_LINE_TYPES.values()], state="readonly", width=48)
@@ -2302,6 +2414,11 @@ class RoadLineDialog(LensLineDialog):
         ttk.Label(bar, text="เฟรม").grid(row=2, column=0, sticky="e")
         ttk.Entry(bar, textvariable=self.frame_var, width=8).grid(row=2, column=1, sticky="w")
         ttk.Button(bar, text="โหลดเฟรม", command=lambda: self.set_frame(self.frame_var.get())).grid(row=2, column=2, sticky="w")
+        bot = ttk.Frame(top, padding=(6, 4))
+        bot.pack(side="bottom", fill="x")                           # always visible, below the picture
+        ttk.Button(bot, text="ใช้ค่านี้ (บันทึกทั้งหมด)", command=self.apply).pack(side="right", padx=4)
+        ttk.Button(bot, text="ปิด", command=self.close).pack(side="right", padx=4)
+        tk.Label(bot, textvariable=self.msg_var, height=2, anchor="nw", wraplength=760, justify="left").pack(side="left", fill="x", expand=True)
         self.canvas = tk.Canvas(top, width=self.VIEW_W, height=self.VIEW_H, bg="#202020", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True, padx=6)
         self.canvas.bind("<Configure>", lambda e: self._on_configure())
@@ -2314,14 +2431,16 @@ class RoadLineDialog(LensLineDialog):
         self.canvas.bind("<MouseWheel>", lambda e: self.zoom_at(e.x, e.y, 1 if e.delta > 0 else -1))
         self.canvas.bind("<Button-4>", lambda e: self.zoom_at(e.x, e.y, 1))
         self.canvas.bind("<Button-5>", lambda e: self.zoom_at(e.x, e.y, -1))
-        tk.Label(top, textvariable=self.msg_var, height=2, anchor="nw", wraplength=980, justify="left", padx=6, pady=4).pack(fill="x")
 
     def apply(self):
         self._sync_types()
         use = [{"type": k, "points": l, "straight": st} for l, k, st in zip(self.lines, self.types, self.straight) if len(l) >= 2]
-        if not use and self.lens is None:
-            self.msg_var.set("ยังไม่มีเส้น (แต่ละเส้นต้องมีอย่างน้อย 2 จุด)")
-            messagebox.showinfo("เส้นถนน", self.msg_var.get(), parent=self.top)
+        persp = self._apply_perspective()
+        if persp is None:
+            return False
+        if not use and self.lens is None and not persp:
+            self.msg_var.set("ยังไม่มีอะไรให้บันทึก (เส้นถนนอย่างน้อย 2 จุด / เลนส์ที่ประมาณได้ / จุดพื้น P1–P4)")
+            messagebox.showinfo("ปรับเทียบกล้อง", self.msg_var.get(), parent=self.top)
             return False
         if use:
             self.on_apply(use)
@@ -3164,50 +3283,31 @@ class Run1App:
         ttk.Label(cal, text="Road direction angle (deg) — ใช้เมื่อไม่มี Perspective").grid(row=r, column=0, columnspan=2, sticky="w", pady=4)
         ttk.Entry(cal, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=r, column=2, sticky="w", pady=4)
         r += 1
-        lensf = ttk.LabelFrame(cal, text="เลนส์ fisheye (แก้ความโก่งของภาพกล้องมุมกว้างก่อนแปลงเป็นพื้นถนน — f = ความยาวโฟกัสเป็นเท่าของความกว้างภาพ เช่น 0.5 · เว้น f ว่าง = ไม่แก้)", padding=4)
-        lensf.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 2))
-        ttk.Label(lensf, text="f").pack(side="left")
-        ttk.Entry(lensf, textvariable=self.run3_lens_f_var, width=6).pack(side="left", padx=(2, 8))
-        ttk.Label(lensf, text="k1").pack(side="left")
-        ttk.Entry(lensf, textvariable=self.run3_lens_k1_var, width=8).pack(side="left", padx=(2, 8))
-        ttk.Label(lensf, text="k2").pack(side="left")
-        ttk.Entry(lensf, textvariable=self.run3_lens_k2_var, width=8).pack(side="left", padx=(2, 8))
-        ttk.Button(lensf, text="เลนส์ + เส้นถนน…", command=self.open_road_line_tool).pack(side="left", padx=4)
-        ttk.Button(lensf, text="ดูภาพก่อน/หลัง", command=self.preview_lens_settings).pack(side="left", padx=4)
-        ttk.Button(lensf, text="ล้าง", width=5, command=self.clear_lens_values).pack(side="left", padx=4)
+        calbtn = ttk.Frame(cal)
+        calbtn.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 2))
+        ttk.Button(calbtn, text="🎯 ปรับเทียบกล้อง… (เลนส์ + พื้นถนน + เส้นถนน)", command=self.open_road_line_tool).pack(side="left")
+        self.cal_summary_var = tk.StringVar(value="")
+        ttk.Label(calbtn, textvariable=self.cal_summary_var, foreground="#0a7a3d", justify="left", wraplength=620).pack(side="left", padx=10)
         r += 1
         ttk.Checkbutton(cal, text="สร้างวิดีโอ Topview (Tracking_Topview.mp4)", variable=self.run3_topview_video_var).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Label(cal, text="วาดจากพิกัดเมตรเดียวกับที่ตัวชี้วัดใช้ (ไฟล์ Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
+        ttk.Checkbutton(cal, text="แบบแผนที่ (กริดเปล่า + เส้นถนน ไม่ใช้ภาพกล้อง)", variable=self.run3_topview_map_var).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
         r += 1
-        roadf = ttk.Frame(cal)
-        roadf.grid(row=r, column=0, columnspan=4, sticky="w", pady=2)
-        ttk.Checkbutton(roadf, text="Topview แบบแผนที่ (กริดเปล่า + เส้นถนน ไม่ใช้ภาพกล้อง)", variable=self.run3_topview_map_var).pack(side="left")
-        ttk.Button(roadf, text="เลนส์ + เส้นถนน…", command=self.open_road_line_tool).pack(side="left", padx=6)
-        ttk.Button(roadf, text="ล้างเส้นถนน", command=self.clear_road_lines).pack(side="left", padx=2)
+        ttk.Label(cal, text="Topview และตัวชี้วัดทั้งหมดใช้พิกัดเมตรชุดเดียวกัน (Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=0, columnspan=4, sticky="w", pady=(0, 2))
+        r += 1
+        adv = ttk.LabelFrame(cal, text="ขั้นสูง (ปกติไม่ต้องแตะ)", padding=4)
+        adv.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(8, 2))
+        ttk.Checkbutton(adv, text="ใช้ Perspective correction", variable=self.run3_perspective_enabled_var).pack(side="left")
+        ttk.Button(adv, text="PPM / ปรับเทียบรายโซน…", command=self.open_perspective_calibration).pack(side="left", padx=10)
+        ttk.Button(adv, text="ล้างเส้นถนน", command=self.clear_road_lines).pack(side="left", padx=2)
         self.road_lines_info_var = tk.StringVar(value="")
-        ttk.Label(roadf, textvariable=self.road_lines_info_var, foreground=gray).pack(side="left", padx=6)
-        self.run3_road_lines_var.trace_add("write", lambda *_: self._refresh_road_lines_info())
+        ttk.Label(adv, textvariable=self.road_lines_info_var, foreground=gray).pack(side="left", padx=6)
+        for v_ in (self.run3_road_lines_var, self.run3_lens_f_var, self.run3_lens_k1_var, self.run3_lens_k2_var, self.run3_perspective_enabled_var,
+                   self.run3_perspective_l12_var, self.run3_perspective_l23_var, self.run3_perspective_l34_var, self.run3_perspective_l41_var,
+                   self.run3_perspective_p1_var, self.run3_ppm_var):
+            v_.trace_add("write", lambda *_: self._refresh_cal_summary())
         self._refresh_road_lines_info()
+        self._refresh_cal_summary()
         r += 1
-        ttk.Checkbutton(cal, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=r, column=0, sticky="w", pady=(6, 4))
-        ttk.Label(cal, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง (P1→P2 ต้องขนานแนวถนน)", foreground=gray).grid(row=r, column=1, columnspan=2, sticky="w", pady=(6, 4))
-        ttk.Button(cal, text="🎯 Perspective / PPM Calibration", command=self.open_perspective_calibration).grid(row=r, column=3, sticky="e", pady=(6, 4))
-        r += 1
-        for (la, va, lb, vb) in (("P1", self.run3_perspective_p1_var, "P2", self.run3_perspective_p2_var),
-                                 ("P3", self.run3_perspective_p3_var, "P4", self.run3_perspective_p4_var)):
-            ttk.Label(cal, text=la).grid(row=r, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(cal, textvariable=va, width=18, state="readonly").grid(row=r, column=1, sticky="w", pady=2)
-            ttk.Label(cal, text=lb).grid(row=r, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(cal, textvariable=vb, width=18, state="readonly").grid(row=r, column=3, sticky="w", pady=2)
-            r += 1
-        for (la, va, lb, vb) in (("ระยะจริง P1→P2 (m)", self.run3_perspective_l12_var, "ระยะจริง P2→P3 (m)", self.run3_perspective_l23_var),
-                                 ("ระยะจริง P3→P4 (m)", self.run3_perspective_l34_var, "ระยะจริง P4→P1 (m)", self.run3_perspective_l41_var)):
-            ttk.Label(cal, text=la).grid(row=r, column=0, sticky="w", padx=4, pady=2)
-            ttk.Entry(cal, textvariable=va, width=18).grid(row=r, column=1, sticky="w", pady=2)
-            ttk.Label(cal, text=lb).grid(row=r, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(cal, textvariable=vb, width=18).grid(row=r, column=3, sticky="w", pady=2)
-            r += 1
-
         ttk.Label(cal, textvariable=self.run3_zone_cal_text, foreground="#0a7a3d").grid(row=r, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         dims = self.section("ขนาดรถ (m) — กว้าง W / ยาว L (ใช้กับ Lateral Clearance และ TTC)")
@@ -5678,6 +5778,22 @@ class Run1App:
 
     def clear_road_lines(self):
         self.run3_road_lines_var.set("")
+
+    def _refresh_cal_summary(self):
+        """One line that says what the calibration is now (shown next to the calibration button)."""
+        try:
+            f = str(self.run3_lens_f_var.get()).strip()
+            lens = (f"เลนส์: f={f}, k1={self.run3_lens_k1_var.get() or 0}" if f else "เลนส์: ไม่แก้")
+            if bool(self.run3_perspective_enabled_var.get()) and str(self.run3_perspective_p1_var.get()).strip():
+                floor = f"พื้น: Perspective 4 จุด ({self.run3_perspective_length_var.get()}×{self.run3_perspective_width_var.get()} ม.)"
+            elif str(self.run3_ppm_var.get()).strip():
+                floor = f"พื้น: PPM {self.run3_ppm_var.get()}"
+            else:
+                floor = "พื้น: ยังไม่ตั้ง"
+            n = len(self.get_road_lines())
+            self.cal_summary_var.set(f"{lens}  ·  {floor}  ·  " + (f"เส้นถนน {n} เส้น" if n else "ยังไม่มีเส้นถนน"))
+        except (AttributeError, tk.TclError):
+            pass
 
     def _refresh_road_lines_info(self):
         n = len(self.get_road_lines())
