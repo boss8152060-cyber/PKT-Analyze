@@ -2003,7 +2003,10 @@ class AlignDialog:
     def __init__(self, app, video_path, on_apply, initial=None):
         self.app, self.on_apply, self.video_path = app, on_apply, video_path
         initial = initial or {}
-        self.pairs = [{"s": tuple(q["s"]), "d": tuple(q["d"])} for q in initial.get("pairs", [])]
+        self.pairs = [{"s": tuple(q["s"]), "d": tuple(q["d"]), **({"l": q["l"]} if q.get("l") else {})} for q in initial.get("pairs", [])]
+        self.pins = []                                           # the zone corners as pins: {"l": name, "p": video pixel, "state": todo | done | skip}
+        self.skipped_saved = set(initial.get("skipped", []))
+        self.pin_index = None                                    # the pin waiting for its place on the drone picture
         self.pending = None
         self.scale = float(initial.get("scale") or 0.0)
         self.rot_deg = float(initial.get("rot_deg") or 0.0)
@@ -2034,6 +2037,7 @@ class AlignDialog:
         self.load_video_frame(initial.get("video_frame"))
         if self.drone_path:
             self.load_drone(self.drone_path, self.dframe_var.get() or None)
+        self.load_zone_pins(quiet=True)
         self.refresh_all()
 
     # ----- pictures -----
@@ -2062,8 +2066,138 @@ class AlignDialog:
         if path:
             self.load_drone(path, self.dframe_var.get() or None)
 
+    # ----- the zone corners as pins -----
+    def load_zone_pins(self, quiet=False):
+        """Every corner of every zone drawn on the video is a pin with a known video pixel (no click needed on that side). Corners at the
+        same spot (the shared corners of neighbouring zones) are one pin. A pin that already has a pair is done; the ones the user skipped
+        stay skipped. Returns the number of pins."""
+        pins = []
+        for zname in ZONE_NAMES:
+            poly = self.app.zones.get(zname, [])
+            if len(poly) < 3:
+                continue
+            num = zname.split()[-1]
+            for k, (x, y) in enumerate(poly, start=1):
+                label = f"Z{num}.{k}"
+                for pin in pins:
+                    if math.hypot(pin["p"][0] - x, pin["p"][1] - y) <= 4.0:             # the same corner of the next zone
+                        pin["l"] += "=" + label
+                        break
+                else:
+                    pins.append({"l": label, "p": (float(x), float(y)), "state": "todo"})
+        done = {q.get("l") for q in self.pairs if q.get("l")}
+        for pin in pins:
+            first = pin["l"].split("=")[0]
+            if first in done:
+                pin["state"] = "done"
+            elif first in self.skipped_saved:
+                pin["state"] = "skip"
+        self.pins = pins
+        self._next_pin(0)
+        if not quiet and not pins:
+            self.msg_var.set("ยังไม่มีโซนที่วาดไว้ (โหลดไฟล์โซนในแท็บ ② ก่อน)")
+        return len(pins)
+
+    def _next_pin(self, start=None):
+        """Point at the next pin still to do (from `start`, wrapping round); None when there is none."""
+        n = len(self.pins)
+        if not n:
+            self.pin_index = None
+            return None
+        i0 = (self.pin_index if start is None else start) or 0
+        for k in range(n):
+            j = (i0 + k) % n
+            if self.pins[j]["state"] == "todo":
+                self.pin_index = j
+                return j
+        self.pin_index = None
+        return None
+
+    def pin_status(self):
+        c = {"todo": 0, "done": 0, "skip": 0}
+        for pin in self.pins:
+            c[pin["state"]] += 1
+        return c
+
+    def _pin_message(self):
+        c = self.pin_status()
+        if self.pin_index is not None:
+            pin = self.pins[self.pin_index]
+            return (f"หมุดโซน {pin['l']} ({self.pin_index + 1}/{len(self.pins)}) — คลิกตำแหน่งเดียวกันบนภาพโดรน หรือกด ข้ามหมุดนี้  "
+                    f"[ใส่แล้ว {c['done']} · ข้าม {c['skip']} · เหลือ {c['todo']}]")
+        return f"หมุดโซนครบแล้ว — ใส่ {c['done']} · ข้าม {c['skip']}" if self.pins else "ยังไม่มีหมุดโซน"
+
+    def place_pin(self, x, y):
+        """The current pin is where the user clicked on the drone picture: a pair (video side = the zone corner from the file)."""
+        if self.pin_index is None:
+            self.msg_var.set(self._pin_message())
+            return False
+        pin = self.pins[self.pin_index]
+        self.add_pair(pin["p"], (float(x), float(y)), label=pin["l"].split("=")[0])
+        pin["state"] = "done"
+        self.skipped_saved.discard(pin["l"].split("=")[0])
+        self._next_pin(self.pin_index + 1)
+        self.msg_var.set(self._pin_message())
+        return True
+
+    def skip_pin(self):
+        if self.pin_index is None:
+            return False
+        pin = self.pins[self.pin_index]
+        pin["state"] = "skip"
+        self.skipped_saved.add(pin["l"].split("=")[0])
+        self._next_pin(self.pin_index + 1)
+        self.msg_var.set(self._pin_message())
+        self.refresh_all()
+        return True
+
+    def goto_pin(self, step):
+        """Move to the next / previous pin that is not done (a skipped pin can be taken up again)."""
+        n = len(self.pins)
+        if not n:
+            return False
+        j = self.pin_index if self.pin_index is not None else 0
+        for _ in range(n):
+            j = (j + step) % n
+            if self.pins[j]["state"] != "done":
+                self.pin_index = j
+                self.pins[j]["state"] = "todo"
+                self.skipped_saved.discard(self.pins[j]["l"].split("=")[0])
+                break
+        self.msg_var.set(self._pin_message())
+        self.refresh_all()
+        return True
+
+    def pick_pin_near(self, x, y, radius_px=20.0):
+        """A click on the video picture in the pin mode picks the nearest pin that is not done."""
+        k = self.vpane.view[0] if self.vpane.view else 1.0
+        best = None
+        for j, pin in enumerate(self.pins):
+            d = math.hypot(pin["p"][0] - x, pin["p"][1] - y) * k
+            if pin["state"] != "done" and d <= radius_px and (best is None or d < best[0]):
+                best = (d, j)
+        if best is None:
+            return False
+        self.pin_index = best[1]
+        self.pins[best[1]]["state"] = "todo"
+        self.skipped_saved.discard(self.pins[best[1]]["l"].split("=")[0])
+        self.msg_var.set(self._pin_message())
+        self.refresh_all()
+        return True
+
+    def set_mode_pins(self):
+        self.mode_var.set("pins")
+        if not self.pins:
+            self.load_zone_pins()
+        self.msg_var.set(self._pin_message())
+        self.refresh_all()
+
     # ----- pairs -----
     def click_video(self, x, y):
+        if self.mode_var.get() == "pins":
+            if not self.pick_pin_near(x, y):
+                self.msg_var.set(self._pin_message())
+            return
         if self.mode_var.get() != "pairs":
             self.msg_var.set("โหมดนี้คลิกบนภาพโดรน (ขวา) — เปลี่ยนเป็น 'คู่จุด' เพื่อคลิกภาพวิดีโอ")
             return
@@ -2073,6 +2207,10 @@ class AlignDialog:
 
     def click_drone(self, x, y):
         mode = self.mode_var.get()
+        if mode == "pins":
+            self.place_pin(x, y)
+            self.refresh_all()
+            return
         if mode == "pairs":
             if self.pending is None:
                 self.msg_var.set("คลิกจุดในภาพวิดีโอ (ซ้าย) ก่อน แล้วคลิกจุดเดียวกันในภาพโดรน")
@@ -2102,8 +2240,8 @@ class AlignDialog:
                 self.msg_var.set("คลิกจุดที่สองบนภาพโดรน")
         self.refresh_all()
 
-    def add_pair(self, s_pt, d_pt):
-        self.pairs.append({"s": tuple(float(v) for v in s_pt), "d": tuple(float(v) for v in d_pt)})
+    def add_pair(self, s_pt, d_pt, label=None):
+        self.pairs.append({"s": tuple(float(v) for v in s_pt), "d": tuple(float(v) for v in d_pt), **({"l": label} if label else {})})
         self.msg_var.set(f"คู่ที่ {len(self.pairs)} แล้ว")
         self.refresh_all()
 
@@ -2112,7 +2250,12 @@ class AlignDialog:
             sel = self.tree.selection()
             index = int(self.tree.item(sel[0], "values")[0]) - 1 if sel else len(self.pairs) - 1
         if 0 <= index < len(self.pairs):
-            self.pairs.pop(index)
+            gone = self.pairs.pop(index)
+            for j, pin in enumerate(self.pins):                       # a deleted zone-corner pair: that pin is waiting again
+                if gone.get("l") and pin["l"].split("=")[0] == gone["l"]:
+                    pin["state"] = "todo"
+                    if self.pin_index is None:
+                        self.pin_index = j
         self.selected = None
         self.refresh_all()
 
@@ -2210,7 +2353,7 @@ class AlignDialog:
             limit = max(0.30 if self.scale > 0 else 15.0, 2.0 * med)
             for i in order:
                 loo = rep["loo_u"][i] * mult if rep["loo_u"] else None
-                self.tree.insert("", "end", values=(i + 1, f"{rep['residuals_u'][i] * mult:.1f}", "-" if loo is None else f"{loo:.1f}"),
+                self.tree.insert("", "end", values=(i + 1, f"{rep['residuals_u'][i] * mult:.1f}", "-" if loo is None else f"{loo:.1f}", self.pairs[i].get("l", "-")),
                                  tags=(("bad",) if key_vals[i] > limit else ()))
             lines = [f"ชนิด: {ALIGN_KINDS[self.kind][1]} · {len(self.pairs)} คู่ · คลาดเฉลี่ย {rep['rms_u'] * mult:.1f} {unit_txt}"
                      + (f" · เว้นจุดตรวจ {rep['loo_rms_u'] * mult:.1f} {unit_txt}" if rep["loo_rms_u"] is not None else " · (ยังไม่พอจะตรวจแบบเว้นจุด)")]
@@ -2236,6 +2379,13 @@ class AlignDialog:
 
     # ----- overlays -----
     def _draw_video(self, out, pane):
+        for j, pin in enumerate(self.pins):                          # the zone corners: a hollow square = still to do, filled = done, grey = skipped
+            pp = pane.to_view(*pin["p"])
+            col = {"todo": (0, 220, 255), "done": (60, 200, 60), "skip": (150, 150, 150)}[pin["state"]]
+            cv2.rectangle(out, (pp[0] - 4, pp[1] - 4), (pp[0] + 4, pp[1] + 4), col, -1 if pin["state"] == "done" else 1)
+            if j == self.pin_index:
+                cv2.circle(out, pp, 15, (0, 255, 255), 3, cv2.LINE_AA)
+                cv2.putText(out, pin["l"], (pp[0] + 16, pp[1] - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
         for i, q in enumerate(self.pairs):
             p = pane.to_view(*q["s"])
             if i == self.selected:
@@ -2313,8 +2463,14 @@ class AlignDialog:
         ttk.Button(left, text="ปิด", command=self.close).grid(row=4, column=2, sticky="w")
         ttk.Button(left, text="ลบคู่ที่แย่สุด", command=self.delete_worst).grid(row=5, column=0, pady=2, sticky="w")
         ttk.Radiobutton(left, text="วัดระยะทดสอบ (คลิก 2 จุดบนภาพโดรน)", variable=self.mode_var, value="measure").grid(row=5, column=1, columnspan=3, sticky="w")
-        self.tree = ttk.Treeview(low, columns=("n", "res", "loo"), show="headings", height=14)
-        for col, text, w in (("n", "คู่", 40), ("res", "คลาด (ซม.)", 90), ("loo", "เว้นจุด (ซม.)", 100)):
+        ttk.Radiobutton(left, text="หมุดโซน (ไล่ทีละหมุด)", variable=self.mode_var, value="pins", command=self.set_mode_pins).grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        pinbar = ttk.Frame(left)
+        pinbar.grid(row=6, column=2, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Button(pinbar, text="◀", width=3, command=lambda: self.goto_pin(-1)).pack(side="left")
+        ttk.Button(pinbar, text="ข้ามหมุดนี้", command=self.skip_pin).pack(side="left", padx=3)
+        ttk.Button(pinbar, text="▶", width=3, command=lambda: self.goto_pin(1)).pack(side="left")
+        self.tree = ttk.Treeview(low, columns=("n", "res", "loo", "lab"), show="headings", height=14)
+        for col, text, w in (("n", "คู่", 40), ("res", "คลาด (ซม.)", 90), ("loo", "เว้นจุด (ซม.)", 100), ("lab", "หมุดโซน", 70)):
             self.tree.heading(col, text=text)
             self.tree.column(col, width=w, anchor="center")
         self.tree.tag_configure("bad", foreground="#c00000")
@@ -2335,7 +2491,8 @@ class AlignDialog:
         if self.scale <= 0:
             messagebox.showerror("จัดแนวกับภาพโดรน", "ตั้งสเกลภาพโดรนก่อน (วัดสเกล: คลิก 2 จุดบนภาพโดรน แล้วใส่ความยาวจริง)", parent=self.top)
             return False
-        data = {"pairs": [{"s": list(q["s"]), "d": list(q["d"])} for q in self.pairs], "kind": self.kind, "scale": self.scale, "rot_deg": self.rot_deg,
+        data = {"pairs": [{"s": list(q["s"]), "d": list(q["d"]), **({"l": q["l"]} if q.get("l") else {})} for q in self.pairs],
+                "skipped": sorted(self.skipped_saved), "kind": self.kind, "scale": self.scale, "rot_deg": self.rot_deg,
                 "origin": list(self.pairs[0]["d"]), "video_size": [self.video_img.shape[1], self.video_img.shape[0]],
                 "video_frame": self.frame_var.get(), "drone": {"path": self.drone_path, "frame": self.dframe_var.get()},
                 "info": {"rms_m": rep["rms_u"], "loo_rms_m": rep["loo_rms_u"], "unit": rep["unit"]}}
