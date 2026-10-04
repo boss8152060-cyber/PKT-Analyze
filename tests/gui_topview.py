@@ -124,6 +124,20 @@ zpx = m.topview_px(scene_far["cv"], np.asarray(zp, float))
 cx_, cy_ = (zpx[:, 0].min() + zpx[:, 0].max()) / 2.0, (zpx[:, 1].min() + zpx[:, 1].max()) / 2.0
 check("the zones are in the middle of the picture, also with a far vehicle in the data", abs(cx_ - scene_far["W"] / 2.0) < 0.06 * scene_far["W"] and abs(cy_ - scene_far["H"] / 2.0) < 0.06 * scene_far["H"], f"centre ({cx_:.0f}, {cy_:.0f}) in {scene_far['W']}x{scene_far['H']}")
 check("the zones fill a good part of the picture", (zpx[:, 0].max() - zpx[:, 0].min()) > 0.25 * scene_far["W"])
+# ---- a look before a run: the zones in metres with the calibration that is set now
+m.messagebox.showerror = lambda *a, **k: None
+app.run3_ppm_var.set("40")
+app.video_var.set(video)
+pw = app.preview_xy_plane()
+root.update()
+check("the preview opens before any run: a picture of the zones with a grid", pw is not None and pw.scene["base"].shape[1] / pw.scene["base"].shape[0] > 1.7)
+check("it lists the real length of every zone edge (Zone 1 = 1400 px x 500 px at 40 px/m = 35.0 m x 12.5 m)", "35.0" in "\n".join(pw.lines) and "12.5" in "\n".join(pw.lines) and "Zone 1" in "\n".join(pw.lines), "\n".join(pw.lines[:3]))
+check("it says which calibration is used", "PPM" in pw.lines[0] or "Perspective" in pw.lines[0] or "Align" in pw.lines[0], pw.lines[0])
+pw.destroy()
+saved_zones = app.zones
+app.zones = {name: [] for name in m.ZONE_NAMES}
+check("without zones the preview says so (no window)", app.preview_xy_plane() is None)
+app.zones = saved_zones
 png = app._run3_write_xy_plot(tracks, c, out_dir, video, display={})
 data = np.fromfile(png, dtype=np.uint8) if png else None
 img = cv2.imdecode(data, cv2.IMREAD_COLOR) if data is not None else None
