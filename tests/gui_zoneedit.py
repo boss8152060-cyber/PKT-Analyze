@@ -187,6 +187,16 @@ pp = ed.plan_of(np.asarray(pn, float))
 check("with the new file loaded the cross-road edges are vertical in the plane (to a pixel's rounding)", abs(pp[1][0] - pp[2][0]) < 0.08 and abs(pp[0][0] - pp[3][0]) < 0.08,
       f"{abs(pp[1][0] - pp[2][0]):.3f} m")
 check("a pixel's rounding is the only difference to what was edited", max(abs(pn[k][0] - ed.zones['Zone 2'][k][0]) for k in range(4)) <= 0.5 + 1e-9)
+# ---- one click: use the edited zones for the analysis
+ed.zones = {z_: [list(q) for q in v] for z_, v in ed.orig.items()}
+ed.make_perpendicular()
+app.zone_line_config_var.set(src_json)
+used = ed.use_for_analysis()
+check("'use for the analysis' writes <name>_aligned.json beside the original and the program takes it (no dialog)",
+      used == os.path.join(tmp, "clip_zones_aligned.json") and app.zone_line_config_var.get() == used, str(used))
+pu = ed.plan_of(np.asarray(app.zones["Zone 2"], float))
+check("the program's zones are the edited ones (cross-road edges vertical in the plane)", abs(pu[1][0] - pu[2][0]) < 0.08)
+check("the original zone file is still untouched", hashlib.md5(open(src_json, "rb").read()).hexdigest() == before_hash)
 ed.close()
 
 root.destroy()
