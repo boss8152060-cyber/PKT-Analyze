@@ -86,6 +86,36 @@ red = ((f5[..., 2] > 200) & (f5[..., 1] < 60) & (f5[..., 0] < 60)).sum()
 check("the reference point is yellow inside a zone and a red ring outside", yellow > 15 and red > 8, f"yellow {yellow}, red {red}")
 check("no boxes and no photo: the only large bright shapes are the points (the picture is mostly dark grid)", float((f5.mean(axis=2) > 120).mean()) < 0.01)
 
+# ---- vehicles outside every zone: show / dot / hide (X-Y outputs) ----
+def mark_px(f):
+    return int(((f[..., 2] > 200) & (f[..., 1] < 60) & (f[..., 0] < 60)).sum())           # red ring pixels (outside every zone)
+
+
+def label_px(f):
+    return int(((f[..., 1] > 200) & (f[..., 2] < 90) & (f[..., 0] < 90)).sum())           # green label text
+
+
+modes = {}
+for mode in ("show", "dot", "hide"):
+    pth = app._run3_write_topview_video(tracks, c, tempfile.mkdtemp(dir=tmp), video, display={"outside_zone_xy": mode, "draw_trail": True, "trail_length": 10})
+    fr_, _ = frame_at(pth, 30)                                                              # frame 31: tracks[1] and tracks[2] are both outside Zone 1
+    modes[mode] = (mark_px(fr_), label_px(fr_))
+check("X-Y video, outside a zone: show = point + labels, dot = point only, hide = nothing",
+      modes["show"][0] > 8 and modes["show"][1] > 50 and modes["dot"][0] > 8 and modes["dot"][1] == 0 and modes["hide"][0] == 0 and modes["hide"][1] == 0, str(modes))
+px_modes = {}
+for mode in ("show", "dot", "hide"):
+    pth = app._run3_write_xy_plot(tracks, c, tempfile.mkdtemp(dir=tmp), video, display={"outside_zone_xy": mode})
+    im_ = cv2.imdecode(np.fromfile(pth, dtype=np.uint8), cv2.IMREAD_COLOR)
+    px_modes[mode] = int((np.abs(im_.astype(int) - 38).sum(axis=2) > 120).sum())
+check("X-Y picture: hide draws less than dot, dot less than show (the tracks outside the zone)", px_modes["hide"] < px_modes["dot"] < px_modes["show"], str(px_modes))
+saved = app.get_settings()
+saved["outside_zone_normal"], saved["outside_zone_xy"] = "hide", "dot"
+app2 = m.Run1App(tk.Toplevel(root))
+app2.set_settings(saved)
+check("both choices are saved and loaded with the settings", app2.outside_zone_normal_var.get() == "hide" and app2.outside_zone_xy_var.get() == "dot" and
+      app2.get_settings()["outside_zone_normal"] == "hide" and app._runtime_snapshot(saved)["outside_zone_normal"] in ("dot", "hide", "show"))
+check("the defaults keep what was: normal video = point only, X-Y = in full", app.get_settings()["outside_zone_normal"] == "dot" and app.get_settings()["outside_zone_xy"] == "show")
+
 png = app._run3_write_xy_plot(tracks, c, out_dir, video, display={})
 data = np.fromfile(png, dtype=np.uint8) if png else None
 img = cv2.imdecode(data, cv2.IMREAD_COLOR) if data is not None else None
