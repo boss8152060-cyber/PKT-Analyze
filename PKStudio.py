@@ -8417,7 +8417,10 @@ class Run1App:
             cap0.release()
             if vw > 0 and vh > 0:
                 aspect = vw / vh
-        cv = topview_canvas(all_pts, max_px, aspect=aspect)
+        # the picture is centred on the study area (the zones, with room around them for vehicles that are about to enter); a vehicle far
+        # away does not move it. Without zones: all the points.
+        zone_pts = [tuple(q) for _z, pts_ in zone_m for q in pts_]
+        cv = topview_canvas(zone_pts, max_px, margin_m=6.0, aspect=aspect) if len(zone_pts) >= 3 else topview_canvas(all_pts, max_px, aspect=aspect)
         W, H = cv["w"], cv["h"]
         base = np.full((H, W, 3), 38, np.uint8)
         step = 5.0 if max(W, H) / cv["scale"] <= 80 else 10.0

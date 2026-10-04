@@ -41,7 +41,7 @@ root = tk.Tk()
 root.withdraw()
 app = m.Run1App(root)
 app.zones = {name: [] for name in m.ZONE_NAMES}
-app.zones["Zone 1"] = [(100, 100), (500, 100), (500, 300), (100, 300)]
+app.zones["Zone 1"] = [(100, 100), (1500, 100), (1500, 600), (100, 600)]
 tracks = {1: [], 2: []}
 for k in range(40):
     t = k / 10.0
@@ -116,6 +116,14 @@ check("both choices are saved and loaded with the settings", app2.outside_zone_n
       app2.get_settings()["outside_zone_normal"] == "hide" and app._runtime_snapshot(saved)["outside_zone_normal"] in ("dot", "hide", "show"))
 check("the defaults keep what was: normal video = point only, X-Y = in full", app.get_settings()["outside_zone_normal"] == "dot" and app.get_settings()["outside_zone_xy"] == "show")
 
+# ---- the picture is centred on the zones (a far vehicle does not push them to a corner)
+far = {1: tracks[1] + [{"frame": "99", "timestamp": "9.9", "_timestamp": 9.9, "class_name": "Car", "zone": "", "confidence": "0.9", "_m": (-60.0, -80.0)}], 2: tracks[2]}
+scene_far = app._run3_topview_scene(far, c, video, {})
+zp = [q for _z, pts_ in [(zn, app._run3_to_metric(np.asarray(poly, float), c)) for zn, poly in app._zone_polygons()] for q in pts_]
+zpx = m.topview_px(scene_far["cv"], np.asarray(zp, float))
+cx_, cy_ = (zpx[:, 0].min() + zpx[:, 0].max()) / 2.0, (zpx[:, 1].min() + zpx[:, 1].max()) / 2.0
+check("the zones are in the middle of the picture, also with a far vehicle in the data", abs(cx_ - scene_far["W"] / 2.0) < 0.06 * scene_far["W"] and abs(cy_ - scene_far["H"] / 2.0) < 0.06 * scene_far["H"], f"centre ({cx_:.0f}, {cy_:.0f}) in {scene_far['W']}x{scene_far['H']}")
+check("the zones fill a good part of the picture", (zpx[:, 0].max() - zpx[:, 0].min()) > 0.25 * scene_far["W"])
 png = app._run3_write_xy_plot(tracks, c, out_dir, video, display={})
 data = np.fromfile(png, dtype=np.uint8) if png else None
 img = cv2.imdecode(data, cv2.IMREAD_COLOR) if data is not None else None
