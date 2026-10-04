@@ -970,6 +970,22 @@ class GroundPlaneTests(unittest.TestCase):
         self.assertIn("error", CORE["solve_ground_homography"](self.to_img(self.PLANE[:3]), [(0, 1, 30), (1, 2, 20)], [], [], self.SIZE))
         self.assertIn("error", CORE["solve_ground_homography"](self.to_img(self.PLANE), [], a, b, self.SIZE))
 
+    def test_distances_are_read_with_point_names(self):
+        labels = ["Z1.1", "Z1.2", "Z2.1"]
+        d, bad = CORE["parse_ground_distances"]("Z1.1-Z1.2=12.5, z1.2 - Z2.1 : 8 m; Z1.1-Z9.9=3, nonsense", labels)
+        self.assertEqual([(i, j, round(v, 1)) for i, j, v in d], [(0, 1, 12.5), (1, 2, 8.0)])
+        self.assertEqual(bad, ["Z1.1-Z9.9=3", "nonsense"])
+        d2, bad2 = CORE["parse_ground_distances"]("P1-P2=17, 2-3 = 8.4; P1\u2192P4=3 m, P2-P2=4")
+        self.assertEqual([(i, j, round(v, 1)) for i, j, v in d2], [(0, 1, 17.0), (1, 2, 8.4), (0, 3, 3.0)])
+        self.assertEqual(bad2, ["P2-P2=4"])
+        self.assertEqual(CORE["format_ground_distances"]([(0, 1, 12.5)], labels), "Z1.1-Z1.2=12.5")
+
+    def test_ground_points_keep_their_names_and_the_old_format_loads(self):
+        txt = CORE["encode_ground_points"]([(10.0, 20.5), (30.0, 40.0)], ["Z1.1", "P1"])
+        self.assertEqual(CORE["decode_ground_points"](txt), ([(10.0, 20.5), (30.0, 40.0)], ["Z1.1", "P1"]))
+        self.assertEqual(CORE["decode_ground_points"]("[[1, 2], [3, 4]]"), ([(1.0, 2.0), (3.0, 4.0)], ["P1", "P2"]))
+        self.assertEqual(CORE["decode_ground_points"]("garbage"), ([], []))
+
     def test_a_wrong_distance_shows_in_the_report(self):
         a, b = self.lines(0.3)
         out = CORE["solve_ground_homography"](self.to_img(self.PLANE, 0.3, 5), [(0, 1, 30), (1, 2, 20), (2, 3, 30), (3, 0, 20), (0, 2, 50)], a, b, self.SIZE)

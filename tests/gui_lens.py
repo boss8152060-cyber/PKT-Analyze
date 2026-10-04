@@ -491,6 +491,60 @@ check("typed distances are read (and the unreadable pieces named)", [(a_, b_, ro
 app.run3_cal_mode_var.set("rect")
 app.clear_road_lines()
 
+# ---- the zone corners are the ground points: nothing to click, only the distances to type
+zone_ground = {"Zone 1": np.array([[12.0, 14.0], [24.0, 14.0], [24.0, 22.0], [12.0, 22.0]]),
+               "Zone 2": np.array([[24.0, 14.0], [36.0, 14.0], [36.0, 22.0], [24.0, 22.0]])}
+app.zones = {name: [] for name in m.ZONE_NAMES}
+for zn, gpts in zone_ground.items():
+    app.zones[zn] = [tuple(int(round(v)) for v in q) for q in to_rec(gpts)]
+for v_ in (app.run3_perspective_p1_var, app.run3_perspective_p2_var, app.run3_perspective_p3_var, app.run3_perspective_p4_var,
+           app.run3_perspective_l12_var, app.run3_perspective_l23_var, app.run3_perspective_l34_var, app.run3_perspective_l41_var):
+    v_.set("")
+app.run3_ground_points_var.set("")
+app.run3_ground_dists_var.set("")
+app.run3_cal_mode_var.set("rect")
+app.clear_road_lines()
+app.run3_perspective_enabled_var.set(False)
+zd = app.open_road_line_tool()
+root.update()
+check("the zone corners show up as ground points by themselves", zd.cal_labels == ["Z1.1", "Z1.2", "Z1.3", "Z1.4", "Z2.1", "Z2.2", "Z2.3", "Z2.4"], str(zd.cal_labels))
+check("with nothing typed, the zone corners alone change nothing", zd._apply_perspective() is False and app.run3_cal_mode_var.get() == "rect")
+first = True
+for grp, glines in (("A", [np.array([[12.0, y], [36.0, y]]) for y in (14.0, 18.0, 22.0)]), ("B", [np.array([[x, 12.0], [x, 24.0]]) for x in (14.0, 34.0)])):
+    for gl in glines:
+        if not first:
+            zd.new_line()
+        first = False
+        zd.set_type("white_solid")
+        zd.set_group(grp)
+        zd.mode_var.set("lines")
+        for q_ in to_rec(np.linspace(gl[0], gl[1], 6)):
+            zd.add_point(*q_)
+ew = zd.open_edge_table()
+root.update()
+check("the edge table lists every zone edge", ew is not None and len(zd.edge_vars) == 8 and ("Z1.1", "Z1.2") in zd.edge_vars)
+zd.edge_vars[("Z1.1", "Z1.2")].set("12")
+zd.edge_vars[("Z1.2", "Z1.3")].set("8")
+zd.edge_vars[("Z2.2", "Z2.3")].set("8")
+zd.edge_vars[("Z2.1", "Z2.2")].set("12")
+zd.edge_ok()
+root.update()
+check("typing the edge lengths fills the distances", parse_ok := (set(m.parse_ground_distances(zd.dists_var.get(), zd.cal_labels)[0]) == {(0, 1, 12.0), (1, 2, 8.0), (5, 6, 8.0), (4, 5, 12.0)}), zd.dists_var.get())
+check("zone corners + their edge lengths + road lines give the map", zd.apply() is True and app.run3_cal_mode_var.get() == "geometry")
+cfg_z = app._run3_snapshot_config()
+test_ground = np.array([[20.0, 16.0], [30.0, 20.0], [14.0, 23.0], [40.0, 13.0]])
+err_z = np.abs(app._run3_to_metric(to_rec(test_ground), cfg_z) - (test_ground - np.array([12.0, 14.0]))).max()
+check("positions come out right with the zone corners as ground points", err_z < 0.2, f"{err_z:.4f} m")
+zd2 = app.open_road_line_tool()
+root.update()
+check("reopening keeps the zone-corner names", zd2.cal_labels[:2] == ["Z1.1", "Z1.2"] and len(zd2.cal_pts) == 8)
+zd2.close()
+app.zones = {name: [] for name in m.ZONE_NAMES}
+app.run3_cal_mode_var.set("rect")
+app.run3_ground_points_var.set("")
+app.run3_ground_dists_var.set("")
+app.clear_road_lines()
+
 check("the Topview has the video's shape", abs(Wf / Hf - CW / CH) < 0.02, f"{Wf}x{Hf}")
 vid_b = app._run3_write_topview_video(tr, dict(base_cfg, lens=None, lens_size=None), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video)
 ncc_b = ncc_of(vid_b)

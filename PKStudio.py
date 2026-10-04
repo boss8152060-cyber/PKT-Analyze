@@ -554,6 +554,7 @@ CONFLICT_ZONE_IDS = (3, 6)              # V28: conflict zones (PET / TTC); ordin
 ZONE_NAMES = [f"Zone {i}" for i in ZONE_IDS]
 
 # ==== CORE-BEGIN (pure logic, no GUI: unit-tested by tests/test_core.py) ====
+import json
 import math
 import re
 import numpy as np
@@ -1386,23 +1387,63 @@ def estimate_lens_from_lines(lines, size, use_k2=False, min_gain=0.3):
     return {"lens": lens, "bend_before": before, "bend_after": after, "lines": len(lines), "points": int(sum(len(l) for l in lines))}
 
 
-def parse_ground_distances(text):
-    """'P1-P2=17, P2-P3=8.4' -> ([(0, 1, 17.0), (1, 2, 8.4)], [text pieces that could not be read]). Points are numbered from 1."""
+def parse_ground_distances(text, labels=None):
+    """'P1-P2=17, Z1.1-Z1.2=8.4' -> ([(i, j, metres)], [pieces that could not be read]). `labels` = the names of the ground points in order
+    (e.g. ['Z1.1', 'Z1.2', ...]); without it only 'P<number>' / a bare number (counted from 1) is understood."""
+    lab = {str(l).upper(): k for k, l in enumerate(labels)} if labels else None
+    tok = r"([A-Za-z]{0,2}\d+(?:\.\d+)?)"
+    pat = re.compile(tok + r"\s*(?:-|\u2013|\u2192|>|~|to)\s*" + tok + r"\s*(?:=|:)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|\u0e21\.?)?")
+
+    def index(t):
+        t = t.upper()
+        if t[0].isdigit():
+            t = "P" + t
+        if lab is not None:
+            return lab.get(t)
+        return int(t[1:]) - 1 if (t.startswith("P") and t[1:].isdigit() and int(t[1:]) >= 1) else None
+
     out, bad = [], []
     for piece in re.split(r"[,;\n]+", str(text or "")):
         piece = piece.strip()
         if not piece:
             continue
-        m_ = re.fullmatch(r"[Pp]?\s*(\d+)\s*(?:-|\u2013|\u2192|>|to)\s*[Pp]?\s*(\d+)\s*(?:=|:)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|\u0e21\.?)?", piece)
-        if not m_ or int(m_.group(1)) == int(m_.group(2)) or int(m_.group(1)) < 1 or int(m_.group(2)) < 1 or float(m_.group(3)) <= 0:
+        m_ = pat.fullmatch(piece)
+        i = index(m_.group(1)) if m_ else None
+        j = index(m_.group(2)) if m_ else None
+        if m_ is None or i is None or j is None or i == j or float(m_.group(3)) <= 0:
             bad.append(piece)
         else:
-            out.append((int(m_.group(1)) - 1, int(m_.group(2)) - 1, float(m_.group(3))))
+            out.append((i, j, float(m_.group(3))))
     return out, bad
 
 
-def format_ground_distances(dists):
-    return ", ".join(f"P{i + 1}-P{j + 1}={d:g}" for i, j, d in dists)
+def format_ground_distances(dists, labels=None):
+    name = (lambda k: labels[k]) if labels else (lambda k: f"P{k + 1}")
+    return ", ".join(f"{name(i)}-{name(j)}={d:g}" for i, j, d in dists)
+
+
+def encode_ground_points(pts, labels):
+    return json.dumps([{"l": str(l), "p": [round(float(x), 2), round(float(y), 2)]} for (x, y), l in zip(pts, labels)])
+
+
+def decode_ground_points(text):
+    """Saved ground points -> ([(x, y)], [labels]); the older format (a list of [x, y]) gets the labels P1, P2 ..."""
+    try:
+        data = json.loads(text or "[]")
+    except (ValueError, TypeError):
+        return [], []
+    pts, labels = [], []
+    for n, item in enumerate(data, start=1):
+        try:
+            if isinstance(item, dict):
+                pts.append((float(item["p"][0]), float(item["p"][1])))
+                labels.append(str(item.get("l", f"P{n}")))
+            else:
+                pts.append((float(item[0]), float(item[1])))
+                labels.append(f"P{n}")
+        except (KeyError, TypeError, ValueError, IndexError):
+            return [], []
+    return pts, labels
 
 
 # ---------------- Ground plane from road geometry (parallel / perpendicular lines + real distances) ----------------
@@ -2474,8 +2515,11 @@ class RoadLineDialog(LensLineDialog):
         self.top.title("ปรับเทียบกล้อง — เลนส์ + พื้นถนน + เส้นถนน")
         sw_, sh_ = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
         self.top.geometry(f"{min(1150, sw_ - 40)}x{min(930, sh_ - 90)}+10+10")
-        self.cal_pts = []
+        self.cal_pts, self.cal_labels = [], []
         self._load_cal_from_app()
+        if not self.cal_pts and self.zone_corner_points():
+            self.use_zone_corners()                              # the zone corners appear by themselves: only the distances are left to type
+            self.msg_var.set("โชว์มุมโซนเป็นจุดพื้นให้แล้ว — พิมพ์ระยะจริงระหว่างจุด (Z1.1-Z1.2=12.5) หรือกด กรอกระยะตามขอบโซน")
         self.types = [ROAD_LINE_DEFAULT]
         self.straight = [True]
         self.groups = [""]
@@ -2492,24 +2536,22 @@ class RoadLineDialog(LensLineDialog):
             self.lens = tuple(lens_now)                      # the lens already set: the corrected picture can be shown at once
         self.refresh()
 
-    # ----- the ground points (any number) + the real distances between them -----
+    # ----- the ground points (the zone corners, or clicked ones) + the real distances between them -----
+    MAX_GROUND_POINTS = 80
+
     def _load_cal_from_app(self):
         app = self.app
-        self.cal_pts = []
-        try:
-            pts = json.loads(app.run3_ground_points_var.get() or "[]")
-            self.cal_pts = [(float(x), float(y)) for x, y in pts]
-        except (ValueError, TypeError):
-            self.cal_pts = []
+        self.cal_pts, self.cal_labels = decode_ground_points(app.run3_ground_points_var.get())
         if not self.cal_pts:                                           # an older, 4-corner calibration
             try:
                 pts = [app._run3_parse_xy(v.get(), n) for v, n in ((app.run3_perspective_p1_var, "P1"), (app.run3_perspective_p2_var, "P2"),
                                                                      (app.run3_perspective_p3_var, "P3"), (app.run3_perspective_p4_var, "P4"))]
                 self.cal_pts = [tuple(q) for q in pts]
+                self.cal_labels = ["P1", "P2", "P3", "P4"]
             except Exception:
-                self.cal_pts = []
+                self.cal_pts, self.cal_labels = [], []
         text = app.run3_ground_dists_var.get().strip()
-        if not text and self.cal_pts:
+        if not text and self.cal_pts and self.cal_labels[:4] == ["P1", "P2", "P3", "P4"]:
             try:
                 sides = [float(v.get()) for v in (app.run3_perspective_l12_var, app.run3_perspective_l23_var, app.run3_perspective_l34_var, app.run3_perspective_l41_var)]
                 text = format_ground_distances([(0, 1, sides[0]), (1, 2, sides[1]), (2, 3, sides[2]), (3, 0, sides[3])])
@@ -2517,23 +2559,126 @@ class RoadLineDialog(LensLineDialog):
                 text = ""
         self.dists_var.set(text)
 
-    MAX_GROUND_POINTS = 12
+    def zone_corner_points(self):
+        """Every corner of every zone drawn on the video: [(label 'Z<zone>.<corner>', (x, y))] (corners numbered from 1 in drawing order)."""
+        out = []
+        for zname in ZONE_NAMES:
+            poly = self.app.zones.get(zname, [])
+            if len(poly) < 3:
+                continue
+            num = zname.split()[-1]
+            for k, (x, y) in enumerate(poly, start=1):
+                out.append((f"Z{num}.{k}", (float(x), float(y))))
+        return out
+
+    def use_zone_corners(self):
+        """The ground points = the corners of the zones (nothing to click); then only the real distances have to be typed."""
+        zc = self.zone_corner_points()
+        if not zc:
+            self.msg_var.set("ยังไม่มีโซนที่วาดไว้ (โหลดไฟล์โซนในแท็บ ② ก่อน)")
+            return False
+        self.cal_labels = [l for l, _ in zc]
+        self.cal_pts = [pt for _, pt in zc]
+        self.msg_var.set(f"ใช้มุมของโซนเป็นจุดพื้น {len(zc)} จุด (ชื่อ Z<โซน>.<มุม>) — พิมพ์ระยะจริงระหว่างจุด เช่น Z1.1-Z1.2=12.5 หรือกด กรอกระยะตามขอบโซน")
+        self.refresh()
+        return True
+
+    def edge_list(self):
+        """The edges of the zones as pairs of ground-point labels: [(zone name, label a, label b)]."""
+        out = []
+        for zname in ZONE_NAMES:
+            poly = self.app.zones.get(zname, [])
+            if len(poly) < 3:
+                continue
+            num = zname.split()[-1]
+            for k in range(len(poly)):
+                out.append((zname, f"Z{num}.{k + 1}", f"Z{num}.{(k + 1) % len(poly) + 1}"))
+        return out
+
+    def set_edge_distances(self, values):
+        """values = {(label a, label b): metres} -> merged into the typed distances (an entry for the same pair is replaced)."""
+        cur, _bad = parse_ground_distances(self.dists_var.get(), self.cal_labels)
+        names = self.cal_labels
+        keep = [(i, j, d) for i, j, d in cur if not any({names[i], names[j]} == {a, b} for (a, b) in values)]
+        for (a, b), d in values.items():
+            if a in names and b in names and d and d > 0:
+                keep.append((names.index(a), names.index(b), float(d)))
+        self.dists_var.set(format_ground_distances(keep, names))
+        self.refresh()
+
+    def open_edge_table(self):
+        """A small window: one line per zone edge, type its real length."""
+        if not self.cal_pts or not any(l.startswith("Z") for l in self.cal_labels):
+            if not self.use_zone_corners():
+                return None
+        edges = self.edge_list()
+        win = tk.Toplevel(self.top)
+        win.title("ระยะจริงตามขอบโซน (เมตร)")
+        win.geometry("+60+60")
+        ttk.Label(win, text="ใส่ความยาวจริงของขอบโซนที่รู้ (เว้นว่างได้) — ขอบที่ใส่แล้วจะถูกใช้ปรับเทียบ", wraplength=520).pack(anchor="w", padx=8, pady=6)
+        holder = ttk.Frame(win)
+        holder.pack(fill="both", expand=True, padx=8)
+        cv_ = tk.Canvas(holder, height=min(480, 26 * len(edges) + 10), width=520, highlightthickness=0)
+        sb = ttk.Scrollbar(holder, orient="vertical", command=cv_.yview)
+        inner = ttk.Frame(cv_)
+        inner.bind("<Configure>", lambda e: cv_.configure(scrollregion=cv_.bbox("all")))
+        cv_.create_window((0, 0), window=inner, anchor="nw")
+        cv_.configure(yscrollcommand=sb.set)
+        cv_.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        cur, _b = parse_ground_distances(self.dists_var.get(), self.cal_labels)
+        have = {frozenset((self.cal_labels[i], self.cal_labels[j])): d for i, j, d in cur}
+        self.edge_vars = {}
+        for row, (zname, a, b) in enumerate(edges):
+            ttk.Label(inner, text=f"{zname}   {a} → {b}", width=26).grid(row=row, column=0, sticky="w", pady=1)
+            v = tk.StringVar(value=(f"{have[frozenset((a, b))]:g}" if frozenset((a, b)) in have else ""))
+            ttk.Entry(inner, textvariable=v, width=10).grid(row=row, column=1, sticky="w")
+            ttk.Label(inner, text="ม.").grid(row=row, column=2, sticky="w", padx=4)
+            self.edge_vars[(a, b)] = v
+
+        def ok():
+            vals = {}
+            for key, v in self.edge_vars.items():
+                try:
+                    if v.get().strip():
+                        vals[key] = float(v.get().strip())
+                except ValueError:
+                    pass
+            self.set_edge_distances(vals)
+            win.destroy()
+
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", pady=6)
+        ttk.Button(bar, text="ตกลง", command=ok).pack(side="right", padx=8)
+        ttk.Button(bar, text="ยกเลิก", command=win.destroy).pack(side="right")
+        self.edge_win = win
+        self.edge_ok = ok
+        return win
+
+    def _next_p_label(self):
+        used = {l.upper() for l in self.cal_labels}
+        n = 1
+        while f"P{n}" in used:
+            n += 1
+        return f"P{n}"
 
     def add_cal_point(self, x, y):
-        """The next ground point (a point given in the corrected picture is carried back to the recorded one)."""
+        """A ground point clicked on the picture (a point given in the corrected picture is carried back to the recorded one)."""
         if len(self.cal_pts) >= self.MAX_GROUND_POINTS:
             self.msg_var.set(f"มีจุดพื้นครบ {self.MAX_GROUND_POINTS} จุดแล้ว — กด ล้างจุด P เพื่อคลิกใหม่")
             return False
         pt = (float(x), float(y))
         if self.fixed_var.get() and self.lens is not None:
             pt = tuple(lens_distort([pt], self.size, self.lens)[0])
+        label = self._next_p_label()
         self.cal_pts.append(pt)
-        self.msg_var.set(f"จุด P{len(self.cal_pts)} แล้ว — จุดพื้นกี่จุดก็ได้ (4 จุดขึ้นไป) แล้วพิมพ์ระยะจริงระหว่างจุด เช่น P1-P2=17, P2-P3=8.4")
+        self.cal_labels.append(label)
+        self.msg_var.set(f"จุด {label} แล้ว — พิมพ์ระยะจริงระหว่างจุด เช่น {label}-P1=17")
         self.refresh()
         return True
 
     def clear_cal_points(self):
-        self.cal_pts = []
+        self.cal_pts, self.cal_labels = [], []
         self.refresh()
 
     def add_point(self, x, y):
@@ -2545,6 +2690,7 @@ class RoadLineDialog(LensLineDialog):
         if self.mode_var.get() == "points":
             if self.cal_pts:
                 self.cal_pts.pop()
+                self.cal_labels.pop()
             self.refresh()
             return
         super().undo_point()
@@ -2556,15 +2702,15 @@ class RoadLineDialog(LensLineDialog):
         pts = np.asarray(self.cal_pts, dtype=float)
         shown = lens_undistort(pts, self.size, self.lens) if (show_fixed and self.lens is not None) else pts
         c = np.round(shown * k + np.array([ox, oy])).astype(np.int32)
-        dists, _bad = parse_ground_distances(self.dists_var.get()) if hasattr(self, "dists_var") else ([], [])
+        dists, _bad = parse_ground_distances(self.dists_var.get(), self.cal_labels) if hasattr(self, "dists_var") else ([], [])
         for i, j, d in dists:                                           # a thin line + the value for every measured distance
             if i < len(c) and j < len(c):
                 a_, b_ = tuple(int(v) for v in c[i]), tuple(int(v) for v in c[j])
                 cv2.line(out, a_, b_, (0, 140, 255), 1, cv2.LINE_AA)
                 cv2.putText(out, f"{d:g} m", ((a_[0] + b_[0]) // 2 + 4, (a_[1] + b_[1]) // 2 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1, cv2.LINE_AA)
-        for n, q in enumerate(c, start=1):
-            cv2.circle(out, (int(q[0]), int(q[1])), 7, (0, 140, 255), -1, cv2.LINE_AA)
-            cv2.putText(out, f"P{n}", (int(q[0]) + 9, int(q[1]) - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2, cv2.LINE_AA)
+        for q, label in zip(c, self.cal_labels):
+            cv2.circle(out, (int(q[0]), int(q[1])), 6, (0, 140, 255), -1, cv2.LINE_AA)
+            cv2.putText(out, label, (int(q[0]) + 8, int(q[1]) - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2, cv2.LINE_AA)
 
     def _fail(self, text):
         self.msg_var.set(text)
@@ -2576,20 +2722,20 @@ class RoadLineDialog(LensLineDialog):
         the input is incomplete / does not work out (an error is shown and nothing is written)."""
         app = self.app
         text = self.dists_var.get().strip()
+        if not text and not any(not l.startswith("Z") for l in self.cal_labels):
+            return False                                               # only the zone corners were loaded, no distance typed: nothing to do
         if not self.cal_pts and not text:
             return False
-        dists, bad = parse_ground_distances(text)
+        dists, bad = parse_ground_distances(text, self.cal_labels)
         if bad:
-            return self._fail("อ่านระยะไม่ได้: " + "; ".join(bad) + "  (รูปแบบ: P1-P2=17, P2-P3=8.4)")
+            return self._fail("อ่านระยะไม่ได้ หรือชื่อจุดไม่มี: " + "; ".join(bad) + "  (รูปแบบ: P1-P2=17 หรือ Z1.1-Z1.2=12.5)")
         if len(self.cal_pts) < 2 or not dists:
             return self._fail("ต้องมีจุดพื้นอย่างน้อย 2 จุด และระยะจริงอย่างน้อย 1 ค่า (หรือกด ล้างจุด P ถ้าไม่ใช้)")
-        if any(i >= len(self.cal_pts) or j >= len(self.cal_pts) for i, j, _ in dists):
-            return self._fail("มีระยะที่อ้างถึงจุดที่ยังไม่ได้คลิก (ตรวจเลข P)")
         self._sync_types()
         la = [l for l, g in zip(self.lines, self.groups) if g == "A" and len(l) >= 2]
         lb = [l for l, g in zip(self.lines, self.groups) if g == "B" and len(l) >= 2]
         side_pairs = {frozenset(q) for q in ((0, 1), (1, 2), (2, 3), (3, 0))}
-        classic = (len(self.cal_pts) == 4 and not la and not lb and len(dists) == 4 and {frozenset((i, j)) for i, j, _ in dists} == side_pairs)
+        classic = (self.cal_labels == ["P1", "P2", "P3", "P4"] and not la and not lb and len(dists) == 4 and {frozenset((i, j)) for i, j, _ in dists} == side_pairs)
         lens = self.lens
         if lens is None:
             try:
@@ -2624,14 +2770,14 @@ class RoadLineDialog(LensLineDialog):
             worst = max(res["dist_report"], key=lambda r: abs(r["got_m"] - r["given_m"]))
             lrms = res["line_rms_m"]["A"] + res["line_rms_m"]["B"]
             info = (f"พื้น: {res['method']} · จุด {res['n_points']} · ระยะ {res['n_dists']} ค่า คลาดระยะเฉลี่ย {res['rms_dist_m']:.2f} ม. "
-                    f"(แย่สุด P{worst['i'] + 1}-P{worst['j'] + 1}: ให้ {worst['given_m']:g} ได้ {worst['got_m']:.2f} ม.)"
+                    f"(แย่สุด {self.cal_labels[worst['i']]}-{self.cal_labels[worst['j']]}: ให้ {worst['given_m']:g} ได้ {worst['got_m']:.2f} ม.)"
                     + (f" · เส้นคลาด {max(lrms):.2f} ม." if lrms else ""))
             for var in (app.run3_perspective_p1_var, app.run3_perspective_p2_var, app.run3_perspective_p3_var, app.run3_perspective_p4_var,
                         app.run3_perspective_l12_var, app.run3_perspective_l23_var, app.run3_perspective_l34_var, app.run3_perspective_l41_var):
                 var.set("")
             app.run3_cal_mode_var.set("geometry")
-        app.run3_ground_points_var.set(json.dumps([[round(x, 2), round(y, 2)] for x, y in self.cal_pts]))
-        app.run3_ground_dists_var.set(format_ground_distances(dists))
+        app.run3_ground_points_var.set(encode_ground_points(self.cal_pts, self.cal_labels))
+        app.run3_ground_dists_var.set(format_ground_distances(dists, self.cal_labels))
         app.run3_perspective_enabled_var.set(True)
         ppm = [math.hypot(self.cal_pts[j][0] - self.cal_pts[i][0], self.cal_pts[j][1] - self.cal_pts[i][1]) / d for i, j, d in dists]
         app.run3_ppm_var.set(f"{sum(ppm) / len(ppm):.6f}")
@@ -2737,6 +2883,8 @@ class RoadLineDialog(LensLineDialog):
         ttk.Radiobutton(modef, text="วาดเส้นถนน", variable=self.mode_var, value="lines").pack(side="left", padx=4)
         ttk.Radiobutton(modef, text="จุดพื้น P1–P4", variable=self.mode_var, value="points").pack(side="left", padx=4)
         ttk.Button(modef, text="ล้างจุด P", command=self.clear_cal_points).pack(side="left", padx=4)
+        ttk.Button(modef, text="ใช้มุมโซนเป็นจุดพื้น", command=self.use_zone_corners).pack(side="left", padx=4)
+        ttk.Button(modef, text="กรอกระยะตามขอบโซน…", command=self.open_edge_table).pack(side="left", padx=4)
         appv = self.app
         self.group_var = tk.StringVar(value=self.GROUP_LABELS[""])
         ttk.Label(bar, text="ทิศของเส้น").grid(row=3, column=6, sticky="e", padx=(10, 2))
@@ -2744,7 +2892,7 @@ class RoadLineDialog(LensLineDialog):
         gb.grid(row=3, column=7, columnspan=2, sticky="w")
         gb.bind("<<ComboboxSelected>>", lambda e: self._on_group_changed())
         self.dists_var = tk.StringVar(value="")
-        lenf = ttk.LabelFrame(bar, text="ระยะจริงระหว่างจุดพื้น (เมตร) — พิมพ์กี่ค่าก็ได้ ระหว่างจุดคู่ไหนก็ได้ เช่น  P1-P2=17, P2-P3=8.4, P1-P3=19", padding=4)
+        lenf = ttk.LabelFrame(bar, text="ระยะจริงระหว่างจุดพื้น (เมตร) — กี่ค่าก็ได้ ระหว่างจุดคู่ไหนก็ได้ เช่น  Z1.1-Z1.2=12.5, Z2.2-Z2.3=8.4  หรือจุดที่คลิก P1-P2=17", padding=4)
         lenf.grid(row=4, column=0, columnspan=9, sticky="ew", pady=(6, 0))
         ent = ttk.Entry(lenf, textvariable=self.dists_var, width=110)
         ent.pack(side="left", padx=4, fill="x", expand=True)
@@ -6148,7 +6296,7 @@ class Run1App:
             if bool(self.run3_perspective_enabled_var.get()) and str(self.run3_cal_mode_var.get()) == "geometry":
                 lines_ = self.get_road_lines()
                 na, nb = sum(1 for l in lines_ if l.get("group") == "A"), sum(1 for l in lines_ if l.get("group") == "B")
-                nd = len(parse_ground_distances(self.run3_ground_dists_var.get())[0])
+                nd = len(parse_ground_distances(self.run3_ground_dists_var.get(), decode_ground_points(self.run3_ground_points_var.get())[1])[0])
                 floor = f"พื้น: จากเส้นขนาน/ตั้งฉาก (ตามถนน {na} · ตั้งฉาก {nb} เส้น) + {nd} ระยะ"
             elif bool(self.run3_perspective_enabled_var.get()) and str(self.run3_perspective_p1_var.get()).strip():
                 floor = f"พื้น: Perspective 4 จุด ({self.run3_perspective_length_var.get()}×{self.run3_perspective_width_var.get()} ม.)"
@@ -6264,11 +6412,8 @@ class Run1App:
 
     def _run3_ground_inputs(self):
         """Ground points, distances and the two groups of lines of the 'geometry' calibration, all in recorded pixels."""
-        try:
-            pts = [(float(x), float(y)) for x, y in json.loads(self.run3_ground_points_var.get() or "[]")]
-        except (ValueError, TypeError):
-            pts = []
-        dists, bad = parse_ground_distances(self.run3_ground_dists_var.get())
+        pts, labels = decode_ground_points(self.run3_ground_points_var.get())
+        dists, bad = parse_ground_distances(self.run3_ground_dists_var.get(), labels)
         lines = self.get_road_lines()
         la = [[tuple(q) for q in l["points"]] for l in lines if l.get("group") == "A"]
         lb = [[tuple(q) for q in l["points"]] for l in lines if l.get("group") == "B"]
