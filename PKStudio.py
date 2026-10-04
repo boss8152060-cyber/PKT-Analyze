@@ -5066,6 +5066,21 @@ class Run1App:
             zs = sorted(int(k) for k in self.run3_zone_calibrations)
             return ("ปรับเทียบรายโซนแล้ว: " + ", ".join(f"Zone {z}" for z in zs)) if zs else "ยังไม่มีการปรับเทียบรายโซน"
 
+        def zone_quad_points(key):
+            """The 4 corners of Zone <key> as drawn (a zone with more corners is reduced to its 4 main corners); [] when there are none."""
+            poly = self.zones.get(f"Zone {key}", [])
+            if len(poly) < 4:
+                return []
+            if len(poly) == 4:
+                return [(float(x), float(y)) for x, y in poly]
+            cnt = np.array(poly, dtype=np.float32).reshape(-1, 1, 2)
+            peri = cv2.arcLength(cnt, True)
+            for eps in np.linspace(0.005, 0.30, 80) * peri:
+                ap = cv2.approxPolyDP(cnt, float(eps), True)
+                if len(ap) == 4:
+                    return [(float(q[0][0]), float(q[0][1])) for q in ap]
+            return []
+
         def on_mode_change(event=None):
             ctx["drafts"][ctx["mode"]] = current_data()
             label = mode_var.get()
@@ -5077,9 +5092,17 @@ class Run1App:
                 load_data(base_initial)
             else:
                 saved = self.run3_zone_calibrations.get(key)
-                load_data({"points": saved["points"], "lengths": saved["lengths"]} if saved else {})
+                quad = [] if saved else zone_quad_points(key)         # no saved calibration: the zone's own corners appear as P1-P4
+                load_data({"points": saved["points"], "lengths": saved["lengths"]} if saved else ({"points": quad} if quad else {}))
             apply_button.config(text="✅ Apply Calibration" if key == "base" else "✅ บันทึกโซนนี้")
             delete_zone_button.state(["disabled"] if key == "base" else ["!disabled"])
+            if key != "base" and len(state["points"]) == 4 and not self.run3_zone_calibrations.get(key) and all(not v.get().strip() for v in length_vars):
+                pp = state["points"]
+                px = [math.hypot(pp[(i + 1) % 4][0] - pp[i][0], pp[(i + 1) % 4][1] - pp[i][1]) for i in range(4)]
+                mode_status_var.set(f"Zone {key}: ใส่จุด P1–P4 ให้แล้วจากมุมโซน — กรอกระยะจริง 4 ด้านแล้วกด บันทึกโซนนี้ "
+                                    f"(ด้านในภาพยาว P1→P2 {px[0]:.0f} · P2→P3 {px[1]:.0f} · P3→P4 {px[2]:.0f} · P4→P1 {px[3]:.0f} พิกเซล — ด้านที่ยาวในภาพมักเป็นด้านตามถนน)")
+                render()
+                return
             mode_status_var.set("" if key == "base" else f"โหมด Zone {key}: คลิก P1–P4 ให้คลุมพื้นที่ถนนของโซนนี้ แล้วกรอกระยะจริง 4 ด้าน — {zone_summary_text()}")
             render()
 
