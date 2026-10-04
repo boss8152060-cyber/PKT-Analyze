@@ -2135,6 +2135,19 @@ def normalize_road_line(item):
     return kind, [(float(x), float(y)) for x, y in pts]
 
 
+STRAIGHT_SNAP_MAX_BEND = 0.015          # a line marked 'straight' is snapped to its best straight line when its clicks bend less than 1.5 %
+
+
+def snap_straight(u):
+    """The best straight line through the points u (N x 2): its two end points (the extreme clicks projected on it)."""
+    u = np.asarray(u, dtype=float).reshape(-1, 2)
+    c = u.mean(axis=0)
+    d = u - c
+    ax = np.linalg.svd(d, full_matrices=False)[2][0]
+    t = d @ ax
+    return np.stack([c + ax * t.min(), c + ax * t.max()])
+
+
 def road_line_straight(item):
     """Is this saved road line marked 'really straight' (it is then also used to estimate the lens)? Old formats: yes."""
     return bool(item.get("straight", item.get("s", True))) if isinstance(item, dict) else True
@@ -2225,9 +2238,7 @@ class RoadLineDialog(LensLineDialog):
     def set_type(self, kind):
         """The type of the line being drawn."""
         self.type_var.set(ROAD_LINE_TYPES[kind][0])
-        self._sync_types()
-        self.types[-1] = kind
-        self.refresh()
+        self._on_type_changed()
 
     def _on_straight_changed(self):
         self._sync_types()
@@ -2242,6 +2253,9 @@ class RoadLineDialog(LensLineDialog):
     def _on_type_changed(self):
         self._sync_types()
         self.types[-1] = self.type_key()
+        if not self.lines[-1]:                               # a new line: kerbs are usually curved, markings usually straight
+            self.straight_var.set(not self.types[-1].startswith("kerb_"))
+            self.straight[-1] = bool(self.straight_var.get())
         self.refresh()
 
     def new_line(self):
@@ -8345,6 +8359,8 @@ class Run1App:
                     u = lens_undistort(pts_px, c["lens_size"], c["lens"])
                 else:
                     u = pts_px
+                if road_line_straight(item) and len(u) >= 3 and line_bend([u]) < STRAIGHT_SNAP_MAX_BEND:
+                    u = snap_straight(u)                           # click jitter on a straight road does not become a wiggle
                 dense = np.concatenate([np.linspace(u[i], u[i + 1], 25, endpoint=False) for i in range(len(u) - 1)] + [u[-1:]])
                 rec_px = lens_distort(dense, c["lens_size"], c["lens"]) if c.get("lens") is not None else dense
                 q = np.clip(topview_px(cv, self._run3_to_metric(rec_px, c)), -1e5, 1e5)
