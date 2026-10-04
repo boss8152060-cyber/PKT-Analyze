@@ -201,7 +201,7 @@ for var, v in zip(api["length_vars"], ("12", "4.2", "12", "4.2")):
 api["apply"]()
 check("only typing the lengths and saving stores the zone calibration", app.run3_zone_calibrations.get("4", {}).get("lengths") == [12.0, 4.2, 12.0, 4.2])
 api["set_mode"](api["mode_labels"][5])                       # "Zone 5": six corners
-check("a zone with more corners is reduced to its 4 main corners", len(st5["points"]) == 4 and all(p in [(900.0, 300.0), (1100.0, 300.0), (1130.0, 330.0), (1130.0, 450.0), (900.0, 450.0), (880.0, 420.0)] for p in st5["points"]), str(st5["points"]))
+check("a zone with more than 4 corners is not cut down to 4: the window points to the zone calibration", st5["points"] == [], str(st5["points"]))
 api["set_mode"](api["mode_labels"][6])                       # "Zone 6": not drawn
 check("a zone that is not drawn starts empty", st5["points"] == [])
 api["set_mode"](api["mode_labels"][0])
