@@ -3877,9 +3877,6 @@ class Run1App:
         ttk.Checkbutton(cal, text="สร้างวิดีโอ Topview (Tracking_Topview.mp4)", variable=self.run3_topview_video_var).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(cal, text="วาดจากพิกัดเมตรเดียวกับที่ตัวชี้วัดใช้ (ไฟล์ Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
         r += 1
-        ttk.Button(cal, text="👁 ดูตัวอย่างผัง X–Y (ก่อนรัน)", command=self.preview_xy_plane).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Label(cal, text="โซนในหน่วยเมตรตามการปรับเทียบ/จัดแนวที่ตั้งอยู่ตอนนี้ + ความยาวขอบโซน", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
-        r += 1
         alignf = ttk.LabelFrame(cal, text="จัดแนวกับภาพโดรน (Align) — แปลงพิกัดวิดีโอให้ตรงกับผังจริงของโดรน (ภาพโดรนใช้เฉพาะตอนจัดแนว)", padding=4)
         alignf.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 2))
         ttk.Button(alignf, text="🧭 จัดแนว…", command=self.open_align).pack(side="left")
