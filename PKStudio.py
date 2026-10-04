@@ -2919,7 +2919,8 @@ class ZoneAlignEditor:
         ttk.Button(bar, text="↶ ย้อน", command=self.undo).pack(side="left")
         ttk.Button(bar, text="↷ ทำซ้ำ", command=self.redo).pack(side="left", padx=4)
         ttk.Button(bar, text="รีเซ็ตเป็นไฟล์เดิม", command=self.reset).pack(side="left", padx=4)
-        ttk.Button(bar, text="บันทึกเป็นไฟล์โซนใหม่…", command=self.save_new_file).pack(side="right")
+        ttk.Button(bar, text="✅ ใช้โซนนี้ในการวิเคราะห์", command=self.use_for_analysis).pack(side="right")
+        ttk.Button(bar, text="บันทึกเป็นไฟล์โซนใหม่…", command=self.save_new_file).pack(side="right", padx=6)
         ttk.Button(bar, text="ปิด", command=self.close).pack(side="right", padx=6)
         panes = ttk.Frame(top)
         panes.pack(fill="both", expand=True, padx=8, pady=4)
@@ -2962,7 +2963,26 @@ class ZoneAlignEditor:
             self.report.config(state="disabled")
 
     # ----- save -----
-    def save_new_file(self, path=None):
+    def use_for_analysis(self):
+        """One click: write the edited zones to `<name>_aligned.json` beside the loaded zone file (the original stays) and make it the zone
+        file of the program - what the analysis, the previews and the X-Y outputs use from now on."""
+        src = str(self.app.zone_line_config_var.get() or "")
+        stem, ext = os.path.splitext(os.path.basename(src)) if src else ("zones", ".json")
+        if stem.endswith("_aligned"):
+            stem = stem[:-len("_aligned")]
+        folder = os.path.dirname(src) if src else os.path.dirname(self.video_path)
+        path = os.path.join(folder, f"{stem}_aligned.json")
+        try:
+            self.save_new_file(path, notify=False)
+            self.app._load_pkstudio_json(path)
+        except Exception as exc:
+            messagebox.showerror("ใช้โซนนี้ในการวิเคราะห์", str(exc), parent=self.top)
+            return None
+        self.msg_var.set(f"ใช้โซนที่แก้แล้วในการวิเคราะห์: {os.path.basename(path)}")
+        messagebox.showinfo("ใช้โซนนี้ในการวิเคราะห์", f"โปรแกรมใช้โซนที่แก้แล้วเป็นไฟล์โซนปัจจุบัน:\n{path}\n(ไฟล์เดิมไม่ถูกแก้)", parent=self.top)
+        return path
+
+    def save_new_file(self, path=None, notify=True):
         src = str(self.app.zone_line_config_var.get() or "")
         if path is None:
             stem = os.path.splitext(os.path.basename(src))[0] if src else "zones"
@@ -3002,7 +3022,7 @@ class ZoneAlignEditor:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         self.msg_var.set(f"บันทึกแล้ว: {path}")
-        if self.on_saved:
+        if self.on_saved and notify:
             self.on_saved(path)
         return path
 
