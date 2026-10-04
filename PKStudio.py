@@ -1413,47 +1413,6 @@ def apply_transform(model, pts):
     return out * model["ds"] + model["dc"]
 
 
-def invert_transform(model, targets, src_pairs, dst_pairs, size=None):
-    """Drone pixels -> the video pixels the transformation sends there (numerical inverse: a start from a projective fit the other way round,
-    then Newton). Used to bring a zone drawn on the drone picture back into the video, where the zones are applied."""
-    t = np.asarray(targets, dtype=float).reshape(-1, 2)
-    back = fit_transform("projective", dst_pairs, src_pairs, size)
-    x = apply_transform(back, t) if "error" not in back else np.tile(np.mean(np.asarray(src_pairs, float), axis=0), (len(t), 1))
-    for k in range(len(t)):
-        xk = x[k].copy()
-        for _ in range(40):
-            f = apply_transform(model, xk[None])[0] - t[k]
-            h = 0.5
-            jac = np.empty((2, 2))
-            for j in range(2):
-                d = np.zeros(2)
-                d[j] = h
-                jac[:, j] = (apply_transform(model, (xk + d)[None])[0] - apply_transform(model, (xk - d)[None])[0]) / (2 * h)
-            try:
-                dx = np.linalg.solve(jac, -f)
-            except np.linalg.LinAlgError:
-                break
-            xk = xk + dx
-            if float(np.hypot(*dx)) < 1e-5:
-                break
-        x[k] = xk
-    return x
-
-
-def densify_polygon(pts, per_edge):
-    """The corners with per_edge - 1 extra points on every edge (straight in this picture): [(x, y)] in drawing order."""
-    pts = [tuple(float(v) for v in q) for q in pts]
-    if per_edge <= 1:
-        return pts
-    out = []
-    for i, a in enumerate(pts):
-        b = pts[(i + 1) % len(pts)]
-        for j in range(per_edge):
-            f = j / float(per_edge)
-            out.append((a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f))
-    return out
-
-
 def transform_report(kind, src, dst, size=None):
     """How well a kind fits the pairs: per-pair residual (in the unit of dst) and the leave-one-out residual (each pair predicted by a fit
     WITHOUT it - the honest accuracy; None for a kind that cannot be fitted without one pair). {"error"} when it cannot be fitted."""
@@ -2041,17 +2000,9 @@ class AlignDialog:
     transformation (move/turn/scale ... projective ... lens ... polynomial ... rubber sheet) and see the error of every pair and of
     the kind itself (leave-one-out = the honest accuracy). The drone picture is used only here; the saved result is just numbers."""
 
-    def __init__(self, app, video_path, on_apply, initial=None, on_zones=None):
-        self.app, self.on_apply, self.video_path, self.on_zones = app, on_apply, video_path, on_zones
+    def __init__(self, app, video_path, on_apply, initial=None):
+        self.app, self.on_apply, self.video_path = app, on_apply, video_path
         initial = initial or {}
-        self.zone_pins = []                                      # the corners of the zones drawn on the video: {"zone", "label", "src", "target"}
-        for zname in ZONE_NAMES:
-            poly = app.zones.get(zname, [])
-            if len(poly) >= 3:
-                for k, (x, y) in enumerate(poly, start=1):
-                    self.zone_pins.append({"zone": zname, "label": f"Z{zname.split()[-1]}.{k}", "src": (float(x), float(y)), "target": None})
-        self.pin_idx = 0
-        self._pred = []
         self.pairs = [{"s": tuple(q["s"]), "d": tuple(q["d"])} for q in initial.get("pairs", [])]
         self.pending = None
         self.scale = float(initial.get("scale") or 0.0)
@@ -2075,9 +2026,6 @@ class AlignDialog:
         self.frame_var = tk.StringVar(value="")
         self.dframe_var = tk.StringVar(value=str((initial.get("drone") or {}).get("frame", "")))
         self.dpath_var = tk.StringVar(value=self.drone_path)
-        self.zone_gcp_var = tk.BooleanVar(value=False)
-        self.zone_dense_var = tk.IntVar(value=4)
-        self.pin_var = tk.StringVar(value="")
         cap = cv2.VideoCapture(video_path)
         self.total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
         cap.release()
@@ -2115,93 +2063,7 @@ class AlignDialog:
             self.load_drone(path, self.dframe_var.get() or None)
 
     # ----- pairs -----
-    def _pin_text(self, i):
-        pin = self.zone_pins[i]
-        return f"{'✓' if pin['target'] else '·'} {pin['label']}"
-
-    def select_pin(self, i):
-        if not self.zone_pins:
-            return
-        self.pin_idx = max(0, min(len(self.zone_pins) - 1, i))
-        self.pin_var.set(self._pin_text(self.pin_idx))
-        self.refresh_all()
-
-    def _next_open_pin(self):
-        n = len(self.zone_pins)
-        for step in range(1, n + 1):
-            j = (self.pin_idx + step) % n
-            if not self.zone_pins[j]["target"]:
-                return j
-        return self.pin_idx
-
-    def set_pin_target(self, x, y):
-        """The place on the drone picture where the corner of the zone SHOULD be (not a control point of the transformation)."""
-        if not self.zone_pins:
-            self.msg_var.set("ยังไม่มีโซนที่วาดไว้ (โหลดไฟล์โซนในแท็บ ② ก่อน)")
-            return False
-        self.zone_pins[self.pin_idx]["target"] = (float(x), float(y))
-        done = self.pin_idx
-        self.pin_idx = self._next_open_pin()
-        self.pin_var.set(self._pin_text(self.pin_idx))
-        self.pin_combo.config(values=[self._pin_text(i) for i in range(len(self.zone_pins))])
-        self.msg_var.set(f"วางหมุด {self.zone_pins[done]['label']} แล้ว — ต่อไป {self.zone_pins[self.pin_idx]['label']}")
-        self.refresh_all()
-        return True
-
-    def clear_pins(self):
-        for pin in self.zone_pins:
-            pin["target"] = None
-        self.pin_idx = 0
-        self.pin_combo.config(values=[self._pin_text(i) for i in range(len(self.zone_pins))])
-        self.pin_var.set(self._pin_text(0) if self.zone_pins else "")
-        self.refresh_all()
-
-    def new_zone_polygons(self):
-        """{zone name: polygon in VIDEO pixels} for every zone whose corners ALL have a place on the drone picture: the drone polygon (straight
-        edges, with extra points on every edge) brought back into the video by the transformation that is fitted now."""
-        rep = self.report
-        if not rep or "error" in rep:
-            return {}
-        pairs = self._all_pairs()
-        src = np.array([q["s"] for q in pairs])
-        dst = np.array([q["d"] for q in pairs])
-        out = {}
-        for zname in ZONE_NAMES:
-            pins = [p_ for p_ in self.zone_pins if p_["zone"] == zname]
-            if pins and all(p_["target"] for p_ in pins):
-                dense = densify_polygon([p_["target"] for p_ in pins], max(1, int(self.zone_dense_var.get() or 1)))
-                back = invert_transform(rep["model"], dense, src, dst, (self.video_img.shape[1], self.video_img.shape[0]))
-                out[zname] = [tuple(float(v) for v in q) for q in back]
-        return out
-
-    def save_zones(self):
-        polys = self.new_zone_polygons()
-        if not polys:
-            self.msg_var.set("ยังไม่มีโซนที่วางหมุดครบทุกมุม (ต้องมีคู่จุดอย่างน้อยตามชนิดการแปลงด้วย)")
-            return None
-        if self.on_zones is None:
-            return polys
-        path = self.on_zones(polys)
-        self.msg_var.set(f"บันทึกโซนใหม่ {len(polys)} โซนแล้ว: {os.path.basename(path)} (โหลดใช้แล้ว ไฟล์เดิมไม่ถูกแก้)")
-        return path
-
-    def _all_pairs(self):
-        """The clicked pairs + (when ticked) the zone corners that already have a place, as extra control points."""
-        extra = []
-        if self.zone_gcp_var.get():
-            extra = [{"s": p_["src"], "d": p_["target"]} for p_ in self.zone_pins if p_["target"]]
-        return list(self.pairs) + extra
-
     def click_video(self, x, y):
-        if self.mode_var.get() == "zones":                      # pick the nearest corner of a zone as the one to place next
-            if self.zone_pins:
-                k = self.vpane.view[0] if self.vpane.view else 1.0
-                d = [math.hypot(p_["src"][0] - x, p_["src"][1] - y) for p_ in self.zone_pins]
-                i = int(np.argmin(d))
-                if d[i] * k < 25:
-                    self.select_pin(i)
-                    self.msg_var.set(f"เลือกหมุด {self.zone_pins[i]['label']} — คลิกตำแหน่งที่ควรเป็นบนภาพโดรน")
-            return
         if self.mode_var.get() != "pairs":
             self.msg_var.set("โหมดนี้คลิกบนภาพโดรน (ขวา) — เปลี่ยนเป็น 'คู่จุด' เพื่อคลิกภาพวิดีโอ")
             return
@@ -2211,9 +2073,6 @@ class AlignDialog:
 
     def click_drone(self, x, y):
         mode = self.mode_var.get()
-        if mode == "zones":
-            self.set_pin_target(x, y)
-            return
         if mode == "pairs":
             if self.pending is None:
                 self.msg_var.set("คลิกจุดในภาพวิดีโอ (ซ้าย) ก่อน แล้วคลิกจุดเดียวกันในภาพโดรน")
@@ -2269,9 +2128,6 @@ class AlignDialog:
         i = self.worst_index()
         if i is None:
             return False
-        if i >= len(self.pairs):
-            self.msg_var.set(f"คู่ที่ {i + 1} มาจากหมุดโซนที่ติ๊กใช้เป็นคู่จุดอ้างอิง — เอาติ๊กออกหรือวางหมุดนั้นใหม่")
-            return False
         self.msg_var.set(f"ลบคู่ที่ {i + 1} (แย่สุด)")
         self.delete_pair(i)
         return True
@@ -2320,9 +2176,8 @@ class AlignDialog:
         if not self.pairs:
             self.report = {"error": "ยังไม่มีคู่จุด"}
             return self.report
-        allp = self._all_pairs()
-        src = np.array([q["s"] for q in allp])
-        dst = np.array([q["d"] for q in allp])
+        src = np.array([q["s"] for q in self.pairs])
+        dst = np.array([q["d"] for q in self.pairs])
         size = (self.video_img.shape[1], self.video_img.shape[0]) if self.video_img is not None else (1920, 1080)
         rep = transform_report(self.kind, src, dst, size)
         if "error" in rep:
@@ -2350,18 +2205,18 @@ class AlignDialog:
         mult = 100.0 if self.scale > 0 else 1.0
         if "error" not in rep:
             key_vals = rep["loo_u"] if rep["loo_u"] else rep["residuals_u"]
-            order = sorted(range(len(key_vals)), key=lambda j: -key_vals[j])                    # the most doubtful pair first
+            order = sorted(range(len(self.pairs)), key=lambda j: -key_vals[j])                    # the most doubtful pair first
             med = float(np.median(key_vals)) if key_vals else 0.0
             limit = max(0.30 if self.scale > 0 else 15.0, 2.0 * med)
             for i in order:
                 loo = rep["loo_u"][i] * mult if rep["loo_u"] else None
                 self.tree.insert("", "end", values=(i + 1, f"{rep['residuals_u'][i] * mult:.1f}", "-" if loo is None else f"{loo:.1f}"),
                                  tags=(("bad",) if key_vals[i] > limit else ()))
-            lines = [f"ชนิด: {ALIGN_KINDS[self.kind][1]} · {len(key_vals)} คู่ · คลาดเฉลี่ย {rep['rms_u'] * mult:.1f} {unit_txt}"
+            lines = [f"ชนิด: {ALIGN_KINDS[self.kind][1]} · {len(self.pairs)} คู่ · คลาดเฉลี่ย {rep['rms_u'] * mult:.1f} {unit_txt}"
                      + (f" · เว้นจุดตรวจ {rep['loo_rms_u'] * mult:.1f} {unit_txt}" if rep["loo_rms_u"] is not None else " · (ยังไม่พอจะตรวจแบบเว้นจุด)")]
             if rep["loo_rms_u"] is not None and rep["loo_rms_u"] > 3.0 * max(rep["rms_u"], 1e-9) and rep["loo_rms_u"] * mult > 3:
                 lines.append("⚠ ค่าเว้นจุดตรวจสูงกว่าค่าที่พอดีมาก = ชนิดนี้ซับซ้อนเกินจำนวนจุด (ตามจุดแต่ผิดระหว่างจุด) — เพิ่มจุด หรือเลือกชนิดที่ง่ายกว่า")
-            worst3 = sorted(range(len(key_vals)), key=lambda j: -key_vals[j])[:3]
+            worst3 = sorted(range(len(self.pairs)), key=lambda j: -key_vals[j])[:3]
             lines.append("คู่ที่น่าสงสัยสุด (ซูมตรวจ คลิกใหม่ หรือลบ): " + ", ".join(
                 f"#{j + 1} ({key_vals[j] * mult:.0f} {unit_txt})" for j in worst3))
             lines.append("เทียบทุกชนิด (คลาดเฉลี่ย / เว้นจุดตรวจ):")
@@ -2376,32 +2231,11 @@ class AlignDialog:
         self.report_text.delete("1.0", "end")
         self.report_text.insert("end", "\n".join(lines))
         self.report_text.config(state="disabled")
-        self._pred = []
-        if self.report and "error" not in self.report and self.zone_pins:
-            try:
-                self._pred = [tuple(q) for q in apply_transform(self.report["model"], np.array([p_["src"] for p_ in self.zone_pins]))]
-            except Exception:
-                self._pred = []
         self.vpane.refresh()
         self.dpane.refresh()
 
     # ----- overlays -----
-    def _zone_groups(self):
-        groups = {}
-        for i, p_ in enumerate(self.zone_pins):
-            groups.setdefault(p_["zone"], []).append(i)
-        return groups
-
     def _draw_video(self, out, pane):
-        if self.mode_var.get() == "zones":
-            for zname, idx in self._zone_groups().items():
-                pts = [pane.to_view(*self.zone_pins[i]["src"]) for i in idx]
-                cv2.polylines(out, [np.array(pts, np.int32).reshape(-1, 1, 2)], True, (150, 150, 150), 1, cv2.LINE_AA)
-                for i, q in zip(idx, pts):
-                    cur = (i == self.pin_idx)
-                    done = bool(self.zone_pins[i]["target"])
-                    cv2.circle(out, q, 7 if cur else 4, (0, 255, 255) if cur else ((0, 200, 0) if done else (0, 140, 255)), 2 if cur else -1, cv2.LINE_AA)
-                    cv2.putText(out, self.zone_pins[i]["label"], (q[0] + 6, q[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255) if cur else (200, 200, 200), 1, cv2.LINE_AA)
         for i, q in enumerate(self.pairs):
             p = pane.to_view(*q["s"])
             if i == self.selected:
@@ -2414,23 +2248,6 @@ class AlignDialog:
 
     def _draw_drone(self, out, pane):
         rep = self.report if (self.report and "error" not in self.report) else None
-        if self.mode_var.get() == "zones" and self._pred:
-            for zname, idx in self._zone_groups().items():
-                pts = [pane.to_view(*self._pred[i]) for i in idx]
-                cv2.polylines(out, [np.array(pts, np.int32).reshape(-1, 1, 2)], True, (60, 60, 255), 1, cv2.LINE_AA)    # where the zone is now
-                if all(self.zone_pins[i]["target"] for i in idx):
-                    tp = [pane.to_view(*self.zone_pins[i]["target"]) for i in idx]
-                    cv2.polylines(out, [np.array(tp, np.int32).reshape(-1, 1, 2)], True, (255, 255, 0), 2, cv2.LINE_AA)  # where it will be
-            for i, pin in enumerate(self.zone_pins):
-                q = pane.to_view(*self._pred[i])
-                cv2.drawMarker(out, q, (60, 60, 255), cv2.MARKER_CROSS, 9, 1, cv2.LINE_AA)
-                if i == self.pin_idx:
-                    cv2.circle(out, q, 13, (0, 255, 255), 2, cv2.LINE_AA)
-                if pin["target"]:
-                    t = pane.to_view(*pin["target"])
-                    cv2.line(out, q, t, (0, 255, 255), 1, cv2.LINE_AA)
-                    cv2.circle(out, t, 5, (255, 255, 0), -1, cv2.LINE_AA)
-                    cv2.putText(out, pin["label"], (t[0] + 6, t[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1, cv2.LINE_AA)
         for i, q in enumerate(self.pairs):
             p = pane.to_view(*q["d"])
             if rep:                                                  # where the transformation puts the video point: the gap is the error
@@ -2508,22 +2325,6 @@ class AlignDialog:
         tsb.pack(side="left", fill="y", padx=(0, 10))
         self.report_text = tk.Text(low, height=14, width=70, wrap="word", state="disabled")
         self.report_text.pack(side="left", fill="both", expand=True)
-        zb = ttk.LabelFrame(top, text="โซน — ไล่วางตำแหน่งที่ควรเป็นของมุมโซนบนภาพโดรน (เลือกโหมด \"โซน\")", padding=4)
-        zb.pack(fill="x", padx=8, pady=(0, 4))
-        ttk.Radiobutton(zb, text="โซน", variable=self.mode_var, value="zones", command=lambda: self.select_pin(self.pin_idx)).pack(side="left")
-        ttk.Label(zb, text="หมุดปัจจุบัน").pack(side="left", padx=(10, 2))
-        self.pin_combo = ttk.Combobox(zb, textvariable=self.pin_var, values=[self._pin_text(i) for i in range(len(self.zone_pins))], state="readonly", width=12)
-        self.pin_combo.pack(side="left")
-        self.pin_combo.bind("<<ComboboxSelected>>", lambda e: self.select_pin(self.pin_combo.current()))
-        ttk.Button(zb, text="◀", width=3, command=lambda: self.select_pin(self.pin_idx - 1)).pack(side="left", padx=2)
-        ttk.Button(zb, text="▶", width=3, command=lambda: self.select_pin(self.pin_idx + 1)).pack(side="left", padx=(0, 10))
-        ttk.Checkbutton(zb, text="ใช้หมุดที่วางแล้วเป็นคู่จุดอ้างอิงด้วย", variable=self.zone_gcp_var, command=self.refresh_all).pack(side="left", padx=6)
-        ttk.Label(zb, text="จุดแทรกต่อขอบโซน").pack(side="left", padx=(10, 2))
-        ttk.Spinbox(zb, from_=1, to=10, textvariable=self.zone_dense_var, width=4).pack(side="left")
-        ttk.Button(zb, text="ล้างหมุดที่วาง", command=self.clear_pins).pack(side="left", padx=10)
-        ttk.Button(zb, text="บันทึกโซนใหม่…", command=self.save_zones).pack(side="left")
-        if self.zone_pins:
-            self.pin_var.set(self._pin_text(0))
         tk.Label(top, textvariable=self.msg_var, anchor="w", foreground="#a00").pack(fill="x", padx=8)
 
     def apply(self):
@@ -2534,8 +2335,8 @@ class AlignDialog:
         if self.scale <= 0:
             messagebox.showerror("จัดแนวกับภาพโดรน", "ตั้งสเกลภาพโดรนก่อน (วัดสเกล: คลิก 2 จุดบนภาพโดรน แล้วใส่ความยาวจริง)", parent=self.top)
             return False
-        data = {"pairs": [{"s": list(q["s"]), "d": list(q["d"])} for q in self._all_pairs()], "kind": self.kind, "scale": self.scale, "rot_deg": self.rot_deg,
-                "origin": list(self._all_pairs()[0]["d"]), "video_size": [self.video_img.shape[1], self.video_img.shape[0]],
+        data = {"pairs": [{"s": list(q["s"]), "d": list(q["d"])} for q in self.pairs], "kind": self.kind, "scale": self.scale, "rot_deg": self.rot_deg,
+                "origin": list(self.pairs[0]["d"]), "video_size": [self.video_img.shape[1], self.video_img.shape[0]],
                 "video_frame": self.frame_var.get(), "drone": {"path": self.drone_path, "frame": self.dframe_var.get()},
                 "info": {"rms_m": rep["rms_u"], "loo_rms_m": rep["loo_rms_u"], "unit": rep["unit"]}}
         cfg = align_build(data)
@@ -5881,59 +5682,6 @@ class Run1App:
             txt += f" (เว้นจุดตรวจ {info['loo_rms_m'] * 100:.0f} ซม.)"
         return txt + ("" if self.run3_align_enabled_var.get() else " — ยังไม่ได้ติ๊กใช้")
 
-    def save_aligned_zones(self, zones_new):
-        """Zones edited in the Align window (video pixels) -> a NEW zone file next to the loaded one (the original is never touched), then loaded.
-        Returns the path. zones_new = {"Zone 4": [(x, y), ...], ...}; zones that were not edited are copied as they are."""
-        src = self.zone_line_config_var.get().strip()
-        data = {}
-        if src and os.path.isfile(src) and src.lower().endswith(".json"):
-            with open(src, encoding="utf-8") as f:
-                data = json.load(f)
-        raw = data.get("zones") if isinstance(data.get("zones"), list) else None
-        w, h = self._actual_video_size()
-        w = w or data.get("frame_width") or 1920
-        h = h or data.get("frame_height") or 1080
-        if raw is None:
-            raw = []
-            for name in ZONE_NAMES:
-                if len(self.zones.get(name, [])) >= 3:
-                    meta = dict(getattr(self, "zone_meta", {}).get(name, {}))
-                    meta.update({"name": name, "points": [list(map(int, q)) for q in self.zones[name]]})
-                    raw.append(meta)
-        else:
-            raw = [dict(z) for z in raw]
-        have = {z.get("name") for z in raw}
-
-        def area(pts):
-            return abs(sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(pts, pts[1:] + pts[:1]))) / 2.0
-
-        for name, pts in zones_new.items():
-            pts = [(int(round(x)), int(round(y))) for x, y in pts]
-            item = next((z for z in raw if z.get("name") == name), None)
-            if item is None:
-                item = {"name": name, "id": f"zone_{name.split()[-1]}", "color_bgr": [0, 200, 0], "show_label": True}
-                raw.append(item)
-            item["points"] = [[x, y] for x, y in pts]
-            item["points_norm"] = [[round(x / float(w), 6), round(y / float(h), 6)] for x, y in pts]
-            item["area_px"] = float(area(pts))
-            item["aligned"] = True
-        for z in raw:                                           # the zones that were not edited keep their pixels; make sure they follow the same frame size
-            z.setdefault("points_norm", [[round(x / float(w), 6), round(y / float(h), 6)] for x, y in z.get("points", [])])
-        data["zones"] = raw
-        data["frame_width"], data["frame_height"] = int(w), int(h)
-        data["aligned_from"] = os.path.basename(src) if src else ""
-        base = os.path.splitext(src)[0] if src else os.path.join(os.path.dirname(str(self.video_var.get())) or ".", "zones")
-        out = base + "_aligned.json"
-        n = 1
-        while os.path.exists(out):
-            n += 1
-            out = f"{base}_aligned{n}.json"
-        with open(out, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=1)
-        self.zone_line_config_var.set(out)
-        self.load_pkstudio_zones()
-        return out
-
     def open_align(self):
         video = str(self.video_var.get() or "").strip()
         if not video or not os.path.isfile(video):
@@ -5943,7 +5691,7 @@ class Run1App:
             initial = json.loads(self.run3_align_var.get() or "{}")
         except (ValueError, TypeError):
             initial = {}
-        return AlignDialog(self, video, self.save_align, initial=initial, on_zones=self.save_aligned_zones)
+        return AlignDialog(self, video, self.save_align, initial=initial)
 
     def save_align(self, data):
         self.run3_align_var.set(json.dumps(data))

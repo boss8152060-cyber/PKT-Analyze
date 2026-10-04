@@ -889,23 +889,6 @@ class AlignTests(unittest.TestCase):
         rep = CORE["transform_report"]("projective", src, self.project(src), self.SIZE)
         self.assertIsNone(rep["loo_rms"])                                  # 4 pairs for 4 needed: no leave-one-out
 
-    def test_the_inverse_brings_drone_points_back_into_the_video(self):
-        src = self.grid(5, 4)
-        dst = self.project(self.distort(src, 0.25))
-        for kind in ("projective", "lens", "poly2", "tps"):
-            model = CORE["fit_transform"](kind, src, dst, self.SIZE)
-            test = self.grid(3, 2) + [40, 25]
-            target = CORE["apply_transform"](model, test)
-            back = CORE["invert_transform"](model, target, src, dst, self.SIZE)
-            self.assertLess(np.abs(back - test).max(), 0.05, kind)
-
-    def test_a_polygon_gets_extra_points_on_every_edge(self):
-        sq = [(0, 0), (4, 0), (4, 4), (0, 4)]
-        d = CORE["densify_polygon"](sq, 4)
-        self.assertEqual(len(d), 16)
-        self.assertEqual(d[:5], [(0, 0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4, 0)])
-        self.assertEqual(CORE["densify_polygon"](sq, 1), [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)])
-
     def test_align_to_metres_scale_rotation_origin(self):
         src = self.grid()
         dst = src * 0.5 + [100, 50]                                       # a scaled copy
