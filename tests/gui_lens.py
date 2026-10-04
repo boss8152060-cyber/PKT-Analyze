@@ -401,6 +401,9 @@ for v_ in (app.run3_perspective_p1_var, app.run3_perspective_p2_var, app.run3_pe
            app.run3_perspective_l12_var, app.run3_perspective_l23_var, app.run3_perspective_l34_var, app.run3_perspective_l41_var):
     v_.set("")
 app.run3_perspective_enabled_var.set(False)
+app.run3_ground_points_var.set("")
+app.run3_ground_dists_var.set("")
+app.run3_cal_mode_var.set("rect")
 cd = app.open_road_line_tool()
 root.update()
 check("the calibration window: no two widgets share a grid cell", not grid_overlaps(cd.top), "; ".join(grid_overlaps(cd.top)[:4]))
@@ -409,11 +412,12 @@ rect_rec = to_rec(rect_g)
 cd.mode_var.set("points")
 for q_ in rect_rec[:3]:
     cd.add_point(*q_)
-for v_, val in zip(cd.len_vars, ("10", "6", "10", "6")):
-    v_.set(val)
+cd.dists_var.set("P1-P2=10, P2-P3=6, P3-P4=10, P4-P1=6")
 check("three ground points are not enough: nothing is written", cd.apply() is False and app.run3_perspective_p1_var.get() == "")
 cd.add_point(*rect_rec[3])
-check("a fifth ground point is refused", cd.add_point(5, 5) is False and len(cd.cal_pts) == 4)
+r5_ = cd.add_point(5, 5)
+check("more than four ground points are accepted", r5_ is True and len(cd.cal_pts) == 5, f"{r5_} {len(cd.cal_pts)} {cd.msg_var.get()}")
+cd.undo_point()
 cd.mode_var.set("lines")
 cd.set_type("white_solid")
 cd.add_point(200, 200); cd.add_point(900, 220)
@@ -430,6 +434,7 @@ app.set_lens_values(LENS)
 cfg_c = app._run3_snapshot_config()
 mapped_c = app._run3_to_metric(rect_rec, cfg_c)
 check("the corners clicked in the window become the true rectangle", np.abs(mapped_c - np.array([[0, 0], [10, 0], [10, 6], [0, 6]], float)).max() < 0.02)
+check("a plain 4-corner calibration stays the classic one", app.run3_cal_mode_var.get() == "rect")
 check("the page shows one summary line of the calibration", "Perspective 4" in app.cal_summary_var.get() and "เส้นถนน" in app.cal_summary_var.get(), app.cal_summary_var.get())
 cd2 = app.open_road_line_tool()
 root.update()
@@ -437,6 +442,54 @@ check("reopening the window shows the saved ground points again", len(cd2.cal_pt
 cd2.close()
 app.clear_lens_values()
 app.set_lens_values(LENS)
+
+# ---- the ground from parallel / perpendicular road lines + more than four points with distances
+app.clear_road_lines()
+app.run3_perspective_enabled_var.set(False)
+app.run3_ground_points_var.set("")
+app.run3_ground_dists_var.set("")
+for v_ in (app.run3_perspective_p1_var, app.run3_perspective_p2_var, app.run3_perspective_p3_var, app.run3_perspective_p4_var,
+           app.run3_perspective_l12_var, app.run3_perspective_l23_var, app.run3_perspective_l34_var, app.run3_perspective_l41_var):
+    v_.set("")
+g_a = [np.array([[12.0, y], [36.0, y]]) for y in (14.0, 18.0, 22.0)]                         # lines along the main road (metres on the ground)
+g_b = [np.array([[x, 12.0], [x, 24.0]]) for x in (14.0, 34.0)]                                 # lines across it
+ground = np.array([[12.0, 14.0], [36.0, 14.0], [36.0, 22.0], [12.0, 22.0], [24.0, 18.0]])
+gd = ud_ = None
+gdlg = app.open_road_line_tool()
+root.update()
+first = True
+for grp, group_lines in (("A", g_a), ("B", g_b)):
+    for gl in group_lines:
+        if not first:
+            gdlg.new_line()
+        first = False
+        gdlg.set_type("white_solid")
+        gdlg.set_group(grp)
+        for q_ in to_rec(np.linspace(gl[0], gl[1], 6)):
+            gdlg.add_point(*q_)
+gdlg.mode_var.set("points")
+for q_ in to_rec(ground):
+    gdlg.add_point(*q_)
+gdlg.dists_var.set("P1-P2=24")
+check("one distance cannot fix the shape: nothing is written", gdlg.apply() is False and app.run3_cal_mode_var.get() == "rect" and not app.run3_perspective_enabled_var.get())
+gdlg.dists_var.set("P1-P2=24, P2-P3=8, P3-P4=24, P4-P1=8, P1-P5=12.6491, P2-P5=12.6491")
+check("lines in two directions + five points with six distances are accepted", gdlg.apply() is True and app.run3_cal_mode_var.get() == "geometry")
+cfg_g = app._run3_snapshot_config()
+test_ground = np.array([[20.0, 16.0], [30.0, 20.0], [14.0, 23.0], [40.0, 13.0], [8.0, 18.0]])
+mapped_g = app._run3_to_metric(to_rec(test_ground), cfg_g)
+err_g = np.abs(mapped_g - (test_ground - np.array([12.0, 14.0]))).max()
+check("the map is square: positions come out right (x along the road, origin P1)", err_g < 0.1, f"{err_g:.4f} m")
+check("the page names the method", "เส้นขนาน/ตั้งฉาก" in app.cal_summary_var.get(), app.cal_summary_var.get())
+saved_g = app.get_settings()
+app3 = m.Run1App(tk.Toplevel(root))
+app3.video_var.set(grid_video)
+app3.set_settings(saved_g)
+check("the geometry calibration survives saving and loading the settings", app3.run3_cal_mode_var.get() == "geometry" and app3.run3_ground_dists_var.get() == app.run3_ground_dists_var.get() and len(app3.get_road_lines()) == 5 and {l["group"] for l in app3.get_road_lines()} == {"A", "B"})
+d_ = m.parse_ground_distances("P1-P2=17, 2-3 = 8.4; P1→P4=3 m, nonsense, P2-P2=4")
+check("typed distances are read (and the unreadable pieces named)", [(a_, b_, round(c_, 1)) for a_, b_, c_ in d_[0]] == [(0, 1, 17.0), (1, 2, 8.4), (0, 3, 3.0)] and d_[1] == ["nonsense", "P2-P2=4"], str(d_))
+# back to the classic state for the rest of the tests
+app.run3_cal_mode_var.set("rect")
+app.clear_road_lines()
 
 check("the Topview has the video's shape", abs(Wf / Hf - CW / CH) < 0.02, f"{Wf}x{Hf}")
 vid_b = app._run3_write_topview_video(tr, dict(base_cfg, lens=None, lens_size=None), tempfile.mkdtemp(prefix="pk_tv_", dir=tmp), video)
