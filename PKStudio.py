@@ -3355,6 +3355,9 @@ class Run1App:
         ttk.Checkbutton(cal, text="สร้างวิดีโอ Topview (Tracking_Topview.mp4)", variable=self.run3_topview_video_var).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(cal, text="วาดจากพิกัดเมตรเดียวกับที่ตัวชี้วัดใช้ (ไฟล์ Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
         r += 1
+        ttk.Button(cal, text="👁 ดูตัวอย่างผัง X–Y (ก่อนรัน)", command=self.preview_xy_plane).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(cal, text="โซนในหน่วยเมตรตามการปรับเทียบ/จัดแนวที่ตั้งอยู่ตอนนี้ + ความยาวขอบโซน", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
+        r += 1
         alignf = ttk.LabelFrame(cal, text="จัดแนวกับภาพโดรน (Align) — แปลงพิกัดวิดีโอให้ตรงกับผังจริงของโดรน (ภาพโดรนใช้เฉพาะตอนจัดแนว)", padding=4)
         alignf.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 2))
         ttk.Button(alignf, text="🧭 จัดแนว…", command=self.open_align).pack(side="left")
@@ -8379,7 +8382,7 @@ class Run1App:
 
     TOPVIEW_PALETTE = [(255, 160, 40), (80, 200, 80), (60, 60, 255), (200, 120, 255), (0, 200, 255), (255, 255, 80), (180, 180, 255), (60, 220, 160)]
 
-    def _run3_topview_scene(self, tracks, c, video_path, display, max_px=1280):
+    def _run3_topview_scene(self, tracks, c, video_path, display, max_px=1280, allow_empty=False):
         """What the X-Y picture and the X-Y video share: the canvas (same shape as the video), the metre grid, the zones (drawn like in the
         normal video: same switches, same opacity) and the observed points per frame. Returns a dict or None when there is nothing to draw."""
         dsp = dict(display or {})
@@ -8404,12 +8407,12 @@ class Run1App:
                     fr = int(round(r["_timestamp"] * 1000))
                 per_frame[fr].append((tid, r["_timestamp"], r["_m"], r))
                 all_pts.append(r["_m"])
-        if not per_frame:
-            return None
         zone_m = []
         for zname, poly in self._zone_polygons():
             zone_m.append((zname, self._run3_to_metric(np.asarray(poly, dtype=float), c)))
             all_pts.extend(map(tuple, zone_m[-1][1]))
+        if not per_frame and not (allow_empty and zone_m):
+            return None
         aspect = None
         if video_path and os.path.isfile(video_path):
             cap0 = cv2.VideoCapture(video_path)
@@ -8464,7 +8467,53 @@ class Run1App:
         cv2.putText(base, f"X-Y plane in metres (x right, y down) · {cv['scale']:.1f} px/m · {self._run3_calibration_mode(c)}", (6, 16),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
         mode = str(dsp.get("outside_zone_xy", "show") or "show")
-        return {"cv": cv, "base": base, "W": W, "H": H, "per_frame": per_frame, "flag": flag, "dsp": dsp, "mode": mode, "zones": bool(zone_m)}
+        return {"cv": cv, "base": base, "W": W, "H": H, "per_frame": per_frame, "flag": flag, "dsp": dsp, "mode": mode, "zones": bool(zone_m), "zone_m": zone_m}
+
+    def preview_xy_plane(self):
+        """A look at the X-Y plane BEFORE a run: the zones (and the metre grid) drawn with the calibration that is set now (Align / Perspective /
+        PPM), with the real length of every zone edge written next to the picture - to see at once whether the zones come out right."""
+        if not any(len(self.zones.get(z, [])) >= 3 for z in ZONE_NAMES):
+            messagebox.showerror("ตัวอย่างผัง X–Y", "ยังไม่มีโซนที่วาดไว้ — โหลดไฟล์โซนก่อน (แท็บ ② ไฟล์โซนและเส้น)")
+            return None
+        try:
+            c = self._run3_snapshot_config()
+        except Exception as exc:
+            messagebox.showerror("ตัวอย่างผัง X–Y", f"ตั้งค่าการแปลงเป็นเมตรไม่ครบ: {exc}")
+            return None
+        video = str(self.video_var.get() or "").strip()
+        scene = self._run3_topview_scene({}, c, video if os.path.isfile(video) else None, self.get_settings(), 1400, allow_empty=True)
+        if scene is None:
+            return None
+        lines = [f"การแปลงเป็นเมตรที่ใช้อยู่: {self._run3_calibration_mode(c)}", "ความยาวจริงของขอบโซน (เมตร) ตามการแปลงนี้:"]
+        for zname, pts in scene["zone_m"]:
+            n = len(pts)
+            edges = [float(np.hypot(*(np.asarray(pts[(k + 1) % n]) - np.asarray(pts[k])))) for k in range(n)]
+            lines.append(f"  {zname}: " + " · ".join(f"{k + 1}→{(k + 1) % n + 1} {e:.1f}" for k, e in enumerate(edges)))
+        lines += ["", "เทียบกับความยาวที่รู้ (เช่น ความกว้างเลน) ถ้าไม่ตรง แก้การปรับเทียบ/จัดแนวก่อนรัน"]
+        win = tk.Toplevel(self.root)
+        win.title("ตัวอย่างผัง X–Y (ก่อนรัน)")
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"{min(1500, sw - 40)}x{min(900, sh - 90)}+20+20")
+        txt = tk.Text(win, height=min(24, len(lines) + 1), width=44, wrap="word")
+        txt.insert("end", "\n".join(lines))
+        txt.config(state="disabled")
+        txt.pack(side="right", fill="y", padx=6, pady=6)
+        lab = tk.Label(win, bg="#202020")
+        lab.pack(side="left", fill="both", expand=True)
+        img = scene["base"]
+        ok, buf = cv2.imencode(".png", img)
+        photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
+        lab.configure(image=photo)
+        lab.image = photo                                                # (kept so the picture is not collected)
+
+        def save():
+            path = filedialog.asksaveasfilename(parent=win, defaultextension=".png", filetypes=[("PNG", "*.png")], initialfile="XY_preview.png")
+            if path:
+                with open(path, "wb") as f:                              # (any letters in the path)
+                    f.write(buf.tobytes())
+        ttk.Button(txt.master, text="บันทึกภาพ…", command=save).pack(side="bottom", pady=4)
+        win.scene, win.lines = scene, lines
+        return win
 
     def _run3_write_xy_plot(self, tracks, c, output_dir, video_path=None, display=None, max_px=1600):
         """Trajectory_XY.png: every track as a line on the X-Y plane (colour per ID, start dot + ID), zones and the metre grid."""
