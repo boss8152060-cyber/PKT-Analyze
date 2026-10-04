@@ -793,6 +793,13 @@ class TopviewTests(unittest.TestCase):
         self.assertLessEqual(px[:, 1].max(), cv["h"])
         self.assertAlmostEqual(cv["scale"] * (40 + 4), 1000, delta=2)       # the long side fills max_px
 
+    def test_canvas_takes_the_shape_of_the_video(self):
+        pts = [(0, 0), (20, 0), (20, 40), (0, 40)] * 30                    # a tall area
+        cv = CORE["topview_canvas"](pts, max_px=1280, margin_m=2.0, aspect=16 / 9)
+        self.assertAlmostEqual(cv["w"] / cv["h"], 16 / 9, delta=0.02)      # but a landscape picture, like the video
+        px = CORE["topview_px"](cv, [(0, 0), (20, 40)])
+        self.assertTrue((px >= 0).all() and px[:, 0].max() <= cv["w"] and px[:, 1].max() <= cv["h"])
+
     def test_canvas_ignores_a_far_outlier(self):
         pts = [(x * 0.1, 0.0) for x in range(400)] + [(5000.0, 0.0)]
         cv = CORE["topview_canvas"](pts, max_px=1000)

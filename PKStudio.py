@@ -1220,7 +1220,7 @@ TOPVIEW_CLASS_COLORS = {            # BGR
 TOPVIEW_DEFAULT_COLOR = (230, 230, 230)
 
 
-def topview_canvas(points_m, max_px=1280, margin_m=3.0, min_span_m=10.0):
+def topview_canvas(points_m, max_px=1280, margin_m=3.0, min_span_m=10.0, aspect=None):
     """Canvas for a Topview picture of metric points (N x 2): px/m, the metric origin of the top-left pixel and the
     picture size. Outliers are ignored (0.5 / 99.5 percentiles); the picture size is made even."""
     p = np.asarray(points_m, dtype=float).reshape(-1, 2)
@@ -1230,6 +1230,10 @@ def topview_canvas(points_m, max_px=1280, margin_m=3.0, min_span_m=10.0):
     lo = np.percentile(p, 0.5, axis=0) - margin_m
     hi = np.percentile(p, 99.5, axis=0) + margin_m
     span = np.maximum(hi - lo, min_span_m)
+    if aspect:                                  # same width : height as the video (e.g. 16:9), the area is centred in it
+        want = np.array([max(span[0], span[1] * aspect), max(span[1], span[0] / aspect)])
+        lo = lo - (want - span) / 2.0
+        span = want
     scale = float(max_px) / float(span.max())
     w, h = int(math.ceil(span[0] * scale)), int(math.ceil(span[1] * scale))
     return {"scale": scale, "xmin": float(lo[0]), "ymin": float(lo[1]), "w": w + (w % 2), "h": h + (h % 2)}
@@ -7400,51 +7404,32 @@ class Run1App:
         rows.sort(key=lambda x: (float(x["timestamp"] or 0), str(x["track_id"])))
         return rows
 
-    def _run3_topview_background(self, video_path, t0, t1, n=15):
-        """Median of n frames spread over [t0, t1] = the road without moving vehicles (None if unreadable)."""
-        if not video_path or not os.path.isfile(video_path):
-            return None
-        cap = cv2.VideoCapture(video_path)
-        try:
-            if not cap.isOpened():
-                return None
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-            frames = []
-            for k in range(n):
-                t = t0 + (t1 - t0) * (k + 0.5) / n
-                idx = int(t * fps)
-                if total:
-                    idx = max(0, min(total - 1, idx))
-                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-                ok, fr = cap.read()
-                if ok:
-                    frames.append(fr)
-            if not frames:
-                return None
-            return np.median(np.stack(frames), axis=0).astype(np.uint8)
-        finally:
-            cap.release()
+    TOPVIEW_PALETTE = [(255, 160, 40), (80, 200, 80), (60, 60, 255), (200, 120, 255), (0, 200, 255), (255, 255, 80), (180, 180, 255), (60, 220, 160)]
 
-    def _run3_write_topview_video(self, tracks, c, output_dir, video_path=None, max_px=1280, trail_s=2.0):
-        """Tracking_Topview.mp4: vehicles drawn on the road plane from the metric points (NOT a warped video, so
-        vehicles are never stretched). Background = the road of the video warped by the base calibration (a
-        vehicle-free median frame) when the video file is known, else a plain grid. Zones with their own
-        calibration are placed correctly by the points but the background uses the base calibration only."""
+    def _run3_topview_scene(self, tracks, c, video_path, display, max_px=1280):
+        """What the X-Y picture and the X-Y video share: the canvas (same shape as the video), the metre grid, the zones (drawn like in the
+        normal video: same switches, same opacity) and the observed points per frame. Returns a dict or None when there is nothing to draw."""
+        dsp = dict(display or {})
+
+        def flag(key, default):
+            v = dsp.get(key, default)
+            return v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes")
+
+        try:
+            zone_alpha = max(0.0, min(1.0, float(dsp.get("zone_overlay_opacity", 45)) / 100.0))
+        except (TypeError, ValueError):
+            zone_alpha = 0.45
         per_frame = defaultdict(list)
         all_pts = []
         for tid, rows in tracks.items():
-            valid = [r for r in rows if r.get("_m") is not None]
-            if not valid:
-                continue
-            heads = track_headings([r["_timestamp"] for r in valid], [r["_m"] for r in valid], 0.5, 0.5)
-            cls = self._run3_canonical_class(valid[0].get("class_name", ""))
-            for r, h in zip(valid, heads):
+            for r in rows:
+                if r.get("_m") is None:
+                    continue
                 try:
                     fr = int(float(r.get("frame", "")))
                 except (TypeError, ValueError):
                     fr = int(round(r["_timestamp"] * 1000))
-                per_frame[fr].append((tid, cls, r["_timestamp"], r["_m"], h))
+                per_frame[fr].append((tid, r["_timestamp"], r["_m"], r))
                 all_pts.append(r["_m"])
         if not per_frame:
             return None
@@ -7452,49 +7437,96 @@ class Run1App:
         for zname, poly in self._zone_polygons():
             zone_m.append((zname, self._run3_to_metric(np.asarray(poly, dtype=float), c)))
             all_pts.extend(map(tuple, zone_m[-1][1]))
-        cv = topview_canvas(all_pts, max_px)
+        aspect = None
+        if video_path and os.path.isfile(video_path):
+            cap0 = cv2.VideoCapture(video_path)
+            vw, vh = cap0.get(cv2.CAP_PROP_FRAME_WIDTH), cap0.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            cap0.release()
+            if vw > 0 and vh > 0:
+                aspect = vw / vh
+        cv = topview_canvas(all_pts, max_px, aspect=aspect)
         W, H = cv["w"], cv["h"]
-        # static layer: background, grid, zones
         base = np.full((H, W, 3), 38, np.uint8)
-        t_all = [it[2] for items in per_frame.values() for it in items]
-        bg = self._run3_topview_background(video_path, min(t_all), max(t_all))
-        bg_used = False
-        if bg is not None:
-            try:
-                if c.get("perspective") is not None:
-                    hm = np.asarray(c["perspective"]["H"], dtype=np.float64)
-                else:
-                    bh, bw = bg.shape[:2]
-                    src = np.float32([[0, 0], [bw, 0], [bw, bh], [0, bh]])
-                    hm = cv2.getPerspectiveTransform(src, self._run3_to_metric(src, c).astype(np.float32))
-                mm = np.array([[cv["scale"], 0, -cv["scale"] * cv["xmin"]], [0, cv["scale"], -cv["scale"] * cv["ymin"]], [0, 0, 1]])
-                warped = cv2.warpPerspective(bg, mm @ hm, (W, H))
-                base = cv2.addWeighted(warped, 0.55, base, 0.45, 0)
-                bg_used = True
-            except Exception:
-                log.exception("Topview background could not be warped; using a plain grid")
         step = 5.0 if max(W, H) / cv["scale"] <= 80 else 10.0
+        grid = base.copy()
+        labels = []
         x = math.ceil(cv["xmin"] / step) * step
         while (x - cv["xmin"]) * cv["scale"] < W:
             px = int(round((x - cv["xmin"]) * cv["scale"]))
-            cv2.line(base, (px, 0), (px, H - 1), (90, 90, 90), 1)
-            cv2.putText(base, f"{x:g}", (px + 2, H - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (170, 170, 170), 1, cv2.LINE_AA)
+            cv2.line(grid, (px, 0), (px, H - 1), (255, 255, 255), 1)
+            labels.append((f"{x:g}", (px + 2, H - 4)))
             x += step
         y = math.ceil(cv["ymin"] / step) * step
         while (y - cv["ymin"]) * cv["scale"] < H:
             py = int(round((y - cv["ymin"]) * cv["scale"]))
-            cv2.line(base, (0, py), (W - 1, py), (90, 90, 90), 1)
-            cv2.putText(base, f"{y:g}", (2, py - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (170, 170, 170), 1, cv2.LINE_AA)
+            cv2.line(grid, (0, py), (W - 1, py), (255, 255, 255), 1)
+            labels.append((f"{y:g}", (2, py - 3)))
             y += step
-        for zname, pts in zone_m:
-            q = np.round(topview_px(cv, pts)).astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(base, [q], True, (120, 220, 120), 1, cv2.LINE_AA)
-            cx, cy = q.reshape(-1, 2).mean(axis=0)
-            cv2.putText(base, zname.replace("Zone ", "Z"), (int(cx) - 8, int(cy) + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (120, 220, 120), 1, cv2.LINE_AA)
-        cv2.putText(base, f"metres (x right, y down)  {cv['scale']:.1f} px/m  " + ("road photo + points" if bg_used else "grid + points"),
-                    (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+        base = cv2.addWeighted(grid, 0.22, base, 0.78, 0)
+        for text_, org_ in labels:
+            cv2.putText(base, text_, org_, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (235, 235, 235), 1, cv2.LINE_AA)
+        if flag("show_zone_boundary", True) or flag("show_zone_label", True):
+            zlayer = base.copy()
+            meta_all = getattr(self, "zone_meta", {})
+            for zname, pts in zone_m:
+                meta = meta_all.get(zname, {})
+                try:
+                    zcol = tuple(int(max(0, min(255, v))) for v in meta.get("color_bgr", [0, 200, 0])[:3])
+                    if len(zcol) != 3:
+                        zcol = (0, 200, 0)
+                except Exception:
+                    zcol = (0, 200, 0)
+                q = np.round(topview_px(cv, pts)).astype(np.int32).reshape(-1, 1, 2)
+                if flag("show_zone_boundary", True):
+                    cv2.polylines(zlayer, [q], True, zcol, 1, cv2.LINE_AA)
+                if flag("show_zone_label", True) and meta.get("show_label", True):
+                    cx, cy = q.reshape(-1, 2).mean(axis=0)
+                    text_ = zname if flag("show_zone_label_prefix", True) else zname.replace("Zone ", "", 1)
+                    (tw, th), _ = cv2.getTextSize(text_, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+                    cv2.putText(zlayer, text_, (int(cx) - tw // 2, int(cy) + th // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.55, zcol, 1, cv2.LINE_AA)
+            base = cv2.addWeighted(zlayer, max(zone_alpha, 0.35), base, 1.0 - max(zone_alpha, 0.35), 0)
+        cv2.putText(base, f"X-Y plane in metres (x right, y down) · {cv['scale']:.1f} px/m · {self._run3_calibration_mode(c)}", (6, 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+        return {"cv": cv, "base": base, "W": W, "H": H, "per_frame": per_frame, "flag": flag, "dsp": dsp}
+
+    def _run3_write_xy_plot(self, tracks, c, output_dir, video_path=None, display=None, max_px=1600):
+        """Trajectory_XY.png: every track as a line on the X-Y plane (colour per ID, start dot + ID), zones and the metre grid."""
+        scene = self._run3_topview_scene(tracks, c, video_path, display, max_px)
+        if scene is None:
+            return None
+        cv, img = scene["cv"], scene["base"].copy()
+        for k, (tid, rows) in enumerate(sorted(tracks.items(), key=lambda it: str(it[0]))):
+            pts = [r["_m"] for r in sorted((r for r in rows if r.get("_m") is not None), key=lambda r: r["_timestamp"])]
+            if not pts:
+                continue
+            col = self.TOPVIEW_PALETTE[k % len(self.TOPVIEW_PALETTE)]
+            q = np.round(topview_px(cv, np.asarray(pts, dtype=float))).astype(np.int32)
+            if len(q) > 1:
+                cv2.polylines(img, [q.reshape(-1, 1, 2)], False, col, 2, cv2.LINE_AA)
+            cv2.circle(img, (int(q[0][0]), int(q[0][1])), 4, col, -1, cv2.LINE_AA)
+            cv2.putText(img, str(tid), (int(q[0][0]) + 5, int(q[0][1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
+        out_path = os.path.join(output_dir, "Trajectory_XY.png")
+        ok, buf = cv2.imencode(".png", img)
+        if not ok:
+            return None
+        with open(out_path, "wb") as f:                       # (cv2.imwrite cannot write a path with Thai letters on Windows)
+            f.write(buf.tobytes())
+        return out_path
+
+    def _run3_write_topview_video(self, tracks, c, output_dir, video_path=None, max_px=1280, display=None):
+        """Tracking_Topview.mp4: the X-Y plane in metres, same shape as the video, one picture per processed frame: the zones, every vehicle as
+        its REFERENCE POINT (yellow = in a zone, red ring = in none), the labels and the trajectory as set for the normal video
+        (ID / Class / Conf / Zone / Speed, with or without their prefix, trajectory length)."""
+        scene = self._run3_topview_scene(tracks, c, video_path, display, max_px)
+        if scene is None:
+            return None
+        cv, base, W, H, per_frame, flag, dsp = scene["cv"], scene["base"], scene["W"], scene["H"], scene["per_frame"], scene["flag"], scene["dsp"]
+        try:
+            trail_n = max(1, int(float(dsp.get("trail_length", 30))))
+        except (TypeError, ValueError):
+            trail_n = 30
         frames = sorted(per_frame)
-        times = sorted({per_frame[f][0][2] for f in frames})
+        times = sorted({per_frame[f][0][1] for f in frames})
         dts = np.diff(times)
         dts = dts[dts > 0]
         # one picture per processed frame, played at the rate the frames were sampled (60 fps video -> 60 fps here),
@@ -7504,27 +7536,54 @@ class Run1App:
         writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps_out, (W, H))
         if not writer.isOpened():
             raise RuntimeError("Unable to create Tracking_Topview.mp4")
-        lengths, widths = c["lengths"], c["widths"]
         trails = defaultdict(deque)
+        speed_hist = defaultdict(deque)
         try:
             for fr in frames:
                 img = base.copy()
-                now = per_frame[fr][0][2]
-                for tid, cls, t, m, h in per_frame[fr]:
+                now = per_frame[fr][0][1]
+                marks = []
+                for tid, t, m, rec in per_frame[fr]:
                     pt = topview_px(cv, [m])[0]
-                    trails[tid].append((t, pt))
-                    while trails[tid] and trails[tid][0][0] < t - trail_s:
+                    trails[tid].append(tuple(pt))
+                    while len(trails[tid]) > trail_n:
                         trails[tid].popleft()
-                    col = TOPVIEW_CLASS_COLORS.get(cls, TOPVIEW_DEFAULT_COLOR)
-                    if len(trails[tid]) > 1:
-                        cv2.polylines(img, [np.round(np.array([q for _, q in trails[tid]])).astype(np.int32).reshape(-1, 1, 2)],
-                                      False, col, 1, cv2.LINE_AA)
-                    ln = lengths.get(cls) or 4.5
-                    wd = widths.get(cls) or 1.8
-                    box = np.round(topview_px(cv, oriented_rect(m, h, ln, wd))).astype(np.int32).reshape(-1, 1, 2)
-                    cv2.polylines(img, [box], True, col, 2, cv2.LINE_AA)
-                    cv2.circle(img, (int(round(pt[0])), int(round(pt[1]))), 2, (255, 255, 255), -1)
-                    cv2.putText(img, str(tid), (int(pt[0]) + 5, int(pt[1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
+                    hist = speed_hist[tid]
+                    hist.append((t, m))
+                    while len(hist) > 1 and hist[0][0] < t - 0.5:
+                        hist.popleft()
+                    spd = None
+                    if len(hist) >= 2 and hist[-1][0] > hist[0][0]:
+                        spd = math.hypot(hist[-1][1][0] - hist[0][1][0], hist[-1][1][1] - hist[0][1][1]) / (hist[-1][0] - hist[0][0]) * 3.6
+                    marks.append((tid, pt, rec, spd))
+                for tid, pt, rec, spd in marks:
+                    if flag("draw_trail", False) and len(trails[tid]) > 1:
+                        cv2.polylines(img, [np.round(np.array(trails[tid])).astype(np.int32).reshape(-1, 1, 2)], False, (255, 0, 255), 2, cv2.LINE_AA)
+                    p_ = (int(round(pt[0])), int(round(pt[1])))
+                    cv2.circle(img, p_, 7, (255, 255, 255), -1, cv2.LINE_AA)
+                    inside = str(rec.get("zone", "")).strip() != ""
+                    cv2.circle(img, p_, 5, (0, 255, 255) if inside else (0, 0, 255), -1 if inside else 2, cv2.LINE_AA)
+                    parts = []
+                    if flag("show_label_id", True):
+                        parts.append(f"ID {tid}" if flag("show_prefix_id", False) else str(tid))
+                    if flag("show_label_class", True):
+                        v_ = str(rec.get("class_name", "")).strip()
+                        parts.append(f"Class {v_}" if flag("show_prefix_class", False) else v_)
+                    if flag("show_label_conf", True):
+                        try:
+                            v_ = f"{float(rec.get('confidence', '')):.2f}"
+                        except (TypeError, ValueError):
+                            v_ = "-"
+                        parts.append(f"Conf {v_}" if flag("show_prefix_conf", False) else v_)
+                    if flag("show_label_zone", True):
+                        zn = re.search(r"(\d+)", str(rec.get("zone", "") or ""))
+                        v_ = zn.group(1) if zn else "-"
+                        parts.append(f"Zone {v_}" if flag("show_prefix_zone", False) else v_)
+                    if flag("show_label_speed", True):
+                        v_ = f"{spd:.1f}" if spd is not None else "-"
+                        parts.append(f"Speed {v_}" if flag("show_prefix_speed", False) else v_)
+                    if parts:
+                        cv2.putText(img, " | ".join(parts), (p_[0] + 8, max(14, p_[1] - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
                 cv2.putText(img, f"t = {now:.2f} s   frame {fr}", (6, H - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
                 writer.write(img)
         finally:
@@ -8878,10 +8937,14 @@ class Run1App:
             summary["diagnostics"]["topview"] = {"records": len(topview_rows), "calibration_mode": self._run3_calibration_mode(c)}
             if c.get("topview_video") and topview_rows:
                 status("Run 3 — drawing the Topview video...")
-                tv = self._run3_write_topview_video(tracks, c, output_dir, (settings or {}).get("video"))
+                tv = self._run3_write_topview_video(tracks, c, output_dir, (settings or {}).get("video"), display=settings)
                 if tv:
                     outputs["topview_video"] = tv
                     summary["diagnostics"]["topview"]["video"] = tv
+            plot = self._run3_write_xy_plot(tracks, c, output_dir, (settings or {}).get("video"), display=settings)
+            if plot:
+                outputs["topview_plot"] = plot
+                summary["diagnostics"]["topview"]["plot"] = plot
         except Exception as exc:
             log.exception("Topview output failed")
             summary["diagnostics"]["topview_error"] = str(exc)
