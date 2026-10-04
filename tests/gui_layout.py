@@ -190,6 +190,21 @@ check("settings restore the zone calibration", set(app.run3_zone_calibrations) =
 check("clean copy used by Run 3 has numbers and a zone number", app._run3_snapshot_config()["zone_calibrations"][3]["lengths"] == [8.0, 4.0, 8.0, 4.0])
 api["delete_zone"]()
 check("delete removes the zone calibration", app.run3_zone_calibrations == {})
+# ---- a zone with its corners drawn: the corners appear as P1-P4 by themselves, only the four lengths are left to type ----
+app.zones["Zone 4"] = [(300, 500), (700, 500), (720, 620), (280, 620)]
+app.zones["Zone 5"] = [(900, 300), (1100, 300), (1130, 330), (1130, 450), (900, 450), (880, 420)]            # six corners
+app.zones["Zone 3"] = []
+api["set_mode"](api["mode_labels"][4])                       # "Zone 4"
+check("a zone with 4 corners: P1-P4 are its corners, nothing to click", st5["points"] == [(300.0, 500.0), (700.0, 500.0), (720.0, 620.0), (280.0, 620.0)], str(st5["points"]))
+for var, v in zip(api["length_vars"], ("12", "4.2", "12", "4.2")):
+    var.set(v)
+api["apply"]()
+check("only typing the lengths and saving stores the zone calibration", app.run3_zone_calibrations.get("4", {}).get("lengths") == [12.0, 4.2, 12.0, 4.2])
+api["set_mode"](api["mode_labels"][5])                       # "Zone 5": six corners
+check("a zone with more corners is reduced to its 4 main corners", len(st5["points"]) == 4 and all(p in [(900.0, 300.0), (1100.0, 300.0), (1130.0, 330.0), (1130.0, 450.0), (900.0, 450.0), (880.0, 420.0)] for p in st5["points"]), str(st5["points"]))
+api["set_mode"](api["mode_labels"][6])                       # "Zone 6": not drawn
+check("a zone that is not drawn starts empty", st5["points"] == [])
+api["set_mode"](api["mode_labels"][0])
 bad = []
 walk(top5, bad)
 check("calibration dialog with the new controls: still no overlapping widgets", not bad, "; ".join(bad[:4]))
