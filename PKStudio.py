@@ -5290,8 +5290,10 @@ class Run1App:
             for zname, zpts in self.zones.items():
                 if len(zpts) >= 3:
                     zarr = np.array([[int(x * scale), int(y * scale)] for x, y in zpts], np.int32)
-                    cv2.polylines(view, [zarr], True, (150, 150, 150), 1, cv2.LINE_AA)
-                    cv2.putText(view, str(zname).replace("Zone ", "Z"), (int(zarr[0][0]) + 4, int(zarr[0][1]) + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (190, 190, 190), 1, cv2.LINE_AA)
+                    chosen = ctx["mode"] != "base" and str(zname) == f"Zone {ctx['mode']}"            # the zone being calibrated: always visible
+                    cv2.polylines(view, [zarr], True, (0, 255, 255) if chosen else (200, 200, 200), 3 if chosen else 2, cv2.LINE_AA)
+                    cv2.putText(view, str(zname).replace("Zone ", "Z"), (int(zarr[0][0]) + 4, int(zarr[0][1]) + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                                (0, 255, 255) if chosen else (210, 210, 210), 2 if chosen else 1, cv2.LINE_AA)
             for zkey, zdat in self.run3_zone_calibrations.items():
                 if zkey == ctx["mode"]:
                     continue
