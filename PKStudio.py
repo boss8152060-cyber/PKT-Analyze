@@ -1462,6 +1462,95 @@ def align_apply(cfg, pts):
     return np.stack([v[:, 0] * c + v[:, 1] * s_, -v[:, 0] * s_ + v[:, 1] * c], axis=1)
 
 
+# ---------------- Zone editing on the drone / X-Y views ----------------
+def invert_transform(model, dst, init, iters=40):
+    """The video pixels whose transformation (apply_transform) is `dst` - Newton iterations from `init` (the video pixels they were before)."""
+    dst = np.asarray(dst, dtype=float).reshape(-1, 2)
+    x = np.asarray(init, dtype=float).reshape(-1, 2).copy()
+    h = 0.5
+    for _ in range(iters):
+        f = apply_transform(model, x) - dst
+        if float(np.abs(f).max()) < 1e-3:
+            break
+        jx = (apply_transform(model, x + [h, 0.0]) - apply_transform(model, x - [h, 0.0])) / (2 * h)
+        jy = (apply_transform(model, x + [0.0, h]) - apply_transform(model, x - [0.0, h])) / (2 * h)
+        a, b, c_, d = jx[:, 0], jy[:, 0], jx[:, 1], jy[:, 1]
+        det = a * d - b * c_
+        det = np.where(np.abs(det) < 1e-12, 1e-12, det)
+        x = x - np.stack([(d * f[:, 0] - b * f[:, 1]) / det, (-c_ * f[:, 0] + a * f[:, 1]) / det], axis=1)
+    return x
+
+
+def align_plane_to_drone(cfg, plane):
+    """Metres in the Align plane -> drone pixels (the inverse of the rotation / scale / origin of align_apply)."""
+    th = math.radians(cfg["rot_deg"])
+    c, s_ = math.cos(th), math.sin(th)
+    o = np.asarray(plane, dtype=float).reshape(-1, 2)
+    v = np.stack([c * o[:, 0] - s_ * o[:, 1], s_ * o[:, 0] + c * o[:, 1]], axis=1)
+    return v / cfg["scale"] + np.array(cfg["origin"])
+
+
+def align_plane_to_video(cfg, plane, init_video):
+    """Metres in the Align plane -> video pixels (init_video = where the points were: the start of the iteration)."""
+    return invert_transform(cfg["model"], align_plane_to_drone(cfg, plane), init_video)
+
+
+def perpendicularize_zones(zones, merge_tol=0.05, vertical_tol_deg=35.0, horizontal_too=False, horizontal_tol_deg=20.0):
+    """Make the cross-road edges of the zones vertical in the plane (the two ends of such an edge get the same x), and shared corners
+    of neighbouring zones stay shared. zones = {name: n x 2 array of plane metres}; an edge within `vertical_tol_deg` of vertical counts
+    as cross-road (the corner chamfers at junctions are left alone). With horizontal_too the along-road edges (within
+    `horizontal_tol_deg` of horizontal) also get one y. Returns ({name: new array}, {"moved_max_m": ..., "edges_fixed": n})."""
+    names = list(zones)
+    nodes = []                                                   # unique corners: [sum_x, sum_y, count]
+    node_of = {}
+    for name in names:
+        for i, q in enumerate(np.asarray(zones[name], dtype=float)):
+            for k, nd in enumerate(nodes):
+                if math.hypot(nd[0] / nd[2] - q[0], nd[1] / nd[2] - q[1]) <= merge_tol:
+                    nd[0] += q[0]; nd[1] += q[1]; nd[2] += 1
+                    node_of[(name, i)] = k
+                    break
+            else:
+                nodes.append([q[0], q[1], 1])
+                node_of[(name, i)] = len(nodes) - 1
+    pos = np.array([[nd[0] / nd[2], nd[1] / nd[2]] for nd in nodes])
+    par_x, par_y = list(range(len(nodes))), list(range(len(nodes)))
+
+    def find(par, a):
+        while par[a] != a:
+            par[a] = par[par[a]]
+            a = par[a]
+        return a
+
+    fixed = 0
+    for name in names:
+        arr = np.asarray(zones[name], dtype=float)
+        n = len(arr)
+        for i in range(n):
+            a, b = node_of[(name, i)], node_of[(name, (i + 1) % n)]
+            if a == b:
+                continue
+            dx, dy = abs(pos[b][0] - pos[a][0]), abs(pos[b][1] - pos[a][1])
+            ang = math.degrees(math.atan2(dy, dx))              # 0 = along the road, 90 = across
+            if ang >= 90.0 - vertical_tol_deg:
+                par_x[find(par_x, a)] = find(par_x, b)
+                fixed += 1
+            elif horizontal_too and ang <= horizontal_tol_deg:
+                par_y[find(par_y, a)] = find(par_y, b)
+                fixed += 1
+    newpos = pos.copy()
+    for par, axis in ((par_x, 0), (par_y, 1)):
+        comp = {}
+        for k in range(len(nodes)):
+            comp.setdefault(find(par, k), []).append(k)
+        for members in comp.values():
+            if len(members) > 1:
+                newpos[members, axis] = float(np.mean(pos[members, axis]))
+    out = {name: np.array([newpos[node_of[(name, i)]] for i in range(len(zones[name]))]) for name in names}
+    moved = max((float(np.hypot(*(out[nm][i] - np.asarray(zones[nm][i], dtype=float)))) for nm in names for i in range(len(zones[nm]))), default=0.0)
+    return out, {"moved_max_m": moved, "edges_fixed": fixed}
+
+
 # ==== CORE-END ====
 
 RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
@@ -1879,9 +1968,12 @@ def read_picture_any(path, frame=None):
 class _ZoomPane:
     """A picture with wheel zoom at the pointer, drag to pan and a click callback (picture coordinates) + an overlay hook."""
 
-    def __init__(self, parent, width, height, on_click, overlay):
+    def __init__(self, parent, width, height, on_click, overlay, on_press=None, on_drag=None, on_release=None):
         self.canvas = tk.Canvas(parent, width=width, height=height, bg="#202020", highlightthickness=0)
         self.on_click, self.overlay = on_click, overlay
+        self.on_press, self.on_drag, self.on_release = on_press, on_drag, on_release         # (optional) grab and drag things in the picture
+        self._grab = False
+        self.shift = False
         self.img = None
         self.zoom, self.fit_k, self.view = 1.0, 1.0, None
         self._pan = None
@@ -1889,8 +1981,8 @@ class _ZoomPane:
         self.last_render = None
         c = self.canvas
         c.bind("<Configure>", lambda e: self._on_configure())
-        c.bind("<ButtonPress-1>", lambda e: self._press(e.x, e.y))
-        c.bind("<B1-Motion>", lambda e: self._drag(e.x, e.y))
+        c.bind("<ButtonPress-1>", lambda e: self._press(e.x, e.y, False, e.state))
+        c.bind("<B1-Motion>", lambda e: self._drag(e.x, e.y, e.state))
         c.bind("<ButtonRelease-1>", lambda e: self._release(e.x, e.y))
         for b in (2, 3):
             c.bind(f"<ButtonPress-{b}>", lambda e: self._press(e.x, e.y, True))
@@ -1943,10 +2035,22 @@ class _ZoomPane:
         self.refresh()
         return True
 
-    def _press(self, ex, ey, always_pan=False):
+    def _press(self, ex, ey, always_pan=False, state=0):
+        self.shift = bool(state & 1)
+        if self.on_press is not None and not always_pan and self.view is not None and self.img is not None:
+            ix, iy = self.to_image(ex, ey)
+            if self.on_press(ix, iy, ex, ey):
+                self._grab = True
+                self._pan = None
+                return
         self._pan = {"x": ex, "y": ey, "x0": ex, "y0": ey, "moved": bool(always_pan)}
 
-    def _drag(self, ex, ey):
+    def _drag(self, ex, ey, state=0):
+        if self._grab:
+            self.shift = bool(state & 1)
+            if self.on_drag is not None and self.view is not None:
+                self.on_drag(*self.to_image(ex, ey))
+            return
         p = self._pan
         if p is None or self.view is None:
             return
@@ -1959,6 +2063,11 @@ class _ZoomPane:
             self.refresh()
 
     def _release(self, ex, ey):
+        if self._grab:
+            self._grab = False
+            if self.on_release is not None:
+                self.on_release()
+            return
         p, self._pan = self._pan, None
         if p is None or p["moved"] or self.img is None or self.view is None:
             return
@@ -2503,6 +2612,399 @@ class AlignDialog:
         self.on_apply(data)
         self.close()
         return True
+
+    def close(self):
+        try:
+            self.top.destroy()
+        except tk.TclError:
+            pass
+
+
+class ZoneAlignEditor:
+    """Edit the zone corners on three views at once - the VIDEO, the DRONE picture and the X-Y plane in metres - all updating live.
+    Drag a corner in any of them; the corners shared by neighbouring zones move together. Helpers like the zone editor of PK Studio:
+    Shift while dragging = the edge from the previous corner stays PERPENDICULAR to the one before it, snap to the corners and edges of
+    the other zones, undo / redo. "ทำให้ตั้งฉาก" makes the cross-road edges vertical in the plane at once. The video position of a moved
+    corner is computed back from where it was put (the inverse of the Align transformation). The result is saved as a NEW zone file."""
+
+    HIT_PX = 14
+
+    def __init__(self, app, video_path, data, cfg, on_saved=None):
+        self.app, self.video_path, self.cfg, self.data, self.on_saved = app, video_path, cfg, data, on_saved
+        self.video_img = read_picture_any(video_path, data.get("video_frame") or None)
+        drone = data.get("drone") or {}
+        self.drone_img = read_picture_any(drone.get("path"), drone.get("frame") or None)
+        self.names = [z for z in ZONE_NAMES if len(app.zones.get(z, [])) >= 3]
+        self.zones = {z: [[float(x), float(y)] for x, y in app.zones[z]] for z in self.names}
+        self.orig = {z: [list(q) for q in pts] for z, pts in self.zones.items()}
+        self.group_pos, self.group_of, self.members = {}, {}, {}
+        for z in self.names:                                       # corners of neighbouring zones at the same spot are one corner
+            for i, (x, y) in enumerate(self.zones[z]):
+                for gid, (gx, gy) in self.group_pos.items():
+                    if math.hypot(gx - x, gy - y) <= 8.0:                    # (hand-drawn neighbours rarely meet to the pixel)
+                        self.group_of[(z, i)] = gid
+                        self.members[gid].append((z, i))
+                        break
+                else:
+                    gid = len(self.group_pos)
+                    self.group_pos[gid] = (x, y)
+                    self.group_of[(z, i)] = gid
+                    self.members[gid] = [(z, i)]
+        self.undo_stack, self.redo_stack = [], []
+        self.drag = None
+        self.selected_zone = None
+        self.selected_group = None
+        self.top = tk.Toplevel(app.root)
+        self.top.title("แก้รูปโซนบนภาพโดรน / ผัง X–Y (3 มุมมองพร้อมกัน)")
+        sw, sh = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
+        self.top.geometry(f"{min(1560, sw - 30)}x{min(940, sh - 80)}+10+10")
+        self.top.protocol("WM_DELETE_WINDOW", self.close)
+        self.top.dialog = self
+        self.msg_var = tk.StringVar(value="")
+        self.snap_var = tk.BooleanVar(value=True)
+        self.snap_cm_var = tk.StringVar(value="25")
+        self.level_var = tk.BooleanVar(value=False)
+        self._setup_plan()
+        self._build()
+        self.vpane.set_image(self.video_img if self.video_img is not None else np.full((720, 1280, 3), 60, np.uint8))
+        self.dpane.set_image(self.drone_img if self.drone_img is not None else np.full((720, 1280, 3), 60, np.uint8))
+        self.ppane.set_image(self.plan_img)
+        self.refresh_all()
+
+    # ----- geometry -----
+    def _vpts(self, z):
+        return np.asarray(self.zones[z], dtype=float)
+
+    def plan_of(self, vpts):
+        return align_apply(self.cfg, np.asarray(vpts, dtype=float).reshape(-1, 2))
+
+    def drone_of(self, vpts):
+        return apply_transform(self.cfg["model"], np.asarray(vpts, dtype=float).reshape(-1, 2))
+
+    def drone_to_plane(self, d):
+        v = (np.asarray(d, dtype=float).reshape(-1, 2) - np.array(self.cfg["origin"])) * self.cfg["scale"]
+        th = math.radians(self.cfg["rot_deg"])
+        c, s_ = math.cos(th), math.sin(th)
+        return np.stack([v[:, 0] * c + v[:, 1] * s_, -v[:, 0] * s_ + v[:, 1] * c], axis=1)
+
+    def _setup_plan(self):
+        allp = np.vstack([self.plan_of(self._vpts(z)) for z in self.names])
+        lo, hi = allp.min(axis=0) - 6.0, allp.max(axis=0) + 6.0
+        self.scale_px = 40.0
+        self.pxmin = lo
+        w, h = int((hi[0] - lo[0]) * self.scale_px), int((hi[1] - lo[1]) * self.scale_px)
+        img = np.full((h, w, 3), 38, np.uint8)
+        for x in range(int(math.ceil(lo[0])), int(hi[0]) + 1):
+            px = int((x - lo[0]) * self.scale_px)
+            cv2.line(img, (px, 0), (px, h - 1), (90, 90, 90) if x % 5 == 0 else (55, 55, 55), 1)
+            if x % 5 == 0:
+                cv2.putText(img, f"{x}", (px + 3, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+        for y in range(int(math.ceil(lo[1])), int(hi[1]) + 1):
+            py = int((y - lo[1]) * self.scale_px)
+            cv2.line(img, (0, py), (w - 1, py), (90, 90, 90) if y % 5 == 0 else (55, 55, 55), 1)
+            if y % 5 == 0:
+                cv2.putText(img, f"{y}", (4, py - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+        self.plan_img = img
+
+    def plan_to_px(self, plan):
+        return (np.asarray(plan, dtype=float).reshape(-1, 2) - self.pxmin) * self.scale_px
+
+    def px_to_plan(self, px):
+        return np.asarray(px, dtype=float).reshape(-1, 2) / self.scale_px + self.pxmin
+
+    def pane_xy(self, pane, vpts):
+        """Video pixels of some points -> where they are in that picture (video / drone / plan pixels)."""
+        if pane == "video":
+            return np.asarray(vpts, dtype=float).reshape(-1, 2)
+        if pane == "drone":
+            return self.drone_of(vpts)
+        return self.plan_to_px(self.plan_of(vpts))
+
+    def group_video(self, gid):
+        z, i = self.members[gid][0]
+        return np.array(self.zones[z][i], dtype=float)
+
+    def group_plan(self, gid):
+        return self.plan_of(self.group_video(gid))[0]
+
+    # ----- moving corners -----
+    def set_group_plan(self, gid, plan_xy):
+        v = align_plane_to_video(self.cfg, np.asarray(plan_xy, dtype=float).reshape(-1, 2), self.group_video(gid).reshape(1, 2))[0]
+        for z, i in self.members[gid]:
+            self.zones[z][i] = [float(v[0]), float(v[1])]
+
+    def _snap_target(self, gid, plan_xy):
+        """The plan position after snapping to the corners / edges of the other zones (a radius in cm) when 'snap' is ticked."""
+        if not self.snap_var.get():
+            return plan_xy
+        try:
+            radius = max(0.0, float(self.snap_cm_var.get())) / 100.0
+        except ValueError:
+            radius = 0.25
+        best, best_d = None, radius
+        mine = {z for z, _ in self.members[gid]}
+        for g2 in self.members:
+            if g2 == gid:
+                continue
+            q = self.group_plan(g2)
+            d = float(np.hypot(*(q - plan_xy)))
+            if d < best_d:
+                best, best_d = q, d
+        for z in self.names:
+            if z in mine:
+                continue
+            pts = self.plan_of(self._vpts(z))
+            for i in range(len(pts)):
+                a, b = pts[i], pts[(i + 1) % len(pts)]
+                ab = b - a
+                den = float(ab @ ab)
+                if den < 1e-12:
+                    continue
+                t = max(0.0, min(1.0, float((plan_xy - a) @ ab) / den))
+                q = a + t * ab
+                d = float(np.hypot(*(q - plan_xy)))
+                if d < best_d:
+                    best, best_d = q, d
+        return plan_xy if best is None else best
+
+    def _shift_perpendicular(self, gid, plan_xy):
+        """Shift: the edge from the previous corner of the dragged corner is made perpendicular to the edge before it."""
+        z, i = self.members[gid][0]
+        pts = self.plan_of(self._vpts(z))
+        n = len(pts)
+        if n < 3:
+            return plan_xy
+        prev, prev2 = pts[(i - 1) % n], pts[(i - 2) % n]
+        ang = math.atan2(prev[1] - prev2[1], prev[0] - prev2[0])
+        length = float(np.hypot(*(plan_xy - prev)))
+        cands = [prev + length * np.array([math.cos(ang + sgn * math.pi / 2), math.sin(ang + sgn * math.pi / 2)]) for sgn in (1, -1)]
+        return min(cands, key=lambda q: float(np.hypot(*(q - plan_xy))))
+
+    def move_group_to(self, gid, plan_xy, shift=False):
+        p = np.asarray(plan_xy, dtype=float)
+        if shift:
+            p = self._shift_perpendicular(gid, p)
+        self.set_group_plan(gid, self._snap_target(gid, p))
+
+    # ----- undo -----
+    def _snapshot(self):
+        return {z: [list(q) for q in pts] for z, pts in self.zones.items()}
+
+    def _push_undo(self):
+        self.undo_stack.append(self._snapshot())
+        self.redo_stack = []
+
+    def undo(self):
+        if not self.undo_stack:
+            return False
+        self.redo_stack.append(self._snapshot())
+        self.zones = self.undo_stack.pop()
+        self.refresh_all()
+        return True
+
+    def redo(self):
+        if not self.redo_stack:
+            return False
+        self.undo_stack.append(self._snapshot())
+        self.zones = self.redo_stack.pop()
+        self.refresh_all()
+        return True
+
+    def reset(self):
+        self._push_undo()
+        self.zones = {z: [list(q) for q in pts] for z, pts in self.orig.items()}
+        self.refresh_all()
+
+    # ----- automatic: cross-road edges vertical -----
+    def make_perpendicular(self, only_selected=False):
+        names = [self.selected_zone] if (only_selected and self.selected_zone in self.zones) else list(self.names)
+        plan = {z: np.array([self.group_plan(self.group_of[(z, i)]) for i in range(len(self.zones[z]))]) for z in names}      # shared corners = one place
+        new, rep = perpendicularize_zones(plan, horizontal_too=bool(self.level_var.get()))
+        self._push_undo()
+        for z in names:
+            for i in range(len(new[z])):
+                self.set_group_plan(self.group_of[(z, i)], new[z][i])
+        self.msg_var.set(f"ทำให้ตั้งฉากแล้ว: จัด {rep['edges_fixed']} ขอบ ขยับมากสุด {rep['moved_max_m'] * 100:.0f} ซม.")
+        self.refresh_all()
+        return rep
+
+    # ----- the pictures -----
+    def _draw(self, out, pane_name, pane):
+        meta = getattr(self.app, "zone_meta", {})
+        for z in self.names:
+            pts = self.pane_xy(pane_name, self._vpts(z))
+            vp = np.array([pane.to_view(*q) for q in pts], dtype=np.int32)
+            try:
+                col = tuple(int(v) for v in meta.get(z, {}).get("color_bgr", [0, 200, 0])[:3])
+            except Exception:
+                col = (0, 200, 0)
+            cv2.polylines(out, [vp.reshape(-1, 1, 2)], True, col, 3 if z == self.selected_zone else 2, cv2.LINE_AA)
+            c = vp.mean(axis=0).astype(int)
+            cv2.putText(out, z.replace("Zone ", "Z"), (int(c[0]) - 8, int(c[1]) + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
+        for gid in self.members:
+            q = pane.to_view(*self.pane_xy(pane_name, self.group_video(gid).reshape(1, 2))[0])
+            hot = gid == self.selected_group
+            cv2.circle(out, q, 7 if hot else 5, (0, 0, 255) if hot else (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(out, q, 7 if hot else 5, (0, 0, 0), 1, cv2.LINE_AA)
+
+    # ----- mouse -----
+    def _on_press(self, pane_name):
+        def handler(ix, iy, ex, ey):
+            pane = {"video": self.vpane, "drone": self.dpane, "plan": self.ppane}[pane_name]
+            best, best_d = None, float(self.HIT_PX)
+            for gid in self.members:
+                q = pane.to_view(*self.pane_xy(pane_name, self.group_video(gid).reshape(1, 2))[0])
+                d = math.hypot(q[0] - ex, q[1] - ey)
+                if d <= best_d:
+                    best, best_d = gid, d
+            if best is None:
+                return False
+            self._push_undo()
+            self.drag = {"gid": best, "pane": pane_name}
+            self.selected_group = best
+            z0 = self.members[best][0][0]
+            self.selected_zone = z0
+            return True
+        return handler
+
+    def _on_drag(self, pane_name):
+        def handler(ix, iy):
+            if not self.drag:
+                return
+            pane = {"video": self.vpane, "drone": self.dpane, "plan": self.ppane}[pane_name]
+            if pane_name == "video":
+                plan = self.plan_of(np.array([[ix, iy]]))[0]
+            elif pane_name == "drone":
+                plan = self.drone_to_plane(np.array([[ix, iy]]))[0]
+            else:
+                plan = self.px_to_plan(np.array([[ix, iy]]))[0]
+            self.move_group_to(self.drag["gid"], plan, shift=pane.shift)
+            self.refresh_all(report=False)
+        return handler
+
+    def _on_release(self):
+        self.drag = None
+        self.refresh_all()
+
+    # ----- report / window -----
+    def report_text(self):
+        lines = []
+        for z in self.names:
+            p = self.plan_of(self._vpts(z))
+            n = len(p)
+            parts = []
+            for i in range(n):
+                d = p[(i + 1) % n] - p[i]
+                length = float(np.hypot(*d))
+                ang = math.degrees(math.atan2(abs(d[1]), abs(d[0])))
+                tag = f" (เอียง {90.0 - ang:.0f}°)" if ang >= 55.0 and abs(90.0 - ang) >= 1.0 else ""
+                parts.append(f"{i + 1}→{(i + 1) % n + 1} {length:.1f}{tag}")
+            lines.append(f"{z}: " + " · ".join(parts))
+        return "ความยาวขอบโซน (เมตร) และขอบตัดขวางที่เอียงจากแนวตั้ง:\n" + "\n".join(lines)
+
+    def _build(self):
+        top = self.top
+        ttk.Label(top, text=("ลากมุมโซน (จุดขาว) ในภาพไหนก็ได้ — วิดีโอ | โดรน | ผัง X–Y อัปเดตพร้อมกัน; มุมที่โซนข้างเคียงใช้ร่วมกันขยับด้วยกัน · "
+                             "กด Shift ค้างตอนลาก = ขอบจากมุมก่อนหน้าตั้งฉากกับขอบก่อนนั้น · ติ๊ก ดูดติด = ดูดติดมุม/ขอบของโซนอื่น · "
+                             "ปุ่ม ทำให้ตั้งฉาก = ขอบตัดขวางถนนเป็นแนวตั้งในผังทีเดียว · ล้อเมาส์ = ซูม · ลากพื้นที่ว่าง = เลื่อนภาพ"),
+                  wraplength=1500, justify="left").pack(anchor="w", padx=8, pady=(6, 2))
+        bar = ttk.Frame(top)
+        bar.pack(fill="x", padx=8)
+        ttk.Button(bar, text="ทำให้ตั้งฉาก (ทุกโซน)", command=lambda: self.make_perpendicular(False)).pack(side="left")
+        ttk.Button(bar, text="ทำให้ตั้งฉาก (โซนที่เลือก)", command=lambda: self.make_perpendicular(True)).pack(side="left", padx=4)
+        ttk.Checkbutton(bar, text="ทำขอบตามถนนให้เป็นแนวนอนด้วย", variable=self.level_var).pack(side="left", padx=8)
+        ttk.Checkbutton(bar, text="ดูดติดโซนอื่น", variable=self.snap_var).pack(side="left", padx=(12, 2))
+        ttk.Entry(bar, textvariable=self.snap_cm_var, width=4).pack(side="left")
+        ttk.Label(bar, text="ซม.").pack(side="left", padx=(2, 12))
+        ttk.Button(bar, text="↶ ย้อน", command=self.undo).pack(side="left")
+        ttk.Button(bar, text="↷ ทำซ้ำ", command=self.redo).pack(side="left", padx=4)
+        ttk.Button(bar, text="รีเซ็ตเป็นไฟล์เดิม", command=self.reset).pack(side="left", padx=4)
+        ttk.Button(bar, text="บันทึกเป็นไฟล์โซนใหม่…", command=self.save_new_file).pack(side="right")
+        ttk.Button(bar, text="ปิด", command=self.close).pack(side="right", padx=6)
+        panes = ttk.Frame(top)
+        panes.pack(fill="both", expand=True, padx=8, pady=4)
+        for c_ in range(3):
+            panes.columnconfigure(c_, weight=1)
+        panes.rowconfigure(1, weight=1)
+        for c_, t_ in enumerate(("วิดีโอข้างทาง", "ภาพโดรน", "ผัง X–Y (เมตร)")):
+            ttk.Label(panes, text=t_).grid(row=0, column=c_, sticky="w")
+        mk = lambda name: dict(on_press=self._on_press(name), on_drag=self._on_drag(name), on_release=self._on_release)
+        self.vpane = _ZoomPane(panes, 480, 420, lambda x, y: None, lambda o, p: self._draw(o, "video", p), **mk("video"))
+        self.dpane = _ZoomPane(panes, 480, 420, lambda x, y: None, lambda o, p: self._draw(o, "drone", p), **mk("drone"))
+        self.ppane = _ZoomPane(panes, 480, 420, lambda x, y: None, lambda o, p: self._draw(o, "plan", p), **mk("plan"))
+        for c_, pane in enumerate((self.vpane, self.dpane, self.ppane)):
+            pane.canvas.grid(row=1, column=c_, sticky="nsew", padx=2)
+        low = ttk.Frame(top)
+        low.pack(fill="x", padx=8, pady=(0, 4))
+        self.zone_list = tk.Listbox(low, height=7, exportselection=False, width=14)
+        for z in self.names:
+            self.zone_list.insert("end", z)
+        self.zone_list.bind("<<ListboxSelect>>", lambda e: self._on_list())
+        self.zone_list.pack(side="left", padx=(0, 8))
+        self.report = tk.Text(low, height=8, wrap="word", state="disabled")
+        self.report.pack(side="left", fill="x", expand=True)
+        tk.Label(top, textvariable=self.msg_var, anchor="w", foreground="#a00").pack(fill="x", padx=8)
+
+    def _on_list(self):
+        sel = self.zone_list.curselection()
+        self.selected_zone = self.names[sel[0]] if sel else None
+        self.refresh_all(report=False)
+
+    def refresh_all(self, report=True):
+        if not getattr(self, "report", None) or not self.top.winfo_exists():
+            return
+        for pane in (self.vpane, self.dpane, self.ppane):
+            pane.refresh()
+        if report:
+            self.report.config(state="normal")
+            self.report.delete("1.0", "end")
+            self.report.insert("end", self.report_text())
+            self.report.config(state="disabled")
+
+    # ----- save -----
+    def save_new_file(self, path=None):
+        src = str(self.app.zone_line_config_var.get() or "")
+        if path is None:
+            stem = os.path.splitext(os.path.basename(src))[0] if src else "zones"
+            path = filedialog.asksaveasfilename(parent=self.top, title="บันทึกเป็นไฟล์โซนใหม่", defaultextension=".json", initialfile=f"{stem}_aligned.json",
+                                                initialdir=os.path.dirname(src) if src else None, filetypes=[("Zone JSON", "*.json")])
+            if not path:
+                return None
+        try:
+            with open(src, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {"zones": []}
+        aw, ah = self.app._actual_video_size()
+        if not aw or not ah:
+            aw, ah = (self.video_img.shape[1], self.video_img.shape[0]) if self.video_img is not None else (1920, 1080)
+        out_items, seen = [], set()
+        for item in data.get("zones", []):
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or (f"Zone {item.get('id')}" if item.get("id") is not None else None)
+            if name in self.zones:
+                seen.add(name)
+                pts = [[int(round(x)), int(round(y))] for x, y in self.zones[name]]
+                item = dict(item, name=name, points=pts, points_norm=[[round(x / aw, 6), round(y / ah, 6)] for x, y in pts],
+                            area_px=round(abs(float(sum(pts[i][0] * pts[(i + 1) % len(pts)][1] - pts[(i + 1) % len(pts)][0] * pts[i][1] for i in range(len(pts)))) / 2.0), 2))
+            out_items.append(item)
+        for name in self.names:                                      # (a zone that was not in the file as an object)
+            if name not in seen:
+                pts = [[int(round(x)), int(round(y))] for x, y in self.zones[name]]
+                out_items.append({"name": name, "points": pts, "points_norm": [[round(x / aw, 6), round(y / ah, 6)] for x, y in pts]})
+        data["zones"] = out_items
+        data["frame_width"], data["frame_height"] = int(aw), int(ah)                     # the points are in the size of the video now
+        lines = {n: [[int(x), int(y)] for x, y in pts] for n, pts in self.app.lines.items() if len(pts) == 2}
+        if lines:
+            data["lines"] = lines
+            data["lines_frame_width"], data["lines_frame_height"] = int(aw), int(ah)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        self.msg_var.set(f"บันทึกแล้ว: {path}")
+        if self.on_saved:
+            self.on_saved(path)
+        return path
 
     def close(self):
         try:
@@ -3361,6 +3863,7 @@ class Run1App:
         alignf = ttk.LabelFrame(cal, text="จัดแนวกับภาพโดรน (Align) — แปลงพิกัดวิดีโอให้ตรงกับผังจริงของโดรน (ภาพโดรนใช้เฉพาะตอนจัดแนว)", padding=4)
         alignf.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 2))
         ttk.Button(alignf, text="🧭 จัดแนว…", command=self.open_align).pack(side="left")
+        ttk.Button(alignf, text="🧩 แก้รูปโซนบนภาพโดรน…", command=self.open_zone_editor).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(alignf, text="ใช้ผลการจัดแนวแทน PPM / Perspective", variable=self.run3_align_enabled_var).pack(side="left", padx=10)
         self.align_status_var = tk.StringVar(value="")
         ttk.Label(alignf, textvariable=self.align_status_var, foreground="#0a7a3d").pack(side="left", padx=6)
@@ -5860,10 +6363,43 @@ class Run1App:
         info = data.get("info", {})
         self.run3_result_text.set(f"จัดแนวกับภาพโดรน: {len(data['pairs'])} คู่" + (f", คลาดเฉลี่ย {info['rms_m'] * 100:.0f} ซม." if info.get("rms_m") is not None else ""))
 
-    def _run3_align_cfg(self, silent=False):
+    def open_zone_editor(self):
+        """The zone editor on the video | drone | X-Y views (needs a saved Align, the zones and the drone picture)."""
+        video = str(self.video_var.get() or "").strip()
+        if not video or not os.path.isfile(video):
+            messagebox.showerror("แก้รูปโซน", "เลือกวิดีโอก่อน")
+            return None
+        if not any(len(self.zones.get(z, [])) >= 3 for z in ZONE_NAMES):
+            messagebox.showerror("แก้รูปโซน", "ยังไม่มีโซนที่วาดไว้ — โหลดไฟล์โซนก่อน (แท็บ ② ไฟล์โซนและเส้น)")
+            return None
+        try:
+            data = json.loads(self.run3_align_var.get() or "{}")
+        except (ValueError, TypeError):
+            data = {}
+        if not data.get("pairs"):
+            messagebox.showerror("แก้รูปโซน", "ยังไม่ได้จัดแนวกับภาพโดรน — กด \"จัดแนว…\" ก่อน (ต้องมีคู่จุดและสเกล)")
+            return None
+        try:
+            cfg = self._run3_align_cfg(silent=False, force=True)
+        except Exception as exc:
+            messagebox.showerror("แก้รูปโซน", str(exc))
+            return None
+        if not os.path.isfile(str((data.get("drone") or {}).get("path", ""))):
+            messagebox.showerror("แก้รูปโซน", "ไม่พบภาพโดรนที่ใช้จัดแนว — เปิด \"จัดแนว…\" แล้วเลือกภาพโดรนใหม่")
+            return None
+
+        def saved(path):
+            if messagebox.askyesno("ไฟล์โซนใหม่", f"บันทึกแล้ว:\n{path}\n\nใช้ไฟล์ใหม่นี้เป็นไฟล์โซนของโปรแกรมเลย (แทนไฟล์ที่โหลดอยู่) ใช่ไหม?"):
+                try:
+                    self._load_pkstudio_json(path)
+                except Exception as exc:
+                    messagebox.showerror("ไฟล์โซนใหม่", str(exc))
+        return ZoneAlignEditor(self, video, data, cfg, on_saved=saved)
+
+    def _run3_align_cfg(self, silent=False, force=False):
         """The usable Align config (see align_build) when 'use the Align result' is ticked, else None. The pairs were clicked on a frame of
         a given size; for a video of another size the video points are scaled."""
-        if not bool(self.run3_align_enabled_var.get()):
+        if not bool(self.run3_align_enabled_var.get()) and not force:
             return None
         try:
             text = self.run3_align_var.get()

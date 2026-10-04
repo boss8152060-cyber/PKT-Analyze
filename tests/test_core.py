@@ -906,5 +906,54 @@ class AlignTests(unittest.TestCase):
         self.assertIn("error", CORE["align_build"](dict(data, scale=0)))
 
 
+class ZoneEditCoreTests(unittest.TestCase):
+    SIZE = (1920, 1080)
+
+    def cfg(self, kind="lens"):
+        rng = np.random.default_rng(2)
+        gx, gy = np.linspace(2, 50, 5), np.linspace(2, 16, 4)
+        ground = np.array([(a, b) for a in gx for b in gy])
+        h = CORE["homography_from_points"]([(0, 0), (60, 0), (60, 20), (0, 20)], [(150, 500), (1800, 420), (1900, 900), (60, 950)])
+        video = CORE["apply_homography"](h, ground)
+        data = {"pairs": [{"s": list(v), "d": list(g * 20.0 + [100, 60])} for v, g in zip(video, ground)], "kind": kind, "scale": 0.05, "rot_deg": 0.0,
+                "video_size": list(self.SIZE), "origin": [100.0, 60.0]}
+        return CORE["align_build"](data), h
+
+    def test_a_transformation_can_be_inverted(self):
+        cfg, h = self.cfg("lens")
+        video = CORE["apply_homography"](h, np.array([[12.0, 5.0], [33.0, 9.0], [47.0, 15.0]]))
+        plane = CORE["align_apply"](cfg, video)
+        back = CORE["align_plane_to_video"](cfg, plane, video + [25.0, -18.0])               # start the iteration away from the answer
+        self.assertLess(np.abs(back - video).max(), 0.02)
+        cfg90, _ = self.cfg("projective")
+        cfg90["rot_deg"] = 90.0
+        pl = CORE["align_apply"](cfg90, video)
+        self.assertLess(np.abs(CORE["align_plane_to_video"](cfg90, pl, video) - video).max(), 0.02)
+
+    def test_cross_road_edges_become_vertical_and_shared_corners_stay_shared(self):
+        # two neighbouring zones, their cross edges lean; the corner chamfer (45 degrees) is left alone
+        z2 = np.array([[0.0, 0.0], [5.0, 0.0], [5.6, 4.0], [0.4, 4.0]])
+        z3 = np.array([[5.0, 0.0], [10.0, 0.0], [10.5, 4.0], [5.6, 4.0]])               # shares the edge (5,0)-(5.6,4) with zone 2
+        chamfer = np.array([[10.0, 0.0], [12.0, 2.0], [10.5, 4.0]])
+        out, rep = CORE["perpendicularize_zones"]({"Zone 2": z2, "Zone 3": z3, "Zone 4": chamfer})
+        a = out["Zone 2"]
+        self.assertAlmostEqual(a[1][0], a[2][0], places=9)                                    # the shared cross edge is vertical
+        self.assertAlmostEqual(a[0][0], a[3][0], places=9)
+        b = out["Zone 3"]
+        self.assertTrue(np.allclose(a[1], b[0]) and np.allclose(a[2], b[3]))                  # still the same corners
+        self.assertAlmostEqual(b[1][0], b[2][0], places=9)
+        self.assertTrue(np.allclose(out["Zone 4"][1], [12.0, 2.0]))                           # the 45-degree chamfer end is not forced
+        self.assertGreater(rep["moved_max_m"], 0.0)
+        out2, _ = CORE["perpendicularize_zones"](out)
+        self.assertTrue(all(np.allclose(out[k], out2[k]) for k in out))                       # doing it twice changes nothing
+
+    def test_along_road_edges_can_be_levelled_too(self):
+        z = np.array([[0.0, 0.0], [10.0, 0.3], [10.0, 4.0], [0.0, 4.2]])
+        out, _ = CORE["perpendicularize_zones"]({"Zone 1": z}, horizontal_too=True)
+        a = out["Zone 1"]
+        self.assertAlmostEqual(a[0][1], a[1][1], places=9)
+        self.assertAlmostEqual(a[2][1], a[3][1], places=9)
+
+
 if __name__ == "__main__":
     unittest.main()
