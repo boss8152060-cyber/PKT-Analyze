@@ -344,105 +344,80 @@ class LateralClearanceTests(unittest.TestCase):
         self.assertAlmostEqual(diag[30][1], -math.sqrt(0.5))
 
 
-class RearEndTtc(unittest.TestCase):
-    VMIN = 2.0 / 3.6
-    COS = math.cos(math.radians(45))
+class VectorTtc(unittest.TestCase):
+    """TTC = -(r . v) / (v . v), r = P_B - P_A, v = V_B - V_A (SPEC v28 section 7; Eq. 11 of Yaibok et al. 2026)."""
+    REL = 0.5
 
-    def re(self, p_f, v_f, p_l, v_l, lf=4.5, ll=4.5, wf=1.8, wl=1.8):
-        return CORE["rear_end_ttc"](p_f, v_f, p_l, v_l, lf, ll, wf, wl, self.VMIN, self.COS)
+    def vt(self, p_a, v_a, p_b, v_b):
+        return CORE["vector_ttc"](p_a, v_a, p_b, v_b, self.REL)
 
-    def test_known_value(self):
-        r = self.re((0, 0), (10, 0), (20, 0), (5, 0))     # S = 20 - 4.5 = 15.5 ; CS = 5
-        self.assertAlmostEqual(r["S"], 15.5)
-        self.assertAlmostEqual(r["CS"], 5.0)
-        self.assertAlmostEqual(r["TTC"], 3.1)
+    def test_known_example(self):
+        r = self.vt((0, 0), (10, 0), (20, 15), (-4, -10))          # r = (20, 15), v = (-14, -10)
+        self.assertAlmostEqual(r["TTC"], 430.0 / 296.0, places=9)  # 1.4527 s
+        self.assertAlmostEqual(r["m"][0], 20 - 14 * 430.0 / 296.0, places=9)
+        self.assertAlmostEqual(r["m"][1], 15 - 10 * 430.0 / 296.0, places=9)
+        self.assertAlmostEqual(r["miss"], 0.5812, places=3)
+        self.assertAlmostEqual(r["miss"], abs(20 * -10 - 15 * -14) / math.hypot(14, 10), places=9)     # |r x v| / |v|
+        self.assertAlmostEqual(r["rel_speed"], math.hypot(14, 10), places=9)
+        self.assertAlmostEqual(r["ttc_x"], 20 / 14.0, places=9)
+        self.assertAlmostEqual(r["ttc_y"], 1.5, places=9)
 
-    def test_stationary_leader(self):
-        r = self.re((0, 0), (10, 0), (30, 0), (0, 0))
-        self.assertAlmostEqual(r["TTC"], 25.5 / 10.0)
+    def test_rear_end_course(self):
+        r = self.vt((0, 0), (15, 0), (20, 0), (10, 0))             # 20 m behind, closing at 5 m/s
+        self.assertAlmostEqual(r["TTC"], 4.0)
+        self.assertAlmostEqual(r["miss"], 0.0, places=9)
 
-    def test_leader_behind_or_not_closing_or_beside(self):
-        self.assertIsNone(self.re((20, 0), (10, 0), (0, 0), (5, 0)))        # leader behind
-        self.assertIsNone(self.re((0, 0), (5, 0), (20, 0), (10, 0)))        # leader faster
-        self.assertIsNone(self.re((0, 0), (10, 0), (20, 3.0), (5, 0)))      # 3 m to the side > (1.8+1.8)/2
+    def test_separating_or_not_approaching_has_no_ttc(self):
+        self.assertIsNone(self.vt((0, 0), (10, 0), (20, 0), (15, 0)))       # the leader is faster
+        self.assertIsNone(self.vt((20, 0), (10, 0), (0, 0), (8, 0)))        # B behind A and slower
+        self.assertIsNone(self.vt((0, 0), (10, 0), (0, 5), (10, 0)))        # same velocity: no relative motion
+        self.assertIsNone(self.vt((0, 0), (10, 0), (0, 5), (10, 5)))        # drifting away sideways
 
-    def test_opposite_direction_is_not_rear_end(self):
-        self.assertIsNone(self.re((0, 0), (10, 0), (20, 0), (-5, 0)))
+    def test_r_dot_v_zero_has_no_ttc(self):
+        self.assertIsNone(self.vt((0, 0), (0, 0), (10, 0), (0, 5)))         # r = (10, 0), v = (0, 5): r . v = 0
 
-    def test_boxes_already_overlap(self):
-        r = self.re((0, 0), (10, 0), (3.0, 0), (5, 0))
-        self.assertIsNotNone(r)
-        self.assertIsNone(r["TTC"])
+    def test_small_relative_speed_is_skipped(self):
+        self.assertIsNone(self.vt((0, 0), (10, 0), (20, 0), (9.8, 0)))      # 0.2 m/s < 0.5 m/s
+        self.assertIsNotNone(CORE["vector_ttc"]((0, 0), (10, 0), (20, 0), (9.8, 0), 0.1))
 
-    def test_slow_follower_ignored(self):
-        self.assertIsNone(self.re((0, 0), (0.1, 0), (20, 0), (0, 0)))
+    def test_symmetric_in_the_two_vehicles(self):
+        a = self.vt((0, 0), (10, 0), (20, 15), (-4, -10))
+        b = self.vt((20, 15), (-4, -10), (0, 0), (10, 0))
+        self.assertAlmostEqual(a["TTC"], b["TTC"], places=12)
+        self.assertAlmostEqual(a["miss"], b["miss"], places=12)
+
+    def test_the_time_does_not_say_how_close(self):
+        # B is 20 m ahead of A, both 10 m/s, B heads at angle theta: TTC is 1.0 s for every theta, the miss distance is 20 cos(theta / 2)
+        for theta, miss in ((180.0, 0.0), (90.0, 20 * math.cos(math.radians(45))), (30.0, 20 * math.cos(math.radians(15)))):
+            vb = (10 * math.cos(math.radians(theta)), 10 * math.sin(math.radians(theta)))
+            r = self.vt((0, 0), (10, 0), (20, 0), vb)
+            self.assertAlmostEqual(r["TTC"], 1.0, places=9)
+            self.assertAlmostEqual(r["miss"], miss, places=9)
 
 
-class SideTtc(unittest.TestCase):
-    VMIN = 2.0 / 3.6
+class ConflictAngle(unittest.TestCase):
+    def test_angle_between_velocities(self):
+        ang = CORE["conflict_angle_deg"]
+        self.assertAlmostEqual(ang((10, 0), (10, 0)), 0.0, places=6)
+        self.assertAlmostEqual(ang((10, 0), (0, 10)), 90.0, places=6)
+        self.assertAlmostEqual(ang((10, 0), (-10, 0)), 180.0, places=6)
+        self.assertAlmostEqual(ang((10, 0), (5, 5)), 45.0, places=6)
 
-    def sd(self, p_i, v_i, p_j, v_j, li=4.5, lj=4.5):
-        return CORE["side_ttc"](p_i, v_i, p_j, v_j, li, lj, self.VMIN)
+    def test_a_vehicle_without_heading_has_no_angle(self):
+        ang = CORE["conflict_angle_deg"]
+        self.assertIsNone(ang((10, 0), (0, 0)))
+        self.assertIsNone(ang((10, 0), (0.1, 0), min_speed=0.5))
 
-    def test_perpendicular_same_arrival(self):
-        r = self.sd((0, -10), (0, 10), (-10, 0), (10, 0))     # both reach (0,0) after 1 s
-        self.assertAlmostEqual(r["TTC"], 1.0)
-        self.assertAlmostEqual(r["d_i"], 10.0)
-        self.assertAlmostEqual(r["angle_deg"], 90.0)
-
-    def test_arrivals_too_far_apart_is_no_collision(self):
-        self.assertIsNone(self.sd((0, -10), (0, 10), (-20, 0), (10, 0)))    # 1 s vs 2 s, window 0.45 s
-
-    def test_arrival_difference_inside_window(self):
-        r = self.sd((0, -10), (0, 10), (-14, 0), (10, 0))                   # 1.0 s vs 1.4 s
-        self.assertAlmostEqual(r["TTC"], 1.0)
-        self.assertAlmostEqual(r["t_j"], 1.4)
-
-    def test_crossing_point_behind_one_vehicle(self):
-        self.assertIsNone(self.sd((0, 5), (0, 10), (-10, 0), (10, 0)))      # i already past X
-
-    def test_parallel_or_same_direction_excluded(self):
-        self.assertIsNone(self.sd((0, 0), (10, 0), (5, 2), (10, 0)))
-        self.assertIsNone(self.sd((0, 0), (10, 0), (5, 2), (10, 0.5)))      # 2.9 deg < 10 deg
-
-    def test_merging_angle_counts(self):
-        # 30 deg merge: j comes from the side and joins i's path 10 m ahead of i
-        x = (10.0, 0.0)
-        hj = (math.cos(math.radians(150)), math.sin(math.radians(150)))     # heading up-left
-        pj = (x[0] - hj[0] * 10.0, x[1] - hj[1] * 10.0)
-        r = self.sd((0, 0), (10, 0), pj, (hj[0] * 10.0, hj[1] * 10.0))
-        self.assertIsNotNone(r)
-        self.assertAlmostEqual(r["TTC"], 1.0, places=6)
-        self.assertAlmostEqual(r["angle_deg"], 30.0, places=6)
-
-    def test_stationary_vehicle_excluded(self):
-        self.assertIsNone(self.sd((0, -10), (0, 10), (0, 0), (0, 0)))
-
-    # ---- adjustable rule (the user has not settled the exact side-collision rule) ----
-    def sdp(self, **kw):
-        # arrivals 1.0 s and 1.4 s, both cars (4.5 m long) at 10 m/s -> default window 0.45 s
-        return CORE["side_ttc"]((0, -10), (0, 10), (-14, 0), (10, 0), 4.5, 4.5, self.VMIN, **kw)
-
-    def test_window_factor_zero_uses_margin_only(self):
-        self.assertIsNotNone(self.sdp())                                   # 0.4 <= 0.45
-        self.assertIsNone(self.sdp(window_factor=0.0, margin_s=0.3))       # 0.4 >  0.3
-        self.assertIsNotNone(self.sdp(window_factor=0.0, margin_s=0.5))    # 0.4 <= 0.5
-
-    def test_window_factor_scales_vehicle_length_window(self):
-        self.assertIsNone(self.sdp(window_factor=0.5))                     # 0.225 < 0.4
-        self.assertIsNotNone(self.sdp(window_factor=1.0, margin_s=0.0))
-        self.assertIsNotNone(self.sdp(window_factor=0.5, margin_s=0.2))    # 0.225 + 0.2 = 0.425
-
-    def test_ttc_mode(self):
-        self.assertAlmostEqual(self.sdp(mode="earlier")["TTC"], 1.0)
-        self.assertAlmostEqual(self.sdp(mode="later")["TTC"], 1.4)
-        self.assertAlmostEqual(self.sdp(mode="average")["TTC"], 1.2)
-
-    def test_min_angle_is_adjustable(self):
-        near_parallel = CORE["side_ttc"]((0, 0), (10, 0), (8, 2), (10, -1.5), 4.5, 4.5, self.VMIN, 10.0)
-        self.assertIsNone(near_parallel)                                   # 8.5 deg < 10 deg
-        allowed = CORE["side_ttc"]((0, 0), (10, 0), (8, 2), (10, -1.5), 4.5, 4.5, self.VMIN, 5.0, margin_s=5.0)
-        self.assertIsNotNone(allowed)
+    def test_types_follow_the_30_and_85_degree_limits(self):
+        t = CORE["ttc_conflict_type"]
+        self.assertEqual(t(0.0), "Rear-end")
+        self.assertEqual(t(29.9), "Rear-end")
+        self.assertEqual(t(30.0), "Lane change")
+        self.assertEqual(t(85.0), "Lane change")
+        self.assertEqual(t(85.1), "Crossing")
+        self.assertEqual(t(180.0), "Crossing")
+        self.assertEqual(t(None), "Unclassified")
+        self.assertEqual(t(40.0, 45.0, 90.0), "Rear-end")                   # the limits are adjustable
 
 
 class ConflictType(unittest.TestCase):

@@ -32,13 +32,12 @@
 | `pet_max_s` | 10 | PET | ตัดค่า PET ใหญ่ออก | 5, 10, 15 |
 | `pet_threshold_s` | 1.0 | PET (นับต่ำกว่าเกณฑ์) | | 0.5, 1.0, 1.5 |
 | `ttc_max_record_s` | 3.0 | TTC | บันทึกเฉพาะ TTCmin ≤ ค่านี้ | 2, 3, 5 |
-| `ttc_heading_max_deg` | 45 | TTC ท้ายชน (ทิศเดียวกัน) | | 30, 45, 60 |
 | `ttc_velocity_window_s` | 0.50 | TTC | | 0.25, 0.5, 1.0 |
-| `ttc_min_speed_kmh` | 2.0 | TTC | ผู้ตามต้องเคลื่อนที่ | 1, 2, 5 |
-| `ttc_side_window_factor` | 1.0 | TTC ด้านข้าง | เงื่อนไขชน (ผู้ใช้ให้ "กำหนดได้" — ยังไม่สรุป) | 0, 0.5, 1, 2 |
-| `ttc_side_margin_s` | 0.0 | TTC ด้านข้าง | | 0, 0.25, 0.5 |
-| `ttc_side_min_angle_deg` | 10 | TTC ด้านข้าง | | 5, 10, 20 |
-| `ttc_side_mode` | Earlier arrival | TTC ด้านข้าง | เร็ว/ช้า/เฉลี่ย | ทั้ง 3 แบบ |
+| `ttc_min_speed_kmh` | 2.0 | TTC | รถที่ช้ากว่านี้ไม่มีทิศ → มุมความขัดแย้งว่าง (ชนิด Unclassified) | 1, 2, 5 |
+| `ttc_min_rel_speed_ms` | 0.5 | TTC | ข้ามคู่ที่ความเร็วสัมพัทธ์ต่ำกว่านี้ (m/s) กันค่า TTC ไม่นิ่ง | 0.25, 0.5, 1.0 |
+| `ttc_pair_radius_m` | 20 | TTC | ประเมินเฉพาะคู่ที่ห่างกันไม่เกินค่านี้ (m); งานอ้างอิงมีระยะคัดกรองแต่ไม่ระบุค่า — 20 เป็นค่าที่เราเลือก ไม่มีที่มา | 10, 20, 30 |
+| `ttc_angle_rear_end_deg` | 30 | TTC ชนิดความขัดแย้ง | มุมระหว่างทิศวิ่งสองคัน < ค่านี้ = Rear-end (Yaibok et al. 2026, Fig. 8; Hydén/SSAM) | 20, 30, 45 |
+| `ttc_angle_crossing_deg` | 85 | TTC ชนิดความขัดแย้ง | > ค่านี้ = Crossing, ระหว่างกลาง = Lane change | 75, 85, 95 |
 | ความกว้างรถ (`vehicle_widths`) | Car 1.80, Motorcycle 0.80, Bus 2.50, Pickup 1.85, Sidecar 1.30, Truck 2.50, Van 1.90 m | Lateral Clearance, TTC | ขอบถึงขอบ = ระยะ − (W_A+W_B)/2 | ± 10 % |
 | ความยาวรถ (`vehicle_lengths`) | Car 4.50, Motorcycle 2.00, Bus 12.0, Pickup 5.30, Sidecar 2.20, Truck 8.0, Van 5.0 m | Lateral Clearance (กรอบซ้อนตามแนวยาว), TTC | | ± 10 % |
 | `ZONE_FLICKER_MERGE_S` (ในโค้ด) | 0.10 s | ลำดับโซน/Movement | ตัดการกะพริบที่ขอบโซน | 0.05, 0.10, 0.20 (แก้ค่าคงที่ในโค้ด) |

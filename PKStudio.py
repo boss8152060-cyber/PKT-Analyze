@@ -478,15 +478,13 @@ RUN3_DEFAULTS = {
     # V27 implementation starter values (editable; verify per site):
     "pet_max_s": "10.0",                    # pairs/events above this are not PET conflicts; blank = no limit
     "ttc_max_record_s": "3.0",              # record TTC events with TTCmin <= this value
-    "ttc_heading_max_deg": "45",            # same-direction test for rear-end / deviation
     "ttc_velocity_window_s": "0.50",        # centred window of observed samples for velocity
-    "ttc_min_speed_kmh": "2.0",             # follower must be moving
-    # Side (crossing / merging) collision - adjustable because the rule is not settled yet:
-    "ttc_side_enabled": True,
-    "ttc_side_window_factor": "1.0",        # x (L_i/v_i + L_j/v_j)/2  (0 = ignore vehicle length)
-    "ttc_side_margin_s": "0.0",             # seconds added to the arrival-time window
-    "ttc_side_min_angle_deg": "10",         # paths closer to parallel than this are not a side conflict
-    "ttc_side_mode": "Earlier arrival",     # Earlier arrival | Later arrival | Average of arrivals
+    "ttc_min_speed_kmh": "2.0",             # a vehicle slower than this has no heading (conflict angle -> Unclassified)
+    # Vector TTC (SPEC v28 section 7, formula of Yaibok et al. 2026):
+    "ttc_min_rel_speed_ms": "0.5",          # pairs with a smaller relative speed (m/s) are skipped (unstable TTC)
+    "ttc_pair_radius_m": "20",              # only pairs closer than this (m) are evaluated (the reference paper has a screening radius, value not given)
+    "ttc_angle_rear_end_deg": "30",         # conflict angle < this: Rear-end
+    "ttc_angle_crossing_deg": "85",         # conflict angle > this: Crossing (in between: Lane change)
     # V28: road geometry (m). Blank = not entered (never guessed).
     # W_entry = entry motorcycle lane + entry car lane (side with the side street: Zones 2-3-4)
     # W_opp   = opposite motorcycle lane + opposite car lane (Zones 5-6-7)
@@ -856,69 +854,51 @@ def conflict_type_from_sequences(seq_a, seq_b, trajectories_intersect=False):
     return "Merging/Diverging"
 
 
-def rear_end_ttc(p_f, v_f, p_l, v_l, len_f, len_l, w_f, w_l, vmin, cos_max):
-    """Rear-end TTC = S / CS (SPEC v28 section 7). Follower f, leader l;
-    positions in m, velocities in m/s.
-      S  = separation along the follower's heading - (L_f + L_l) / 2
-      CS = closing speed along that heading = v_f - v_l(along)
-    Conditions: follower moving (>= vmin), leader ahead, lateral offset within
-    (W_f + W_l) / 2, same direction (or leader (nearly) stationary), CS > 0.
-    Returns None when not a rear-end course, else a dict; TTC is None when the
-    boxes already overlap (S <= 0)."""
-    spd_f = math.hypot(v_f[0], v_f[1])
-    if spd_f < vmin:
-        return None
-    hx, hy = v_f[0] / spd_f, v_f[1] / spd_f
-    dx, dy = p_l[0] - p_f[0], p_l[1] - p_f[1]
-    d_long = dx * hx + dy * hy
-    if d_long <= 0:
-        return None
-    if abs(hx * dy - hy * dx) > (w_f + w_l) / 2.0:
-        return None
-    spd_l = math.hypot(v_l[0], v_l[1])
-    if spd_l >= vmin and (hx * v_l[0] + hy * v_l[1]) / spd_l < cos_max:
-        return None
-    closing = spd_f - (v_l[0] * hx + v_l[1] * hy)
-    if closing <= 0:
-        return None
-    gap = d_long - (len_f + len_l) / 2.0
-    return {"S": gap, "CS": closing, "TTC": (gap / closing) if gap > 0 else None,
-            "Speed_F": spd_f, "Speed_L": spd_l}
+TTC_ANGLE_REAR_END_DEG = 30.0       # conflict angle < 30 deg: rear-end (Yaibok et al., Sustainability 2026, 18, 4995, after Hyden / SSAM)
+TTC_ANGLE_CROSSING_DEG = 85.0       # 30 - 85 deg: lane change / weaving; > 85 deg: crossing
 
 
-SIDE_TTC_MIN_ANGLE_DEG = 10.0   # paths closer to parallel than this are not a side (crossing) conflict
+def vector_ttc(p_a, v_a, p_b, v_b, min_rel_speed):
+    """Two-dimensional vector TTC (SPEC v28 section 7; the same formula as Eq. 11 of Yaibok et al. 2026 = TCPA of marine navigation).
+    r = p_b - p_a (relative position, m), v = v_b - v_a (relative velocity, m/s). Constant velocities:  r(t) = r + v t.
+      TTC = -(r . v) / (v . v)   when r . v < 0 (approaching), else no TTC
+    Also returned: m = r + v TTC (where the vehicles are, relative to each other, when they are closest), |m|, |v|, TTC_x, TTC_y.
+    None when the pair is separating (r . v >= 0) or the relative speed is below `min_rel_speed` (m/s)."""
+    r = (p_b[0] - p_a[0], p_b[1] - p_a[1])
+    v = (v_b[0] - v_a[0], v_b[1] - v_a[1])
+    vv = v[0] * v[0] + v[1] * v[1]
+    rel = math.sqrt(vv)
+    if rel <= 0.0 or rel < min_rel_speed:
+        return None
+    rv = r[0] * v[0] + r[1] * v[1]
+    if rv >= 0.0:
+        return None
+    ttc = -rv / vv
+    m = (r[0] + v[0] * ttc, r[1] + v[1] * ttc)
+    return {"TTC": ttc, "r": r, "v": v, "m": m, "miss": math.hypot(m[0], m[1]), "rel_speed": rel,
+            "ttc_x": (-r[0] / v[0]) if r[0] * v[0] < 0 else None,
+            "ttc_y": (-r[1] / v[1]) if r[1] * v[1] < 0 else None}
 
 
-def side_ttc(p_i, v_i, p_j, v_j, len_i, len_j, vmin, min_angle_deg=SIDE_TTC_MIN_ANGLE_DEG,
-             window_factor=1.0, margin_s=0.0, mode="earlier"):
-    """Side (crossing / merging) TTC by distance to the path intersection
-    (SPEC v28 section 7; constant velocity, straight paths along the velocity).
-      X = intersection of the two straight paths (must be ahead of both)
-      t_i = d_i / v_i,  t_j = d_j / v_j
-    User-adjustable (the exact rule is not settled yet):
-      window = window_factor x (L_i/v_i + L_j/v_j) / 2 + margin_s   (time the vehicles need to clear X)
-      a collision course exists when |t_i - t_j| <= window
-      TTC = "earlier" -> min(t_i, t_j) | "later" -> max(t_i, t_j) | "average" -> (t_i + t_j) / 2"""
-    spd_i, spd_j = math.hypot(v_i[0], v_i[1]), math.hypot(v_j[0], v_j[1])
-    if spd_i < vmin or spd_j < vmin:
+def conflict_angle_deg(v_a, v_b, min_speed=0.0):
+    """Angle (0 - 180 deg) between the velocity vectors of the two vehicles; None when either is slower than `min_speed` (m/s) or still."""
+    sa, sb = math.hypot(v_a[0], v_a[1]), math.hypot(v_b[0], v_b[1])
+    if sa <= 0.0 or sb <= 0.0 or sa < min_speed or sb < min_speed:
         return None
-    hix, hiy = v_i[0] / spd_i, v_i[1] / spd_i
-    hjx, hjy = v_j[0] / spd_j, v_j[1] / spd_j
-    den = hix * hjy - hiy * hjx
-    if abs(den) < math.sin(math.radians(min_angle_deg)):
-        return None
-    dx, dy = p_j[0] - p_i[0], p_j[1] - p_i[1]
-    s_i = (dx * hjy - dy * hjx) / den
-    s_j = (dx * hiy - dy * hix) / den
-    if s_i <= 0 or s_j <= 0:
-        return None
-    t_i, t_j = s_i / spd_i, s_j / spd_j
-    window = float(window_factor) * (len_i / spd_i + len_j / spd_j) / 2.0 + float(margin_s)
-    if abs(t_i - t_j) > window:
-        return None
-    ttc = {"later": max(t_i, t_j), "average": (t_i + t_j) / 2.0}.get(mode, min(t_i, t_j))
-    return {"TTC": ttc, "t_i": t_i, "t_j": t_j, "d_i": s_i, "d_j": s_j,
-            "window": window, "angle_deg": math.degrees(math.asin(min(1.0, abs(den))))}
+    c = (v_a[0] * v_b[0] + v_a[1] * v_b[1]) / (sa * sb)
+    return math.degrees(math.acos(max(-1.0, min(1.0, c))))
+
+
+def ttc_conflict_type(theta_deg, rear_end_deg=TTC_ANGLE_REAR_END_DEG, crossing_deg=TTC_ANGLE_CROSSING_DEG):
+    """Conflict type from the angle between the two velocity vectors (Yaibok et al. 2026, Fig. 8):
+    theta < 30 -> Rear-end | 30 <= theta <= 85 -> Lane change | theta > 85 -> Crossing | no angle -> Unclassified."""
+    if theta_deg is None:
+        return "Unclassified"
+    if theta_deg < rear_end_deg:
+        return "Rear-end"
+    if theta_deg <= crossing_deg:
+        return "Lane change"
+    return "Crossing"
 
 
 def canvas_to_video(cx, cy, scale, width, height):
@@ -3561,14 +3541,12 @@ class Run1App:
         self.run3_ldp_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["ldp_zones"])) for z in ZONE_IDS}
         self.run3_pet_max_var = tk.StringVar(value=RUN3_DEFAULTS["pet_max_s"])
         self.run3_ttc_max_record_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_max_record_s"])
-        self.run3_ttc_heading_max_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_heading_max_deg"])
         self.run3_ttc_velocity_window_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_velocity_window_s"])
         self.run3_ttc_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_speed_kmh"])
-        self.run3_ttc_side_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["ttc_side_enabled"])
-        self.run3_ttc_side_factor_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_side_window_factor"])
-        self.run3_ttc_side_margin_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_side_margin_s"])
-        self.run3_ttc_side_angle_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_side_min_angle_deg"])
-        self.run3_ttc_side_mode_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_side_mode"])
+        self.run3_ttc_min_rel_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_rel_speed_ms"])
+        self.run3_ttc_pair_radius_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_pair_radius_m"])
+        self.run3_ttc_angle_rear_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_angle_rear_end_deg"])
+        self.run3_ttc_angle_cross_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_angle_crossing_deg"])
         # V28: road geometry (lane widths per side + median)
         self.run3_geometry_vars = {
             key: tk.StringVar(value=RUN3_DEFAULTS[key]) for key in RUN3_GEOMETRY_KEYS
@@ -3982,21 +3960,16 @@ class Run1App:
         self.run3_reference_text.insert("1.0", self.run3_reference_mapping_text)
 
         box = self._indicator_box("TTC", self.run3_ttc_enabled_var,
-                                  "ชนท้าย: TTC = S / CS   |   ชนด้านข้าง: เวลาถึงจุดตัดของเส้นทางสองคัน (ระยะทางถึงจุดตัด ÷ ความเร็ว) ชนเมื่อเวลาถึงต่างกันไม่เกินเวลาที่ตัวรถใช้พ้นจุดตัด")
+                                  "TTC เวกเตอร์ 2 มิติ = −(r·v)/(v·v) (r = ตำแหน่งสัมพัทธ์, v = ความเร็วสัมพัทธ์) — ชนิดความขัดแย้งแยกด้วยมุมระหว่างทิศวิ่งของสองคัน (สูตรและมุมตามงาน Yaibok et al. 2026)")
         self._zone_checks(box, self.run3_ttc_zone_vars, 1)
         for i, (label, var) in enumerate((("บันทึกเมื่อ TTCmin ≤ (s)", self.run3_ttc_max_record_var),
-                                          ("ชนท้าย: มุมทิศทางต่างกันไม่เกิน (deg)", self.run3_ttc_heading_max_var),
                                           ("หน้าต่างคำนวณความเร็ว (s)", self.run3_ttc_velocity_window_var),
-                                          ("ความเร็วรถตามขั้นต่ำ (km/h)", self.run3_ttc_min_speed_var))):
-            self._entry_row(box, 2 + i, label, var)
-        ttk.Checkbutton(box, text="คำนวณ TTC ชนด้านข้าง", variable=self.run3_ttc_side_enabled_var).grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 2))
-        for i, (label, var) in enumerate((("ตัวคูณหน้าต่างเวลาถึงจุดตัด (× เวลาที่ตัวรถพ้นจุดตัด, 0 = ไม่คิดความยาวรถ)", self.run3_ttc_side_factor_var),
-                                          ("เวลาเผื่อเพิ่ม (s)", self.run3_ttc_side_margin_var),
-                                          ("มุมระหว่างเส้นทางอย่างน้อย (deg)", self.run3_ttc_side_angle_var))):
-            self._entry_row(box, 7 + i, label, var, span=7)
-        ttk.Label(box, text="TTC ด้านข้าง =").grid(row=10, column=0, sticky="w", pady=2)
-        ttk.Combobox(box, textvariable=self.run3_ttc_side_mode_var, state="readonly", width=20,
-                     values=["Earlier arrival", "Later arrival", "Average of arrivals"]).grid(row=10, column=1, columnspan=3, sticky="w", pady=2)
+                                          ("ความเร็วขั้นต่ำของแต่ละคัน เพื่อหาทิศ/มุม (km/h)", self.run3_ttc_min_speed_var),
+                                          ("ความเร็วสัมพัทธ์ขั้นต่ำที่ยังคิด (m/s)", self.run3_ttc_min_rel_speed_var),
+                                          ("ระยะคัดกรองคู่รถ — ห่างกันไม่เกิน (m)", self.run3_ttc_pair_radius_var),
+                                          ("มุมความขัดแย้ง: น้อยกว่านี้ = Rear-end (deg)", self.run3_ttc_angle_rear_var),
+                                          ("มุมความขัดแย้ง: มากกว่านี้ = Crossing (deg), ระหว่างกลาง = Lane change", self.run3_ttc_angle_cross_var))):
+            self._entry_row(box, 2 + i, label, var, span=7)
 
         box = self._indicator_box("PET", self.run3_pet_enabled_var, "PET คำนวณแยกในแต่ละ Conflict Zone (Zone 3 / Zone 6)")
         self._zone_checks(box, self.run3_pet_zone_vars, 1, "Conflict Zone")
@@ -5438,14 +5411,12 @@ class Run1App:
                 "ldp_zones": [z for z, v in self.run3_ldp_zone_vars.items() if v.get()],
                 "pet_max_s": self.run3_pet_max_var.get(),
                 "ttc_max_record_s": self.run3_ttc_max_record_var.get(),
-                "ttc_heading_max_deg": self.run3_ttc_heading_max_var.get(),
                 "ttc_velocity_window_s": self.run3_ttc_velocity_window_var.get(),
                 "ttc_min_speed_kmh": self.run3_ttc_min_speed_var.get(),
-                "ttc_side_enabled": self.run3_ttc_side_enabled_var.get(),
-                "ttc_side_window_factor": self.run3_ttc_side_factor_var.get(),
-                "ttc_side_margin_s": self.run3_ttc_side_margin_var.get(),
-                "ttc_side_min_angle_deg": self.run3_ttc_side_angle_var.get(),
-                "ttc_side_mode": self.run3_ttc_side_mode_var.get(),
+                "ttc_min_rel_speed_ms": self.run3_ttc_min_rel_speed_var.get(),
+                "ttc_pair_radius_m": self.run3_ttc_pair_radius_var.get(),
+                "ttc_angle_rear_end_deg": self.run3_ttc_angle_rear_var.get(),
+                "ttc_angle_crossing_deg": self.run3_ttc_angle_cross_var.get(),
                 **{key: self.run3_geometry_vars[key].get() for key in RUN3_GEOMETRY_KEYS},
                 "ldp_smoothing_samples": self.run3_ldp_smoothing_var.get(),
                 "vehicle_lengths": {name: var.get() for name, var in self.run3_length_vars.items()},
@@ -5586,14 +5557,12 @@ class Run1App:
                 ("perspective_l41_m", self.run3_perspective_l41_var),
                 ("pet_max_s", self.run3_pet_max_var),
                 ("ttc_max_record_s", self.run3_ttc_max_record_var),
-                ("ttc_heading_max_deg", self.run3_ttc_heading_max_var),
                 ("ttc_velocity_window_s", self.run3_ttc_velocity_window_var),
                 ("ttc_min_speed_kmh", self.run3_ttc_min_speed_var),
-                ("ttc_side_enabled", self.run3_ttc_side_enabled_var),
-                ("ttc_side_window_factor", self.run3_ttc_side_factor_var),
-                ("ttc_side_margin_s", self.run3_ttc_side_margin_var),
-                ("ttc_side_min_angle_deg", self.run3_ttc_side_angle_var),
-                ("ttc_side_mode", self.run3_ttc_side_mode_var),
+                ("ttc_min_rel_speed_ms", self.run3_ttc_min_rel_speed_var),
+                ("ttc_pair_radius_m", self.run3_ttc_pair_radius_var),
+                ("ttc_angle_rear_end_deg", self.run3_ttc_angle_rear_var),
+                ("ttc_angle_crossing_deg", self.run3_ttc_angle_cross_var),
                 ("speed_smoothing_samples", self.run3_speed_smoothing_var),
                 ("speed_max_kmh", self.run3_speed_max_var),
                 ("ldp_smoothing_samples", self.run3_ldp_smoothing_var),
@@ -6548,20 +6517,15 @@ class Run1App:
                 self._run3_float(self.run3_length_vars[name].get(), f"vehicle length for {name} (Lateral Clearance needs the length)")
         if enabled["ttc"]:
             need_zone(self.run3_ttc_zone_vars, "TTC")
-            for name in RUN3_VEHICLE_CLASSES:
-                self._run3_float(self.run3_length_vars[name].get(), f"vehicle length for {name}")
             self._run3_float(self.run3_ttc_max_record_var.get(), "TTC record limit (s)")
-            self._run3_float(self.run3_ttc_heading_max_var.get(), "TTC heading limit (deg)")
             self._run3_float(self.run3_ttc_velocity_window_var.get(), "TTC velocity window (s)")
-            self._run3_float(self.run3_ttc_min_speed_var.get(), "TTC minimum follower speed (km/h)", positive=False)
-            if self.run3_ttc_side_enabled_var.get():
-                self._run3_float(self.run3_ttc_side_factor_var.get(), "TTC side window factor", positive=False)
-                self._run3_float(self.run3_ttc_side_margin_var.get(), "TTC side extra time (s)", positive=False)
-                angle = self._run3_float(self.run3_ttc_side_angle_var.get(), "TTC side minimum path angle (deg)")
-                if not 0 < angle < 90:
-                    raise ValueError("Run 3 TTC side minimum path angle must be between 0 and 90 degrees.")
-                if float(self.run3_ttc_side_factor_var.get()) < 0 or float(self.run3_ttc_side_margin_var.get()) < 0:
-                    raise ValueError("Run 3 TTC side window factor and extra time must not be negative.")
+            self._run3_float(self.run3_ttc_min_speed_var.get(), "TTC minimum vehicle speed (km/h)", positive=False)
+            self._run3_float(self.run3_ttc_min_rel_speed_var.get(), "TTC minimum relative speed (m/s)", positive=False)
+            self._run3_float(self.run3_ttc_pair_radius_var.get(), "TTC pair screening radius (m)")
+            a1 = self._run3_float(self.run3_ttc_angle_rear_var.get(), "TTC rear-end angle (deg)")
+            a2 = self._run3_float(self.run3_ttc_angle_cross_var.get(), "TTC crossing angle (deg)")
+            if not 0 < a1 < a2 < 180:
+                raise ValueError("Run 3 TTC angles must satisfy 0 < rear-end angle < crossing angle < 180 degrees.")
         for key in RUN3_GEOMETRY_KEYS:
             text = str(self.run3_geometry_vars[key].get()).strip()
             if text:   # must be numeric when entered (lane widths are required when LDP is enabled)
@@ -8850,15 +8814,12 @@ class Run1App:
             "pet_threshold": num(self.run3_pet_threshold_var, 1.0),
             "pet_max_s": pet_max if (pet_max is not None and pet_max > 0) else None,
             "ttc_max_record_s": num(self.run3_ttc_max_record_var, 3.0),
-            "ttc_heading_max_deg": num(self.run3_ttc_heading_max_var, 45.0),
             "ttc_velocity_window_s": num(self.run3_ttc_velocity_window_var, 0.5),
             "ttc_min_speed_kmh": num(self.run3_ttc_min_speed_var, 2.0),
-            "ttc_side_enabled": bool(self.run3_ttc_side_enabled_var.get()),
-            "ttc_side_window_factor": num(self.run3_ttc_side_factor_var, 1.0),
-            "ttc_side_margin_s": num(self.run3_ttc_side_margin_var, 0.0),
-            "ttc_side_min_angle_deg": num(self.run3_ttc_side_angle_var, 10.0),
-            "ttc_side_mode": {"Later arrival": "later", "Average of arrivals": "average"}.get(
-                str(self.run3_ttc_side_mode_var.get()), "earlier"),
+            "ttc_min_rel_speed_ms": num(self.run3_ttc_min_rel_speed_var, 0.5),
+            "ttc_pair_radius_m": num(self.run3_ttc_pair_radius_var, 20.0),
+            "ttc_angle_rear_end_deg": num(self.run3_ttc_angle_rear_var, TTC_ANGLE_REAR_END_DEG),
+            "ttc_angle_crossing_deg": num(self.run3_ttc_angle_cross_var, TTC_ANGLE_CROSSING_DEG),
             "geometry": geometry,
             "w_entry_m": w_entry, "w_opp_m": w_opp,
             "ldp_smoothing_samples": int(num(self.run3_ldp_smoothing_var, 5) or 1),
@@ -10075,32 +10036,28 @@ class Run1App:
     # ========================================================
 
     def _run3_ttc(self, tracks, c, movement_by_id):
-        """TTC (SPEC v28 section 7) for vehicles standing in the selected zones
-        (default Zones 3 and 6) at the same frame.
+        """Vector TTC (SPEC v28 section 7) for vehicles standing in the selected zones (default Zones 3 and 6) at the same frame.
 
-        RearEnd: TTC = S / CS (same-direction follower / leader).
-        Side   : pairs that are not on a rear-end course but whose straight paths
-                 cross ahead of both; TTC = min(d_i/v_i, d_j/v_j) when the arrival
-                 times differ by at most the time needed to clear the crossing.
-        One row per event (pair + type) = its TTCmin. Velocities come from a short
-        centred window of observed samples (no interpolation)."""
+        Every pair of vehicles seen in the same frame, closer than `ttc_pair_radius_m`: r = P_B - P_A, v = V_B - V_A (metres, from the Trajectory
+        Position; velocities from a short centred window of observed samples, no interpolation); TTC = -(r . v) / (v . v) when r . v < 0
+        (approaching) and |v| >= the minimum relative speed. One row per event (pair; frames more than 1 s apart start a new event) = the frame
+        with the smallest TTC. The conflict type comes from the angle between the two velocity vectors at that frame:
+        < 30 deg Rear-end, 30 - 85 Lane change, > 85 Crossing (Yaibok et al. 2026)."""
         zones = c["ttc_zones"]
         win = max(1e-3, c["ttc_velocity_window_s"]) / 2.0
         vmin = c["ttc_min_speed_kmh"] / 3.6
-        cos_max = math.cos(math.radians(c["ttc_heading_max_deg"]))
+        rel_min = c["ttc_min_rel_speed_ms"]
+        radius = c["ttc_pair_radius_m"]
         ttc_max = c["ttc_max_record_s"]
-        widths = c["widths"]; lengths = c["lengths"]
-        diag = {"frames_with_pairs": 0, "pairs_evaluated": 0, "rear_end_candidates": 0, "side_candidates": 0,
-                "skipped_overlap_boxes": 0, "missing_dimension_class": set()}
+        a_rear, a_cross = c["ttc_angle_rear_end_deg"], c["ttc_angle_crossing_deg"]
+        diag = {"frames_with_pairs": 0, "pairs_evaluated": 0, "pairs_outside_radius": 0, "pairs_approaching": 0, "candidates": 0}
 
         per_frame = defaultdict(list)
         for tid, rows in tracks.items():
             if not rows:
                 continue
             cls = self._run3_canonical_class(rows[0].get("class_name", ""))
-            if cls not in widths or widths.get(cls) is None or lengths.get(cls) is None:
-                if str(cls).lower() != "person":
-                    diag["missing_dimension_class"].add(cls)
+            if str(cls).lower() == "person":
                 continue
             valid = [r for r in rows if r.get("_m") is not None]
             if len(valid) < 2:
@@ -10132,48 +10089,24 @@ class Run1App:
             for i in range(n):
                 for j in range(i + 1, n):
                     A, B = items[i], items[j]
+                    if str(B["tid"]) < str(A["tid"]):
+                        A, B = B, A                                   # A = the smaller ID (stable, one row per pair)
                     diag["pairs_evaluated"] += 1
-                    la, lb = lengths[A["cls"]], lengths[B["cls"]]
-                    wa, wb = widths[A["cls"]], widths[B["cls"]]
-                    on_rear_end_course = False
-                    for f, l in ((A, B), (B, A)):
-                        res = rear_end_ttc(f["p"], f["v"], l["p"], l["v"],
-                                           lengths[f["cls"]], lengths[l["cls"]],
-                                           widths[f["cls"]], widths[l["cls"]], vmin, cos_max)
-                        if res is None:
-                            continue
-                        on_rear_end_course = True
-                        if res["TTC"] is None:
-                            diag["skipped_overlap_boxes"] += 1
-                            continue
-                        if res["TTC"] <= ttc_max:
-                            diag["rear_end_candidates"] += 1
-                            cand[("RearEnd", f["tid"], l["tid"])].append({
-                                "t": f["t"], "fr": fr, "ttc": res["TTC"], "zone": f["zone"],
-                                "a": f, "b": l, "S": res["S"], "CS": res["CS"],
-                                "vA": res["Speed_F"], "vB": res["Speed_L"]})
-                    if on_rear_end_course:
+                    if math.hypot(B["p"][0] - A["p"][0], B["p"][1] - A["p"][1]) > radius:
+                        diag["pairs_outside_radius"] += 1
                         continue
-                    if not c["ttc_side_enabled"]:
+                    res = vector_ttc(A["p"], A["v"], B["p"], B["v"], rel_min)
+                    if res is None:
                         continue
-                    sd = side_ttc(A["p"], A["v"], B["p"], B["v"], la, lb, vmin,
-                                  c["ttc_side_min_angle_deg"], c["ttc_side_window_factor"],
-                                  c["ttc_side_margin_s"], c["ttc_side_mode"])
-                    if sd is None or sd["TTC"] > ttc_max:
+                    diag["pairs_approaching"] += 1
+                    if res["TTC"] > ttc_max:
                         continue
-                    diag["side_candidates"] += 1
-                    first, second = (A, B) if sd["t_i"] <= sd["t_j"] else (B, A)
-                    d_first, d_second = (sd["d_i"], sd["d_j"]) if first is A else (sd["d_j"], sd["d_i"])
-                    key_ids = tuple(sorted((A["tid"], B["tid"]), key=lambda x: str(x)))
-                    cand[("Side", key_ids[0], key_ids[1])].append({
-                        "t": A["t"], "fr": fr, "ttc": sd["TTC"], "zone": first["zone"],
-                        "a": first, "b": second, "d_a": d_first, "d_b": d_second,
-                        "dt": abs(sd["t_i"] - sd["t_j"]), "angle": sd["angle_deg"],
-                        "vA": math.hypot(*first["v"]), "vB": math.hypot(*second["v"])})
+                    diag["candidates"] += 1
+                    cand[(A["tid"], B["tid"])].append({"t": A["t"], "fr": fr, "ttc": res["TTC"], "res": res, "a": A, "b": B})
 
         out = []
         event_gap = 1.0
-        for (kind, id_a, id_b), lst in cand.items():
+        for (id_a, id_b), lst in cand.items():
             lst.sort(key=lambda x: x["t"])
             events = [[lst[0]]]
             for item in lst[1:]:
@@ -10183,35 +10116,35 @@ class Run1App:
                     events[-1].append(item)
             for ev in events:
                 best = min(ev, key=lambda x: x["ttc"])
-                a_, b_ = best["a"], best["b"]
-                vA_kmh = best["vA"] * 3.6
-                rear = kind == "RearEnd"
+                a_, b_, res = best["a"], best["b"], best["res"]
+                sp_a, sp_b = math.hypot(*a_["v"]), math.hypot(*b_["v"])
+                theta = conflict_angle_deg(a_["v"], b_["v"], vmin)
+                fast = a_ if sp_a >= sp_b else b_                    # approach speed = the higher of the two speeds
                 out.append({
                     "Site_ID": c["site_id"],
-                    "Event_ID": f"{kind}_{a_['tid']}_{b_['tid']}_{ev[0]['t']:.6f}",
-                    "TTC_Type": kind,
+                    "Event_ID": f"TTC_{a_['tid']}_{b_['tid']}_{ev[0]['t']:.6f}",
+                    "TTC_Type": ttc_conflict_type(theta, a_rear, a_cross),
                     "Vehicle_A_ID": a_["tid"], "Vehicle_A_Class": a_["cls"], "Movement_A": movement_by_id.get(str(a_["tid"]), ""),
                     "Vehicle_B_ID": b_["tid"], "Vehicle_B_Class": b_["cls"], "Movement_B": movement_by_id.get(str(b_["tid"]), ""),
-                    "Zone": f"Zone {best['zone']}", "Event_Start": f"{ev[0]['t']:.6f}", "Event_End": f"{ev[-1]['t']:.6f}",
+                    "Zone": f"Zone {best['a']['zone']}", "Event_Start": f"{ev[0]['t']:.6f}", "Event_End": f"{ev[-1]['t']:.6f}",
                     "Event_Frames": len(ev), "TTCmin_Time": f"{best['t']:.6f}", "TTCmin_Frame": best["fr"],
-                    "S_Conflict_Distance_m": f"{best['S']:.6f}" if rear else "",
-                    "CS_Closing_Speed_kmh": f"{best['CS'] * 3.6:.6f}" if rear else "",
-                    "Speed_A_kmh": f"{vA_kmh:.6f}", "Speed_B_kmh": f"{best['vB'] * 3.6:.6f}",
-                    "Dist_A_to_Crossing_m": "" if rear else f"{best['d_a']:.6f}",
-                    "Dist_B_to_Crossing_m": "" if rear else f"{best['d_b']:.6f}",
-                    "Arrival_Diff_s": "" if rear else f"{best['dt']:.6f}",
-                    "Path_Angle_deg": "" if rear else f"{best['angle']:.2f}",
+                    "Theta_deg": "" if theta is None else f"{theta:.2f}",
+                    "Rel_X_m": f"{res['r'][0]:.4f}", "Rel_Y_m": f"{res['r'][1]:.4f}",
+                    "RelV_X_mps": f"{res['v'][0]:.4f}", "RelV_Y_mps": f"{res['v'][1]:.4f}", "Rel_Speed_kmh": f"{res['rel_speed'] * 3.6:.4f}",
+                    "Miss_X_m": f"{res['m'][0]:.4f}", "Miss_Y_m": f"{res['m'][1]:.4f}", "Miss_Distance_m": f"{res['miss']:.4f}",
+                    "TTC_X_s": "" if res["ttc_x"] is None else f"{res['ttc_x']:.4f}",
+                    "TTC_Y_s": "" if res["ttc_y"] is None else f"{res['ttc_y']:.4f}",
+                    "Speed_A_kmh": f"{sp_a * 3.6:.6f}", "Speed_B_kmh": f"{sp_b * 3.6:.6f}",
                     "TTC_s": f"{best['ttc']:.6f}",
                     "TTC_Level": self._level_ttc(best["ttc"]),
-                    "Speed_Level": self._level_ttc_speed(vA_kmh, a_["cls"]),
+                    "Speed_Level": self._level_ttc_speed(max(sp_a, sp_b) * 3.6, fast["cls"]),
                     "QC_Flag": ";".join(x for x in [
                         "Single_Frame_Event" if len(ev) == 1 else "",
-                        "Leader_Stationary" if rear and best["vB"] < vmin else "",
+                        "No_Heading" if theta is None else "",
                         self._run3_qc_calibration(c),
                     ] if x),
                 })
         out.sort(key=lambda r: float(r["TTCmin_Time"]))
-        diag["missing_dimension_class"] = sorted(diag["missing_dimension_class"])
         return out, diag
 
     # ========================================================
@@ -10463,20 +10396,19 @@ class Run1App:
         def do_ttc():
             status("Run 3 — TTC...")
             rows, diag = self._run3_ttc(tracks, c, movement_by_id)
-            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","S_Conflict_Distance_m","CS_Closing_Speed_kmh","Speed_A_kmh","Speed_B_kmh","Dist_A_to_Crossing_m","Dist_B_to_Crossing_m","Arrival_Diff_s","Path_Angle_deg","TTC_s","TTC_Level","Speed_Level","QC_Flag"]
+            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","Rel_X_m","Rel_Y_m","RelV_X_mps","RelV_Y_mps","Rel_Speed_kmh","Miss_X_m","Miss_Y_m","Miss_Distance_m","TTC_X_s","TTC_Y_s","Speed_A_kmh","Speed_B_kmh","TTC_s","TTC_Level","Speed_Level","QC_Flag"]
             row_counts["ttc"] = len(rows)
             outputs["ttc"] = write_csv("TTC.csv", fields, rows)
             vals = [float(r["TTC_s"]) for r in rows]
             s_ = indicator("Time-to-Collision (TTCmin per event)", "Time", "s", "All", vals,
                            f"events with TTCmin <= {c['ttc_max_record_s']} s")
-            for kind in ("RearEnd", "Side"):
+            for kind in ("Rear-end", "Lane change", "Crossing", "Unclassified"):
                 indicator("Time-to-Collision (TTCmin per event)", "Time", "s", kind,
                           [float(r["TTC_s"]) for r in rows if r["TTC_Type"] == kind])
             s_["Level_Counts"] = {lv: sum(1 for r in rows if r["TTC_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
             summary["indicators"]["TTC"] = s_
-            diag["side_rule"] = {"enabled": c["ttc_side_enabled"], "window_factor": c["ttc_side_window_factor"],
-                                 "margin_s": c["ttc_side_margin_s"], "min_angle_deg": c["ttc_side_min_angle_deg"],
-                                 "ttc_is": c["ttc_side_mode"]}
+            diag["rule"] = {"formula": "TTC = -(r.v)/(v.v), r.v < 0", "min_rel_speed_ms": c["ttc_min_rel_speed_ms"], "pair_radius_m": c["ttc_pair_radius_m"],
+                            "angle_rear_end_deg": c["ttc_angle_rear_end_deg"], "angle_crossing_deg": c["ttc_angle_crossing_deg"]}
             summary["diagnostics"]["ttc"] = diag
         run_step("ttc", "TTC.csv", do_ttc)
 
