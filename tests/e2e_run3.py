@@ -209,7 +209,9 @@ def scene1(app):
     lz = {(r["Vehicle_ID"], r["Zone"]): r for r in ldp}
     check("LDP rows for every main-road vehicle A, B, C (any class); D, E are not main-road", {v for v, _ in lz} == {"1", "2", "3"}, str(sorted(lz)))
     check("LDP car B (straight) ~ 0 %", float(lz[("2", "Zone 3")]["LDP_percent"]) < 0.5)
-    check("LDP risk level: A zone 3 (14.7 %) = None, C zone 6 (28.6 %) = None", lz[("1", "Zone 3")]["LDP_Level"] == "None" and lz[("3", "Zone 6")]["LDP_Level"] == "None")
+    check("LDP risk level: A zone 3 (14.7 %) = Interaction, C zone 6 (28.6 %) = Interaction", lz[("1", "Zone 3")]["LDP_Level"] == "Interaction" and lz[("3", "Zone 6")]["LDP_Level"] == "Interaction")
+    check("LDP overall level = the less severe of the LDP level and the speed level (every row)",
+          all(r["LDP_Risk_Level"] == m.combine_risk(r["LDP_Level"], r["Speed_Level"]) for r in ldp if r["Speed_Level"]), str([(r["LDP_Level"], r["Speed_Level"], r["LDP_Risk_Level"]) for r in ldp][:4]))
     a3 = float(lz[("1", "Zone 3")]["LDP_percent"])
     check("LDP A zone 3 ~ 0.35/(4.75/2) = 14.74 %", abs(a3 - 14.74) < 0.7, f"{a3:.3f}")
     check("LDP A zone 2 ~ 0 %", float(lz[("1", "Zone 2")]["LDP_percent"]) < 0.5)
@@ -313,6 +315,11 @@ def scene2(app):
         check("PET PET(P,Q) = 1.0 s", abs(float(r["PET_s"]) - 1.0) < 0.06, r["PET_s"])
         check("PET conflict type Crossing in Zone 3", r["Conflict_Type"] == "Crossing" and r["Conflict_Zone"] == "Zone 3",
               f"{r['Conflict_Type']} {r['Conflict_Zone']}")
+        lim_pet = m.RISK_DEFAULT_LIMITS["pet_s"]
+        check("PET levels follow the limits: PET level from PET_s, speed level from the 36 km/h of P and Q (Moderate), overall = the less severe",
+              r["PET_Level"] == m.risk_level_low_is_risky(float(r["PET_s"]), lim_pet) and r["Speed_Level"] == "Moderate"
+              and r["PET_Risk_Level"] == m.combine_risk(r["PET_Level"], "Moderate") and abs(float(r["Speed_A_kmh"]) - 36.0) < 0.5,
+              f"{r['PET_s']} {r['PET_Level']} {r['Speed_Level']} {r['PET_Risk_Level']} speeds {r['Speed_A_kmh']} {r['Speed_B_kmh']}")
 
     # ---- TTC (vector: TTC = -(r . v)/(v . v), no miss-distance gate) ----
     ttc = read_csv(os.path.join(out, "TTC.csv"))
@@ -334,6 +341,19 @@ def scene2(app):
         check("TTC P-R: TTCmin ~ 0 (1.55 - t, the last approaching frame)", float(pr_["TTC_s"]) < 0.05, pr_["TTC_s"])
         check("TTC P-R: miss distance ~ 0.7 m (the cars pass 0.1 s apart)", abs(float(pr_["Miss_Distance_m"]) - 0.71) < 0.12, pr_["Miss_Distance_m"])
         check("TTC P-R: relative speed sqrt(10^2 + 10^2) m/s = 50.9 km/h", abs(float(pr_["Rel_Speed_kmh"]) - 50.91) < 1.0, pr_["Rel_Speed_kmh"])
+    check("TTC overall level = the less severe of the TTC level and the speed level (every row)",
+          all(r["TTC_Risk_Level"] == m.combine_risk(r["TTC_Level"], r["Speed_Level"]) for r in ttc), str([(r["TTC_Level"], r["Speed_Level"], r["TTC_Risk_Level"]) for r in ttc]))
+    check("TTC P-R (TTC ~ 0, speed 36 km/h = Moderate by the speed scale): TTC level High, overall Moderate",
+          pr_ and pr_["TTC_Level"] == "High" and pr_["Speed_Level"] == "Moderate" and pr_["TTC_Risk_Level"] == "Moderate", f"{pr_['TTC_Level']} {pr_['Speed_Level']} {pr_['TTC_Risk_Level']}" if pr_ else "")
+    check("TTC F-L (TTC 2.016 s is just above the 2.0 s limit = Interaction, whatever the speed)", fl and fl["TTC_Level"] == "Interaction" and fl["TTC_Risk_Level"] == "Interaction",
+          f"{fl['TTC_s']} {fl['TTC_Level']} {fl['TTC_Risk_Level']}" if fl else "")
+    # the risk limits are editable: TTC limits 0.05 / 0.1 / 0.2 s -> F-L (2.0 s) = Interaction, P-R (0.017 s) = High
+    app.run3_risk_vars["risk_ttc_limits_s"].set("0.05, 0.1, 0.2")
+    out_rl, summ_rl = run_scene(app, veh)
+    app.run3_risk_vars["risk_ttc_limits_s"].set(m.RUN3_DEFAULTS["risk_ttc_limits_s"])
+    lv = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]): (r["TTC_Level"], r["TTC_Risk_Level"]) for r in read_csv(os.path.join(out_rl, "TTC.csv"))}
+    check("TTC risk limits are editable (0.05 / 0.1 / 0.2 s: F-L = Interaction, P-R = High level)", lv.get(("4", "5"), ("", ""))[0] == "Interaction" and lv.get(("1", "3"), ("", ""))[0] == "High", str(lv))
+    check("the limits used are written to the summary", summ_rl.get("risk_level_limits", {}).get("ttc_s") == [0.05, 0.1, 0.2], str(summ_rl.get("risk_level_limits")))
     pl = ev.get(("1", "5"))
     if pl:
         check("TTC P-L: lanes 12 m apart: TTC ~ 2.0 s but the miss distance is 12 m (written, not used to filter)",

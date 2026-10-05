@@ -344,6 +344,61 @@ class LateralClearanceTests(unittest.TestCase):
         self.assertAlmostEqual(diag[30][1], -math.sqrt(0.5))
 
 
+class RiskLevels(unittest.TestCase):
+    """Risk levels of the seminar slides (CROW 2009): index level, speed level, overall = the less severe of the two."""
+
+    def test_ttc_levels(self):
+        f, lim = CORE["risk_level_low_is_risky"], CORE["RISK_DEFAULT_LIMITS"]["ttc_s"]
+        self.assertEqual([f(v, lim) for v in (0.5, 0.99, 1.0, 1.5, 1.51, 2.0, 2.01, 9.0)],
+                         ["High", "High", "Moderate", "Moderate", "Low", "Low", "Interaction", "Interaction"])
+
+    def test_pet_levels(self):
+        f, lim = CORE["risk_level_low_is_risky"], CORE["RISK_DEFAULT_LIMITS"]["pet_s"]
+        self.assertEqual([f(v, lim) for v in (0.9, 1.0, 2.0, 2.1, 3.0, 3.1)], ["High", "Moderate", "Moderate", "Low", "Low", "Interaction"])
+
+    def test_speed_and_ldp_levels(self):
+        f = CORE["risk_level_high_is_risky"]
+        sp = CORE["RISK_DEFAULT_LIMITS"]["speed_kmh"]
+        self.assertEqual([f(v, sp) for v in (60, 50, 49.9, 30, 29.9, 15, 14.9, 0)], ["High", "High", "Moderate", "Moderate", "Low", "Low", "Interaction", "Interaction"])
+        ldp = CORE["RISK_DEFAULT_LIMITS"]["ldp_pct"]
+        self.assertEqual([f(v, ldp) for v in (95, 80, 79, 50, 49, 30, 29)], ["High", "High", "Moderate", "Moderate", "Low", "Low", "Interaction"])
+
+    def test_values_are_judged_at_the_exported_precision(self):
+        self.assertEqual(CORE["risk_level_low_is_risky"](0.99999999999, (1.0, 1.5, 2.0)), "Moderate")     # = 1.000000 s in the file
+        self.assertEqual(CORE["risk_level_high_is_risky"](49.9999999999, (50.0, 30.0, 15.0)), "High")
+
+    def test_overall_is_the_less_severe_level(self):
+        c = CORE["combine_risk"]
+        self.assertEqual(c("High", "Moderate"), "Moderate")        # TTC 0.5 s with 40 km/h (the orange block of the slide)
+        self.assertEqual(c("Moderate", "High"), "Moderate")        # TTC 1.2 s with 60 km/h
+        self.assertEqual(c("Low", "High"), "Low")                  # TTC 1.8 s with 60 km/h
+        self.assertEqual(c("High", "Low"), "Low")
+        self.assertEqual(c("High", "Interaction"), "Interaction")  # TTC 0.5 s with 10 km/h (the green floor)
+        self.assertEqual(c("High", "High"), "High")
+        self.assertEqual(c("High", ""), "")                        # speed unknown
+        self.assertEqual(c("High", None), "")
+
+    def test_the_colour_map_of_the_ttc_chart(self):
+        # every block of the chart: (TTC, speed) -> colour
+        ttc, spd = CORE["RISK_DEFAULT_LIMITS"]["ttc_s"], CORE["RISK_DEFAULT_LIMITS"]["speed_kmh"]
+        lv = lambda t, v: CORE["combine_risk"](CORE["risk_level_low_is_risky"](t, ttc), CORE["risk_level_high_is_risky"](v, spd))
+        self.assertEqual(lv(0.5, 70), "High")
+        self.assertEqual(lv(0.5, 40), "Moderate")
+        self.assertEqual(lv(1.2, 80), "Moderate")
+        self.assertEqual(lv(0.5, 20), "Low")
+        self.assertEqual(lv(1.8, 80), "Low")
+        self.assertEqual(lv(2.5, 80), "Interaction")
+        self.assertEqual(lv(0.5, 10), "Interaction")
+
+    def test_parse_limits(self):
+        p = CORE["parse_risk_limits"]
+        self.assertEqual(p("1.0, 1.5, 2.0", True), (1.0, 1.5, 2.0))
+        self.assertEqual(p("50 30 15", False), (50.0, 30.0, 15.0))
+        for bad, asc in (("1, 2", True), ("2, 1, 3", True), ("1, 2, 3", False), ("a, b, c", True), ("1, 1, 2", True)):
+            with self.assertRaises(ValueError):
+                p(bad, asc)
+
+
 class VectorTtc(unittest.TestCase):
     """TTC = -(r . v) / (v . v), r = P_B - P_A, v = V_B - V_A (SPEC v28 section 7; Eq. 11 of Yaibok et al. 2026)."""
     REL = 0.5
