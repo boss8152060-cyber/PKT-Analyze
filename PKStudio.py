@@ -438,6 +438,10 @@ RUN3_VEHICLE_CLASSES = [
 RUN3_GEOMETRY_KEYS = ("lane_entry_motorcycle_m", "lane_entry_car_m",
                       "lane_opp_motorcycle_m", "lane_opp_car_m", "median_m")
 
+RISK_SETTING_KEYS = ("risk_ttc_limits_s", "risk_pet_limits_s", "risk_ldp_limits_pct", "risk_speed_limits_kmh", "risk_ldp_speed_limits_kmh")
+RISK_SETTING_ASCENDING = {"risk_ttc_limits_s": True, "risk_pet_limits_s": True, "risk_ldp_limits_pct": False,
+                          "risk_speed_limits_kmh": False, "risk_ldp_speed_limits_kmh": False}
+
 RUN3_DEFAULTS = {
     # Starter preset based on the values currently entered in the researcher UI.
     # NOTE: values marked as implementation defaults are editable and are NOT
@@ -449,6 +453,12 @@ RUN3_DEFAULTS = {
     "pet_enabled": True,
     "ttc_enabled": True,
     "ldp_enabled": True,
+    # Risk-level limits (seminar slides, CROW 2009): three numbers each; editable in tab 3
+    "risk_ttc_limits_s": "1.0, 1.5, 2.0",
+    "risk_pet_limits_s": "1.0, 2.0, 3.0",
+    "risk_ldp_limits_pct": "80, 50, 30",
+    "risk_speed_limits_kmh": "50, 30, 15",
+    "risk_ldp_speed_limits_kmh": "80, 50, 30",
     "ppm": "57.822",
     # Optional road-plane perspective calibration. Disabled by default because
     # image points and real dimensions are site/video-specific and were not
@@ -1529,6 +1539,65 @@ def perpendicularize_zones(zones, merge_tol=0.05, vertical_tol_deg=35.0, horizon
     out = {name: np.array([newpos[node_of[(name, i)]] for i in range(len(zones[name]))]) for name in names}
     moved = max((float(np.hypot(*(out[nm][i] - np.asarray(zones[nm][i], dtype=float)))) for nm in names for i in range(len(zones[nm]))), default=0.0)
     return out, {"moved_max_m": moved, "edges_fixed": fixed}
+
+
+# ---------------- Risk levels (seminar "Evaluation Approach"; CROW Road Safety Manual 2009) ----------------
+RISK_LEVELS = ("Interaction", "Low", "Moderate", "High")            # ascending severity
+RISK_DEFAULT_LIMITS = {
+    "ttc_s": (1.0, 1.5, 2.0),            # High < 1.0 | Moderate <= 1.5 | Low <= 2.0 | else Interaction   (slide: 0-0.9 / 1.0-1.5 / 1.6-2.0 / > 2.0)
+    "pet_s": (1.0, 2.0, 3.0),            # slide: 0-0.9 / 1.0-2.0 / 2.1-3.0 / > 3.0
+    "ldp_pct": (80.0, 50.0, 30.0),       # High >= 80 | Moderate >= 50 | Low >= 30 | else Interaction
+    "speed_kmh": (50.0, 30.0, 15.0),     # TTC and PET, all vehicle types: >= 50 / 30-49 / 15-29 / 0-14
+    "ldp_speed_kmh": (80.0, 50.0, 30.0), # LDP slide
+}
+
+
+def risk_level_low_is_risky(value, limits):
+    """Level of an index where a SMALL value is risky (TTC, PET). limits = (a, b, c) ascending:
+    High if value < a, Moderate if <= b, Low if <= c, else Interaction (no risk)."""
+    a, b, c_ = limits
+    value = round(float(value), 6)            # the exported precision: 0.99999999999 s is 1.000000 s in the file, so it is Moderate, not High
+    if value < a:
+        return "High"
+    if value <= b:
+        return "Moderate"
+    if value <= c_:
+        return "Low"
+    return "Interaction"
+
+
+def risk_level_high_is_risky(value, limits):
+    """Level of an index where a LARGE value is risky (LDP %, speed km/h). limits = (a, b, c) descending:
+    High if value >= a, Moderate if >= b, Low if >= c, else Interaction."""
+    a, b, c_ = limits
+    value = round(float(value), 6)
+    if value >= a:
+        return "High"
+    if value >= b:
+        return "Moderate"
+    if value >= c_:
+        return "Low"
+    return "Interaction"
+
+
+def combine_risk(level_a, level_b):
+    """Overall risk = the LESS severe of the index level and the speed level (the colour map of the seminar slide: both conditions must be met,
+    e.g. TTC < 1.0 s with 40 km/h is Moderate, TTC 1.2 s with 60 km/h is Moderate). "" when either is unknown."""
+    if level_a not in RISK_LEVELS or level_b not in RISK_LEVELS:
+        return ""
+    return RISK_LEVELS[min(RISK_LEVELS.index(level_a), RISK_LEVELS.index(level_b))]
+
+
+def parse_risk_limits(text, ascending):
+    """'1.0, 1.5, 2.0' -> (1.0, 1.5, 2.0). Exactly three numbers, strictly ascending (or descending when ascending=False)."""
+    parts = [q for q in re.split(r"[,\s;]+", str(text).strip()) if q]
+    if len(parts) != 3:
+        raise ValueError("need three numbers separated by commas")
+    vals = tuple(float(q) for q in parts)
+    ok = vals[0] < vals[1] < vals[2] if ascending else vals[0] > vals[1] > vals[2]
+    if not ok:
+        raise ValueError("the three numbers must be " + ("increasing" if ascending else "decreasing"))
+    return vals
 
 
 # ==== CORE-END ====
@@ -3543,6 +3612,7 @@ class Run1App:
         self.run3_ttc_max_record_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_max_record_s"])
         self.run3_ttc_velocity_window_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_velocity_window_s"])
         self.run3_ttc_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_speed_kmh"])
+        self.run3_risk_vars = {key: tk.StringVar(value=RUN3_DEFAULTS[key]) for key in RISK_SETTING_KEYS}
         self.run3_ttc_min_rel_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_rel_speed_ms"])
         self.run3_ttc_pair_radius_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_pair_radius_m"])
         self.run3_ttc_angle_rear_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_angle_rear_end_deg"])
@@ -3983,6 +4053,19 @@ class Run1App:
         self._zone_checks(box, self.run3_speed_zone_vars, 1)
         self._entry_row(box, 2, "Median smoothing (จำนวนตัวอย่าง, 1 = ปิด)", self.run3_speed_smoothing_var)
         self._entry_row(box, 3, "ความเร็วสูงสุดที่สมเหตุสมผล (km/h, 0 = ปิด) — เกินนี้ติดธง ไม่นับในสถิติ", self.run3_speed_max_var, span=6)
+
+        box = ttk.LabelFrame(self._page, text="เกณฑ์ระดับความเสี่ยง (ดัชนี + ความเร็ว) — ค่าตั้งต้นตามสไลด์สัมมนา / CROW 2009", padding=10)
+        box.grid(row=self._flow_row, column=0, sticky="ew", padx=5, pady=5)
+        self._flow_row += 1
+        ttk.Label(box, text="ใส่ 3 ค่าคั่นด้วยจุลภาค: High / Moderate / Low  (TTC, PET: ต่ำกว่า = เสี่ยงกว่า → เรียงน้อยไปมาก;  LDP, ความเร็ว: สูงกว่า = เสี่ยงกว่า → เรียงมากไปน้อย).  "
+                            "ระดับรวม = ระดับที่ต่ำกว่าของ (ระดับดัชนี, ระดับความเร็ว);  ต่ำกว่าเกณฑ์สุดท้าย = Interaction (ไม่มีความเสี่ยง)",
+                  foreground="#555555", wraplength=900, justify="left").grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 4))
+        for i, (key, label) in enumerate((("risk_ttc_limits_s", "TTC (s)"), ("risk_pet_limits_s", "PET (s)"),
+                                          ("risk_ldp_limits_pct", "LDP (%)"),
+                                          ("risk_speed_limits_kmh", "ความเร็ว ของ TTC และ PET — ทุกชนิดรถ (km/h)"),
+                                          ("risk_ldp_speed_limits_kmh", "ความเร็ว ของ LDP (km/h)"))):
+            self._entry_row(box, 1 + i, label, self.run3_risk_vars[key], width=18)
+        ttk.Button(box, text="คืนค่าตามสไลด์", command=lambda: [v.set(RUN3_DEFAULTS[k]) for k, v in self.run3_risk_vars.items()]).grid(row=6, column=0, sticky="w", pady=(6, 0))
 
         ttk.Label(self._page, textvariable=self.run3_result_text, foreground="#444444").grid(row=self._flow_row, column=0, sticky="w", padx=6, pady=(4, 0))
         self._flow_row += 1
@@ -5413,6 +5496,7 @@ class Run1App:
                 "ttc_max_record_s": self.run3_ttc_max_record_var.get(),
                 "ttc_velocity_window_s": self.run3_ttc_velocity_window_var.get(),
                 "ttc_min_speed_kmh": self.run3_ttc_min_speed_var.get(),
+                **{key: var.get() for key, var in self.run3_risk_vars.items()},
                 "ttc_min_rel_speed_ms": self.run3_ttc_min_rel_speed_var.get(),
                 "ttc_pair_radius_m": self.run3_ttc_pair_radius_var.get(),
                 "ttc_angle_rear_end_deg": self.run3_ttc_angle_rear_var.get(),
@@ -5559,6 +5643,7 @@ class Run1App:
                 ("ttc_max_record_s", self.run3_ttc_max_record_var),
                 ("ttc_velocity_window_s", self.run3_ttc_velocity_window_var),
                 ("ttc_min_speed_kmh", self.run3_ttc_min_speed_var),
+                *[(key, var) for key, var in self.run3_risk_vars.items()],
                 ("ttc_min_rel_speed_ms", self.run3_ttc_min_rel_speed_var),
                 ("ttc_pair_radius_m", self.run3_ttc_pair_radius_var),
                 ("ttc_angle_rear_end_deg", self.run3_ttc_angle_rear_var),
@@ -6526,6 +6611,11 @@ class Run1App:
             a2 = self._run3_float(self.run3_ttc_angle_cross_var.get(), "TTC crossing angle (deg)")
             if not 0 < a1 < a2 < 180:
                 raise ValueError("Run 3 TTC angles must satisfy 0 < rear-end angle < crossing angle < 180 degrees.")
+        for key in RISK_SETTING_KEYS:
+            try:
+                parse_risk_limits(self.run3_risk_vars[key].get(), RISK_SETTING_ASCENDING[key])
+            except ValueError as exc:
+                raise ValueError(f"Run 3 risk-level limits ({key}): {exc}.")
         for key in RUN3_GEOMETRY_KEYS:
             text = str(self.run3_geometry_vars[key].get()).strip()
             if text:   # must be numeric when entered (lane widths are required when LDP is enabled)
@@ -8816,6 +8906,11 @@ class Run1App:
             "ttc_max_record_s": num(self.run3_ttc_max_record_var, 3.0),
             "ttc_velocity_window_s": num(self.run3_ttc_velocity_window_var, 0.5),
             "ttc_min_speed_kmh": num(self.run3_ttc_min_speed_var, 2.0),
+            "risk_limits": {
+                "ttc_s": self._risk_limits("risk_ttc_limits_s", "ttc_s"), "pet_s": self._risk_limits("risk_pet_limits_s", "pet_s"),
+                "ldp_pct": self._risk_limits("risk_ldp_limits_pct", "ldp_pct"), "speed_kmh": self._risk_limits("risk_speed_limits_kmh", "speed_kmh"),
+                "ldp_speed_kmh": self._risk_limits("risk_ldp_speed_limits_kmh", "ldp_speed_kmh"),
+            },
             "ttc_min_rel_speed_ms": num(self.run3_ttc_min_rel_speed_var, 0.5),
             "ttc_pair_radius_m": num(self.run3_ttc_pair_radius_var, 20.0),
             "ttc_angle_rear_end_deg": num(self.run3_ttc_angle_rear_var, TTC_ANGLE_REAR_END_DEG),
@@ -8834,6 +8929,13 @@ class Run1App:
     # ========================================================
     # RUN 3 — SHARED HELPERS
     # ========================================================
+
+    def _risk_limits(self, key, default_key):
+        """The three limits of a risk table as entered (the default when empty or invalid - validation reports the error before a run)."""
+        try:
+            return parse_risk_limits(self.run3_risk_vars[key].get(), RISK_SETTING_ASCENDING[key])
+        except ValueError:
+            return RISK_DEFAULT_LIMITS[default_key]
 
     @staticmethod
     def _run3_calibration_mode(c):
@@ -9258,49 +9360,15 @@ class Run1App:
     def _fmt(v, nd=6):
         return "" if v is None else f"{v:.{nd}f}"
 
-    # ---------------- Risk-level tables (Chapter 2) ----------------
-    # TTC: Kronprasert et al. (2021); PET / LDP: กรมทางหลวง (2569).
-    # Each table is applied per dimension; the rule for combining the two
-    # dimensions (index + speed) is NOT stated in the sources, so both levels
-    # are exported separately and no combined level is invented here.
+    # ---------------- Risk levels ----------------
+    # The limits come from the settings (defaults: the seminar slides, CROW Road Safety Manual 2009; TTC: Intersection Safety Assessment Using
+    # Video-Based Traffic Conflict Analysis, Thailand 2021; PET: Safety assessment of pedestrian-vehicle interaction 2024). Each indicator exports
+    # its index level, the speed level and the overall level (the less severe of the two - the colour map of the slide). The speed scale is the same
+    # for every vehicle type.
 
     @staticmethod
-    def _level_ttc(ttc):
-        if ttc < 1.0: return "High"
-        if ttc <= 1.5: return "Moderate"
-        if ttc <= 2.0: return "Low"
-        return "None"
-
-    @staticmethod
-    def _level_ttc_speed(speed_kmh, vehicle_class):
-        mc = str(vehicle_class) in ("Motorcycle", "Sidecar")
-        hi, mid, lo = (50.0, 30.0, 15.0) if mc else (70.0, 50.0, 25.0)
-        if speed_kmh > hi: return "High"
-        if speed_kmh >= mid: return "Moderate"
-        if speed_kmh >= lo: return "Low"
-        return "None"
-
-    @staticmethod
-    def _level_pet(pet):
-        if pet < 1.0: return "High"
-        if pet <= 2.0: return "Moderate"
-        if pet <= 3.0: return "Low"
-        return "None"
-
-    @staticmethod
-    def _level_ldp(ldp):
-        """Risk level of LDP (%) - Department of Highways (2026) table for dY / (W/2)."""
-        if ldp >= 80.0: return "High"
-        if ldp >= 50.0: return "Moderate"
-        if ldp >= 30.0: return "Low"
-        return "None"
-
-    @staticmethod
-    def _level_ldp_speed(speed_kmh):
-        if speed_kmh >= 80.0: return "High"
-        if speed_kmh >= 50.0: return "Moderate"
-        if speed_kmh >= 30.0: return "Low"
-        return "None"
+    def _risk_row(index_level, speed_level):
+        return index_level, speed_level, combine_risk(index_level, speed_level)
 
     # ========================================================
     # SPEED (per Zone 1-7 and per Movement; V50, V85, Mean, SD)
@@ -9936,6 +10004,13 @@ class Run1App:
         ib = j if db0[i, j] <= db1[i, j] else j + 1
         return float(score[i, j]), int(ia), int(ib), (float(ipx[i, j]), float(ipy[i, j]))
 
+    @staticmethod
+    def _run3_mean_speed_kmh(P, t):
+        """Mean speed (km/h) over the samples of a vehicle in the zone: path length / time. None when it cannot be told."""
+        if len(t) < 2 or t[-1] <= t[0]:
+            return None
+        return float(np.hypot(np.diff(P[:, 0]), np.diff(P[:, 1])).sum() / (t[-1] - t[0]) * 3.6)
+
     def _run3_pet(self, tracks, c, movement_by_id, movement_source_by_id, sequence_by_id=None):
         """PET per conflict zone. Timestamps come only from observed frames.
 
@@ -10009,6 +10084,7 @@ class Run1App:
                     pet = t2 - t1
                     if pet <= 0:
                         continue
+                    sp_a, sp_b = self._run3_mean_speed_kmh(A, At), self._run3_mean_speed_kmh(B, Bt)
                     if pet_max is not None and pet > pet_max:
                         diag["above_pet_max"] += 1
                         continue
@@ -10020,7 +10096,13 @@ class Run1App:
                         "Conflict_Type": ctype, "Conflict_Zone": f"Zone {zone}",
                         "Interaction_Start": f"{min(a_entry, b_entry):.6f}", "Interaction_End": f"{max(a_exit, b_exit):.6f}",
                         "T1_Exit_Time": f"{t1:.6f}", "T2_Entry_Time": f"{t2:.6f}", "PET_s": f"{pet:.6f}",
-                        "PET_Risk_Level": self._level_pet(pet),
+                        "Speed_A_kmh": self._fmt(sp_a, 3), "Speed_B_kmh": self._fmt(sp_b, 3),
+                        "PET_Level": risk_level_low_is_risky(pet, c["risk_limits"]["pet_s"]),
+                        "Speed_Level": (risk_level_high_is_risky(max(v for v in (sp_a, sp_b) if v is not None), c["risk_limits"]["speed_kmh"])
+                                        if (sp_a is not None or sp_b is not None) else ""),
+                        "PET_Risk_Level": combine_risk(risk_level_low_is_risky(pet, c["risk_limits"]["pet_s"]),
+                                                       (risk_level_high_is_risky(max(v for v in (sp_a, sp_b) if v is not None), c["risk_limits"]["speed_kmh"])
+                                                        if (sp_a is not None or sp_b is not None) else "")),
                         "QC_Flag": ";".join(x for x in [
                             "Threshold_At_or_Below" if pet <= threshold else "",
                             "Movement_A_Not_Observed" if not ma else "",
@@ -10119,7 +10201,6 @@ class Run1App:
                 a_, b_, res = best["a"], best["b"], best["res"]
                 sp_a, sp_b = math.hypot(*a_["v"]), math.hypot(*b_["v"])
                 theta = conflict_angle_deg(a_["v"], b_["v"], vmin)
-                fast = a_ if sp_a >= sp_b else b_                    # approach speed = the higher of the two speeds
                 out.append({
                     "Site_ID": c["site_id"],
                     "Event_ID": f"TTC_{a_['tid']}_{b_['tid']}_{ev[0]['t']:.6f}",
@@ -10136,8 +10217,10 @@ class Run1App:
                     "TTC_Y_s": "" if res["ttc_y"] is None else f"{res['ttc_y']:.4f}",
                     "Speed_A_kmh": f"{sp_a * 3.6:.6f}", "Speed_B_kmh": f"{sp_b * 3.6:.6f}",
                     "TTC_s": f"{best['ttc']:.6f}",
-                    "TTC_Level": self._level_ttc(best["ttc"]),
-                    "Speed_Level": self._level_ttc_speed(max(sp_a, sp_b) * 3.6, fast["cls"]),
+                    "TTC_Level": risk_level_low_is_risky(best["ttc"], c["risk_limits"]["ttc_s"]),
+                    "Speed_Level": risk_level_high_is_risky(max(sp_a, sp_b) * 3.6, c["risk_limits"]["speed_kmh"]),
+                    "TTC_Risk_Level": combine_risk(risk_level_low_is_risky(best["ttc"], c["risk_limits"]["ttc_s"]),
+                                                   risk_level_high_is_risky(max(sp_a, sp_b) * 3.6, c["risk_limits"]["speed_kmh"])),
                     "QC_Flag": ";".join(x for x in [
                         "Single_Frame_Event" if len(ev) == 1 else "",
                         "No_Heading" if theta is None else "",
@@ -10194,9 +10277,11 @@ class Run1App:
                     "Chord_Length_m": f"{res['Chord_Length_m']:.4f}",
                     "Delta_Y_m": f"{res['Delta_Y_m']:.6f}", "Lane_Width_W_m": f"{W:.3f}",
                     "LDP_percent": f"{ldp:.3f}",
-                    "LDP_Level": self._level_ldp(ldp),
+                    "LDP_Level": risk_level_high_is_risky(ldp, c["risk_limits"]["ldp_pct"]),
                     "Mean_Speed_kmh": self._fmt(speed, 3),
-                    "Speed_Level": self._level_ldp_speed(speed) if speed is not None else "",
+                    "Speed_Level": risk_level_high_is_risky(speed, c["risk_limits"]["ldp_speed_kmh"]) if speed is not None else "",
+                    "LDP_Risk_Level": (combine_risk(risk_level_high_is_risky(ldp, c["risk_limits"]["ldp_pct"]),
+                                                    risk_level_high_is_risky(speed, c["risk_limits"]["ldp_speed_kmh"])) if speed is not None else ""),
                     "Calibration_Mode": mode,
                     "QC_Flag": ";".join(x for x in [
                         "Short_Chord_Reference_Line_Unreliable" if res["Short_Chord"] else "",
@@ -10238,6 +10323,7 @@ class Run1App:
         summary = {
             "program_version": "PK Studio V28",
             "site_id": c["site_id"],
+            "risk_level_limits": {k: list(v) for k, v in c["risk_limits"].items()},
             "inputs": {"detection": det_path, "id_zone_summary": id_path, "zone_summary": zone_path},
             "calibration": {"mode": self._run3_calibration_mode(c), "align": ({"kind": c["align"]["kind"], "pairs": c["align"]["n_pairs"], "m_per_drone_px": c["align"]["scale"]} if c.get("align") else None), "ppm": c["ppm"],
                             "perspective_enabled": c["perspective_enabled"],
@@ -10333,13 +10419,14 @@ class Run1App:
         def do_ldp():
             status("Run 3 — LDP...")
             rows = self._run3_ldp(tracks, c, movement_by_id, movement_source_by_id)
-            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","LDP_percent","LDP_Level","Mean_Speed_kmh","Speed_Level","Calibration_Mode","QC_Flag"]
+            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","LDP_percent","LDP_Level","Mean_Speed_kmh","Speed_Level","LDP_Risk_Level","Calibration_Mode","QC_Flag"]
             row_counts["ldp"] = len(rows)
             outputs["ldp"] = write_csv("LDP.csv", fields, rows)
             vals = [float(r["LDP_percent"]) for r in rows]
             note = f"W_entry={c['w_entry_m']} m; W_opp={c['w_opp_m']} m; smoothing={c['ldp_smoothing_samples']}"
             s_ = indicator("Lane/Lateral Deviation Position (LDP)", "Distance", "%", "All", vals, note)
-            s_["Level_Counts"] = {lv: sum(1 for r in rows if r["LDP_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
+            s_["Level_Counts"] = {lv: sum(1 for r in rows if r["LDP_Level"] == lv) for lv in ("High", "Moderate", "Low", "Interaction")}
+            s_["Risk_Counts"] = {lv: sum(1 for r in rows if r["LDP_Risk_Level"] == lv) for lv in ("High", "Moderate", "Low", "Interaction")}
             for z in sorted(c["ldp_zones"]):
                 indicator("Lane/Lateral Deviation Position (LDP)", "Distance", "%", f"Zone {z}",
                           [float(r["LDP_percent"]) for r in rows if r["Zone"] == f"Zone {z}"])
@@ -10396,7 +10483,7 @@ class Run1App:
         def do_ttc():
             status("Run 3 — TTC...")
             rows, diag = self._run3_ttc(tracks, c, movement_by_id)
-            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","Rel_X_m","Rel_Y_m","RelV_X_mps","RelV_Y_mps","Rel_Speed_kmh","Miss_X_m","Miss_Y_m","Miss_Distance_m","TTC_X_s","TTC_Y_s","Speed_A_kmh","Speed_B_kmh","TTC_s","TTC_Level","Speed_Level","QC_Flag"]
+            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","Rel_X_m","Rel_Y_m","RelV_X_mps","RelV_Y_mps","Rel_Speed_kmh","Miss_X_m","Miss_Y_m","Miss_Distance_m","TTC_X_s","TTC_Y_s","Speed_A_kmh","Speed_B_kmh","TTC_s","TTC_Level","Speed_Level","TTC_Risk_Level","QC_Flag"]
             row_counts["ttc"] = len(rows)
             outputs["ttc"] = write_csv("TTC.csv", fields, rows)
             vals = [float(r["TTC_s"]) for r in rows]
@@ -10405,7 +10492,8 @@ class Run1App:
             for kind in ("Rear-end", "Lane change", "Crossing", "Unclassified"):
                 indicator("Time-to-Collision (TTCmin per event)", "Time", "s", kind,
                           [float(r["TTC_s"]) for r in rows if r["TTC_Type"] == kind])
-            s_["Level_Counts"] = {lv: sum(1 for r in rows if r["TTC_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
+            s_["Level_Counts"] = {lv: sum(1 for r in rows if r["TTC_Level"] == lv) for lv in ("High", "Moderate", "Low", "Interaction")}
+            s_["Risk_Counts"] = {lv: sum(1 for r in rows if r["TTC_Risk_Level"] == lv) for lv in ("High", "Moderate", "Low", "Interaction")}
             summary["indicators"]["TTC"] = s_
             diag["rule"] = {"formula": "TTC = -(r.v)/(v.v), r.v < 0", "min_rel_speed_ms": c["ttc_min_rel_speed_ms"], "pair_radius_m": c["ttc_pair_radius_m"],
                             "angle_rear_end_deg": c["ttc_angle_rear_end_deg"], "angle_crossing_deg": c["ttc_angle_crossing_deg"]}
@@ -10416,13 +10504,14 @@ class Run1App:
         def do_pet():
             status("Run 3 — PET...")
             rows, diag = self._run3_pet(tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
-            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","PET_s","PET_Risk_Level","QC_Flag"]
+            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","PET_s","Speed_A_kmh","Speed_B_kmh","PET_Level","Speed_Level","PET_Risk_Level","QC_Flag"]
             row_counts["pet"] = len(rows)
             outputs["pet"] = write_csv("PET.csv", fields, rows)
             vals = [float(r["PET_s"]) for r in rows]
             s = indicator("Post-Encroachment Time", "Time", "s", "All", vals)
             s["At_or_Below_Threshold"] = sum(v <= c["pet_threshold"] for v in vals)
-            s["Level_Counts"] = {lv: sum(1 for r in rows if r["PET_Risk_Level"] == lv) for lv in ("High", "Moderate", "Low", "None")}
+            s["Level_Counts"] = {lv: sum(1 for r in rows if r["PET_Level"] == lv) for lv in ("High", "Moderate", "Low", "Interaction")}
+            s["Risk_Counts"] = {lv: sum(1 for r in rows if r["PET_Risk_Level"] == lv) for lv in ("High", "Moderate", "Low", "Interaction")}
             for z in sorted(c["pet_zones"]):
                 indicator("Post-Encroachment Time", "Time", "s", f"Zone {z}",
                           [float(r["PET_s"]) for r in rows if r["Conflict_Zone"] == f"Zone {z}"])
