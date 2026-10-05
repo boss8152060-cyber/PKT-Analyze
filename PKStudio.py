@@ -471,6 +471,8 @@ RUN3_DEFAULTS = {
     "lateral_axis_angle_deg": "0.00",       # implementation starter value; verify per video
     "lc_heading_window_s": "0.50",          # centred window (s) used to get the heading of vehicle A
     "topview_video": True,                  # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points)
+    "footprint_xy": True,                   # draw the vehicle footprint (length x width rectangle on the road plane) in the X-Y video
+    "footprint_video": False,               # also write Tracking_Footprint.mp4: the real video with the footprints drawn on it
     "lc_along_limit_m": "0",                # side-by-side window along the heading (m); 0 = auto (L_A + L_B) / 2
     "lc_max_lateral_m": "3.50",             # pairs further apart sideways than this (m) are unrelated; 0 = no limit
     "pet_interaction_distance_m": "3.00",   # implementation starter value
@@ -1549,6 +1551,80 @@ def perpendicularize_zones(zones, merge_tol=0.05, vertical_tol_deg=35.0, horizon
     out = {name: np.array([newpos[node_of[(name, i)]] for i in range(len(zones[name]))]) for name in names}
     moved = max((float(np.hypot(*(out[nm][i] - np.asarray(zones[nm][i], dtype=float)))) for nm in names for i in range(len(zones[nm]))), default=0.0)
     return out, {"moved_max_m": moved, "edges_fixed": fixed}
+
+
+# ---------------- Vehicle footprint on the road plane ----------------
+def invert_map(fwd, dst, init, iters=30, tol=1e-4, h=0.5):
+    """Points x with fwd(x) = dst for ANY forward map fwd (N x 2 -> N x 2, e.g. video pixels -> metres): Newton iterations from `init`."""
+    dst = np.asarray(dst, dtype=float).reshape(-1, 2)
+    x = np.asarray(init, dtype=float).reshape(-1, 2).copy()
+    for _ in range(iters):
+        f = fwd(x) - dst
+        if float(np.abs(f).max()) < tol:
+            break
+        jx = (fwd(x + [h, 0.0]) - fwd(x - [h, 0.0])) / (2 * h)
+        jy = (fwd(x + [0.0, h]) - fwd(x - [0.0, h])) / (2 * h)
+        a, b, c_, d = jx[:, 0], jy[:, 0], jx[:, 1], jy[:, 1]
+        det = a * d - b * c_
+        det = np.where(np.abs(det) < 1e-12, 1e-12, det)
+        x = x - np.stack([(d * f[:, 0] - b * f[:, 1]) / det, (-c_ * f[:, 0] + a * f[:, 1]) / det], axis=1)
+    return x
+
+
+def fill_headings(heads, default=(1.0, 0.0)):
+    """Headings with the gaps (None = not moving) filled from the nearest known one (before first, then after); `default` if there is none."""
+    out = list(heads)
+    last = None
+    for k in range(len(out)):
+        if out[k] is not None:
+            last = out[k]
+        elif last is not None:
+            out[k] = last
+    nxt = None
+    for k in range(len(out) - 1, -1, -1):
+        if out[k] is not None:
+            nxt = out[k]
+        elif nxt is not None:
+            out[k] = nxt
+    return [h if h is not None else tuple(default) for h in out]
+
+
+def fit_footprints(fwd, boxes, headings, lengths, widths, iters=4):
+    """The vehicle's footprint (a length x width rectangle lying on the road plane, long side along the heading) placed so that, seen in
+    the video, its lowest corner touches the bottom of the detector box and its sideways middle is the box's middle.
+    fwd = video pixels -> plane metres (N x 2 arrays). boxes (n x 4: x1 y1 x2 y2 in pixels), headings (n x 2 plane vectors), lengths / widths (n, m).
+    Returns {"center": n x 2 plane, "corners": n x 4 x 2 plane, "corners_px": n x 4 x 2 video pixels, "center_px", "ok"}."""
+    b = np.asarray(boxes, dtype=float).reshape(-1, 4)
+    n = len(b)
+    if n == 0:
+        return {"center": np.zeros((0, 2)), "corners": np.zeros((0, 4, 2)), "corners_px": np.zeros((0, 4, 2)), "center_px": np.zeros((0, 2)), "ok": np.zeros(0, bool)}
+    hd = np.asarray(headings, dtype=float).reshape(-1, 2)
+    hd = hd / np.maximum(np.hypot(hd[:, 0], hd[:, 1]), 1e-12)[:, None]
+    half_l = np.asarray(lengths, dtype=float).reshape(-1) / 2.0
+    half_w = np.asarray(widths, dtype=float).reshape(-1) / 2.0
+    lat = np.stack([-hd[:, 1], hd[:, 0]], axis=1)
+    sg = np.array([[1, 1], [1, -1], [-1, -1], [-1, 1]], dtype=float)
+    R = half_l[:, None, None] * sg[None, :, 0:1] * hd[:, None, :] + half_w[:, None, None] * sg[None, :, 1:2] * lat[:, None, :]
+    xm, y2 = (b[:, 0] + b[:, 2]) / 2.0, b[:, 3]
+    uc = np.stack([xm, y2], axis=1)
+    p = fwd(np.concatenate([uc, uc + [1.0, 0.0], uc + [0.0, 1.0]]))
+    p0, pa, pb = p[:n], p[n:2 * n], p[2 * n:]
+    J = np.stack([pa - p0, pb - p0], axis=2)                                  # plane change per pixel step
+    det = J[:, 0, 0] * J[:, 1, 1] - J[:, 0, 1] * J[:, 1, 0]
+    ok = np.abs(det) > 1e-12
+    ds = np.where(ok, det, 1.0)
+    A = np.empty_like(J)                                                      # pixel change per plane step
+    A[:, 0, 0], A[:, 0, 1], A[:, 1, 0], A[:, 1, 1] = J[:, 1, 1] / ds, -J[:, 0, 1] / ds, -J[:, 1, 0] / ds, J[:, 0, 0] / ds
+    AR = np.einsum("nij,nkj->nki", A, R)
+    for _ in range(iters):
+        c = fwd(uc)
+        img = invert_map(fwd, (c[:, None, :] + R).reshape(-1, 2), (uc[:, None, :] + AR).reshape(-1, 2)).reshape(n, 4, 2)
+        uc = uc + np.stack([xm - (img[:, :, 0].min(1) + img[:, :, 0].max(1)) / 2.0, y2 - img[:, :, 1].max(1)], axis=1)
+    c = fwd(uc)
+    corners = c[:, None, :] + R
+    corners_px = invert_map(fwd, corners.reshape(-1, 2), (uc[:, None, :] + AR).reshape(-1, 2)).reshape(n, 4, 2)
+    ok = ok & np.isfinite(corners).all(axis=(1, 2)) & np.isfinite(corners_px).all(axis=(1, 2))
+    return {"center": c, "corners": corners, "corners_px": corners_px, "center_px": uc, "ok": ok}
 
 
 # ==== CORE-END ====
@@ -3540,6 +3616,8 @@ class Run1App:
         self.run3_lateral_axis_angle_var = tk.StringVar(value=RUN3_DEFAULTS["lateral_axis_angle_deg"])
         self.run3_lc_heading_window_var = tk.StringVar(value=RUN3_DEFAULTS["lc_heading_window_s"])
         self.run3_topview_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["topview_video"])
+        self.run3_footprint_xy_var = tk.BooleanVar(value=RUN3_DEFAULTS["footprint_xy"])
+        self.run3_footprint_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["footprint_video"])
         self.run3_lc_along_limit_var = tk.StringVar(value=RUN3_DEFAULTS["lc_along_limit_m"])
         self.run3_lc_max_lateral_var = tk.StringVar(value=RUN3_DEFAULTS["lc_max_lateral_m"])
         self.run3_lc_motorcycle_pairs_only_var = tk.BooleanVar(value=RUN3_DEFAULTS["lc_motorcycle_pairs_only"])
@@ -3876,6 +3954,12 @@ class Run1App:
         r += 1
         ttk.Checkbutton(cal, text="สร้างวิดีโอ Topview (Tracking_Topview.mp4)", variable=self.run3_topview_video_var).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(cal, text="วาดจากพิกัดเมตรเดียวกับที่ตัวชี้วัดใช้ (ไฟล์ Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
+        r += 1
+        ttk.Checkbutton(cal, text="วาดกรอบฐานรถ (Footprint) ในวิดีโอ X–Y", variable=self.run3_footprint_xy_var).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(cal, text="สี่เหลี่ยมยาว×กว้างตามชนิดรถ วางบนระนาบถนน หันตามทิศวิ่ง (ใช้ขนาดจากตารางความกว้าง/ความยาวรถ)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
+        r += 1
+        ttk.Checkbutton(cal, text="สร้างวิดีโอข้างทางพร้อมกรอบฐานรถ (Tracking_Footprint.mp4)", variable=self.run3_footprint_video_var).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(cal, text="วิดีโอจริงที่วาดกรอบฐานรถสีเขียว + กรอบตรวจจับสีเหลือง (อ่านวิดีโอซ้ำอีกรอบ ใช้เวลาเพิ่ม)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
         r += 1
         alignf = ttk.LabelFrame(cal, text="จัดแนวกับภาพโดรน (Align) — แปลงพิกัดวิดีโอให้ตรงกับผังจริงของโดรน (ภาพโดรนใช้เฉพาะตอนจัดแนว)", padding=4)
         alignf.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 2))
@@ -5422,6 +5506,8 @@ class Run1App:
                 "lateral_axis_angle_deg": self.run3_lateral_axis_angle_var.get(),
                 "lc_heading_window_s": self.run3_lc_heading_window_var.get(),
                 "topview_video": self.run3_topview_video_var.get(),
+                "footprint_xy": self.run3_footprint_xy_var.get(),
+                "footprint_video": self.run3_footprint_video_var.get(),
                 "lc_along_limit_m": self.run3_lc_along_limit_var.get(),
                 "lc_max_lateral_m": self.run3_lc_max_lateral_var.get(),
                 "lc_motorcycle_pairs_only": self.run3_lc_motorcycle_pairs_only_var.get(),
@@ -5602,6 +5688,8 @@ class Run1App:
                 ("lateral_axis_angle_deg", self.run3_lateral_axis_angle_var),
                 ("lc_heading_window_s", self.run3_lc_heading_window_var),
                 ("topview_video", self.run3_topview_video_var),
+                ("footprint_xy", self.run3_footprint_xy_var),
+                ("footprint_video", self.run3_footprint_video_var),
                 ("lc_along_limit_m", self.run3_lc_along_limit_var),
                 ("lc_max_lateral_m", self.run3_lc_max_lateral_var),
                 ("lc_motorcycle_pairs_only", self.run3_lc_motorcycle_pairs_only_var),
@@ -8843,6 +8931,8 @@ class Run1App:
             "hold_min_duration_s": num(self.run3_hold_min_duration_var, GAP_HOLD_MIN_S),
             "lc_heading_window_s": num(self.run3_lc_heading_window_var, 0.5),
             "topview_video": bool(self.run3_topview_video_var.get()),
+            "footprint_xy": bool(self.run3_footprint_xy_var.get()),
+            "footprint_video": bool(self.run3_footprint_video_var.get()),
             "lc_along_limit_m": max(0.0, num(self.run3_lc_along_limit_var, 0.0) or 0.0),
             "lc_max_lateral_m": max(0.0, num(self.run3_lc_max_lateral_var, 3.5) or 0.0),
             "lc_motorcycle_pairs_only": bool(self.run3_lc_motorcycle_pairs_only_var.get()),
@@ -8910,7 +9000,8 @@ class Run1App:
         lat_u = np.array([-math.sin(th), math.cos(th)])
         return np.stack([m @ road_u, m @ lat_u], axis=1)
 
-    TOPVIEW_FIELDS = ["frame", "timestamp", "track_id", "class_name", "zone", "x_m", "y_m", "cx_m", "cy_m", "calibration_mode"]
+    TOPVIEW_FIELDS = ["frame", "timestamp", "track_id", "class_name", "zone", "x_m", "y_m", "cx_m", "cy_m", "calibration_mode",
+                      "heading_deg", "fp_cx_m", "fp_cy_m"] + [f"fp{k}_{a}_m" for k in range(1, 5) for a in ("x", "y")]
 
     def _run3_topview_rows(self, tracks, c):
         """Every observed point in road-plane metres (the SAME numbers the indicators use):
@@ -8930,8 +9021,119 @@ class Run1App:
                     "cx_m": f"{mc[0]:.4f}" if mc is not None else "", "cy_m": f"{mc[1]:.4f}" if mc is not None else "",
                     "calibration_mode": mode,
                 })
+                fp = r.get("_fp")
+                if fp is not None:
+                    hd = r.get("_hd") or (1.0, 0.0)
+                    rows[-1]["heading_deg"] = f"{math.degrees(math.atan2(hd[1], hd[0])):.1f}"
+                    rows[-1]["fp_cx_m"], rows[-1]["fp_cy_m"] = f"{r['_fpc'][0]:.4f}", f"{r['_fpc'][1]:.4f}"
+                    for k in range(4):
+                        rows[-1][f"fp{k + 1}_x_m"], rows[-1][f"fp{k + 1}_y_m"] = f"{fp[k][0]:.4f}", f"{fp[k][1]:.4f}"
         rows.sort(key=lambda x: (float(x["timestamp"] or 0), str(x["track_id"])))
         return rows
+
+    def _run3_attach_footprints(self, tracks, c):
+        """Every observed vehicle gets its FOOTPRINT: a rectangle (length x width by class) lying on the road plane, long side along the
+        heading (from the trajectory in metres; a stopped vehicle keeps the nearest known heading), placed so that in the video its lowest
+        corner touches the bottom of the detector box and its sideways middle is the box's middle. Rows get _fp (4 x 2 metres), _fpc (centre),
+        _hd (heading) and _fp_px (4 x 2 video pixels). Returns the number of footprints."""
+        lengths = {str(k).strip().lower(): float(v) for k, v in (c.get("lengths") or {}).items() if v}
+        widths = {str(k).strip().lower(): float(v) for k, v in (c.get("widths") or {}).items() if v}
+        win = max(0.2, float(c.get("lc_heading_window_s") or 0.5))
+        items, boxes, heads, lens, wids = [], [], [], [], []
+        for tid, rows in tracks.items():
+            rs = sorted((r for r in rows if r.get("_m") is not None), key=lambda r: r["_timestamp"])
+            if not rs:
+                continue
+            hs = fill_headings(track_headings([r["_timestamp"] for r in rs], [r["_m"] for r in rs], win, 0.5))
+            for r, h in zip(rs, hs):
+                try:
+                    box = [float(r["bbox_x1"]), float(r["bbox_y1"]), float(r["bbox_x2"]), float(r["bbox_y2"])]
+                except (KeyError, TypeError, ValueError):
+                    continue
+                cls = str(r.get("class_name", "")).strip().lower()
+                items.append(r)
+                boxes.append(box)
+                heads.append(h)
+                lens.append(lengths.get(cls, lengths.get("car", 4.5)))
+                wids.append(widths.get(cls, widths.get("car", 1.8)))
+        if not items:
+            return 0
+        fit = fit_footprints(lambda q: self._run3_to_metric(q, c), boxes, heads, lens, wids)
+        n = 0
+        for i, r in enumerate(items):
+            if not fit["ok"][i]:
+                continue
+            r["_fp"], r["_fpc"], r["_hd"], r["_fp_px"] = fit["corners"][i], fit["center"][i], heads[i], fit["corners_px"][i]
+            n += 1
+        return n
+
+    def _run3_write_footprint_video(self, tracks, c, output_dir, video_path=None, display=None):
+        """Tracking_Footprint.mp4: the REAL (roadside) video with the vehicle footprints drawn on it - the green quadrilateral is the
+        rectangle on the road plane seen from the camera; the thin yellow box is the detector box; zones in grey."""
+        if not video_path or not os.path.isfile(video_path):
+            return None
+        dsp = dict(display or {})
+        per_frame = defaultdict(list)
+        for tid, rows in tracks.items():
+            for r in rows:
+                if r.get("_fp_px") is None:
+                    continue
+                try:
+                    per_frame[int(float(r.get("frame", "")))].append((tid, r))
+                except (TypeError, ValueError):
+                    continue
+        if not per_frame:
+            return None
+        cap = cv2.VideoCapture(video_path)
+        try:
+            W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            frames = sorted(per_frame)
+            times = sorted({per_frame[f][0][1]["_timestamp"] for f in frames})
+            dts = np.diff(times)
+            dts = dts[dts > 0]
+            fps_out = float(min(120.0, max(1.0, 1.0 / float(np.median(dts))))) if len(dts) else 30.0
+            out_path = os.path.join(output_dir, "Tracking_Footprint.mp4")
+            writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps_out, (W, H))
+            if not writer.isOpened():
+                raise RuntimeError("Unable to create Tracking_Footprint.mp4")
+            zone_px = [np.round(np.asarray(poly, dtype=float)).astype(np.int32).reshape(-1, 1, 2) for _n, poly in self._zone_polygons()]
+            zones_exist = bool(zone_px)
+            mode = str(dsp.get("outside_zone_normal", "dot") or "dot")
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frames[0] - 1)
+            idx = frames[0]                                           # 1-based number of the next frame to read
+            try:
+                for fr in frames:
+                    while idx < fr:
+                        cap.grab()
+                        idx += 1
+                    ok, img = cap.read()
+                    idx += 1
+                    if not ok:
+                        break
+                    if zone_px:
+                        cv2.polylines(img, zone_px, True, (150, 150, 150), 1, cv2.LINE_AA)
+                    polys, labels = [], []
+                    for tid, r in per_frame[fr]:
+                        plan = outside_zone_plan(mode, str(r.get("zone", "")).strip() != "", zones_exist)
+                        if not plan["object"]:
+                            continue
+                        polys.append(np.round(r["_fp_px"]).astype(np.int32).reshape(-1, 1, 2))
+                        x1, y1, x2, y2 = (int(float(r[k])) for k in ("bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"))
+                        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 220, 255), 1)
+                        labels.append((f"{tid} {str(r.get('class_name', '')).strip()}", (x1, max(14, y1 - 6))))
+                    if polys:
+                        ov = img.copy()
+                        cv2.fillPoly(ov, polys, (0, 200, 0))
+                        img = cv2.addWeighted(ov, 0.30, img, 0.70, 0)
+                        cv2.polylines(img, polys, True, (0, 255, 0), 2, cv2.LINE_AA)
+                        for text_, org_ in labels:
+                            cv2.putText(img, text_, org_, cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
+                    writer.write(img)
+            finally:
+                writer.release()
+        finally:
+            cap.release()
+        return out_path
 
     TOPVIEW_PALETTE = [(255, 160, 40), (80, 200, 80), (60, 60, 255), (200, 120, 255), (0, 200, 255), (255, 255, 80), (180, 180, 255), (60, 220, 160)]
 
@@ -9162,6 +9364,12 @@ class Run1App:
                     if full and flag("draw_trail", False) and len(trails[tid]) > 1:
                         cv2.polylines(img, [np.round(np.array(trails[tid])).astype(np.int32).reshape(-1, 1, 2)], False, (255, 0, 255), 2, cv2.LINE_AA)
                     p_ = (int(round(pt[0])), int(round(pt[1])))
+                    if full and c.get("footprint_xy", True) and rec.get("_fp") is not None:
+                        fq = np.round(topview_px(cv, rec["_fp"])).astype(np.int32).reshape(-1, 1, 2)
+                        fov = img.copy()
+                        cv2.fillPoly(fov, [fq], (0, 200, 0))
+                        img = cv2.addWeighted(fov, 0.35, img, 0.65, 0)
+                        cv2.polylines(img, [fq], True, (0, 255, 0), 2, cv2.LINE_AA)
                     cv2.circle(img, p_, 7, (255, 255, 255), -1, cv2.LINE_AA)
                     inside = str(rec.get("zone", "")).strip() != ""
                     cv2.circle(img, p_, 5, (0, 255, 255) if inside else (0, 0, 255), -1 if inside else 2, cv2.LINE_AA)
@@ -10536,6 +10744,11 @@ class Run1App:
 
         # Topview: the metric points the indicators used, as a file and (optionally) a road-plane video
         try:
+            try:
+                summary["diagnostics"]["footprints"] = self._run3_attach_footprints(tracks, c)
+            except Exception as exc:
+                log.exception("Footprint fit failed")
+                summary["diagnostics"]["footprint_error"] = str(exc)
             topview_rows = self._run3_topview_rows(tracks, c)
             outputs["topview_records"] = write_csv("Detection_Records_Topview.csv", self.TOPVIEW_FIELDS, topview_rows)
             summary["diagnostics"]["topview"] = {"records": len(topview_rows), "calibration_mode": self._run3_calibration_mode(c)}
@@ -10545,6 +10758,11 @@ class Run1App:
                 if tv:
                     outputs["topview_video"] = tv
                     summary["diagnostics"]["topview"]["video"] = tv
+            if c.get("footprint_video"):
+                status("Run 3 — drawing the footprint video...")
+                fv = self._run3_write_footprint_video(tracks, c, output_dir, (settings or {}).get("video"), display=settings)
+                if fv:
+                    outputs["footprint_video"] = fv
             plot = self._run3_write_xy_plot(tracks, c, output_dir, (settings or {}).get("video"), display=settings)
             if plot:
                 outputs["topview_plot"] = plot
