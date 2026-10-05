@@ -17,9 +17,9 @@ Scene 1  (speed, LDP, lateral clearance).  Zones by x: 0-10 / 10-20 / 20-30 m
 Scene 2  (PET, TTC).  Crossing and rear-end conflicts
   P  Car  2-3-4   along +x at y = 0, 10 m/s, passes (15, 0) at t = 1.5 s
   Q  Car  1-3-6   along +y at x = 15, passes (15, 0) at t = 3.1 s  -> PET(P,Q) = 1.0 s
-  R  Car  1-3-6   along +y at x = 15, passes (15, 0) at t = 1.6 s  -> side TTC(P,R) ~ 0
+  R  Car  1-3-6   along +y at x = 15, passes (15, 0) at t = 1.6 s  -> vector TTC(P,R) = 1.55 - t -> ~ 0 (Crossing, 90 deg)
   F  Car  (zone 3) along +x at y = -12, 10 m/s behind  L  Car at 5 m/s, 20 m ahead
-        -> rear-end TTC(F,L) = (S = 15.5 - 5 t) / 5 m/s  (ends when L leaves at t = 2 s: ~1.12 s)
+        -> vector TTC(F,L) = (20 - 5 t) / 5 m/s  (ends when L leaves at t = 2 s: ~2.0 s, Rear-end, 0 deg)
 """
 import csv
 import importlib.util
@@ -284,18 +284,18 @@ def scene2(app):
     ]
     out, summary = run_scene(app, veh)
     print("scene 2 output:", out)
-    # side collision off -> only the rear-end event remains
-    app.run3_ttc_side_enabled_var.set(False)
-    out_off, _ = run_scene(app, veh)
-    app.run3_ttc_side_enabled_var.set(True)
-    kinds_off = {r["TTC_Type"] for r in read_csv(os.path.join(out_off, "TTC.csv"))}
-    check("TTC side collision can be switched off (only RearEnd remains)", kinds_off == {"RearEnd"}, str(kinds_off))
-    # a tighter window rule (factor 0, margin 0.05 s): P-R arrive 0.1 s apart -> no longer a collision course
-    app.run3_ttc_side_factor_var.set("0"); app.run3_ttc_side_margin_var.set("0.05")
-    out_tight, _ = run_scene(app, veh)
-    app.run3_ttc_side_factor_var.set("1.0"); app.run3_ttc_side_margin_var.set("0.0")
-    kinds_tight = {r["TTC_Type"] for r in read_csv(os.path.join(out_tight, "TTC.csv"))}
-    check("TTC side window is adjustable (factor 0, margin 0.05 s drops the 0.1 s apart pair)", kinds_tight == {"RearEnd"}, str(kinds_tight))
+    # the pair screening radius is adjustable: at 5 m only the P-R pair (about 1 m apart when they cross) is evaluated
+    app.run3_ttc_pair_radius_var.set("5")
+    out_r, _ = run_scene(app, veh)
+    app.run3_ttc_pair_radius_var.set("20")
+    pairs_r = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]) for r in read_csv(os.path.join(out_r, "TTC.csv"))}
+    check("TTC pair screening radius is adjustable (5 m keeps only P-R)", pairs_r == {("1", "3")}, str(sorted(pairs_r)))
+    # the conflict-angle limits are adjustable: with the crossing limit at 95 deg the 90 deg pair is a lane change
+    app.run3_ttc_angle_cross_var.set("95")
+    out_a, _ = run_scene(app, veh)
+    app.run3_ttc_angle_cross_var.set("85")
+    types_a = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]): r["TTC_Type"] for r in read_csv(os.path.join(out_a, "TTC.csv"))}
+    check("TTC conflict-angle limit is adjustable (90 deg is Lane change below a 95 deg limit)", types_a.get(("1", "3")) == "Lane change", str(types_a))
 
     reasons = summary["diagnostics"].get("empty_outputs", [])
     check("empty Gap Acceptance output is explained (no Line drawn yet)", any("Gap Acceptance" in r and "Line" in r for r in reasons), str(reasons))
@@ -314,24 +314,30 @@ def scene2(app):
         check("PET conflict type Crossing in Zone 3", r["Conflict_Type"] == "Crossing" and r["Conflict_Zone"] == "Zone 3",
               f"{r['Conflict_Type']} {r['Conflict_Zone']}")
 
-    # ---- TTC ----
+    # ---- TTC (vector: TTC = -(r . v)/(v . v), no miss-distance gate) ----
     ttc = read_csv(os.path.join(out, "TTC.csv"))
-    kinds = {(r["TTC_Type"], frozenset((r["Vehicle_A_ID"], r["Vehicle_B_ID"]))): r for r in ttc}
-    check("TTC event set = RearEnd F->L and Side P-R",
-          set(kinds) == {("RearEnd", frozenset(("4", "5"))), ("Side", frozenset(("1", "3")))},
-          str(sorted((k, sorted(v)) for k, v in kinds)))
-    re_ = kinds.get(("RearEnd", frozenset(("4", "5"))))
-    if re_:
-        check("TTC rear-end: follower is vehicle 4", re_["Vehicle_A_ID"] == "4")
-        check("TTC rear-end TTCmin ~ 1.12 s", abs(float(re_["TTC_s"]) - 1.12) < 0.08, re_["TTC_s"])
-        check("TTC rear-end CS = 5 m/s = 18 km/h", abs(float(re_["CS_Closing_Speed_kmh"]) - 18.0) < 0.5, re_["CS_Closing_Speed_kmh"])
-    sd = kinds.get(("Side", frozenset(("1", "3"))))
-    if sd:
-        check("TTC side TTCmin < 0.1 s (P passes the crossing 0.1 s before R)", float(sd["TTC_s"]) < 0.1, sd["TTC_s"])
-        check("TTC side: P arrives first, arrival diff 0.1 s",
-              sd["Vehicle_A_ID"] == "1" and abs(float(sd["Arrival_Diff_s"]) - 0.1) < 0.03,
-              f"A={sd['Vehicle_A_ID']} diff={sd['Arrival_Diff_s']}")
-        check("TTC side path angle 90 deg", abs(float(sd["Path_Angle_deg"]) - 90.0) < 1.0, sd["Path_Angle_deg"])
+    ev = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]): r for r in ttc}
+    check("TTC columns: the vector columns are written, the old rear-end / crossing-point columns are gone",
+          {"Theta_deg", "Rel_X_m", "RelV_X_mps", "Miss_Distance_m", "TTC_X_s", "TTC_Y_s"} <= set(ttc[0]) and "S_Conflict_Distance_m" not in ttc[0] and "Arrival_Diff_s" not in ttc[0],
+          str(sorted(ttc[0])) if ttc else "no rows")
+    check("TTC events = F-L, P-R, P-L (every approaching pair inside the radius; P-L passes 12 m apart: no miss-distance rule)",
+          set(ev) == {("4", "5"), ("1", "3"), ("1", "5")}, str(sorted(ev)))
+    fl = ev.get(("4", "5"))
+    if fl:
+        check("TTC F-L: Rear-end, angle 0 deg", fl["TTC_Type"] == "Rear-end" and abs(float(fl["Theta_deg"])) < 1.0, f"{fl['TTC_Type']} {fl['Theta_deg']}")
+        check("TTC F-L: (20 - 5 t) / 5 m/s ~ 2.0 s when L leaves the zone at t = 2 s", abs(float(fl["TTC_s"]) - 2.0) < 0.05, fl["TTC_s"])
+        check("TTC F-L: same lane, miss distance 0", float(fl["Miss_Distance_m"]) < 0.01, fl["Miss_Distance_m"])
+        check("TTC F-L: relative speed 5 m/s = 18 km/h", abs(float(fl["Rel_Speed_kmh"]) - 18.0) < 0.5, fl["Rel_Speed_kmh"])
+    pr_ = ev.get(("1", "3"))
+    if pr_:
+        check("TTC P-R: Crossing, angle 90 deg", pr_["TTC_Type"] == "Crossing" and abs(float(pr_["Theta_deg"]) - 90.0) < 1.0, f"{pr_['TTC_Type']} {pr_['Theta_deg']}")
+        check("TTC P-R: TTCmin ~ 0 (1.55 - t, the last approaching frame)", float(pr_["TTC_s"]) < 0.05, pr_["TTC_s"])
+        check("TTC P-R: miss distance ~ 0.7 m (the cars pass 0.1 s apart)", abs(float(pr_["Miss_Distance_m"]) - 0.71) < 0.12, pr_["Miss_Distance_m"])
+        check("TTC P-R: relative speed sqrt(10^2 + 10^2) m/s = 50.9 km/h", abs(float(pr_["Rel_Speed_kmh"]) - 50.91) < 1.0, pr_["Rel_Speed_kmh"])
+    pl = ev.get(("1", "5"))
+    if pl:
+        check("TTC P-L: lanes 12 m apart: TTC ~ 2.0 s but the miss distance is 12 m (written, not used to filter)",
+              abs(float(pl["TTC_s"]) - 2.0) < 0.05 and abs(float(pl["Miss_Distance_m"]) - 12.0) < 0.2, f"{pl['TTC_s']} {pl['Miss_Distance_m']}")
 
 
 def stream_rows(tid, t_cross, x_line, y, jitter=0.0, t_appear=None):
