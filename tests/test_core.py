@@ -955,5 +955,52 @@ class ZoneEditCoreTests(unittest.TestCase):
         self.assertAlmostEqual(a[2][1], a[3][1], places=9)
 
 
+class FootprintCoreTests(unittest.TestCase):
+    """A flat footprint seen by a tilted camera: the fit must recover where it was put."""
+
+    def setUp(self):
+        self.h = CORE["homography_from_points"]([(0, 0), (60, 0), (60, 20), (0, 20)], [(150, 500), (1800, 420), (1900, 900), (60, 950)])   # plane -> pixels
+        self.fwd = lambda px: CORE["apply_homography"](np.linalg.inv(self.h), np.asarray(px, float).reshape(-1, 2))               # pixels -> plane
+        self.to_px = lambda g: CORE["apply_homography"](self.h, np.asarray(g, float).reshape(-1, 2))
+
+    def make(self, centre, heading, length, width):
+        hd = np.array(heading, float) / np.hypot(*heading)
+        lat = np.array([-hd[1], hd[0]])
+        sg = [(1, 1), (1, -1), (-1, -1), (-1, 1)]
+        return np.array([np.array(centre) + a * length / 2 * hd + b * width / 2 * lat for a, b in sg])
+
+    def test_invert_map_round_trip(self):
+        px = np.array([[500.0, 700.0], [1200.0, 650.0]])
+        back = CORE["invert_map"](self.fwd, self.fwd(px), px + 30)
+        self.assertLess(np.abs(back - px).max(), 1e-2)
+
+    def test_the_fit_recovers_a_flat_footprint(self):
+        cases = [((20.0, 8.0), (1.0, 0.0), 4.5, 1.8), ((35.0, 12.0), (0.6, 0.8), 4.5, 1.8), ((10.0, 14.0), (-1.0, 0.2), 8.0, 2.5), ((44.0, 5.0), (0.0, 1.0), 2.0, 0.8)]
+        for centre, heading, L, W in cases:
+            corners = self.make(centre, heading, L, W)
+            px = self.to_px(corners)
+            box = [px[:, 0].min(), px[:, 1].min(), px[:, 0].max(), px[:, 1].max()]
+            fit = CORE["fit_footprints"](self.fwd, [box], [heading], [L], [W])
+            self.assertTrue(fit["ok"][0])
+            self.assertLess(np.hypot(*(fit["center"][0] - np.array(centre))), 0.03, (centre, fit["center"][0]))
+            self.assertLess(np.abs(fit["corners"][0] - corners).max(), 0.05)
+            self.assertLess(np.abs(fit["corners_px"][0] - px).max(), 1.0)
+
+    def test_the_footprint_has_the_class_size_and_the_heading(self):
+        fit = CORE["fit_footprints"](self.fwd, [[800, 500, 1000, 640]], [(0.0, 1.0)], [4.5], [1.8])
+        c = fit["corners"][0]
+        self.assertAlmostEqual(np.hypot(*(c[0] - c[1])), 1.8, places=6)           # the sides
+        self.assertAlmostEqual(np.hypot(*(c[1] - c[2])), 4.5, places=6)
+        self.assertAlmostEqual((c[1] - c[2])[0], 0.0, places=6)                    # long side along the heading (0, 1)
+
+    def test_headings_fill_the_stops(self):
+        out = CORE["fill_headings"]([None, (1.0, 0.0), None, None, (0.0, 1.0), None])
+        self.assertEqual(out, [(1.0, 0.0), (1.0, 0.0), (1.0, 0.0), (1.0, 0.0), (0.0, 1.0), (0.0, 1.0)])
+        self.assertEqual(CORE["fill_headings"]([None, None]), [(1.0, 0.0), (1.0, 0.0)])
+
+    def test_nothing_to_fit(self):
+        self.assertEqual(len(CORE["fit_footprints"](self.fwd, np.zeros((0, 4)), np.zeros((0, 2)), [], [])["ok"]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
