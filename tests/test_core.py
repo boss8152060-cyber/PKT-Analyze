@@ -510,6 +510,25 @@ class MovingRectTtc(unittest.TestCase):
         self.assertGreater(checked, 300)
 
 
+class RectPolygonAndInvertMap(unittest.TestCase):
+    def test_rectangle_corners(self):
+        q = CORE["rect_polygon"]((10.0, 5.0), (3.0, 0.0), (4.5, 1.8), 0.25)        # long side along +x, 0.25 m more on every side
+        self.assertAlmostEqual(q[:, 0].max() - q[:, 0].min(), 5.0, places=9)
+        self.assertAlmostEqual(q[:, 1].max() - q[:, 1].min(), 2.3, places=9)
+        self.assertAlmostEqual(q[:, 0].mean(), 10.0, places=9)
+        self.assertAlmostEqual(q[:, 1].mean(), 5.0, places=9)
+        d = CORE["rect_polygon"]((0.0, 0.0), (1.0, 1.0), (4.0, 2.0), 0.0)          # along the diagonal
+        self.assertAlmostEqual(math.hypot(*(d[0] - d[1])), 2.0, places=9)
+        self.assertAlmostEqual(math.hypot(*(d[1] - d[2])), 4.0, places=9)
+
+    def test_invert_map_round_trip(self):
+        h = CORE["homography_from_points"]([(0, 0), (60, 0), (60, 20), (0, 20)], [(150, 500), (1800, 420), (1900, 900), (60, 950)])
+        to_plane = lambda px: CORE["apply_homography"](np.linalg.inv(h), np.asarray(px, float).reshape(-1, 2))
+        px = np.array([[500.0, 700.0], [1200.0, 650.0]])
+        back = CORE["invert_map"](to_plane, to_plane(px), px + 40)
+        self.assertLess(np.abs(back - px).max(), 1e-2)
+
+
 class ConflictAngle(unittest.TestCase):
     def test_angle_between_velocities(self):
         ang = CORE["conflict_angle_deg"]
