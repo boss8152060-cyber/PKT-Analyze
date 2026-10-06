@@ -22,8 +22,8 @@
 |---|---|---|---|---|
 | `speed_smoothing_samples` | 5 | Speed, (LDP ใช้ `ldp_smoothing_samples`) | ลด jitter; มากไปทำให้ความเร็วเรียบเกิน | 1, 3, 5, 9 |
 | `ldp_smoothing_samples` | 5 | LDP | ΔY ลดลงเมื่อเรียบขึ้น | 1, 3, 5, 9 |
-| `speed_frame_window_s` | 0.5 | ความเร็วต่อเฟรม | ความเร็วทุกเฟรมใน `Detection_Records_Topview.csv` (คอลัมน์ `speed_kmh`) ใช้ตำแหน่งในช่วง ± ครึ่งหนึ่งของค่านี้ (หลัง rolling median ตาม `speed_smoothing_samples`); น้อย = ไวแต่สั่น, มาก = นิ่งแต่เบลอการเปลี่ยนความเร็ว | 0.25, 0.5, 1.0 |
-| `speed_max_kmh` | 80 | Speed | ค่าที่เกินไม่นับในสถิติ | 40, 60, 80, 0 (ปิด) |
+| `speed_frame_window_s` | 0.5 | Speed | ความเร็วของแต่ละเฟรมใน `Speed.csv` ใช้ตำแหน่งในช่วง ± ครึ่งหนึ่งของค่านี้ (หลัง rolling median ตาม `speed_smoothing_samples`); น้อย = ไวแต่สั่น, มาก = นิ่งแต่เบลอการเปลี่ยนความเร็ว | 0.25, 0.5, 1.0 |
+| `speed_max_kmh` | 80 | Speed | ความเร็วที่เกินนี้ติดธง `Speed_Above_Max` ในแถวนั้น (ไม่ลบแถว) | 40, 60, 80, 0 = ปิด |
 | `waiting_speed_threshold` (km/h) | 5.0 | Gap (หยุดค้างกลางแยก) | มาก = นับว่าหยุดง่ายขึ้น → Access/Exit เปลี่ยน | 2, 5, 8 |
 | `gap_hold_min_duration_s` | 0.30 | Gap | | 0.2, 0.3, 0.5 |
 | `lc_heading_window_s` | 0.50 | Lateral Clearance | ทิศ heading ของรถ A | 0.25, 0.5, 1.0 |
@@ -133,10 +133,10 @@ py -3.12 tools/batch_run.py --settings "../Output/Test/R5/คลิป/Settings.
 | `Detection_Records.csv`, `ID_Zone_Summary.csv`, `Zone_Summary.csv` | กรอบรถต่อเฟรม, เส้นทางโซนต่อ ID, สรุปต่อโซน |
 | `Gap_Acceptance.csv`, `Critical_Gap.csv` | Gap Acceptance |
 | `LDP.csv` | LDP |
-| `Lateral_Clearance.csv`, `Lateral_Clearance_Pairs.csv` | Lateral Clearance (ทุกตัวอย่าง / ค่าต่ำสุดต่อคู่) |
+| `Lateral_Clearance_Pairs.csv` | Lateral Clearance (ค่าต่ำสุดต่อคู่) |
+| `Lateral_Clearance.csv`, `TTC_Detail.csv`, `TTC_Frames.csv` | **ไฟล์ตรวจสอบ — เขียนเฉพาะเมื่อติ๊ก "เขียนไฟล์ตรวจสอบเพิ่ม"** (แท็บ ③ ด้านบน; ค่าตั้งต้นปิด): ทุกตัวอย่างของ Lateral Clearance, ค่าตรวจสอบต่อเหตุการณ์ TTC (ต่อกับ `TTC.csv` ด้วย `Event_ID`), ทุกเฟรมของทุกคู่ TTC |
 | `TTC.csv`, `PET.csv` | TTC, PET |
-| `Speed.csv`, `Speed_Detail.csv`, `Speed_Statistics.csv` | Speed (ต่อคัน / ต่อโซนและ Movement / สถิติ) |
-| `TTC_Detail.csv` | ค่าตรวจสอบของแต่ละเหตุการณ์ TTC (เวกเตอร์สัมพัทธ์, เวลาถึงจุดชน ฯลฯ) ต่อกับ `TTC.csv` ด้วย `Event_ID` — `TTC.csv` เหลือเฉพาะคอลัมน์หลัก |
+| `Speed.csv` | Speed: ความเร็วของรถทุกคันในทุกเฟรมที่อยู่ในโซนที่ติ๊ก (ไม่มีสถิติ ไม่มีไฟล์ต่อโซน/ต่อ Movement) |
 | `<ชื่อ>_ERROR.csv` (เช่น `PET_ERROR.csv`) | **มีเฉพาะเมื่อตัวชี้วัดนั้นคำนวณล้มเหลว** บอกข้อความผิดพลาด (ชื่อไฟล์ผลลัพธ์จริง เช่น `PET.csv` จะไม่ถูกเขียนทับด้วยข้อความ error อีก; ถ้ามี `PET.csv` อยู่ในโฟลเดอร์ แปลว่าเป็นของรอบเก่า) |
 | `Indicator_Summary.csv`, `Summary.json`, `Duplicate_Tracks.csv` | สรุปตัวชี้วัด, สรุปการรัน (รวมเหตุผลที่ตัวชี้วัดว่าง, การปรับเทียบ), แทร็กซ้ำที่ตัดออก |
 | `Detection_Records_Topview.csv`, `Tracking_Topview.mp4` | พิกัด Topview: ทุกจุดที่ตรวจพบแปลงเป็นเมตรบนพื้นถนน (`x_m,y_m` = จุดตัดสินโซน, `cx_m,cy_m` = กึ่งกลางกรอบ — ตัวเลขชุดเดียวกับที่ตัวชี้วัดใช้) และวิดีโอ Topview ที่วาดจากพิกัดนั้น (กรอบรถตามขนาดจริง หมุนตามทิศวิ่ง, เส้นทางย้อนหลัง 2 วินาที, โซน, ตารางเมตร; พื้นหลัง = ภาพถนนจริงที่ไม่มีรถ (median ของ 15 เฟรม) บิดด้วย calibration หลัก ถ้าไม่รู้ไฟล์วิดีโอใช้ตารางเปล่า) — ปิดวิดีโอได้ในแท็บ ② ทางแยก ("สร้างวิดีโอ Topview") |
@@ -146,10 +146,10 @@ py -3.12 tools/batch_run.py --settings "../Output/Test/R5/คลิป/Settings.
 ผลของรอบเก่า (ไฟล์ชื่อ `<คลิป>_Speed.csv`, `Run_3_Speed.csv`, `<คลิป>_Research_Settings.json` ฯลฯ) ยังเปิดอ่านได้ และเครื่องมือ/ไฟล์รวมอ่านชื่อเก่าได้ด้วย (ไม่แก้ไฟล์เก่า) — ถ้าคัดลอกไฟล์จากหลายคลิปไปไว้โฟลเดอร์เดียว ชื่อจะซ้ำกัน ให้ใช้ไฟล์รวม `All_Clips/` แทน
 
 **รวมทุกคลิป:** หลังรันทุกครั้ง โปรแกรมสร้าง/อัปเดตโฟลเดอร์ **`All_Clips`** ในโฟลเดอร์ชั้นบนสุดที่นำเข้า (เช่น `ผลลัพธ์/ทางเข้าวิศวะ/All_Clips/`) จากทุกคลิปที่อยู่ในนั้น ทุกระดับ **รวมคลิปจากรอบก่อน ๆ ด้วย** (เพิ่มคลิป/วันใหม่แล้วไฟล์รวมโตตาม):
-- `All_<ชนิด>.csv` (เช่น `All_Gap_Acceptance.csv`, `All_Speed_Detail.csv`) — แถวของทุกคลิป โดยคอลัมน์แรก **`Clip`** บอกว่ามาจากคลิปไหน (เช่น `ทางเข้าวิศวะ/2026_09_01/clip1`) — Vehicle_ID ซ้ำกันข้ามคลิปได้ จึงต้องอ่านคู่กับ Clip เสมอ; ชนิดที่ไม่มีข้อมูลเลยจะไม่มีไฟล์
+- `All_<ชนิด>.csv` (เช่น `All_Gap_Acceptance.csv`, `All_LDP.csv`) — แถวของทุกคลิป โดยคอลัมน์แรก **`Clip`** บอกว่ามาจากคลิปไหน (เช่น `ทางเข้าวิศวะ/2026_09_01/clip1`) — Vehicle_ID ซ้ำกันข้ามคลิปได้ จึงต้องอ่านคู่กับ Clip เสมอ; ชนิดที่ไม่มีข้อมูลเลยจะไม่มีไฟล์
 - **ID ซ้ำข้ามคลิป:** Vehicle_ID เริ่มนับจาก 1 ใหม่ทุกคลิป จึงซ้ำกันได้ ไฟล์รวมจึงมีคอลัมน์คู่ **`<ชื่อคอลัมน์>_Unique`** ต่อท้ายทุกคอลัมน์ ID (เช่น `Vehicle_ID_Unique` = `ทางเข้าวิศวะ/2026_09_01/clip1#12`, ใช้กับ `Vehicle_ID_A/B`, `Subject_ID`, `Conflicting_ID_A/B`, `Pair_ID`, `Event_ID`, `Interaction_ID` ด้วย) — ใช้คอลัมน์นี้เป็นคีย์เวลาจับคู่หรือนับรถ (หรือใช้ `Clip` + ID คู่กัน)
 - **เวลา:** เวลาในแต่ละไฟล์เป็นวินาทีตามเวลาของวิดีโอต้นฉบับของคลิปนั้น (แต่ละคลิปเริ่มของตัวเอง ไม่ต่อกัน) คอลัมน์ **`Clip_Start`** ให้เวลานาฬิกาตอนเริ่มบันทึกถ้าชื่อไฟล์มีวันที่-เวลา (เช่น `20260907_084751A_` → `2026-09-07 08:47:51`; ชื่ออย่าง `DJI_0426` ไม่มีเวลา จะเว้นว่าง) เวลาจริงของเหตุการณ์ = `Clip_Start` + จำนวนวินาทีในคอลัมน์เวลา
-- `All_Statistics.csv` — Mean, SD, V50, V85, Min, Max ของ Speed, LDP, Lateral Clearance, TTC, PET, Gap รวมทุกคลิป
+- `All_Statistics.csv` — Mean, SD, V50, V85, Min, Max ของ LDP, Lateral Clearance, TTC, PET, Gap รวมทุกคลิป (**ไม่มี Speed**: Speed เป็นความเร็วต่อเฟรม ไม่คิดสถิติ)
 - `All_Clips.csv` — รายชื่อคลิปที่รวม, `All_Summary.json`
 - สร้างเมื่อมีตั้งแต่ 2 คลิป; ใช้เดี่ยว ๆ ได้ด้วย `python tools/combine_clips.py <โฟลเดอร์ผลลัพธ์>`
 - ผลรอบเก่าที่ชื่อไฟล์เป็น `Run_3_...` ยังถูกอ่านและรวมได้ (ไม่แก้ไฟล์เก่า)
@@ -266,19 +266,21 @@ py -3.12 tools/batch_run.py --settings "../Output/Test/R5/คลิป/Settings.
 
 ไฟล์ตั้งค่าที่บันทึกไว้ก่อนมีตารางนี้ (ไม่มีคีย์ `xy_…`): วิดีโอ X–Y ใช้ค่าของวิดีโอปกติที่บันทึกไว้ (เส้นทาง, โซน, ป้าย, ชื่อกำกับ, ความจาง) ส่วนจุด/ตารางเมตร/ข้อความเวลาเปิดเป็นค่าตั้งต้น
 
-## 7. ชื่อคอลัมน์ในไฟล์ตัวชี้วัด (v28(129)) — ชื่อเก่า → ชื่อใหม่
+## 7. ชื่อคอลัมน์ในไฟล์ตัวชี้วัด (v28(129)–(131)) — ชื่อเก่า → ชื่อใหม่ และคอลัมน์/ไฟล์ที่เลิกเขียน
 
 หลักการ: คอลัมน์เวลาลงท้าย `_s`; คอลัมน์ความเร็วบอกว่า **ความเร็ว ณ ตอนไหน**; รถ A/B ใช้ `Vehicle_A_ID` / `Vehicle_A_Class` / `Movement_A` เหมือนกันทุกไฟล์ (ไฟล์ตรวจจับพื้นฐาน `Detection_Records*.csv`, `ID_Zone_Summary.csv` ยังใช้ชื่อเดิมเพราะโปรแกรมอ่านกลับ) — ผลรอบเก่าที่ใช้ชื่อเดิมยังเปิดอ่านได้ และ `tools/combine_clips.py` อ่านชื่อ Gap เดิมได้
 
-| ไฟล์ | ชื่อเดิม → ชื่อใหม่ |
+| ไฟล์ | ชื่อเดิม → ชื่อใหม่ / ที่เลิก |
 |---|---|
-| `LDP.csv` | `Start_Time`→`Start_Time_s`, `End_Time`→`End_Time_s`, `Mean_Speed_kmh`→`Mean_Speed_In_Zone_kmh` |
-| `Lateral_Clearance.csv` | `Timestamp`→`Time_s`, `LS_Meter`→`LS_m`; **เพิ่ม** `Movement_A`, `Movement_B`, `Calibration_Mode` |
-| `Lateral_Clearance_Pairs.csv` | `Start_Time`→`Start_Time_s`, `End_Time`→`End_Time_s`; **เพิ่ม** `Movement_A`, `Movement_B`, `Calibration_Mode` |
-| `Gap_Acceptance.csv` | `X32_Waiting_Time`→`Waiting_Time_s`, `X31_Available_Gap`→`Available_Gap_s`, `Gap_Evaluation_Time`/`Gap_Start_Time`/`Gap_End_Time`/`Decision_Time` + `_s`, `Subject_Speed_kmh`→`Subject_Speed_At_Decision_kmh`, `Conflict_Speed_A/B_kmh`→`Conflict_Speed_A/B_At_Decision_kmh` |
+| `LDP.csv` | `Start_Time`→`Start_Time_s`, `End_Time`→`End_Time_s`, `Mean_Speed_kmh`→`Mean_Speed_In_Zone_kmh`; **เลิก** `Side`, `Lane_Width_W_m`, `Chord_Length_m` |
+| `Lateral_Clearance.csv` | `Timestamp`→`Time_s`, `LS_Meter`→`LS_m`; **เพิ่ม** `Movement_A`, `Movement_B`; **เลิก** `Width_A/B_m`, `Length_A/B_m`, `Zone_Sequence_A/B` (ซ้ำทุกตัวอย่าง) |
+| `Lateral_Clearance_Pairs.csv` | `Start_Time`→`Start_Time_s`, `End_Time`→`End_Time_s`; **เพิ่ม** `Movement_A`, `Movement_B` |
+| `Gap_Acceptance.csv` | `X32_Waiting_Time`→`Waiting_Time_s`, `X31_Available_Gap`→`Available_Gap_s`, `Gap_Start_Time`/`Gap_End_Time`/`Decision_Time` + `_s`; **เลิก** `Gap_Acceptance` (1/0 ซ้ำกับ `Gap_Role`) และ `Gap_Evaluation_Time` (เท่ากับ `Decision_Time`), `Subject_Speed_kmh`→`Subject_Speed_At_Decision_kmh`, `Conflict_Speed_A/B_kmh`→`Conflict_Speed_A/B_At_Decision_kmh` |
 | `TTC.csv` | `Event_Start`→`Start_Time_s`, `Event_End`→`End_Time_s`, `TTCmin_Time`→`TTCmin_Time_s`, `Speed_A/B_kmh`→`Speed_A/B_At_TTCmin_kmh`; **ย้ายไป `TTC_Detail.csv`:** `Rel_X_m`, `Rel_Y_m`, `RelV_X_mps`, `RelV_Y_mps`, `Rel_Speed_kmh`, `Collide_Frame_Time_s`, `Dist_A/B_to_Collide_m`, `Arrival_A/B_s`; **เพิ่ม** `Calibration_Mode` |
-| `PET.csv` | `Vehicle_ID_A/B`→`Vehicle_A/B_ID`, `Vehicle_Class_A/B`→`Vehicle_A/B_Class`, `Interaction_Start/End`→`Start_Time_s`/`End_Time_s`, `T1_Exit_Time`→`T1_Exit_Time_s`, `T2_Entry_Time`→`T2_Entry_Time_s`, `Speed_A/B_kmh`→`Speed_A/B_At_Crossing_kmh`; **เพิ่ม** `Calibration_Mode` |
-| `Speed_Detail.csv` | `Start_Time`→`Start_Time_s`, `End_Time`→`End_Time_s` |
-| `Detection_Records_Topview.csv` | **เพิ่ม** `speed_kmh` (ความเร็วของรถคันนั้นในเฟรมนั้น, ตั้งค่าที่ `speed_frame_window_s`) |
+| `PET.csv` | `Vehicle_ID_A/B`→`Vehicle_A/B_ID`, `Vehicle_Class_A/B`→`Vehicle_A/B_Class`, **เลิก** `Conflict_Type` (เป็น Crossing เสมอ) และ `Interaction_Start/End` (เท่ากับ T1/T2), `T1_Exit_Time`→`T1_Exit_Time_s`, `T2_Entry_Time`→`T2_Entry_Time_s`, `Speed_A/B_kmh`→`Speed_A/B_At_Crossing_kmh`; **เพิ่ม** `Calibration_Mode` |
+| `Detection_Records_Topview.csv` | **เลิก** `calibration_mode` |
+| `Detection_Records.csv` | **เลิก** `class_id`, `bbox_width`, `bbox_height`, `bbox_area`, `trajectory_position`, `trajectory_offset` (หาได้จาก `class_name` / มุมกรอบ / ค่าคงที่ใน Settings; โปรแกรมไม่อ่านกลับ) |
+| ทุกไฟล์ตัวชี้วัด | **เลิก** `Site_ID` และ `Calibration_Mode` (ค่าเดียวทั้งรอบ อยู่ใน `Summary.json` / `Settings.json`) |
+| Speed | `Speed.csv` เปลี่ยนเป็นความเร็วต่อเฟรม (คอลัมน์ `Frame, Time_s, Vehicle_ID, Vehicle_Class, Zone, Movement, Speed_kmh, QC_Flag`); **เลิก** `Speed_Detail.csv`, `Speed_Statistics.csv` และสรุปต่อคัน (แบบกว้าง) |
 
 ผล pivot/สูตร Excel ที่อ้างชื่อเดิมต้องแก้เป็นชื่อใหม่เมื่อเปิดผลรันใหม่
