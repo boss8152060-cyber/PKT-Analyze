@@ -424,7 +424,35 @@ DEFAULT_SETTINGS = {
     "show_prefix_conf": False,
     "show_prefix_zone": False,
     "show_prefix_speed": False,
+
+    # Display choices of the X-Y video: every switch of the normal video has its own twin here (xy_...), so the two videos can show different things.
+    # A settings file written before these existed gets the normal-video choices copied (XY_FROM_NORMAL) so nothing changes until the user edits them.
+    "show_info_text": True,                 # normal video: the Frame / FPS / Elapsed / ETA text in the corner
+    "xy_show_zone_boundary": True,
+    "xy_show_zone_label": True,
+    "xy_show_zone_label_prefix": True,
+    "xy_zone_overlay_opacity": "45",
+    "xy_draw_trail": False,
+    "xy_trail_length": "30",
+    "xy_show_label_id": True,
+    "xy_show_label_class": True,
+    "xy_show_label_conf": True,
+    "xy_show_label_zone": True,
+    "xy_show_label_speed": True,
+    "xy_show_prefix_id": False,
+    "xy_show_prefix_class": False,
+    "xy_show_prefix_conf": False,
+    "xy_show_prefix_zone": False,
+    "xy_show_prefix_speed": False,
+    "xy_show_point": True,                  # the dot at the vehicle's Trajectory Position (yellow = in a zone, red ring = in none)
+    "xy_show_grid": True,                   # the metre grid and its numbers
+    "xy_show_time": True,                   # "t = ... s  frame ..." at the bottom
 }
+
+XY_DISPLAY_KEYS = tuple(k for k in DEFAULT_SETTINGS if k.startswith("xy_"))
+XY_FROM_NORMAL = {"xy_" + k: k for k in ("show_zone_boundary", "show_zone_label", "show_zone_label_prefix", "zone_overlay_opacity", "draw_trail", "trail_length",
+                                         "show_label_id", "show_label_class", "show_label_conf", "show_label_zone", "show_label_speed",
+                                         "show_prefix_id", "show_prefix_class", "show_prefix_conf", "show_prefix_zone", "show_prefix_speed")}
 
 
 # ============================================================
@@ -3607,6 +3635,9 @@ class Run1App:
         self.show_prefix_conf_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_prefix_conf"])
         self.show_prefix_zone_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_prefix_zone"])
         self.show_prefix_speed_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_prefix_speed"])
+        self.show_info_text_var = tk.BooleanVar(value=DEFAULT_SETTINGS["show_info_text"])
+        self.xy_vars = {key: (tk.StringVar(value=DEFAULT_SETTINGS[key]) if isinstance(DEFAULT_SETTINGS[key], str) else tk.BooleanVar(value=DEFAULT_SETTINGS[key]))
+                        for key in XY_DISPLAY_KEYS}
 
 
         # ========================================================
@@ -3885,45 +3916,78 @@ class Run1App:
         self.clips_panel.grid(row=0, column=0, sticky="nsew")
 
         box = self.section("การแสดงผลและไฟล์ที่บันทึก")
-        box.columnconfigure(1, weight=0)
         gray = "#666666"
+        xyv = self.xy_vars
 
         def line(label, items, row):
             """label + a row of tick boxes (items = [(text, variable)])"""
             ttk.Label(box, text=label, width=22).grid(row=row, column=0, sticky="w", pady=3)
             fr = ttk.Frame(box)
-            fr.grid(row=row, column=1, sticky="w")
+            fr.grid(row=row, column=1, columnspan=2, sticky="w")
             for text, var in items:
                 ttk.Checkbutton(fr, text=text, variable=var).pack(side="left", padx=(0, 14))
             return fr
 
         line("ระหว่างรัน", [("Show Preview (เปิดหน้าต่างดูภาพ)", self.show_preview_var), ("Save CSV (Detection Records)", self.save_csv_var)], 0)
-        fr = line("เส้นทางรถ", [("แสดงเส้นทาง (Trajectory)", self.draw_trail_var)], 1)
-        ttk.Label(fr, text="ความยาว").pack(side="left", padx=(8, 4))
-        ttk.Spinbox(fr, from_=1, to=300, textvariable=self.trail_length_var, width=6).pack(side="left")
-        ttk.Separator(box, orient="horizontal").grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 4))
-        fr = line("Zone ที่วาดบนวิดีโอ", [("กรอบ Zone", self.show_zone_boundary_var), ("ชื่อ Zone", self.show_zone_label_var),
-                                         ("แสดงคำว่า Zone", self.show_zone_label_prefix_var)], 3)
-        ttk.Label(fr, text="ความจาง %").pack(side="left", padx=(8, 4))
-        ttk.Spinbox(fr, from_=0, to=100, increment=5, textvariable=self.zone_overlay_opacity_var, width=6).pack(side="left")
-        ttk.Label(fr, text="(0 = ไม่เห็น, 100 = ชัดสุด)", foreground=gray).pack(side="left", padx=(6, 0))
-        line("จุดตัดสินโซน", [("แสดงจุดที่ใช้ตัดสินว่ารถอยู่โซนไหน (เหลือง = อยู่ในโซน, วงแดง = ไม่อยู่ในโซนใด)", self.draw_center_var)], 6)
+        ttk.Separator(box, orient="horizontal").grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 4))
+
+        # one row per thing that can be drawn, one column per video: every switch of the normal video has its twin for the X-Y video
+        ttk.Label(box, text="สิ่งที่วาด (ติ๊ก = แสดง)", font=("TkDefaultFont", 9, "bold")).grid(row=2, column=0, sticky="w", pady=(0, 3))
+        ttk.Label(box, text="วิดีโอปกติ (ข้างทาง)", font=("TkDefaultFont", 9, "bold")).grid(row=2, column=1, sticky="w", padx=(0, 24))
+        ttk.Label(box, text="วิดีโอ X–Y (ผังเมตร)", font=("TkDefaultFont", 9, "bold")).grid(row=2, column=2, sticky="w")
         OUTSIDE = {"dot": "แสดงเฉพาะจุด (กรอบ ป้าย เส้นทางซ่อน)", "hide": "ซ่อนทั้งหมด (ไม่เห็นรถนอกโซนเลย)", "show": "แสดงเต็ม (กรอบ ป้าย เส้นทาง จุด)"}
-        fr = line("รถที่อยู่นอกโซน", [], 7)
-        for text, var in (("วิดีโอปกติ", self.outside_zone_normal_var), ("วิดีโอและภาพ X–Y", self.outside_zone_xy_var)):
-            ttk.Label(fr, text=text).pack(side="left", padx=(0, 4))
-            shown = tk.StringVar(value=OUTSIDE.get(var.get(), OUTSIDE["dot"]))
-            cb = ttk.Combobox(fr, textvariable=shown, values=list(OUTSIDE.values()), state="readonly", width=34)
-            cb.pack(side="left", padx=(0, 18))
-            cb.bind("<<ComboboxSelected>>", lambda e, v=var, sv=shown: v.set(next((k for k, t in OUTSIDE.items() if t == sv.get()), "dot")))
-            var.trace_add("write", lambda *_, v=var, sv=shown: sv.set(OUTSIDE.get(v.get(), OUTSIDE["dot"])))
-        fr = line("สี่เหลี่ยมรถของ TTC", [("ในวิดีโอปกติ (ข้างทาง)", self.run3_ttc_show_video_var), ("ในวิดีโอ X–Y", self.run3_ttc_show_xy_var)], 8)
-        ttk.Label(fr, text="รถ = สี่เหลี่ยมยาว×กว้างที่ TTC ใช้ (แดง = เฟรมที่ TTC นับ + ค่า TTC); วิดีโอปกติวาดเพิ่มหลังคำนวณ TTC เสร็จ (เปิดแล้วใช้เวลาเพิ่ม) ต้องเปิดตัวชี้วัด TTC",
-                  foreground=gray).pack(side="left", padx=(8, 0))
-        line("ป้ายบนตัวรถ", [("ID", self.show_label_id_var), ("Class", self.show_label_class_var), ("Conf", self.show_label_conf_var),
-                             ("Zone", self.show_label_zone_var), ("Speed", self.show_label_speed_var), ("กรอบวัตถุ", self.show_bbox_var)], 4)
-        line("ใส่ชื่อกำกับหน้าค่า", [("ID", self.show_prefix_id_var), ("Class", self.show_prefix_class_var), ("Conf", self.show_prefix_conf_var),
-                                   ("Zone", self.show_prefix_zone_var), ("Speed", self.show_prefix_speed_var)], 5)
+        row = [3]
+
+        def cell(col, r, items=(), spin=None, text=None, combo=None):
+            fr = ttk.Frame(box)
+            fr.grid(row=r, column=col, sticky="w", padx=(0, 14 if col == 1 else 0), pady=2)
+            for label, var in items:
+                ttk.Checkbutton(fr, text=label, variable=var).pack(side="left", padx=(0, 10))
+            if spin is not None:
+                lab, var, lo, hi, inc = spin
+                ttk.Label(fr, text=lab).pack(side="left", padx=(0, 4))
+                ttk.Spinbox(fr, from_=lo, to=hi, increment=inc, textvariable=var, width=6).pack(side="left")
+            if text is not None:
+                ttk.Label(fr, text=text, foreground=gray).pack(side="left")
+            if combo is not None:
+                shown = tk.StringVar(value=OUTSIDE.get(combo.get(), OUTSIDE["dot"]))
+                cb = ttk.Combobox(fr, textvariable=shown, values=list(OUTSIDE.values()), state="readonly", width=30)
+                cb.pack(side="left")
+                cb.bind("<<ComboboxSelected>>", lambda e, v=combo, sv=shown: v.set(next((k for k, t in OUTSIDE.items() if t == sv.get()), "dot")))
+                combo.trace_add("write", lambda *_, v=combo, sv=shown: sv.set(OUTSIDE.get(v.get(), OUTSIDE["dot"])))
+
+        def trow(label, normal, xy):
+            r = row[0]
+            ttk.Label(box, text=label).grid(row=r, column=0, sticky="w", pady=2)
+            cell(1, r, **normal)
+            cell(2, r, **xy)
+            row[0] += 1
+
+        trow("สร้างวิดีโอ", dict(text="เลือกต่อคลิปในรายการด้านบน"), dict(items=[("สร้าง Tracking_Topview.mp4", self.run3_topview_video_var)]))
+        trow("เส้นทางรถ (Trajectory)", dict(items=[("แสดง", self.draw_trail_var)], spin=("ความยาว", self.trail_length_var, 1, 300, 1)),
+             dict(items=[("แสดง", xyv["xy_draw_trail"])], spin=("ความยาว", xyv["xy_trail_length"], 1, 300, 1)))
+        trow("Zone", dict(items=[("กรอบ", self.show_zone_boundary_var), ("ชื่อ", self.show_zone_label_var), ("คำว่า Zone", self.show_zone_label_prefix_var)]),
+             dict(items=[("กรอบ", xyv["xy_show_zone_boundary"]), ("ชื่อ", xyv["xy_show_zone_label"]), ("คำว่า Zone", xyv["xy_show_zone_label_prefix"])]))
+        trow("ความจางของ Zone %", dict(spin=("0 = ไม่เห็น, 100 = ชัดสุด", self.zone_overlay_opacity_var, 0, 100, 5)),
+             dict(spin=("0 = ไม่เห็น, 100 = ชัดสุด", xyv["xy_zone_overlay_opacity"], 0, 100, 5)))
+        trow("จุดตำแหน่งรถ", dict(items=[("จุดที่ตัดสินโซน (เหลือง = ในโซน, วงแดง = ไม่อยู่โซน)", self.draw_center_var)]),
+             dict(items=[("จุดรถ (เหลือง = ในโซน, วงแดง = ไม่อยู่โซน)", xyv["xy_show_point"])]))
+        trow("รถที่อยู่นอกโซน", dict(combo=self.outside_zone_normal_var), dict(combo=self.outside_zone_xy_var))
+        trow("ป้ายบนตัวรถ", dict(items=[("ID", self.show_label_id_var), ("Class", self.show_label_class_var), ("Conf", self.show_label_conf_var),
+                                       ("Zone", self.show_label_zone_var), ("Speed", self.show_label_speed_var)]),
+             dict(items=[("ID", xyv["xy_show_label_id"]), ("Class", xyv["xy_show_label_class"]), ("Conf", xyv["xy_show_label_conf"]),
+                         ("Zone", xyv["xy_show_label_zone"]), ("Speed", xyv["xy_show_label_speed"])]))
+        trow("ใส่ชื่อกำกับหน้าค่า", dict(items=[("ID", self.show_prefix_id_var), ("Class", self.show_prefix_class_var), ("Conf", self.show_prefix_conf_var),
+                                              ("Zone", self.show_prefix_zone_var), ("Speed", self.show_prefix_speed_var)]),
+             dict(items=[("ID", xyv["xy_show_prefix_id"]), ("Class", xyv["xy_show_prefix_class"]), ("Conf", xyv["xy_show_prefix_conf"]),
+                         ("Zone", xyv["xy_show_prefix_zone"]), ("Speed", xyv["xy_show_prefix_speed"])]))
+        trow("กรอบวัตถุ (bbox)", dict(items=[("แสดง", self.show_bbox_var)]), dict(text="— (ผังเมตรไม่มีกรอบภาพ ดูสี่เหลี่ยมรถของ TTC)"))
+        trow("สี่เหลี่ยมรถของ TTC", dict(items=[("แสดง (วาดเพิ่มหลังคำนวณ TTC เสร็จ ใช้เวลาเพิ่ม)", self.run3_ttc_show_video_var)]),
+             dict(items=[("แสดง (แดง = เฟรมที่ TTC นับ)", self.run3_ttc_show_xy_var)]))
+        trow("ข้อความที่มุม/ล่างภาพ", dict(items=[("Frame / FPS / เวลา / ETA", self.show_info_text_var)]), dict(items=[("t = … s  frame …", xyv["xy_show_time"])]))
+        trow("ตารางเมตร", dict(text="—"), dict(items=[("เส้นตารางและตัวเลข", xyv["xy_show_grid"])]))
+        ttk.Label(box, text="สี่เหลี่ยมรถของ TTC ต้องเปิดตัวชี้วัด TTC;  แต่ละวิดีโอตั้งได้เป็นอิสระ (เช่น วิดีโอปกติโชว์ Speed แต่ X–Y ไม่โชว์)", foreground=gray).grid(
+            row=row[0], column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     # ---------------- tab 2: site ----------------
     def build_site_tab(self):
@@ -3977,7 +4041,7 @@ class Run1App:
         ttk.Label(cal, text="Road direction angle (deg) — ใช้เมื่อไม่มี Perspective").grid(row=r, column=0, columnspan=2, sticky="w", pady=4)
         ttk.Entry(cal, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=r, column=2, sticky="w", pady=4)
         r += 1
-        ttk.Checkbutton(cal, text="สร้างวิดีโอ Topview (Tracking_Topview.mp4)", variable=self.run3_topview_video_var).grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(cal, text="วิดีโอและภาพ X–Y: เปิด/ปิดและเลือกสิ่งที่วาดที่หน้า ①").grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(cal, text="วาดจากพิกัดเมตรเดียวกับที่ตัวชี้วัดใช้ (ไฟล์ Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
         r += 1
         alignf = ttk.LabelFrame(cal, text="จัดแนวกับภาพโดรน (Align) — แปลงพิกัดวิดีโอให้ตรงกับผังจริงของโดรน (ภาพโดรนใช้เฉพาะตอนจัดแนว)", padding=4)
@@ -4881,6 +4945,7 @@ class Run1App:
             "show_zone_label_prefix": b(self.show_zone_label_prefix_var),
             "show_bbox": b(self.show_bbox_var),
             "show_decision_point": b(self.draw_center_var),
+            "show_info_text": b(self.show_info_text_var),
             "outside_zone_normal": str(self.outside_zone_normal_var.get() or "dot"),
             "live_ppm": live_ppm,
         }
@@ -5507,6 +5572,8 @@ class Run1App:
             "show_prefix_conf": self.show_prefix_conf_var.get(),
             "show_prefix_zone": self.show_prefix_zone_var.get(),
             "show_prefix_speed": self.show_prefix_speed_var.get(),
+            "show_info_text": self.show_info_text_var.get(),
+            **{key: var.get() for key, var in self.xy_vars.items()},
             "run3": {
                 "site_id": self.run3_site_id_var.get(),
                 "speed_enabled": self.run3_speed_enabled_var.get(),
@@ -5663,11 +5730,16 @@ class Run1App:
             ("show_prefix_conf", self.show_prefix_conf_var),
             ("show_prefix_zone", self.show_prefix_zone_var),
             ("show_prefix_speed", self.show_prefix_speed_var),
+            ("show_info_text", self.show_info_text_var),
+            *[(key, var) for key, var in self.xy_vars.items()],
         ]
 
         for key, variable in pairs:
             if key in settings:
                 variable.set(settings[key])
+        for xy_key, normal_key in XY_FROM_NORMAL.items():            # an older settings file: the X-Y video shows what the normal video showed
+            if xy_key not in settings and normal_key in settings:
+                self.xy_vars[xy_key].set(settings[normal_key])
 
         run3 = settings.get("run3", {})
         if isinstance(run3, dict):
@@ -8175,7 +8247,7 @@ class Run1App:
 
                 y_pos = 30
 
-                for line in (info_lines if render_needed else ()):
+                for line in (info_lines if (render_needed and rt.get("show_info_text", True)) else ()):
 
                     text_size, _ = cv2.getTextSize(
                         line,
@@ -9167,11 +9239,11 @@ class Run1App:
         dsp = dict(display or {})
 
         def flag(key, default):
-            v = dsp.get(key, default)
+            v = dsp.get("xy_" + key, dsp.get(key, default))                # the X-Y twin first, then the normal-video switch of the same name
             return v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes")
 
         try:
-            zone_alpha = max(0.0, min(1.0, float(dsp.get("zone_overlay_opacity", 45)) / 100.0))
+            zone_alpha = max(0.0, min(1.0, float(dsp.get("xy_zone_overlay_opacity", dsp.get("zone_overlay_opacity", 45))) / 100.0))
         except (TypeError, ValueError):
             zone_alpha = 0.45
         per_frame = defaultdict(list)
@@ -9220,9 +9292,10 @@ class Run1App:
             cv2.line(grid, (0, py), (W - 1, py), (255, 255, 255), 1)
             labels.append((f"{y:g}", (2, py - 3)))
             y += step
-        base = cv2.addWeighted(grid, 0.22, base, 0.78, 0)
-        for text_, org_ in labels:
-            cv2.putText(base, text_, org_, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (235, 235, 235), 1, cv2.LINE_AA)
+        if flag("show_grid", True):
+            base = cv2.addWeighted(grid, 0.22, base, 0.78, 0)
+            for text_, org_ in labels:
+                cv2.putText(base, text_, org_, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (235, 235, 235), 1, cv2.LINE_AA)
         if flag("show_zone_boundary", True) or flag("show_zone_label", True):
             zlayer = base.copy()
             meta_all = getattr(self, "zone_meta", {})
@@ -9347,7 +9420,7 @@ class Run1App:
         cv, base, W, H, per_frame, flag, dsp = scene["cv"], scene["base"], scene["W"], scene["H"], scene["per_frame"], scene["flag"], scene["dsp"]
         xy_mode, zones_exist = scene["mode"], scene["zones"]
         try:
-            trail_n = max(1, int(float(dsp.get("trail_length", 30))))
+            trail_n = max(1, int(float(dsp.get("xy_trail_length", dsp.get("trail_length", 30)))))
         except (TypeError, ValueError):
             trail_n = 30
         frames = sorted(per_frame)
@@ -9392,9 +9465,10 @@ class Run1App:
                     if full and flag("draw_trail", False) and len(trails[tid]) > 1:
                         cv2.polylines(img, [np.round(np.array(trails[tid])).astype(np.int32).reshape(-1, 1, 2)], False, (255, 0, 255), 2, cv2.LINE_AA)
                     p_ = (int(round(pt[0])), int(round(pt[1])))
-                    cv2.circle(img, p_, 7, (255, 255, 255), -1, cv2.LINE_AA)
                     inside = str(rec.get("zone", "")).strip() != ""
-                    cv2.circle(img, p_, 5, (0, 255, 255) if inside else (0, 0, 255), -1 if inside else 2, cv2.LINE_AA)
+                    if flag("show_point", True):
+                        cv2.circle(img, p_, 7, (255, 255, 255), -1, cv2.LINE_AA)
+                        cv2.circle(img, p_, 5, (0, 255, 255) if inside else (0, 0, 255), -1 if inside else 2, cv2.LINE_AA)
                     parts = []
                     if not full:
                         continue                                  # outside every zone, point only
@@ -9418,7 +9492,8 @@ class Run1App:
                         parts.append(f"Speed {v_}" if flag("show_prefix_speed", False) else v_)
                     if parts:
                         cv2.putText(img, " | ".join(parts), (p_[0] + 8, max(14, p_[1] - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
-                cv2.putText(img, f"t = {now:.2f} s   frame {fr}", (6, H - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                if flag("show_time", True):
+                    cv2.putText(img, f"t = {now:.2f} s   frame {fr}", (6, H - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
                 writer.write(img)
         finally:
             writer.release()
