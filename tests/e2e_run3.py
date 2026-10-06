@@ -493,16 +493,16 @@ def scene3(app):
     gap = read_csv(os.path.join(out, "Gap_Acceptance.csv"))
     roles = sorted(r["Gap_Role"] for r in gap)
     check("Gap Acceptance exactly one rejected + one accepted gap (jitter did not add gaps)",
-          roles == ["Accepted", "Rejected"], str(roles) + " " + str([r["X31_Available_Gap"] for r in gap]))
+          roles == ["Accepted", "Rejected"], str(roles) + " " + str([r["Available_Gap_s"] for r in gap]))
     by = {r["Gap_Role"]: r for r in gap}
     rej, acc = by.get("Rejected"), by.get("Accepted")
     if rej and acc:
-        check("Gap Acceptance rejected gap ~ 0.92 s (closed before the subject entered)", abs(float(rej["X31_Available_Gap"]) - 0.917) < 0.06,
-              rej["X31_Available_Gap"])
-        check("Gap Acceptance accepted gap = time left at zone-3 entry = 1.0 s", abs(float(acc["X31_Available_Gap"]) - 1.0) < 0.05,
-              acc["X31_Available_Gap"])
-        check("Gap Acceptance waiting time = entry 4.0 s - first seen 0.017 s ~ 3.98 s", abs(float(acc["X32_Waiting_Time"]) - 3.98) < 0.1,
-              acc["X32_Waiting_Time"])
+        check("Gap Acceptance rejected gap ~ 0.92 s (closed before the subject entered)", abs(float(rej["Available_Gap_s"]) - 0.917) < 0.06,
+              rej["Available_Gap_s"])
+        check("Gap Acceptance accepted gap = time left at zone-3 entry = 1.0 s", abs(float(acc["Available_Gap_s"]) - 1.0) < 0.05,
+              acc["Available_Gap_s"])
+        check("Gap Acceptance waiting time = entry 4.0 s - first seen 0.017 s ~ 3.98 s", abs(float(acc["Waiting_Time_s"]) - 3.98) < 0.1,
+              acc["Waiting_Time_s"])
         check("Gap Acceptance Access stage, decided in zone 3", acc["Decision_Stage"] == "Access" and acc["Decision_Zone"] == "3",
               f"{acc['Decision_Stage']} zone {acc['Decision_Zone']}")
         check("Gap Acceptance subject 4 (1-3-4) vs stream 2-3-4 on Line 1",
@@ -547,11 +547,11 @@ def scene4(app):
     acc = [r for r in gap if r["Gap_Role"] == "Accepted"]
     rej = [r for r in gap if r["Gap_Role"] == "Rejected"]
     check("Gap Acceptance two simultaneous streams: 1 accepted + 2 rejected", len(acc) == 1 and len(rej) == 2,
-          str([(r["Gap_Role"], r["Conflicting_Movement"], r["X31_Available_Gap"]) for r in gap]))
+          str([(r["Gap_Role"], r["Conflicting_Movement"], r["Available_Gap_s"]) for r in gap]))
     if acc:
         check("Gap Acceptance smaller remaining gap controls (5-6-7, 0.5 s)",
-              acc[0]["Conflicting_Movement"] == "5-6-7" and abs(float(acc[0]["X31_Available_Gap"]) - 0.5) < 0.05,
-              f"{acc[0]['Conflicting_Movement']} {acc[0]['X31_Available_Gap']}")
+              acc[0]["Conflicting_Movement"] == "5-6-7" and abs(float(acc[0]["Available_Gap_s"]) - 0.5) < 0.05,
+              f"{acc[0]['Conflicting_Movement']} {acc[0]['Available_Gap_s']}")
     check("Gap Acceptance rejected gaps come from both streams",
           {r["Conflicting_Movement"] for r in rej} == {"2-3-4", "5-6-7"}, str([r["Conflicting_Movement"] for r in rej]))
     app.run3_gap_subject_134_var.set(True)
@@ -581,12 +581,12 @@ def scene6(app):
     print("scene 6 output:", out)
     gap = read_csv(os.path.join(out, "Gap_Acceptance.csv"))
     check("Gap Acceptance works without a Line (origin-zone fallback): 1 accepted + 1 rejected",
-          sorted(r["Gap_Role"] for r in gap) == ["Accepted", "Rejected"], str([(r["Gap_Role"], r["X31_Available_Gap"]) for r in gap]))
+          sorted(r["Gap_Role"] for r in gap) == ["Accepted", "Rejected"], str([(r["Gap_Role"], r["Available_Gap_s"]) for r in gap]))
     by = {r["Gap_Role"]: r for r in gap}
     if by.get("Accepted") and by.get("Rejected"):
-        check("fallback: accepted gap 2->5 s leaves 1.0 s at t = 4.0 s", abs(float(by["Accepted"]["X31_Available_Gap"]) - 1.0) < 0.05,
-              by["Accepted"]["X31_Available_Gap"])
-        check("fallback: rejected gap 1->2 s = ~1.0 s", abs(float(by["Rejected"]["X31_Available_Gap"]) - 1.0) < 0.06, by["Rejected"]["X31_Available_Gap"])
+        check("fallback: accepted gap 2->5 s leaves 1.0 s at t = 4.0 s", abs(float(by["Accepted"]["Available_Gap_s"]) - 1.0) < 0.05,
+              by["Accepted"]["Available_Gap_s"])
+        check("fallback: rejected gap 1->2 s = ~1.0 s", abs(float(by["Rejected"]["Available_Gap_s"]) - 1.0) < 0.06, by["Rejected"]["Available_Gap_s"])
         check("fallback is named in Reference_Line / QC_Flag", by["Accepted"]["Reference_Line"] == "Observed Zone 2"
               and "Origin_Zone" in by["Accepted"]["QC_Flag"], f"{by['Accepted']['Reference_Line']} | {by['Accepted']['QC_Flag']}")
     for k, v in saved.items():
@@ -619,16 +619,16 @@ def scene7(app):
     out, summary = run_scene(app, veh)
     print("scene 7 output:", out)
     gap = read_csv(os.path.join(out, "Gap_Acceptance.csv"))
-    rows = [(r["Decision_Stage"], r["Gap_Role"], round(float(r["X31_Available_Gap"]), 2)) for r in gap]
+    rows = [(r["Decision_Stage"], r["Gap_Role"], round(float(r["Available_Gap_s"]), 2)) for r in gap]
     print("   rows:", rows)
     access = [r for r in gap if r["Decision_Stage"] == "Access"]
     exit_ = [r for r in gap if r["Decision_Stage"] == "Exit"]
     check("stop in the conflict zone: Access has 2 rejected gaps, no accepted one",
           len(access) == 2 and all(r["Gap_Role"] == "Rejected" for r in access), str(rows))
     check("Access rejected gaps are ~1.0 s (2->3) and ~2.0 s (3->6, open at entry)",
-          sorted(round(float(r["X31_Available_Gap"]), 1) for r in access) == [1.0, 2.0], str(rows))
+          sorted(round(float(r["Available_Gap_s"]), 1) for r in access) == [1.0, 2.0], str(rows))
     check("Exit stage: exactly one accepted gap (6->8 contains the target-zone entry)",
-          len(exit_) == 1 and exit_[0]["Gap_Role"] == "Accepted" and abs(float(exit_[0]["X31_Available_Gap"]) - 1.4) < 0.1, str(rows))
+          len(exit_) == 1 and exit_[0]["Gap_Role"] == "Accepted" and abs(float(exit_[0]["Available_Gap_s"]) - 1.4) < 0.1, str(rows))
     check("Exit stage is decided in the target zone 4", bool(exit_) and exit_[0]["Decision_Zone"] == "4")
     check("the gap 3->6 of the Access stage is NOT reused in Exit",
           not any(abs(float(r["Gap_Start_Time"]) - 3.0) < 0.05 for r in exit_))
