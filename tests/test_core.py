@@ -148,63 +148,6 @@ def make_rows(zone_plan, speed_ms=10.0, dt=1 / 60, jitter=0.0, seed=1):
 
 
 class SpeedTests(unittest.TestCase):
-    def test_path_speed_known(self):
-        rows = make_rows([(2, 61)])           # 1 s at 10 m/s -> 10 m -> 36 km/h
-        d, t, v = CORE["path_speed"]([r["_timestamp"] for r in rows], [r["_m"] for r in rows])
-        self.assertAlmostEqual(d, 10.0, places=6)
-        self.assertAlmostEqual(v, 36.0, places=6)
-
-    def test_path_speed_rejects_short_or_static(self):
-        self.assertIsNone(CORE["path_speed"]([0.0], [(0, 0)]))
-        self.assertIsNone(CORE["path_speed"]([0.0, 1.0], [(0, 0), (0, 0)]))
-
-    def test_zone_and_movement_speed(self):
-        rows = make_rows([(2, 61), (3, 61), (4, 61)])
-        recs = CORE["track_speed_records"](rows, {2, 3, 4}, "2-3-4", "Exact", 1)
-        by = {(r["Scope"], r["Key"]): r for r in recs}
-        for z in (2, 3, 4):
-            self.assertAlmostEqual(by[("Zone", f"Zone {z}")]["Speed_kmh"], 36.0, places=6)
-        mv = by[("Movement", "2-3-4")]
-        self.assertAlmostEqual(mv["Speed_kmh"], 36.0, places=6)
-        self.assertAlmostEqual(mv["Distance_m"], 182 * 10.0 / 60, places=6)   # 183 samples = 182 steps of 1/60 s
-        self.assertEqual(mv["Flag"], "")
-
-    def test_unselected_zone_not_reported_but_movement_is(self):
-        rows = make_rows([(2, 61), (3, 61), (4, 61)])
-        recs = CORE["track_speed_records"](rows, {3}, "2-3-4", "Exact", 1)
-        self.assertEqual({(r["Scope"], r["Key"]) for r in recs}, {("Zone", "Zone 3"), ("Movement", "2-3-4")})
-
-    def test_no_movement_when_unclassified(self):
-        rows = make_rows([(3, 61), (4, 61)])
-        recs = CORE["track_speed_records"](rows, {3, 4}, "", "Ambiguous", 1)
-        self.assertEqual({r["Scope"] for r in recs}, {"Zone"})
-
-    def test_partial_flag(self):
-        rows = make_rows([(1, 30), (3, 30), (6, 30)])
-        recs = CORE["track_speed_records"](rows, {1, 3, 6}, "1-3-6-7", "Partial", 1)
-        mv = [r for r in recs if r["Scope"] == "Movement"][0]
-        self.assertEqual(mv["Flag"], "Partial_Movement")
-
-    def test_smoothing_reduces_jitter_inflation(self):
-        # slow vehicle (2 m/s = 7.2 km/h, 3.3 cm per frame) with +-3 cm bbox jitter
-        rows = make_rows([(2, 121)], speed_ms=2.0, jitter=0.03, seed=7)
-        raw = CORE["track_speed_records"](rows, {2}, "", "", 1)[0]["Speed_kmh"]
-        smooth = CORE["track_speed_records"](rows, {2}, "", "", 5)[0]["Speed_kmh"]
-        self.assertGreater(raw, 7.2 + 1.5)                        # jitter inflates path length a lot
-        self.assertLess(abs(smooth - 7.2), abs(raw - 7.2))        # smoothing pulls it back
-        self.assertLess(abs(smooth - 7.2), 0.5)
-
-    def test_smoothing_does_not_bias_clean_motion(self):
-        rows = make_rows([(2, 61)])                              # noise-free 36 km/h
-        for k in (1, 3, 5, 9, 31):
-            v = CORE["track_speed_records"](rows, {2}, "", "", k)[0]["Speed_kmh"]
-            self.assertAlmostEqual(v, 36.0, places=6, msg=f"k={k}")
-
-    def test_smoothing_window_shrinks_for_short_series(self):
-        rows = make_rows([(2, 4)])                               # only 4 samples, k=9 requested
-        v = CORE["track_speed_records"](rows, {2}, "", "", 9)[0]["Speed_kmh"]
-        self.assertAlmostEqual(v, 36.0, places=6)
-
     def test_rolling_median(self):
         out = CORE["rolling_median"]([0, 0, 100, 0, 0], 3)
         self.assertEqual(list(out), [0, 0, 0, 0, 0])
@@ -1142,6 +1085,109 @@ class CircleInterval(unittest.TestCase):
         self.assertAlmostEqual(t_out, 0.2, places=6)
         self.assertIsNone(CORE["circle_interval"](np.array([[0.0, 5.0], [30.0, 5.0]]), np.array([0.0, 3.0]), (15.0, 0.0), 1.3))
         self.assertIsNone(CORE["circle_interval"](P[:1], np.array([0.0]), (15.0, 0.0), 1.0))
+
+
+class FrameSpeeds(unittest.TestCase):
+    """The speed written for every frame of every vehicle."""
+
+    def test_constant_speed_gives_the_same_value_at_every_frame(self):
+        tt = np.arange(0.0, 3.0001, 0.1)
+        P = np.stack([10.0 * tt, np.zeros_like(tt)], axis=1)                              # 10 m/s = 36 km/h
+        for k in (1, 5):                                                                  # also with smoothing (the ends must not be biased by it)
+            v = CORE["frame_speeds_kmh"](tt, P, 0.5, k)
+            self.assertEqual(len(v), len(tt))
+            for x in v:
+                self.assertAlmostEqual(x, 36.0, places=6)                                  # also at both ends (one-sided window)
+
+    def test_a_stopped_vehicle_has_speed_zero_and_a_single_sample_has_none(self):
+        tt = np.arange(0.0, 1.0001, 0.1)
+        P = np.tile([5.0, 5.0], (len(tt), 1))
+        self.assertTrue(all(abs(x) < 1e-9 for x in CORE["frame_speeds_kmh"](tt, P, 0.5)))
+        self.assertEqual(CORE["frame_speeds_kmh"]([0.0], [(0.0, 0.0)], 0.5), [None])
+
+    def test_speed_follows_a_change_of_speed(self):
+        tt = np.arange(0.0, 4.0001, 0.1)
+        x = np.where(tt < 2.0, 5.0 * tt, 10.0 + 15.0 * (tt - 2.0))                          # 5 m/s then 15 m/s
+        P = np.stack([x, np.zeros_like(tt)], axis=1)
+        v = CORE["frame_speeds_kmh"](tt, P, 0.5)
+        self.assertAlmostEqual(v[5], 18.0, places=6)                                       # t = 0.5: well inside the slow part
+        self.assertAlmostEqual(v[35], 54.0, places=6)                                      # t = 3.5: well inside the fast part
+
+    def test_smoothing_removes_a_single_position_spike(self):
+        tt = np.arange(0.0, 2.0001, 0.1)
+        P = np.stack([10.0 * tt, np.zeros_like(tt)], axis=1)
+        P[10, 1] = 3.0                                                                      # one jumped sample
+        # the window of sample 9 (+-0.125 s) ends on the spiked sample 10: without smoothing the speed is wrong, with smoothing it is 36 km/h
+        raw = CORE["frame_speeds_kmh"](tt, P, 0.25, 1)[9]
+        smooth = CORE["frame_speeds_kmh"](tt, P, 0.25, 5)[9]
+        self.assertGreater(abs(raw - 36.0), 1.0)
+        self.assertAlmostEqual(smooth, 36.0, places=6)
+
+
+class CsvColumnNames(unittest.TestCase):
+    def test_columns_and_rows_are_renamed_together(self):
+        fields, rows = CORE["apply_csv_renames"]("PET.csv", ["Vehicle_ID_A", "Speed_A_kmh", "PET_s"],
+                                                 [{"Vehicle_ID_A": 1, "Speed_A_kmh": 36.0, "PET_s": 1.2}])
+        self.assertEqual(fields, ["Vehicle_A_ID", "Speed_A_At_Crossing_kmh", "PET_s"])
+        self.assertEqual(rows, [{"Vehicle_A_ID": 1, "Speed_A_At_Crossing_kmh": 36.0, "PET_s": 1.2}])
+
+    def test_other_files_pass_through(self):
+        fields, rows = CORE["apply_csv_renames"]("Zone_Summary.csv", ["a", "b"], [{"a": 1, "b": 2}])
+        self.assertEqual((fields, rows), (["a", "b"], [{"a": 1, "b": 2}]))
+
+    def test_columns_that_repeat_information_are_dropped(self):
+        f = CORE["apply_csv_renames"]
+        fields, rows = f("Gap_Acceptance.csv", ["Site_ID", "Gap_Role", "Gap_Acceptance", "Gap_Evaluation_Time", "Decision_Time"],
+                         [{"Site_ID": 8, "Gap_Role": "Accepted", "Gap_Acceptance": 1, "Gap_Evaluation_Time": "2.0", "Decision_Time": "2.0"}])
+        self.assertEqual(fields, ["Gap_Role", "Decision_Time_s"])
+        self.assertEqual(rows, [{"Gap_Role": "Accepted", "Decision_Time_s": "2.0"}])
+        fields, _ = f("PET.csv", ["Interaction_ID", "Conflict_Type", "Interaction_Start", "T1_Exit_Time", "Calibration_Mode", "QC_Flag"], [])
+        self.assertEqual(fields, ["Interaction_ID", "Conflict_Type", "T1_Exit_Time_s", "QC_Flag"])
+        fields, _ = f("Detection_Records_Topview.csv", ["frame", "calibration_mode", "x_m"], [])
+        self.assertEqual(fields, ["frame", "x_m"])
+
+    def test_dropped_columns_are_never_also_renamed_or_needed_by_a_rename(self):
+        for fname, ren in CORE["CSV_COLUMN_RENAMES"].items():
+            drop = set(CORE["CSV_COLUMN_DROPS"].get("*", ())) | set(CORE["CSV_COLUMN_DROPS"].get(fname, ()))
+            self.assertFalse(drop & set(ren), (fname, drop & set(ren)))
+
+    def test_the_same_internal_name_gets_a_name_that_says_when_the_speed_is_taken(self):
+        names = {f: CORE["CSV_COLUMN_RENAMES"][f]["Speed_A_kmh"] for f in ("TTC.csv", "PET.csv")}
+        self.assertEqual(names, {"TTC.csv": "Speed_A_At_TTCmin_kmh", "PET.csv": "Speed_A_At_Crossing_kmh"})
+
+    def test_every_renamed_time_column_ends_in_s(self):
+        for f, ren in CORE["CSV_COLUMN_RENAMES"].items():
+            for old, new in ren.items():
+                if "Time" in old or old in ("Event_Start", "Event_End", "Interaction_Start", "Interaction_End", "Timestamp"):
+                    self.assertTrue(new.endswith("_s"), (f, old, new))
+
+
+class PathVelocity(unittest.TestCase):
+    """PET conflict type = the TTC rule on the velocities where the two vehicles pass the crossing."""
+
+    def test_velocity_is_the_displacement_in_the_window(self):
+        tt = np.arange(0.0, 3.0001, 0.1)
+        P = np.stack([10.0 * tt, 5.0 * tt], axis=1)
+        vx, vy = CORE["path_velocity_at"](P, tt, 1.5, 0.5)
+        self.assertAlmostEqual(vx, 10.0, places=6)
+        self.assertAlmostEqual(vy, 5.0, places=6)
+
+    def test_falls_back_to_the_segment_and_to_zero(self):
+        P = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]])
+        tt = np.array([0.0, 1.0, 2.0])
+        self.assertEqual(CORE["path_velocity_at"](P, tt, 0.5, 0.1, (0, 0.5)), (10.0, 0.0))       # no sample in the window: the segment direction
+        self.assertEqual(CORE["path_velocity_at"](P, tt, 0.5, 0.1, None), (0.0, 0.0))
+
+    def test_pet_conflict_type_follows_the_ttc_angle_rule(self):
+        ang, typ = CORE["conflict_angle_deg"], CORE["ttc_conflict_type"]
+        east = (10.0, 0.0)
+        cases = [((10.0, 0.0), "Rear-end"),          # same direction
+                 ((10.0, 6.0), "Lane change"),        # 31 deg
+                 ((0.0, 10.0), "Crossing"),           # 90 deg: perpendicular
+                 ((-10.0, 0.0), "Crossing")]          # head-on 180 deg
+        for v, expected in cases:
+            self.assertEqual(typ(ang(east, v, 1.0)), expected, v)
+        self.assertEqual(typ(ang(east, (0.0, 0.0), 1.0)), "Unclassified")                       # a vehicle standing still at the crossing
 
 
 if __name__ == "__main__":
