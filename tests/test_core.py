@@ -1144,5 +1144,63 @@ class CircleInterval(unittest.TestCase):
         self.assertIsNone(CORE["circle_interval"](P[:1], np.array([0.0]), (15.0, 0.0), 1.0))
 
 
+class FrameSpeeds(unittest.TestCase):
+    """The speed written for every frame of every vehicle."""
+
+    def test_constant_speed_gives_the_same_value_at_every_frame(self):
+        tt = np.arange(0.0, 3.0001, 0.1)
+        P = np.stack([10.0 * tt, np.zeros_like(tt)], axis=1)                              # 10 m/s = 36 km/h
+        v = CORE["frame_speeds_kmh"](tt, P, 0.5)
+        self.assertEqual(len(v), len(tt))
+        for x in v:
+            self.assertAlmostEqual(x, 36.0, places=6)                                      # also at both ends (one-sided window)
+
+    def test_a_stopped_vehicle_has_speed_zero_and_a_single_sample_has_none(self):
+        tt = np.arange(0.0, 1.0001, 0.1)
+        P = np.tile([5.0, 5.0], (len(tt), 1))
+        self.assertTrue(all(abs(x) < 1e-9 for x in CORE["frame_speeds_kmh"](tt, P, 0.5)))
+        self.assertEqual(CORE["frame_speeds_kmh"]([0.0], [(0.0, 0.0)], 0.5), [None])
+
+    def test_speed_follows_a_change_of_speed(self):
+        tt = np.arange(0.0, 4.0001, 0.1)
+        x = np.where(tt < 2.0, 5.0 * tt, 10.0 + 15.0 * (tt - 2.0))                          # 5 m/s then 15 m/s
+        P = np.stack([x, np.zeros_like(tt)], axis=1)
+        v = CORE["frame_speeds_kmh"](tt, P, 0.5)
+        self.assertAlmostEqual(v[5], 18.0, places=6)                                       # t = 0.5: well inside the slow part
+        self.assertAlmostEqual(v[35], 54.0, places=6)                                      # t = 3.5: well inside the fast part
+
+    def test_smoothing_removes_a_single_position_spike(self):
+        tt = np.arange(0.0, 2.0001, 0.1)
+        P = np.stack([10.0 * tt, np.zeros_like(tt)], axis=1)
+        P[10, 1] = 3.0                                                                      # one jumped sample
+        # the window of sample 9 (+-0.125 s) ends on the spiked sample 10: without smoothing the speed is wrong, with smoothing it is 36 km/h
+        raw = CORE["frame_speeds_kmh"](tt, P, 0.25, 1)[9]
+        smooth = CORE["frame_speeds_kmh"](tt, P, 0.25, 5)[9]
+        self.assertGreater(abs(raw - 36.0), 1.0)
+        self.assertAlmostEqual(smooth, 36.0, places=6)
+
+
+class CsvColumnNames(unittest.TestCase):
+    def test_columns_and_rows_are_renamed_together(self):
+        fields, rows = CORE["apply_csv_renames"]("PET.csv", ["Vehicle_ID_A", "Speed_A_kmh", "PET_s"],
+                                                 [{"Vehicle_ID_A": 1, "Speed_A_kmh": 36.0, "PET_s": 1.2}])
+        self.assertEqual(fields, ["Vehicle_A_ID", "Speed_A_At_Crossing_kmh", "PET_s"])
+        self.assertEqual(rows, [{"Vehicle_A_ID": 1, "Speed_A_At_Crossing_kmh": 36.0, "PET_s": 1.2}])
+
+    def test_other_files_pass_through(self):
+        fields, rows = CORE["apply_csv_renames"]("Speed.csv", ["a", "b"], [{"a": 1, "b": 2}])
+        self.assertEqual((fields, rows), (["a", "b"], [{"a": 1, "b": 2}]))
+
+    def test_the_same_internal_name_gets_a_name_that_says_when_the_speed_is_taken(self):
+        names = {f: CORE["CSV_COLUMN_RENAMES"][f]["Speed_A_kmh"] for f in ("TTC.csv", "PET.csv")}
+        self.assertEqual(names, {"TTC.csv": "Speed_A_At_TTCmin_kmh", "PET.csv": "Speed_A_At_Crossing_kmh"})
+
+    def test_every_renamed_time_column_ends_in_s(self):
+        for f, ren in CORE["CSV_COLUMN_RENAMES"].items():
+            for old, new in ren.items():
+                if "Time" in old or old in ("Event_Start", "Event_End", "Interaction_Start", "Interaction_End", "Timestamp"):
+                    self.assertTrue(new.endswith("_s"), (f, old, new))
+
+
 if __name__ == "__main__":
     unittest.main()

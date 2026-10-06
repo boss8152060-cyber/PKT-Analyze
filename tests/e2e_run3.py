@@ -101,6 +101,11 @@ def read_csv(path, raw=False):
         rows = list(csv.DictReader(f))
     if not raw:
         rows = [{k: (v.replace("→", "-") if isinstance(v, str) else v) for k, v in r.items()} for r in rows]
+    detail = os.path.join(os.path.dirname(path), "TTC_Detail.csv")
+    if os.path.basename(path) == "TTC.csv" and os.path.isfile(detail):          # TTC.csv keeps the core columns; the relative vectors etc. are in TTC_Detail.csv
+        with open(detail, newline="", encoding="utf-8-sig") as f:
+            extra = {r["Event_ID"]: r for r in csv.DictReader(f)}
+        rows = [dict(extra.get(r["Event_ID"], {}), **r) for r in rows]
     return rows
 
 
@@ -242,8 +247,11 @@ def scene1(app):
     check("Lateral Clearance A-E zone 4 = 1.6 - 1.3 = 0.30 m", bool(ae) and all(abs(v - 0.30) < 0.03 for v in ae),
           f"n={len(ae)}" + (f" mean={sum(ae)/len(ae):.3f}" if ae else ""))
     tvr = read_csv(os.path.join(out, "Detection_Records_Topview.csv"))
-    check("Topview records: one row per observed point, in metres", len(tvr) > 0 and {"x_m", "y_m", "cx_m", "cy_m"} <= set(tvr[0]),
+    check("Topview records: one row per observed point, in metres", len(tvr) > 0 and {"x_m", "y_m", "cx_m", "cy_m", "speed_kmh"} <= set(tvr[0]),
           str(len(tvr)))
+    sp = [float(r["speed_kmh"]) for r in tvr if r["speed_kmh"] != "" and r["track_id"] == "1"]
+    check("Topview records: the speed of every frame (vehicle A of scene 1 drives 10 m/s = 36 km/h, weaving a little)", len(sp) > 10 and all(abs(v - 36.0) < 2.5 for v in sp),
+          f"{len(sp)} values, min {min(sp) if sp else None}, max {max(sp) if sp else None}")
     tvv = os.path.join(out, "Tracking_Topview.mp4")
     cap_tv = cv2.VideoCapture(tvv)
     dur_tv = cap_tv.get(cv2.CAP_PROP_FRAME_COUNT) / (cap_tv.get(cv2.CAP_PROP_FPS) or 1.0)
@@ -308,7 +316,7 @@ def scene2(app):
 
     # ---- PET ----
     pet = read_csv(os.path.join(out, "PET.csv"))
-    pairs = {(r["Vehicle_ID_A"], r["Vehicle_ID_B"]): r for r in pet}
+    pairs = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]): r for r in pet}
     check("PET (conflict area, radius (W_A+W_B)/2 = 1.8 m): one event P-Q (P-R are in the area at the same time = undefined, Q-R never cross, F/L no movement)",
           set(pairs) == {("1", "2")}, str(sorted(pairs)))
     if ("1", "2") in pairs:
@@ -322,14 +330,14 @@ def scene2(app):
         lim_pet = m.RISK_DEFAULT_LIMITS["pet_s"]
         check("PET levels follow the limits: PET level from PET_s, speed level from the 36 km/h of P and Q (Moderate), overall = the less severe",
               r["PET_Level"] == m.risk_level_low_is_risky(float(r["PET_s"]), lim_pet) and r["Speed_Level"] == "Moderate"
-              and r["PET_Risk_Level"] == m.combine_risk(r["PET_Level"], "Moderate") and abs(float(r["Speed_A_kmh"]) - 36.0) < 0.5,
-              f"{r['PET_s']} {r['PET_Level']} {r['Speed_Level']} {r['PET_Risk_Level']} speeds {r['Speed_A_kmh']} {r['Speed_B_kmh']}")
+              and r["PET_Risk_Level"] == m.combine_risk(r["PET_Level"], "Moderate") and abs(float(r["Speed_A_At_Crossing_kmh"]) - 36.0) < 0.5,
+              f"{r['PET_s']} {r['PET_Level']} {r['Speed_Level']} {r['PET_Risk_Level']} speeds {r['Speed_A_At_Crossing_kmh']} {r['Speed_B_At_Crossing_kmh']}")
 
     # PET with the area switched off = the crossing point only: PET = the difference of the times at the point
     app.run3_pet_use_area_var.set(False)
     out_pt, _ = run_scene(app, veh)
     app.run3_pet_use_area_var.set(True)
-    pet_pt = {(r["Vehicle_ID_A"], r["Vehicle_ID_B"]): r for r in read_csv(os.path.join(out_pt, "PET.csv"))}
+    pet_pt = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]): r for r in read_csv(os.path.join(out_pt, "PET.csv"))}
     check("PET point only: events P-Q and P-R", set(pet_pt) == {("1", "2"), ("1", "3")}, str(sorted(pet_pt)))
     if ("1", "2") in pet_pt and ("1", "3") in pet_pt:
         check("PET point only: PET(P,Q) = 1.6 s, PET(P,R) = 0.1 s, no radius",
@@ -510,7 +518,7 @@ def scene3(app):
               and acc["Reference_Line"] == "Line 1")
         check("Gap Acceptance flags 1 / 0", acc["Gap_Acceptance"] == "1" and rej["Gap_Acceptance"] == "0")
         check("Gap Acceptance speeds of the subject and stream vehicles are reported",
-              acc["Subject_Speed_kmh"] != "" and acc["Conflict_Speed_A_kmh"] != "")
+              acc["Subject_Speed_At_Decision_kmh"] != "" and acc["Conflict_Speed_A_At_Decision_kmh"] != "")
 
 
 def scene4(app):
@@ -631,7 +639,7 @@ def scene7(app):
           len(exit_) == 1 and exit_[0]["Gap_Role"] == "Accepted" and abs(float(exit_[0]["Available_Gap_s"]) - 1.4) < 0.1, str(rows))
     check("Exit stage is decided in the target zone 4", bool(exit_) and exit_[0]["Decision_Zone"] == "4")
     check("the gap 3->6 of the Access stage is NOT reused in Exit",
-          not any(abs(float(r["Gap_Start_Time"]) - 3.0) < 0.05 for r in exit_))
+          not any(abs(float(r["Gap_Start_Time_s"]) - 3.0) < 0.05 for r in exit_))
     check("QC tells about the stop", all("Stop_" in r["QC_Flag"] for r in gap), str([r["QC_Flag"] for r in gap][:2]))
     app.run3_gap_subject_1367_var.set(True)
     app.run3_gap_subject_5631_var.set(True)
