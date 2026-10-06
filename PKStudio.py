@@ -10374,8 +10374,8 @@ class Run1App:
         radius = c["pet_interaction"]; pet_max = c["pet_max_s"]; threshold = c["pet_threshold"]
         ids = list(tracks)
         diag = {"zone_tracks": {}, "pairs_with_both_in_zone": 0, "pairs_skipped_time_window": 0,
-                "same_movement_no_crossing": 0, "no_movement_both": 0, "interaction_candidates": 0,
-                "fallback_close_pairs": 0, "overlap_intervals": 0, "above_pet_max": 0,
+                "no_crossing": 0, "no_movement_both": 0, "interaction_candidates": 0,
+                "overlap_intervals": 0, "above_pet_max": 0,
                 "tracks_with_movement": sum(1 for t in ids if movement_by_id.get(t))}
         out = []
         for zone in sorted(c["pet_zones"]):
@@ -10401,24 +10401,13 @@ class Run1App:
                     if not ma and not mb:
                         diag["no_movement_both"] += 1
                         continue
+                    # A PET pair needs a real crossing point of the two trajectories (any Movement pair, same Movement included); there is no
+                    # "closest approach" substitute: PET measures the time between the first vehicle leaving that point and the second one arriving.
                     best = self._run3_best_intersection(A, B)
-                    if best is None and ma and ma == mb:
-                        # Same Movement is allowed, but only when the two trajectories really cross (no "closest approach" fallback:
-                        # vehicles following each other in a lane never cross and are not a PET conflict).
-                        diag["same_movement_no_crossing"] += 1
+                    if best is None:
+                        diag["no_crossing"] += 1
                         continue
-                    if best is not None:
-                        ip = best[3]; ctype = "Crossing"
-                    else:
-                        d = np.hypot(A[:, None, 0] - B[None, :, 0], A[:, None, 1] - B[None, :, 1])
-                        flat = int(np.argmin(d))
-                        ia, ib = np.unravel_index(flat, d.shape)
-                        if d[ia, ib] > radius:
-                            continue
-                        ip = ((A[ia, 0] + B[ib, 0]) / 2.0, (A[ia, 1] + B[ib, 1]) / 2.0)
-                        ctype = conflict_type_from_sequences((sequence_by_id or {}).get(str(a_id), []),
-                                                             (sequence_by_id or {}).get(str(b_id), []), False)
-                        diag["fallback_close_pairs"] += 1
+                    ip = best[3]; ctype = "Crossing"
                     diag["interaction_candidates"] += 1
                     a_near = At[np.hypot(A[:, 0] - ip[0], A[:, 1] - ip[1]) <= radius]
                     b_near = Bt[np.hypot(B[:, 0] - ip[0], B[:, 1] - ip[1]) <= radius]
