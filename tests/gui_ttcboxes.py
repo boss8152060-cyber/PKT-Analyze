@@ -137,23 +137,35 @@ check("without a video or without shapes nothing is drawn", app._run3_overlay_tt
       and (lambda: (setattr(app, "_run3_ttc_shapes", None), app._run3_overlay_ttc_boxes(tracks, c, res, 1))[1] is None)())
 
 
-# ---- the POINT method: the expected collision point is drawn (red cross + the TTC) on the X-Y video and on the normal video
+# ---- the POINT method: the expected collision point (where the two straight paths cross) is drawn as a red cross + the TTC
+# car 1 along +x at y = 15 m (10 m/s), car 2 along -y at x = 25 m (10 m/s): both reach (25, 15) at t = 2.0 s
+tr2 = {1: [], 2: []}
+for k in range(21):
+    t = k / 10.0
+    for tid, (x, y) in ((1, (5.0 + 10.0 * t, 15.0)), (2, (25.0, 35.0 - 10.0 * t))):
+        px = (x * PPM, y * PPM)
+        tr2[tid].append({"frame": str(k + 1), "timestamp": f"{t:.6f}", "_timestamp": t, "class_name": "Car", "zone": "Zone 3", "_zone_num": 3,
+                         "_point": px, "_center": px, "_m": (x, y), "_mc": (x, y), "confidence": "0.9"})
 cp_ = dict(c, ttc_method="point", ttc_miss_margin_m=0.5)
-rows_p, diag_p, frames_p, shapes_p = app._run3_ttc(tracks, cp_, {})
+rows_p, diag_p, frames_p, shapes_p = app._run3_ttc(tr2, cp_, {})
 app._run3_ttc_shapes = shapes_p
 mk = shapes_p[11]["marks"]
-check("point method: one mark at t = 1.0 s, TTC 1.0 s (20 m apart closing at 20 m/s), the expected meeting point is the middle (x = 25 m, y = 15 m)",
-      len(mk) == 1 and abs(mk[0]["ttc"] - 1.0) < 0.03 and abs(mk[0]["mid"][0] - 25.0) < 0.5 and abs(mk[0]["mid"][1] - 15.0) < 0.01, str(mk[:1]))
+check("point method: one mark at t = 1.0 s, TTC 1.0 s, the paths cross at (25, 15) m",
+      len(mk) == 1 and abs(mk[0]["ttc"] - 1.0) < 0.03 and mk[0]["cross"] is not None and abs(mk[0]["cross"][0] - 25.0) < 0.05 and abs(mk[0]["cross"][1] - 15.0) < 0.05, str(mk[:1]))
+check("point method: the event row has the crossing point, the distances and the arrival times (both 1.0 s from the minimum frame)",
+      rows_p and rows_p[0]["Collide_X_m"] != "" and abs(float(rows_p[0]["Collide_X_m"]) - 25.0) < 0.1, str(rows_p[0] if rows_p else None))
 check("point method: no rectangles are built", all(not sh["rects"] for sh in shapes_p.values()))
-xp = frame_at(app._run3_write_topview_video(tracks, cp_, tempfile.mkdtemp(dir=tmp), video, display={"draw_trail": False}), 10)
-ys_, xs_ = np.where(red(xp))
-check("X-Y video (point method): the red cross is at the expected meeting point (x = 25 m, y = 15 m on the canvas)", len(ys_) > 30, str(len(ys_)))
+xp = frame_at(app._run3_write_topview_video(tr2, cp_, tempfile.mkdtemp(dir=tmp), video, display={"draw_trail": False}), 10)
+check("X-Y video (point method): the red cross is drawn", int(red(xp).sum()) > 30, str(int(red(xp).sum())))
 res_p = make_result("Tracking_Result.mp4", 21)
-app._run3_overlay_ttc_boxes(tracks, cp_, res_p, first_frame=1)
+app._run3_overlay_ttc_boxes(tr2, cp_, res_p, first_frame=1)
 fp_ = frame_at(res_p, 10)
 ys2, xs2 = np.where(red(fp_))
-check("normal video (point method): the cross is drawn at 25 m x 20 px/m = 500 px, y = 300 px", len(xs2) > 30 and abs(float(np.median(xs2)) - 500) < 25 and abs(float(np.median(ys2)) - 300) < 25,
+check("normal video (point method): the cross is at (25 m x 20 px/m, 15 m x 20 px/m) = (500, 300) px", len(xs2) > 30 and abs(float(np.median(xs2)) - 500) < 25 and abs(float(np.median(ys2)) - 300) < 25,
       f"{len(xs2)} px, median ({np.median(xs2) if len(xs2) else None}, {np.median(ys2) if len(ys2) else None})")
+# parallel paths (the two cars head-on on one line): no crossing point -> no cross, only a thin line and the TTC
+rows_h, _d, _f, shapes_h = app._run3_ttc(tracks, cp_, {})
+check("head-on cars on one line: no crossing point (parallel) - the mark has no cross", shapes_h[11]["marks"] and shapes_h[11]["marks"][0]["cross"] is None and rows_h[0]["Collide_X_m"] == "")
 
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")

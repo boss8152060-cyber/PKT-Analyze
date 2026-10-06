@@ -404,14 +404,15 @@ def scene2(app):
     flp = evp.get(("4", "5"))
     if flp:
         check("point method F-L: TTC = (20 - 5 t) / 5 -> ~ 2.0 s (the classic centre-to-centre time); Rear-end", abs(float(flp["TTC_s"]) - 2.0) < 0.05 and flp["TTC_Type"] == "Rear-end", f"{flp['TTC_s']} {flp['TTC_Type']}")
-        # F drives +x at 10 m/s, L at 5 m/s ahead in the same line (y = -12): they meet where the points coincide: both at y = -12, the miss is 0
-        check("point method F-L: the expected collision point is on their line (y = -12 m) and the two points meet (miss 0)",
-              abs(float(flp["Collide_Y_m"]) + 12.0) < 0.1 and float(flp["Miss_Distance_m"]) < 0.01, f"({flp['Collide_X_m']}, {flp['Collide_Y_m']}) miss {flp['Miss_Distance_m']}")
-        check("point method F-L: the collision point is where F will be after the TTC (x = x_F + 10 x TTC)", abs(float(flp["A_At_Collide_X_m"]) - float(flp["Collide_X_m"])) < 0.01)
+        check("point method F-L: the two paths are parallel (same line) -> no crossing point (Collide blank, no arrivals) and the points meet (miss 0)",
+              flp["Collide_X_m"] == "" and flp["Collide_Y_m"] == "" and flp["Arrival_A_s"] == "" and float(flp["Miss_Distance_m"]) < 0.01,
+              f"({flp['Collide_X_m']}, {flp['Collide_Y_m']}) miss {flp['Miss_Distance_m']}")
     prp = evp.get(("1", "3"))
     if prp:
-        check("point method P-R: Crossing; TTC ~ 0; the expected collision point is the crossing (15, 0)", prp["TTC_Type"] == "Crossing" and float(prp["TTC_s"]) < 0.06
-              and abs(float(prp["Collide_X_m"]) - 15.0) < 0.8 and abs(float(prp["Collide_Y_m"])) < 0.8, f"{prp['TTC_s']} ({prp['Collide_X_m']}, {prp['Collide_Y_m']})")
+        check("point method P-R: Crossing; TTC ~ 0; the expected collision point is where the straight paths cross, (15, 0)", prp["TTC_Type"] == "Crossing" and float(prp["TTC_s"]) < 0.06
+              and abs(float(prp["Collide_X_m"]) - 15.0) < 0.1 and abs(float(prp["Collide_Y_m"])) < 0.1, f"{prp['TTC_s']} ({prp['Collide_X_m']}, {prp['Collide_Y_m']})")
+        check("point method P-R: the arrival times at the crossing differ by 0.1 s (P at 1.5 s, R at 1.6 s): Arrival_B - Arrival_A ~ 0.1 s",
+              abs(abs(float(prp["Arrival_B_s"]) - float(prp["Arrival_A_s"])) - 0.1) < 0.05 and float(prp["Dist_A_to_Collide_m"]) > 0, f"{prp['Arrival_A_s']} {prp['Arrival_B_s']}")
     frp = read_csv(os.path.join(out_p, "TTC_Frames.csv"))
     plp = [r for r in frp if (r["Vehicle_A_ID"], r["Vehicle_B_ID"]) == ("1", "5")]
     check("point method: P-L frames are listed as Miss_Too_Far with a 12 m miss and no counted frame", plp and all(r["Status"] == "Miss_Too_Far" for r in plp) and all(abs(float(r["Miss_Distance_m"]) - 12.0) < 0.3 for r in plp), str({r["Status"] for r in plp}))

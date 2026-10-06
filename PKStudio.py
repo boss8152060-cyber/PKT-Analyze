@@ -990,6 +990,25 @@ def vector_ttc(p_a, v_a, p_b, v_b, min_rel_speed=0.0):
             "miss": math.hypot(pb[0] - pa[0], pb[1] - pa[1])}
 
 
+def ray_intersection(p_a, v_a, p_b, v_b, min_angle_deg=1.0):
+    """Where the two straight paths (each vehicle keeps going along its velocity) cross AHEAD of both: the expected collision point.
+    Returns {"x": (x, y), "d_a", "d_b" (distance each has to go), "t_a", "t_b" (time each needs at its speed)} or None when the paths are (nearly)
+    parallel (< min_angle_deg) or cross behind one of the vehicles."""
+    sa, sb = math.hypot(v_a[0], v_a[1]), math.hypot(v_b[0], v_b[1])
+    if sa <= 0.0 or sb <= 0.0:
+        return None
+    ha, hb = (v_a[0] / sa, v_a[1] / sa), (v_b[0] / sb, v_b[1] / sb)
+    den = ha[0] * hb[1] - ha[1] * hb[0]
+    if abs(den) < math.sin(math.radians(min_angle_deg)):
+        return None
+    dx, dy = p_b[0] - p_a[0], p_b[1] - p_a[1]
+    d_a = (dx * hb[1] - dy * hb[0]) / den
+    d_b = (dx * ha[1] - dy * ha[0]) / den
+    if d_a <= 0.0 or d_b <= 0.0:
+        return None
+    return {"x": (p_a[0] + ha[0] * d_a, p_a[1] + ha[1] * d_a), "d_a": d_a, "d_b": d_b, "t_a": d_a / sa, "t_b": d_b / sb}
+
+
 def ttc_miss_limit(width_a, width_b, margin=0.5):
     """How close two POINT vehicles must come for the TTC to count: half of the two widths plus `margin` (m). TTC only says WHEN they are closest, not
     how close - without this every pair that merely passes each other has a TTC that falls to ~0 at the closest point."""
@@ -4014,7 +4033,7 @@ class Run1App:
                          ("Zone", xyv["xy_show_prefix_zone"]), ("Speed", xyv["xy_show_prefix_speed"])]))
         trow("กรอบวัตถุ (bbox)", dict(items=[("แสดง", self.show_bbox_var)]), dict(text="— (ผังเมตรไม่มีกรอบภาพ ดูสี่เหลี่ยมรถของ TTC)"))
         trow("จุดที่คาดว่าจะชน (TTC)", dict(items=[("แสดง (วาดเพิ่มหลังคำนวณ TTC เสร็จ ใช้เวลาเพิ่ม)", self.run3_ttc_show_video_var)]),
-             dict(items=[("แสดง (กากบาท = จุดที่คาดว่าจะเจอกัน + ค่า TTC)", self.run3_ttc_show_xy_var)]))
+             dict(items=[("แสดง (กากบาท = จุดที่เส้นทางตรงของสองคันตัดกัน + ค่า TTC)", self.run3_ttc_show_xy_var)]))
         trow("ข้อความที่มุม/ล่างภาพ", dict(items=[("Frame / FPS / เวลา / ETA", self.show_info_text_var)]), dict(items=[("t = … s  frame …", xyv["xy_show_time"])]))
         trow("ตารางเมตร", dict(text="—"), dict(items=[("เส้นตารางและตัวเลข", xyv["xy_show_grid"])]))
         ttk.Label(box, text="จุดชน/สี่เหลี่ยมของ TTC ต้องเปิดตัวชี้วัด TTC;  แต่ละวิดีโอตั้งได้เป็นอิสระ (เช่น วิดีโอปกติโชว์ Speed แต่ X–Y ไม่โชว์)", foreground=gray).grid(
@@ -9190,14 +9209,18 @@ class Run1App:
         """The vehicle rectangles TTC used in one frame (green; red when the vehicle is in a counted TTC frame, with the TTC of the pair written at the
         middle between the two). `to_px` maps metres -> picture pixels (the X-Y canvas)."""
         for mk in sh.get("marks", ()):
-            pts = np.asarray(to_px(np.array([mk["pa"], mk["pa2"], mk["pb"], mk["pb2"], mk["mid"]], dtype=float)), dtype=float)
-            for a_, b_ in ((0, 1), (2, 3)):                                   # each vehicle -> where it will be when the TTC has run out
-                cv2.line(img, tuple(int(round(v)) for v in pts[a_]), tuple(int(round(v)) for v in pts[b_]), (0, 165, 255), 2, cv2.LINE_AA)
-            for k in (0, 2):
-                cv2.circle(img, tuple(int(round(v)) for v in pts[k]), 4, (255, 255, 255), -1, cv2.LINE_AA)
-            cx, cy = int(round(pts[4][0])), int(round(pts[4][1]))
-            cv2.line(img, (cx - 9, cy - 9), (cx + 9, cy + 9), (0, 0, 255), 3, cv2.LINE_AA)
-            cv2.line(img, (cx - 9, cy + 9), (cx + 9, cy - 9), (0, 0, 255), 3, cv2.LINE_AA)
+            has_x = mk.get("cross") is not None
+            pts = np.asarray(to_px(np.array([mk["pa"], mk["pb"], mk["label"]], dtype=float)), dtype=float)
+            ip = [tuple(int(round(v)) for v in q) for q in pts]
+            if has_x:                                                         # each vehicle -> the point where the two paths cross
+                for k in (0, 1):
+                    cv2.line(img, ip[k], ip[2], (0, 165, 255), 2, cv2.LINE_AA)
+                cx, cy = ip[2]
+                cv2.line(img, (cx - 9, cy - 9), (cx + 9, cy + 9), (0, 0, 255), 3, cv2.LINE_AA)
+                cv2.line(img, (cx - 9, cy + 9), (cx + 9, cy - 9), (0, 0, 255), 3, cv2.LINE_AA)
+            else:                                                             # parallel paths: no crossing point, only the pair is joined
+                cv2.line(img, ip[0], ip[1], (0, 165, 255), 1, cv2.LINE_AA)
+            cx, cy = ip[2]
             cv2.putText(img, f"{mk['ttc']:.2f}s", (cx + 10, cy - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 3, cv2.LINE_AA)
             cv2.putText(img, f"{mk['ttc']:.2f}s", (cx + 10, cy - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
         ov = img.copy()
@@ -9269,13 +9292,13 @@ class Run1App:
                 rects = [rc for rc in (sh["rects"] if sh else []) if rc.get("px") is not None]
                 marks = [mk for mk in (sh.get("marks", []) if sh else []) if mk.get("px") is not None]
                 if rects or marks:
-                    dst = np.concatenate([rc["poly"] for rc in rects] + [np.array([mk["pa"], mk["pa2"], mk["pb"], mk["pb2"], mk["mid"]], dtype=float) for mk in marks])
+                    dst = np.concatenate([rc["poly"] for rc in rects] + [np.array([mk["pa"], mk["pb"], mk["label"]], dtype=float) for mk in marks])
                     init = np.concatenate([np.tile(np.asarray(rc["px"], dtype=float), (4, 1)) for rc in rects]
-                                          + [np.tile(np.asarray(mk["px"], dtype=float), (5, 1)) for mk in marks])
+                                          + [np.tile(np.asarray(mk["px"], dtype=float), (3, 1)) for mk in marks])
                     pix = invert_map(fwd, dst, init)
                     k0 = 4 * len(rects)
                     sh2 = {"rects": [{"tid": rc["tid"], "poly": pix[4 * k:4 * k + 4]} for k, rc in enumerate(rects)], "hot": sh["hot"], "pairs": sh["pairs"],
-                           "marks": [dict(mk, pa=pix[k0 + 5 * k], pa2=pix[k0 + 5 * k + 1], pb=pix[k0 + 5 * k + 2], pb2=pix[k0 + 5 * k + 3], mid=pix[k0 + 5 * k + 4])
+                           "marks": [dict(mk, pa=pix[k0 + 3 * k], pb=pix[k0 + 3 * k + 1], label=pix[k0 + 3 * k + 2], cross=(pix[k0 + 3 * k + 2] if mk.get("cross") is not None else None))
                                      for k, mk in enumerate(marks)]}
                     img = self._run3_draw_ttc_boxes(img, sh2, lambda q: q)
                 writer.write(img)
@@ -10540,18 +10563,18 @@ class Run1App:
                         else:
                             diag["candidates"] += 1
                             entry.update({"ttc": vr["TTC"], "status": "Counted"})
-                    if entry["ttc"] is not None:                         # where the two are when the TTC has run out: the expected meeting point
+                    if entry["ttc"] is not None:
+                        # the expected collision point: where the two straight paths (along each velocity) cross ahead of both; none when they are parallel
                         pa2 = (A["p"][0] + A["v"][0] * entry["ttc"], A["p"][1] + A["v"][1] * entry["ttc"])
                         pb2 = (B["p"][0] + B["v"][0] * entry["ttc"], B["p"][1] + B["v"][1] * entry["ttc"])
-                        entry["cp"] = {"pa2": pa2, "pb2": pb2, "mid": ((pa2[0] + pb2[0]) / 2.0, (pa2[1] + pb2[1]) / 2.0),
-                                       "gap": math.hypot(pb2[0] - pa2[0], pb2[1] - pa2[1])}
+                        entry["cp"] = {"cross": ray_intersection(A["p"], A["v"], B["p"], B["v"]), "gap": math.hypot(pb2[0] - pa2[0], pb2[1] - pa2[1])}
                     if entry["status"] == "Counted":
                         cand[(A["tid"], B["tid"])].append(entry)
                         shapes[fr]["hot"].update((A["tid"], B["tid"]))
                         shapes[fr]["pairs"].append((A["tid"], B["tid"], entry["ttc"]))
-                        if method != "box" or True:
-                            shapes[fr]["marks"].append({"a": A["tid"], "b": B["tid"], "ttc": entry["ttc"], "pa": A["p"], "pb": B["p"], "pa2": entry["cp"]["pa2"],
-                                                        "pb2": entry["cp"]["pb2"], "mid": entry["cp"]["mid"], "px": A["px"]})
+                        cr = entry["cp"]["cross"]
+                        shapes[fr]["marks"].append({"a": A["tid"], "b": B["tid"], "ttc": entry["ttc"], "pa": A["p"], "pb": B["p"], "cross": None if cr is None else cr["x"],
+                                                    "label": cr["x"] if cr else ((A["p"][0] + B["p"][0]) / 2.0, (A["p"][1] + B["p"][1]) / 2.0), "px": A["px"]})
                     frame_rows.append(entry)
 
         out = []
@@ -10575,6 +10598,11 @@ class Run1App:
                 best["is_min"] = True
                 lv_ttc = risk_level_low_is_risky(best["ttc"], c["risk_limits"]["ttc_s"])
                 lv_spd = risk_level_high_is_risky(max(sp_a, sp_b) * 3.6, c["risk_limits"]["speed_kmh"])
+                # the crossing point of the minimum frame; at the closest moment one vehicle is often already past the crossing, then the counted frame
+                # of this event with the smallest TTC that still has a crossing ahead of both is used (its time is written)
+                with_x = [e_ for e_ in ev if e_["cp"]["cross"] is not None]
+                cb = best if best["cp"]["cross"] is not None else (min(with_x, key=lambda x: x["ttc"]) if with_x else None)
+                cx_ = cb["cp"]["cross"] if cb else None
                 out.append({
                     "Site_ID": c["site_id"],
                     "Event_ID": event_id,
@@ -10587,9 +10615,10 @@ class Run1App:
                     "Rel_X_m": f"{res['r'][0]:.4f}", "Rel_Y_m": f"{res['r'][1]:.4f}",
                     "RelV_X_mps": f"{res['v'][0]:.4f}", "RelV_Y_mps": f"{res['v'][1]:.4f}", "Rel_Speed_kmh": f"{res['rel_speed'] * 3.6:.4f}",
                     "DTC_m": f"{res['DTC']:.4f}",
-                    "Collide_X_m": f"{best['cp']['mid'][0]:.4f}", "Collide_Y_m": f"{best['cp']['mid'][1]:.4f}",
-                    "A_At_Collide_X_m": f"{best['cp']['pa2'][0]:.4f}", "A_At_Collide_Y_m": f"{best['cp']['pa2'][1]:.4f}",
-                    "B_At_Collide_X_m": f"{best['cp']['pb2'][0]:.4f}", "B_At_Collide_Y_m": f"{best['cp']['pb2'][1]:.4f}",
+                    "Collide_X_m": "" if cx_ is None else f"{cx_['x'][0]:.4f}", "Collide_Y_m": "" if cx_ is None else f"{cx_['x'][1]:.4f}",
+                    "Collide_Frame_Time_s": "" if cb is None else f"{cb['t']:.6f}",
+                    "Dist_A_to_Collide_m": "" if cx_ is None else f"{cx_['d_a']:.4f}", "Dist_B_to_Collide_m": "" if cx_ is None else f"{cx_['d_b']:.4f}",
+                    "Arrival_A_s": "" if cx_ is None else f"{cx_['t_a']:.4f}", "Arrival_B_s": "" if cx_ is None else f"{cx_['t_b']:.4f}",
                     "Miss_Distance_m": f"{best['cp']['gap']:.4f}",
                     "Speed_A_kmh": f"{sp_a * 3.6:.6f}", "Speed_B_kmh": f"{sp_b * 3.6:.6f}",
                     "TTC_s": f"{best['ttc']:.6f}",
@@ -10608,7 +10637,8 @@ class Run1App:
                 "Site_ID": c["site_id"], "Vehicle_A_ID": a_["tid"], "Vehicle_B_ID": b_["tid"], "Frame": e_["fr"], "Time_s": f"{e_['t']:.6f}",
                 "Zone_A": f"Zone {a_['zone']}", "Zone_B": f"Zone {b_['zone']}", "Distance_m": f"{e_['dist']:.4f}",
                 "TTC_s": "" if e_["ttc"] is None else f"{e_['ttc']:.6f}", "DTC_m": "" if e_["ttc"] is None else f"{res['DTC']:.4f}",
-                "Collide_X_m": "" if e_["ttc"] is None else f"{e_['cp']['mid'][0]:.4f}", "Collide_Y_m": "" if e_["ttc"] is None else f"{e_['cp']['mid'][1]:.4f}",
+                "Collide_X_m": "" if (e_["ttc"] is None or e_["cp"]["cross"] is None) else f"{e_['cp']['cross']['x'][0]:.4f}",
+                "Collide_Y_m": "" if (e_["ttc"] is None or e_["cp"]["cross"] is None) else f"{e_['cp']['cross']['x'][1]:.4f}",
                 "Miss_Distance_m": "" if e_["ttc"] is None else f"{e_['cp']['gap']:.4f}",
                 "Theta_deg": "" if e_["theta"] is None else f"{e_['theta']:.2f}", "Rel_Speed_kmh": f"{res['rel_speed'] * 3.6:.4f}",
                 "Speed_A_kmh": f"{e_['sp_a'] * 3.6:.4f}", "Speed_B_kmh": f"{e_['sp_b'] * 3.6:.4f}",
@@ -10869,7 +10899,7 @@ class Run1App:
         def do_ttc():
             status("Run 3 — TTC...")
             rows, diag, ttc_frames, self._run3_ttc_shapes = self._run3_ttc(tracks, c, movement_by_id)
-            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","Rel_X_m","Rel_Y_m","RelV_X_mps","RelV_Y_mps","Rel_Speed_kmh","DTC_m","Collide_X_m","Collide_Y_m","A_At_Collide_X_m","A_At_Collide_Y_m","B_At_Collide_X_m","B_At_Collide_Y_m","Miss_Distance_m","Speed_A_kmh","Speed_B_kmh","TTC_s","TTC_Level","Speed_Level","TTC_Risk_Level","QC_Flag"]
+            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","Rel_X_m","Rel_Y_m","RelV_X_mps","RelV_Y_mps","Rel_Speed_kmh","DTC_m","Collide_X_m","Collide_Y_m","Collide_Frame_Time_s","Dist_A_to_Collide_m","Dist_B_to_Collide_m","Arrival_A_s","Arrival_B_s","Miss_Distance_m","Speed_A_kmh","Speed_B_kmh","TTC_s","TTC_Level","Speed_Level","TTC_Risk_Level","QC_Flag"]
             row_counts["ttc"] = len(rows)
             outputs["ttc"] = write_csv("TTC.csv", fields, rows)
             outputs["ttc_frames"] = write_csv("TTC_Frames.csv", ["Site_ID","Vehicle_A_ID","Vehicle_B_ID","Frame","Time_s","Zone_A","Zone_B","Distance_m","TTC_s","DTC_m","Collide_X_m","Collide_Y_m","Miss_Distance_m","Theta_deg","Rel_Speed_kmh","Speed_A_kmh","Speed_B_kmh","Status","Event_ID","Is_Event_Min"], ttc_frames)
