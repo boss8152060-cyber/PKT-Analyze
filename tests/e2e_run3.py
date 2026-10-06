@@ -16,7 +16,7 @@ Scene 1  (speed, LDP, lateral clearance).  Zones by x: 0-10 / 10-20 / 20-30 m
 
 Scene 2  (PET, TTC).  Crossing and rear-end conflicts
   P  Car  2-3-4   along +x at y = 0, 10 m/s, passes (15, 0) at t = 1.5 s
-  Q  Car  1-3-6   along +y at x = 15, passes (15, 0) at t = 3.1 s  -> PET(P,Q) = 1.6 s (crossing point only), PET(P,R) = 0.1 s
+  Q  Car  1-3-6   along +y at x = 15, passes (15, 0) at t = 3.1 s  -> PET(P,Q) = 1.24 s with the conflict area (point only: 1.6 s; P-R: area = undefined, point only 0.1 s)
   R  Car  1-3-6   along +y at x = 15, passes (15, 0) at t = 1.6 s  -> the 4.5 m x 1.8 m boxes touch at t = 1.235 s: TTC ~ 0 (Crossing, 90 deg)
   F  Car  (zone 3) along +x at y = -12, 10 m/s behind  L  Car at 5 m/s, 20 m ahead
         -> boxes (+ 0.25 m each side) 20 - 5 t - 5.0 m apart, closing at 5 m/s: TTC = 3 - t (ends when L leaves at t = 2 s: ~1.0 s, Rear-end, 0 deg)
@@ -309,15 +309,12 @@ def scene2(app):
     # ---- PET ----
     pet = read_csv(os.path.join(out, "PET.csv"))
     pairs = {(r["Vehicle_ID_A"], r["Vehicle_ID_B"]): r for r in pet}
-    check("PET events: P-Q and P-R (the paths cross); Q-R run on the same line and never cross; F/L have no movement",
-          set(pairs) == {("1", "2"), ("1", "3")}, str(sorted(pairs)))
-    if ("1", "3") in pairs:
-        check("PET PET(P,R) = 0.1 s (crossing point only: R is at (15, 0) 0.1 s after P)", abs(float(pairs[("1", "3")]["PET_s"]) - 0.1) < 0.06,
-              pairs[("1", "3")]["PET_s"])
+    check("PET (conflict area, radius (W_A+W_B)/2 = 1.8 m): one event P-Q (P-R are in the area at the same time = undefined, Q-R never cross, F/L no movement)",
+          set(pairs) == {("1", "2")}, str(sorted(pairs)))
     if ("1", "2") in pairs:
         r = pairs[("1", "2")]
-        check("PET PET(P,Q) = 1.6 s (crossing point only: Q is at (15, 0) 1.6 s after P, the vehicle size is not subtracted)",
-              abs(float(r["PET_s"]) - 1.6) < 0.06, r["PET_s"])
+        check("PET PET(P,Q) = 1.24 s (P leaves the 1.8 m circle at 1.68 s, Q enters it at 2.92 s)", abs(float(r["PET_s"]) - 1.24) < 0.06, r["PET_s"])
+        check("PET area radius written: 1.8 m", abs(float(r["Area_Radius_m"]) - 1.8) < 0.01, r["Area_Radius_m"])
         check("PET crossing point written: (15, 0)", abs(float(r["Cross_X_m"]) - 15.0) < 0.05 and abs(float(r["Cross_Y_m"])) < 0.05,
               f"{r['Cross_X_m']} {r['Cross_Y_m']}")
         check("PET conflict type Crossing in Zone 3", r["Conflict_Type"] == "Crossing" and r["Conflict_Zone"] == "Zone 3",
@@ -327,6 +324,17 @@ def scene2(app):
               r["PET_Level"] == m.risk_level_low_is_risky(float(r["PET_s"]), lim_pet) and r["Speed_Level"] == "Moderate"
               and r["PET_Risk_Level"] == m.combine_risk(r["PET_Level"], "Moderate") and abs(float(r["Speed_A_kmh"]) - 36.0) < 0.5,
               f"{r['PET_s']} {r['PET_Level']} {r['Speed_Level']} {r['PET_Risk_Level']} speeds {r['Speed_A_kmh']} {r['Speed_B_kmh']}")
+
+    # PET with the area switched off = the crossing point only: PET = the difference of the times at the point
+    app.run3_pet_use_area_var.set(False)
+    out_pt, _ = run_scene(app, veh)
+    app.run3_pet_use_area_var.set(True)
+    pet_pt = {(r["Vehicle_ID_A"], r["Vehicle_ID_B"]): r for r in read_csv(os.path.join(out_pt, "PET.csv"))}
+    check("PET point only: events P-Q and P-R", set(pet_pt) == {("1", "2"), ("1", "3")}, str(sorted(pet_pt)))
+    if ("1", "2") in pet_pt and ("1", "3") in pet_pt:
+        check("PET point only: PET(P,Q) = 1.6 s, PET(P,R) = 0.1 s, no radius",
+              abs(float(pet_pt[("1", "2")]["PET_s"]) - 1.6) < 0.06 and abs(float(pet_pt[("1", "3")]["PET_s"]) - 0.1) < 0.06 and pet_pt[("1", "2")]["Area_Radius_m"] == "",
+              f"{pet_pt[('1', '2')]['PET_s']} {pet_pt[('1', '3')]['PET_s']}")
 
     # ---- TTC (vehicle rectangles: the time until they first touch) ----
     ttc = read_csv(os.path.join(out, "TTC.csv"))

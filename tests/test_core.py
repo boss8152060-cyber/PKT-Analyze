@@ -1117,5 +1117,32 @@ class PathCrossingTimes(unittest.TestCase):
         self.assertIsNone(CORE["path_crossing"](A[:1], parallel))                           # one sample is not a path
 
 
+class CircleInterval(unittest.TestCase):
+    """PET conflict area: the time a vehicle spends inside the circle around the crossing point."""
+
+    def test_straight_pass_through_the_circle(self):
+        tt = np.arange(0.0, 3.0001, 0.1)
+        P = np.stack([10.0 * tt, np.zeros_like(tt)], axis=1)                              # 10 m/s along +x
+        t_in, t_out = CORE["circle_interval"](P, tt, (15.0, 0.0), 1.3)                       # circle x = 13.7 .. 16.3
+        self.assertAlmostEqual(t_in, 1.37, places=6)
+        self.assertAlmostEqual(t_out, 1.63, places=6)
+
+    def test_offset_chord_is_shorter(self):
+        tt = np.array([0.0, 3.0])
+        P = np.array([[0.0, 0.5], [30.0, 0.5]])                                              # passes 0.5 m beside the centre
+        t_in, t_out = CORE["circle_interval"](P, tt, (15.0, 0.0), 1.3)
+        half = math.sqrt(1.3 ** 2 - 0.5 ** 2)
+        self.assertAlmostEqual(t_in, (15.0 - half) / 10.0, places=6)
+        self.assertAlmostEqual(t_out, (15.0 + half) / 10.0, places=6)
+
+    def test_start_inside_and_miss(self):
+        P = np.array([[15.0, 0.0], [20.0, 0.0]])
+        t_in, t_out = CORE["circle_interval"](P, np.array([0.0, 1.0]), (15.0, 0.0), 1.0)
+        self.assertAlmostEqual(t_in, 0.0, places=6)                                          # already inside at the first sample
+        self.assertAlmostEqual(t_out, 0.2, places=6)
+        self.assertIsNone(CORE["circle_interval"](np.array([[0.0, 5.0], [30.0, 5.0]]), np.array([0.0, 3.0]), (15.0, 0.0), 1.3))
+        self.assertIsNone(CORE["circle_interval"](P[:1], np.array([0.0]), (15.0, 0.0), 1.0))
+
+
 if __name__ == "__main__":
     unittest.main()
