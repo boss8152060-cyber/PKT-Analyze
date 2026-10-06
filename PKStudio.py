@@ -10374,7 +10374,7 @@ class Run1App:
         radius = c["pet_interaction"]; pet_max = c["pet_max_s"]; threshold = c["pet_threshold"]
         ids = list(tracks)
         diag = {"zone_tracks": {}, "pairs_with_both_in_zone": 0, "pairs_skipped_time_window": 0,
-                "same_movement_excluded": 0, "no_movement_both": 0, "interaction_candidates": 0,
+                "same_movement_no_crossing": 0, "no_movement_both": 0, "interaction_candidates": 0,
                 "fallback_close_pairs": 0, "overlap_intervals": 0, "above_pet_max": 0,
                 "tracks_with_movement": sum(1 for t in ids if movement_by_id.get(t))}
         out = []
@@ -10401,10 +10401,12 @@ class Run1App:
                     if not ma and not mb:
                         diag["no_movement_both"] += 1
                         continue
-                    if ma and mb and ma == mb:
-                        diag["same_movement_excluded"] += 1
-                        continue
                     best = self._run3_best_intersection(A, B)
+                    if best is None and ma and ma == mb:
+                        # Same Movement is allowed, but only when the two trajectories really cross (no "closest approach" fallback:
+                        # vehicles following each other in a lane never cross and are not a PET conflict).
+                        diag["same_movement_no_crossing"] += 1
+                        continue
                     if best is not None:
                         ip = best[3]; ctype = "Crossing"
                     else:
