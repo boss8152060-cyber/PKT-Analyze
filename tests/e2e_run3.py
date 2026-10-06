@@ -325,7 +325,8 @@ def scene2(app):
         check("PET area radius written: 1.8 m", abs(float(r["Area_Radius_m"]) - 1.8) < 0.01, r["Area_Radius_m"])
         check("PET crossing point written: (15, 0)", abs(float(r["Cross_X_m"]) - 15.0) < 0.05 and abs(float(r["Cross_Y_m"])) < 0.05,
               f"{r['Cross_X_m']} {r['Cross_Y_m']}")
-        check("PET conflict zone 3 (no Conflict_Type column: it was always Crossing)", r["Conflict_Zone"] == "Zone 3" and "Conflict_Type" not in r, r["Conflict_Zone"])
+        check("PET conflict zone 3, type by the TTC angle rule: P (+x) and Q (+y) meet at 90 deg = Crossing",
+              r["Conflict_Zone"] == "Zone 3" and r["Conflict_Type"] == "Crossing" and abs(float(r["Theta_deg"]) - 90.0) < 3.0, f"{r['Conflict_Zone']} {r['Conflict_Type']} {r['Theta_deg']}")
         lim_pet = m.RISK_DEFAULT_LIMITS["pet_s"]
         check("PET levels follow the limits: PET level from PET_s, speed level from the 36 km/h of P and Q (Moderate), overall = the less severe",
               r["PET_Level"] == m.risk_level_low_is_risky(float(r["PET_s"]), lim_pet) and r["Speed_Level"] == "Moderate"

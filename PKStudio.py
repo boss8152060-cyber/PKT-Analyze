@@ -1770,7 +1770,7 @@ def circle_interval(P, t, center, r):
 CSV_COLUMN_DROPS = {
     "*": ("Site_ID", "Calibration_Mode"),
     "Gap_Acceptance.csv": ("Gap_Acceptance", "Gap_Evaluation_Time"),              # = Gap_Role (Accepted / Rejected); = Decision_Time
-    "PET.csv": ("Conflict_Type", "Interaction_Start", "Interaction_End"),         # always "Crossing"; = T1_Exit_Time / T2_Entry_Time
+    "PET.csv": ("Interaction_Start", "Interaction_End"),                          # = T1_Exit_Time / T2_Entry_Time
     "LDP.csv": ("Side", "Lane_Width_W_m", "Chord_Length_m"),                      # Movement tells the side; the widths are in Settings; = |P_out - P_in|
     "Lateral_Clearance.csv": ("Width_A_m", "Width_B_m", "Length_A_m", "Length_B_m", "Zone_Sequence_A", "Zone_Sequence_B"),   # per class / per pair
     "Detection_Records_Topview.csv": ("calibration_mode",),
@@ -1799,6 +1799,22 @@ def apply_csv_renames(filename, fields, rows):
     fields = [ren.get(f, f) for f in fields if f not in drop]
     rows = [{ren.get(k, k): v for k, v in r.items() if k not in drop} for r in rows]
     return fields, rows
+
+
+def path_velocity_at(points, times, t, window_s, seg=None):
+    """The velocity vector (m/s) of a vehicle around time `t`: the straight displacement between the first and the last sample within +-window_s/2
+    divided by their time difference. With fewer than 2 samples in the window: the direction of the segment `seg` = (index, fraction) it is on
+    (None for it = (0, 0))."""
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    T = np.asarray(times, dtype=float)
+    idx = np.flatnonzero(np.abs(T - t) <= window_s / 2.0)
+    if len(idx) >= 2 and T[idx[-1]] > T[idx[0]]:
+        v = (P[idx[-1]] - P[idx[0]]) / (T[idx[-1]] - T[idx[0]])
+        return float(v[0]), float(v[1])
+    if seg is not None and seg[0] + 1 < len(T) and T[seg[0] + 1] > T[seg[0]]:
+        v = (P[seg[0] + 1] - P[seg[0]]) / (T[seg[0] + 1] - T[seg[0]])
+        return float(v[0]), float(v[1])
+    return 0.0, 0.0
 
 
 def frame_speeds_kmh(times, points, window_s=0.5, smoothing=1):
@@ -10473,10 +10489,15 @@ class Run1App:
                     if cr is None:
                         diag["no_crossing"] += 1
                         continue
-                    ip, ctype = cr["ip"], "Crossing"
+                    ip = cr["ip"]
                     diag["interaction_candidates"] += 1
                     t_a, t_b = path_pass_time(At, cr["seg_a"]), path_pass_time(Bt, cr["seg_b"])
                     ia_, ib_ = cr["seg_a"][0], cr["seg_b"][0]
+                    # Conflict type as TTC does it: the angle between the two velocity vectors where the vehicles pass the crossing (same limits as
+                    # TTC: < 30 Rear-end, 30 - 85 Lane change, > 85 Crossing; a vehicle that stands still there = Unclassified)
+                    theta = conflict_angle_deg(path_velocity_at(A, At, t_a, PET_SPEED_WINDOW_S, cr["seg_a"]), path_velocity_at(B, Bt, t_b, PET_SPEED_WINDOW_S, cr["seg_b"]),
+                                               c.get("ttc_min_speed_kmh", 5.0) / 3.6)
+                    ctype = ttc_conflict_type(theta, c.get("ttc_angle_rear_end_deg", TTC_ANGLE_REAR_END_DEG), c.get("ttc_angle_crossing_deg", TTC_ANGLE_CROSSING_DEG))
                     gap_flag = max(At[ia_ + 1] - At[ia_], Bt[ib_ + 1] - Bt[ib_]) > PET_GAP_FLAG_S
                     if gap_flag:
                         diag["interpolated_gap"] += 1
@@ -10520,7 +10541,7 @@ class Run1App:
                         "Interaction_ID": f"{a_id}_{b_id}_Z{zone}_{span_start:.6f}",
                         "Vehicle_ID_A": a_id, "Vehicle_Class_A": a_rows[0].get("class_name", ""), "Movement_A": ma,
                         "Vehicle_ID_B": b_id, "Vehicle_Class_B": b_rows[0].get("class_name", ""), "Movement_B": mb,
-                        "Conflict_Type": ctype, "Conflict_Zone": f"Zone {zone}",
+                        "Conflict_Type": ctype, "Theta_deg": "" if theta is None else f"{theta:.2f}", "Conflict_Zone": f"Zone {zone}",
                         "Interaction_Start": f"{span_start:.6f}", "Interaction_End": f"{span_end:.6f}",
                         "Cross_X_m": f"{ip[0]:.4f}", "Cross_Y_m": f"{ip[1]:.4f}", "Area_Radius_m": "" if rad is None else f"{rad:.3f}",
                         "T1_Exit_Time": f"{t1:.6f}", "T2_Entry_Time": f"{t2:.6f}", "PET_s": f"{pet:.6f}",
@@ -11110,7 +11131,7 @@ class Run1App:
         def do_pet():
             status("Run 3 — PET...")
             rows, diag = self._run3_pet(tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
-            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","Cross_X_m","Cross_Y_m","Area_Radius_m","T1_Exit_Time","T2_Entry_Time","PET_s","Speed_A_kmh","Speed_B_kmh","PET_Level","Speed_Level","PET_Risk_Level","Calibration_Mode","QC_Flag"]
+            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Theta_deg","Conflict_Zone","Interaction_Start","Interaction_End","Cross_X_m","Cross_Y_m","Area_Radius_m","T1_Exit_Time","T2_Entry_Time","PET_s","Speed_A_kmh","Speed_B_kmh","PET_Level","Speed_Level","PET_Risk_Level","Calibration_Mode","QC_Flag"]
             row_counts["pet"] = len(rows)
             mode_ = self._run3_calibration_mode(c)
             for r in rows:
@@ -11124,12 +11145,12 @@ class Run1App:
             for z in sorted(c["pet_zones"]):
                 indicator("Post-Encroachment Time", "Time", "s", f"Zone {z}",
                           [float(r["PET_s"]) for r in rows if r["Conflict_Zone"] == f"Zone {z}"])
-            for ctype in ("Crossing", "Merging", "Diverging", "Merging/Diverging"):
+            for ctype in ("Rear-end", "Lane change", "Crossing", "Unclassified"):
                 sub = [float(r["PET_s"]) for r in rows if r["Conflict_Type"] == ctype]
                 if sub:
                     indicator("Post-Encroachment Time", "Time", "s", f"Conflict type {ctype}", sub)
             s["Conflict_Type_Counts"] = {ct: sum(1 for r in rows if r["Conflict_Type"] == ct)
-                                         for ct in ("Crossing", "Merging", "Diverging", "Merging/Diverging")}
+                                         for ct in ("Rear-end", "Lane change", "Crossing", "Unclassified")}
             summary["indicators"]["PET"] = s
             summary["diagnostics"]["pet"] = diag
         run_step("pet", "PET.csv", do_pet)

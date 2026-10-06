@@ -1142,7 +1142,7 @@ class CsvColumnNames(unittest.TestCase):
         self.assertEqual(fields, ["Gap_Role", "Decision_Time_s"])
         self.assertEqual(rows, [{"Gap_Role": "Accepted", "Decision_Time_s": "2.0"}])
         fields, _ = f("PET.csv", ["Interaction_ID", "Conflict_Type", "Interaction_Start", "T1_Exit_Time", "Calibration_Mode", "QC_Flag"], [])
-        self.assertEqual(fields, ["Interaction_ID", "T1_Exit_Time_s", "QC_Flag"])
+        self.assertEqual(fields, ["Interaction_ID", "Conflict_Type", "T1_Exit_Time_s", "QC_Flag"])
         fields, _ = f("Detection_Records_Topview.csv", ["frame", "calibration_mode", "x_m"], [])
         self.assertEqual(fields, ["frame", "x_m"])
 
@@ -1160,6 +1160,34 @@ class CsvColumnNames(unittest.TestCase):
             for old, new in ren.items():
                 if "Time" in old or old in ("Event_Start", "Event_End", "Interaction_Start", "Interaction_End", "Timestamp"):
                     self.assertTrue(new.endswith("_s"), (f, old, new))
+
+
+class PathVelocity(unittest.TestCase):
+    """PET conflict type = the TTC rule on the velocities where the two vehicles pass the crossing."""
+
+    def test_velocity_is_the_displacement_in_the_window(self):
+        tt = np.arange(0.0, 3.0001, 0.1)
+        P = np.stack([10.0 * tt, 5.0 * tt], axis=1)
+        vx, vy = CORE["path_velocity_at"](P, tt, 1.5, 0.5)
+        self.assertAlmostEqual(vx, 10.0, places=6)
+        self.assertAlmostEqual(vy, 5.0, places=6)
+
+    def test_falls_back_to_the_segment_and_to_zero(self):
+        P = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]])
+        tt = np.array([0.0, 1.0, 2.0])
+        self.assertEqual(CORE["path_velocity_at"](P, tt, 0.5, 0.1, (0, 0.5)), (10.0, 0.0))       # no sample in the window: the segment direction
+        self.assertEqual(CORE["path_velocity_at"](P, tt, 0.5, 0.1, None), (0.0, 0.0))
+
+    def test_pet_conflict_type_follows_the_ttc_angle_rule(self):
+        ang, typ = CORE["conflict_angle_deg"], CORE["ttc_conflict_type"]
+        east = (10.0, 0.0)
+        cases = [((10.0, 0.0), "Rear-end"),          # same direction
+                 ((10.0, 6.0), "Lane change"),        # 31 deg
+                 ((0.0, 10.0), "Crossing"),           # 90 deg: perpendicular
+                 ((-10.0, 0.0), "Crossing")]          # head-on 180 deg
+        for v, expected in cases:
+            self.assertEqual(typ(ang(east, v, 1.0)), expected, v)
+        self.assertEqual(typ(ang(east, (0.0, 0.0), 1.0)), "Unclassified")                       # a vehicle standing still at the crossing
 
 
 if __name__ == "__main__":
