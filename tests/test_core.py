@@ -399,120 +399,115 @@ class RiskLevels(unittest.TestCase):
                 p(bad, asc)
 
 
-class VectorTtc(unittest.TestCase):
-    """TTC = -(r . v) / (v . v), r = P_B - P_A, v = V_B - V_A (SPEC v28 section 7; Eq. 11 of Yaibok et al. 2026)."""
-    REL = 0.5
+class MovingRectTtc(unittest.TestCase):
+    """TTC of two vehicle rectangles that keep their velocity: the time until they first touch."""
+    CAR = (4.5, 1.8)
+    MC = (2.0, 0.8)
 
-    def vt(self, p_a, v_a, p_b, v_b):
-        return CORE["vector_ttc"](p_a, v_a, p_b, v_b, self.REL)
+    def ttc(self, p_a, v_a, p_b, v_b, size_a=CAR, size_b=CAR, margin=0.0, rel=0.0):
+        return CORE["moving_rect_ttc"](p_a, v_a, size_a, p_b, v_b, size_b, margin, rel)
 
-    def test_known_example(self):
-        r = self.vt((0, 0), (10, 0), (20, 15), (-4, -10))          # r = (20, 15), v = (-14, -10)
-        self.assertAlmostEqual(r["TTC"], 430.0 / 296.0, places=9)  # 1.4527 s
-        self.assertAlmostEqual(r["m"][0], 20 - 14 * 430.0 / 296.0, places=9)
-        self.assertAlmostEqual(r["m"][1], 15 - 10 * 430.0 / 296.0, places=9)
-        self.assertAlmostEqual(r["miss"], 0.5812, places=3)
-        self.assertAlmostEqual(r["miss"], abs(20 * -10 - 15 * -14) / math.hypot(14, 10), places=9)     # |r x v| / |v|
-        self.assertAlmostEqual(r["rel_speed"], math.hypot(14, 10), places=9)
-        self.assertAlmostEqual(r["ttc_x"], 20 / 14.0, places=9)
-        self.assertAlmostEqual(r["ttc_y"], 1.5, places=9)
+    def test_following_in_one_lane(self):
+        # A 15 m/s, B 20 m ahead at 10 m/s: the boxes are 20 - 4.5 = 15.5 m apart, closing at 5 m/s -> 3.1 s (the classic S / CS)
+        r = self.ttc((0, 0), (15, 0), (20, 0), (10, 0))
+        self.assertEqual(r["status"], "collision")
+        self.assertAlmostEqual(r["TTC"], 3.1, places=9)
+        self.assertAlmostEqual(r["DTC"], 15.5, places=9)
 
-    def test_rear_end_course(self):
-        r = self.vt((0, 0), (15, 0), (20, 0), (10, 0))             # 20 m behind, closing at 5 m/s
-        self.assertAlmostEqual(r["TTC"], 4.0)
-        self.assertAlmostEqual(r["miss"], 0.0, places=9)
+    def test_the_margin_enlarges_the_boxes(self):
+        r = self.ttc((0, 0), (15, 0), (20, 0), (10, 0), margin=0.25)        # 0.25 m on every side of both boxes: 0.5 m less gap
+        self.assertAlmostEqual(r["TTC"], 3.0, places=9)
 
-    def test_separating_or_not_approaching_has_no_ttc(self):
-        self.assertIsNone(self.vt((0, 0), (10, 0), (20, 0), (15, 0)))       # the leader is faster
-        self.assertIsNone(self.vt((20, 0), (10, 0), (0, 0), (8, 0)))        # B behind A and slower
-        self.assertIsNone(self.vt((0, 0), (10, 0), (0, 5), (10, 0)))        # same velocity: no relative motion
-        self.assertIsNone(self.vt((0, 0), (10, 0), (0, 5), (10, 5)))        # drifting away sideways
+    def test_head_on(self):
+        r = self.ttc((0, 0), (10, 0), (30, 0), (-10, 0))                    # 30 - 4.5 = 25.5 m closing at 20 m/s
+        self.assertAlmostEqual(r["TTC"], 25.5 / 20.0, places=9)
 
-    def test_r_dot_v_zero_has_no_ttc(self):
-        self.assertIsNone(self.vt((0, 0), (0, 0), (10, 0), (0, 5)))         # r = (10, 0), v = (0, 5): r . v = 0
+    def test_a_pair_that_passes_beside_each_other_never_touches(self):
+        # the R37 case: A drives by a parked-ish B that is 4 m to the side (half widths 0.9 + 0.9 = 1.8 m)
+        self.assertEqual(self.ttc((-30, 0), (11, 0), (0, -4), (0.5, 0))["status"], "none")
+        # with a very large margin the boxes would touch
+        self.assertEqual(self.ttc((-30, 0), (11, 0), (0, -4), (0.5, 0), margin=2.0)["status"], "collision")
+
+    def test_a_lateral_offset_inside_the_widths_still_collides(self):
+        self.assertEqual(self.ttc((0, 0), (15, 0), (20, 1.5), (10, 0))["status"], "collision")      # 1.5 < 1.8
+        self.assertEqual(self.ttc((0, 0), (15, 0), (20, 2.0), (10, 0))["status"], "none")           # 2.0 > 1.8
+        self.assertEqual(self.ttc((0, 0), (15, 0), (20, 2.0), (10, 0), margin=0.25)["status"], "collision")   # 1.8 + 0.5 > 2.0
+
+    def test_separating_vehicles_have_no_ttc(self):
+        self.assertEqual(self.ttc((0, 0), (10, 0), (20, 0), (15, 0))["status"], "none")             # the leader is faster
+
+    def test_already_overlapping(self):
+        self.assertEqual(self.ttc((0, 0), (10, 0), (3.0, 0), (5, 0))["status"], "overlap")          # 3 m apart, the boxes (4.5 m) overlap
+
+    def test_crossing_at_right_angle(self):
+        # A along +x, B along +y, both 10 m/s, both reach (15, 0) at about the same time: the boxes touch before the centres meet
+        r = self.ttc((0, 0), (10, 0), (15, -12), (0, 10))
+        self.assertEqual(r["status"], "collision")
+        self.assertLess(r["TTC"], 1.2)                                       # the centres meet at 1.5 s (A) / 1.2 s (B)
 
     def test_small_relative_speed_is_skipped(self):
-        self.assertIsNone(self.vt((0, 0), (10, 0), (20, 0), (9.8, 0)))      # 0.2 m/s < 0.5 m/s
-        self.assertIsNotNone(CORE["vector_ttc"]((0, 0), (10, 0), (20, 0), (9.8, 0), 0.1))
+        self.assertEqual(self.ttc((0, 0), (10, 0), (20, 0), (9.8, 0), rel=0.5)["status"], "slow")
+        self.assertEqual(self.ttc((0, 0), (10, 0), (20, 0), (9.8, 0), rel=0.1)["status"], "collision")
+
+    def test_a_vehicle_without_heading_is_skipped(self):
+        self.assertEqual(self.ttc((0, 0), (0, 0), (20, 0), (-5, 0))["status"], "slow")
 
     def test_symmetric_in_the_two_vehicles(self):
-        a = self.vt((0, 0), (10, 0), (20, 15), (-4, -10))
-        b = self.vt((20, 15), (-4, -10), (0, 0), (10, 0))
-        self.assertAlmostEqual(a["TTC"], b["TTC"], places=12)
-        self.assertAlmostEqual(a["miss"], b["miss"], places=12)
+        a = self.ttc((0, 0), (10, 3), (25, 2), (-6, 1), size_a=self.CAR, size_b=self.MC)
+        b = self.ttc((25, 2), (-6, 1), (0, 0), (10, 3), size_a=self.MC, size_b=self.CAR)
+        self.assertEqual(a["status"], b["status"])
+        if a["status"] == "collision":
+            self.assertAlmostEqual(a["TTC"], b["TTC"], places=9)
 
-    def test_the_time_does_not_say_how_close(self):
-        # B is 20 m ahead of A, both 10 m/s, B heads at angle theta: TTC is 1.0 s for every theta, the miss distance is 20 cos(theta / 2)
-        for theta, miss in ((180.0, 0.0), (90.0, 20 * math.cos(math.radians(45))), (30.0, 20 * math.cos(math.radians(15)))):
-            vb = (10 * math.cos(math.radians(theta)), 10 * math.sin(math.radians(theta)))
-            r = self.vt((0, 0), (10, 0), (20, 0), vb)
-            self.assertAlmostEqual(r["TTC"], 1.0, places=9)
-            self.assertAlmostEqual(r["miss"], miss, places=9)
+    def test_matches_a_brute_force_scan(self):
+        """For random pairs the first-contact time equals the first time a plain static overlap test (separating axes) says 'overlap'."""
+        import random
+        rnd = random.Random(7)
 
+        def corners(p, v, size, margin):
+            sp = math.hypot(*v)
+            h = (v[0] / sp, v[1] / sp)
+            n = (-h[1], h[0])
+            hl, hw = size[0] / 2 + margin, size[1] / 2 + margin
+            return [(p[0] + sx * hl * h[0] + sy * hw * n[0], p[1] + sx * hl * h[1] + sy * hw * n[1]) for sx, sy in ((1, 1), (1, -1), (-1, -1), (-1, 1))]
 
-class PathCrossing(unittest.TestCase):
-    def line(self, p0, v, n=21, dt=0.1):
-        t = np.arange(n) * dt
-        return t, np.array([(p0[0] + v[0] * x, p0[1] + v[1] * x) for x in t])
+        def overlap(ca, cb):
+            for poly in (ca, cb):
+                for k in range(4):
+                    e = (poly[(k + 1) % 4][0] - poly[k][0], poly[(k + 1) % 4][1] - poly[k][1])
+                    ax = (-e[1], e[0])
+                    pa = [q[0] * ax[0] + q[1] * ax[1] for q in ca]
+                    pb = [q[0] * ax[0] + q[1] * ax[1] for q in cb]
+                    if max(pa) < min(pb) or max(pb) < min(pa):
+                        return False
+            return True
 
-    def test_perpendicular_paths(self):
-        ta, pa = self.line((0, 0), (10, 0))                    # along +x, at (10, 0) at t = 1.0
-        tb, pb = self.line((10, -12), (0, 10))                 # along +y, at (10, 0) at t = 1.2
-        c = CORE["path_crossing"](pa, ta, pb, tb)
-        self.assertAlmostEqual(c["x"][0], 10.0, places=9)
-        self.assertAlmostEqual(c["x"][1], 0.0, places=9)
-        self.assertAlmostEqual(c["t_a"], 1.0, places=9)
-        self.assertAlmostEqual(c["t_b"], 1.2, places=9)
-        self.assertAlmostEqual(c["arc_a"], 10.0, places=9)     # path length from the start of A to the crossing
-        self.assertAlmostEqual(c["arc_b"], 12.0, places=9)
-        self.assertAlmostEqual(c["arc_a_samples"][-1], 20.0, places=9)
-
-    def test_no_crossing_for_parallel_or_apart_paths(self):
-        ta, pa = self.line((0, 0), (10, 0))
-        tb, pb = self.line((0, 3), (10, 0))
-        self.assertIsNone(CORE["path_crossing"](pa, ta, pb, tb))                    # parallel
-        tc, pc = self.line((30, -5), (0, 10))                                      # would cross x = 30, beyond the end of A (x = 20)
-        self.assertIsNone(CORE["path_crossing"](pa, ta, pc, tc))
-        td, pd_ = self.line((0, 0), (10, 0))
-        self.assertIsNone(CORE["path_crossing"](pa, ta, pd_, td))                   # the same line (collinear)
-
-    def test_several_crossings_take_the_one_closest_in_time(self):
-        ta, pa = self.line((0, 0), (10, 0), n=41)              # +x for 4 s: at x = 5 at 0.5 s, at x = 30 (beyond its end at x = 40? no: 3.0 s)
-        pb = np.array([(5, -2), (5, 2), (30, 2), (30, -2)], dtype=float)
-        tb = np.array([0.4, 0.8, 4.9, 5.3])                   # B crosses y = 0 at x = 5 at 0.6 s and at x = 30 at 5.1 s
-        c = CORE["path_crossing"](pa, ta, pb, tb)
-        self.assertAlmostEqual(c["x"][0], 5.0, places=9)
-        self.assertAlmostEqual(abs(c["t_a"] - c["t_b"]), 0.1, places=6)
-
-    def test_too_few_samples(self):
-        self.assertIsNone(CORE["path_crossing"]([(0, 0)], [0.0], [(0, 0), (1, 1)], [0.0, 1.0]))
-
-    def test_chunking_does_not_change_the_result(self):
-        ta, pa = self.line((0, 0), (10, 0), n=400)
-        tb, pb = self.line((100, -50), (0, 5), n=400)
-        one = CORE["path_crossing"](pa, ta, pb, tb, chunk=100000)
-        many = CORE["path_crossing"](pa, ta, pb, tb, chunk=7)
-        self.assertEqual(one["x"], many["x"])
-        self.assertEqual(one["t_a"], many["t_a"])
-
-
-class TtcMissLimit(unittest.TestCase):
-    def test_half_the_widths_plus_the_margin(self):
-        f = CORE["ttc_miss_limit"]
-        self.assertAlmostEqual(f(1.8, 1.8), 2.3)                  # car - car, margin 0.5
-        self.assertAlmostEqual(f(1.8, 0.8), 1.8)                  # car - motorcycle
-        self.assertAlmostEqual(f(0.8, 0.8, margin=0.0), 0.8)
-        self.assertGreater(f(1.8, 1.8, margin=100.0), 100.0)      # a very large margin switches the rule off
-
-    def test_a_passing_pair_has_a_ttc_that_falls_to_zero_but_a_large_miss(self):
-        # B parked-ish beside the road, A drives by 4 m away: the TTC series ends near 0 but the miss distance stays 4 m
-        for t in (0.0, 0.4, 0.7):
-            r = CORE["vector_ttc"]((10.0 * t, 0.0), (10.0, 0.0), (4.0, -4.0), (0.0, 0.0), 0.5)
-            if r is not None:
-                self.assertAlmostEqual(r["miss"], 4.0, places=9)
-                self.assertGreater(r["miss"], CORE["ttc_miss_limit"](1.8, 1.8))
-        late = CORE["vector_ttc"]((3.99, 0.0), (10.0, 0.0), (4.0, -4.0), (0.0, 0.0), 0.5)
-        self.assertLess(late["TTC"], 0.01)                          # TTC ~ 0 although they miss each other by 4 m
+        checked = 0
+        for _ in range(400):
+            size_a, size_b = rnd.choice((self.CAR, self.MC)), rnd.choice((self.CAR, self.MC))
+            p_a = (rnd.uniform(-8, 8), rnd.uniform(-8, 8)); p_b = (rnd.uniform(-8, 8), rnd.uniform(-8, 8))
+            v_a = (rnd.uniform(-12, 12), rnd.uniform(-12, 12)); v_b = (rnd.uniform(-12, 12), rnd.uniform(-12, 12))
+            if math.hypot(*v_a) < 0.5 or math.hypot(*v_b) < 0.5:
+                continue
+            r = CORE["moving_rect_ttc"](p_a, v_a, size_a, p_b, v_b, size_b, 0.2, 0.0)
+            hit = None
+            for k in range(0, 4001):
+                t = k * 0.0025
+                ca = corners((p_a[0] + v_a[0] * t, p_a[1] + v_a[1] * t), v_a, size_a, 0.2)
+                cb = corners((p_b[0] + v_b[0] * t, p_b[1] + v_b[1] * t), v_b, size_b, 0.2)
+                if overlap(ca, cb):
+                    hit = t
+                    break
+            if r["status"] == "overlap":
+                self.assertEqual(hit, 0.0)
+            elif r["status"] == "collision":
+                if r["TTC"] <= 10.0:
+                    self.assertIsNotNone(hit)
+                    self.assertAlmostEqual(hit, r["TTC"], delta=0.0026)
+            else:
+                self.assertIsNone(hit)
+            checked += 1
+        self.assertGreater(checked, 300)
 
 
 class ConflictAngle(unittest.TestCase):
