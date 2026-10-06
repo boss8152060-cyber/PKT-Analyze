@@ -28,15 +28,14 @@ ID_COLUMNS = ("track_id", "Vehicle_ID", "Vehicle_ID_A", "Vehicle_ID_B", "Vehicle
 
 # kinds of CSV that are put together (the file of a clip is <clip>_<kind>.csv; older runs: Run_3_<kind>.csv)
 KINDS = ("Gap_Acceptance", "Critical_Gap", "LDP", "Lateral_Clearance", "Lateral_Clearance_Pairs", "TTC", "TTC_Detail", "PET",
-         "Speed", "Speed_Detail", "Duplicate_Tracks", "ID_Zone_Summary")
+         "Speed", "Speed_Detail", "Duplicate_Tracks", "ID_Zone_Summary")      # Speed = the speed of every frame; Speed_Detail only exists in older results (merged, no statistics)
 
 # kind -> (indicator name, value column, group columns) for All_Statistics.csv
 STATISTICS = {
-    "Speed_Detail": ("Speed", "Speed_kmh", ("Scope", "Key", "Vehicle_Class")),
     "LDP": ("LDP", "LDP_percent", ("Zone",)),
     "Lateral_Clearance_Pairs": ("Lateral Clearance (pair minimum)", "Lateral_Clearance_Min_m", ("Zone",)),
     "TTC": ("TTC", "TTC_s", ("TTC_Type",)),
-    "PET": ("PET", "PET_s", ("Conflict_Type", "Conflict_Zone")),
+    "PET": ("PET", "PET_s", ("Conflict_Zone",)),
     "Gap_Acceptance": ("Gap Acceptance (available gap)", "Available_Gap_s", ("Decision_Stage", "Gap_Role")),
 }
 
