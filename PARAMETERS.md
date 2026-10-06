@@ -28,7 +28,6 @@
 | `lc_heading_window_s` | 0.50 | Lateral Clearance | ทิศ heading ของรถ A | 0.25, 0.5, 1.0 |
 | `lc_along_limit_m` | 0 (อัตโนมัติ = (L_A+L_B)/2) | Lateral Clearance | ช่วงเคียงข้างตามแนวยาว ±m; มาก = เก็บคู่ที่เหลื่อมกันได้มากขึ้น | 0, 4, 6 |
 | `lc_max_lateral_m` | 3.5 (0 = ไม่จำกัด) | Lateral Clearance | ระยะด้านข้างไกลสุดที่ถือว่ารถสองคันเกี่ยวข้องกัน (ตัดคู่ที่ไกลกันในโซนใหญ่ เช่น R10 พบ 8–10 ม. ใน Zone 3) | 0, 3.5, 5 |
-| `pet_interaction_distance_m` | 3.0 | PET (กรณีเส้นทางไม่ตัดกัน) | จำนวน/ประเภทของเหตุการณ์ | 2, 3, 4 |
 | `pet_max_s` | 10 | PET | ตัดค่า PET ใหญ่ออก | 5, 10, 15 |
 | `pet_min_speed_kmh` | ว่าง (ไม่จำกัด) | PET | ข้ามคู่ที่รถคันใดมีความเร็วตอนผ่านจุดตัด (ตัวอย่างในรัศมี interaction รอบจุดตัด) ต่ำกว่าค่านี้ (กันรถจอดที่ตำแหน่งกระพริบสร้างจุดตัดปลอม; ระวังจะตัดรถที่หยุดรอจริง) | ว่าง, 3, 5 |
 | `pet_threshold_s` | 1.0 | PET (นับต่ำกว่าเกณฑ์) | | 0.5, 1.0, 1.5 |
@@ -63,7 +62,7 @@
 เครื่องมือ `tools/sensitivity.py` รัน Run 3 ซ้ำบนผลของ Run 2 ที่มีอยู่แล้ว (`*_Detection_Records.csv` + `*_ID_Zone_Summary.csv`) ครั้งละหนึ่งค่า แล้วสรุป N / Mean / Median / P85 ของทุกตัวชี้วัด **ไม่แตะโฟลเดอร์ต้นฉบับ** (ทำในโฟลเดอร์ชั่วคราว) ใช้ค่าอื่นทั้งหมดจาก `<run>_Research_Settings.json` ของโฟลเดอร์นั้น
 
 ```bash
-python tools/sensitivity.py "../Output/Run3" pet_interaction_distance_m=2,3,4 ttc_max_record_s=2,3,5 --out sens.csv
+python tools/sensitivity.py "../Output/Run3" pet_max_s=5,10,15 ttc_max_record_s=2,3,5 --out sens.csv
 ```
 
 - ชื่อค่า = คีย์ในส่วน `run3` ของไฟล์ settings (ตารางด้านบน)

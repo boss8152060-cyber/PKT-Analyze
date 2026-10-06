@@ -16,7 +16,7 @@ Scene 1  (speed, LDP, lateral clearance).  Zones by x: 0-10 / 10-20 / 20-30 m
 
 Scene 2  (PET, TTC).  Crossing and rear-end conflicts
   P  Car  2-3-4   along +x at y = 0, 10 m/s, passes (15, 0) at t = 1.5 s
-  Q  Car  1-3-6   along +y at x = 15, passes (15, 0) at t = 3.1 s  -> PET(P,Q) = 1.0 s
+  Q  Car  1-3-6   along +y at x = 15, passes (15, 0) at t = 3.1 s  -> PET(P,Q) = 1.6 s (crossing point only), PET(P,R) = 0.1 s
   R  Car  1-3-6   along +y at x = 15, passes (15, 0) at t = 1.6 s  -> the 4.5 m x 1.8 m boxes touch at t = 1.235 s: TTC ~ 0 (Crossing, 90 deg)
   F  Car  (zone 3) along +x at y = -12, 10 m/s behind  L  Car at 5 m/s, 20 m ahead
         -> boxes (+ 0.25 m each side) 20 - 5 t - 5.0 m apart, closing at 5 m/s: TTC = 3 - t (ends when L leaves at t = 2 s: ~1.0 s, Rear-end, 0 deg)
@@ -309,11 +309,17 @@ def scene2(app):
     # ---- PET ----
     pet = read_csv(os.path.join(out, "PET.csv"))
     pairs = {(r["Vehicle_ID_A"], r["Vehicle_ID_B"]): r for r in pet}
-    check("PET exactly one PET event: P-Q (P-R overlaps in time, Q-R same movement, F/L no movement)",
-          set(pairs) == {("1", "2")}, str(sorted(pairs)))
+    check("PET events: P-Q and P-R (the paths cross); Q-R run on the same line and never cross; F/L have no movement",
+          set(pairs) == {("1", "2"), ("1", "3")}, str(sorted(pairs)))
+    if ("1", "3") in pairs:
+        check("PET PET(P,R) = 0.1 s (crossing point only: R is at (15, 0) 0.1 s after P)", abs(float(pairs[("1", "3")]["PET_s"]) - 0.1) < 0.06,
+              pairs[("1", "3")]["PET_s"])
     if ("1", "2") in pairs:
         r = pairs[("1", "2")]
-        check("PET PET(P,Q) = 1.0 s", abs(float(r["PET_s"]) - 1.0) < 0.06, r["PET_s"])
+        check("PET PET(P,Q) = 1.6 s (crossing point only: Q is at (15, 0) 1.6 s after P, the vehicle size is not subtracted)",
+              abs(float(r["PET_s"]) - 1.6) < 0.06, r["PET_s"])
+        check("PET crossing point written: (15, 0)", abs(float(r["Cross_X_m"]) - 15.0) < 0.05 and abs(float(r["Cross_Y_m"])) < 0.05,
+              f"{r['Cross_X_m']} {r['Cross_Y_m']}")
         check("PET conflict type Crossing in Zone 3", r["Conflict_Type"] == "Crossing" and r["Conflict_Zone"] == "Zone 3",
               f"{r['Conflict_Type']} {r['Conflict_Zone']}")
         lim_pet = m.RISK_DEFAULT_LIMITS["pet_s"]
