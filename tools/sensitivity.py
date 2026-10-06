@@ -7,7 +7,7 @@ not run again, the original output folder is not touched (everything happens in 
     python tools/sensitivity.py <output_folder> <setting>=<v1>,<v2>,... [<setting>=...] [--out file.csv]
 
 Examples (setting names = keys of the "run3" part of Settings.json, i.e. RUN3_DEFAULTS):
-    python tools/sensitivity.py ../Output/Run3 pet_interaction_distance_m=2,3,4
+    python tools/sensitivity.py ../Output/Run3 pet_max_s=5,10,15
     python tools/sensitivity.py ../Output/Run3 speed_max_kmh=40,60,80 ttc_max_record_s=2,3,5
 
 The run name is the name of the folder (older results: taken from <run>_Detection_Records.csv); the saved
