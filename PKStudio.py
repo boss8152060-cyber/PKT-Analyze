@@ -10435,14 +10435,12 @@ class Run1App:
                     pet = t2 - t1
                     if pet <= 0:
                         continue
-                    sp_a, sp_b = self._run3_mean_speed_kmh(A, At), self._run3_mean_speed_kmh(B, Bt)
-                    if min_speed is not None:
-                        # the speed the vehicle really had while passing the crossing point: its samples within the interaction radius of that point
-                        # (None = too few samples to tell: not filtered). Blank setting = no limit.
-                        pa_, pb_ = self._run3_mean_speed_kmh(A[a_mask], a_near), self._run3_mean_speed_kmh(B[b_mask], b_near)
-                        if (pa_ is not None and pa_ < min_speed) or (pb_ is not None and pb_ < min_speed):
-                            diag["slow_vehicle"] += 1
-                            continue
+                    # Speed_A/B = the speed each vehicle really had while passing the crossing point: its samples within the interaction radius of
+                    # that point (None = fewer than 2 samples: blank in the CSV). It also feeds the optional minimum-speed filter (blank = no limit).
+                    sp_a, sp_b = self._run3_mean_speed_kmh(A[a_mask], a_near), self._run3_mean_speed_kmh(B[b_mask], b_near)
+                    if min_speed is not None and ((sp_a is not None and sp_a < min_speed) or (sp_b is not None and sp_b < min_speed)):
+                        diag["slow_vehicle"] += 1
+                        continue
                     if pet_max is not None and pet > pet_max:
                         diag["above_pet_max"] += 1
                         continue
