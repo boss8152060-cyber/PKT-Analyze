@@ -587,7 +587,7 @@ RUN3_DEFAULTS = {
 # ============================================================
 
 ZONE_IDS = list(range(1, 8))
-CONFLICT_ZONE_IDS = (3, 6)              # V28: conflict zones (PET / TTC); ordinary path zones for Movement
+CONFLICT_ZONE_IDS = (3, 6)              # V28: conflict zones (default zones of PET / TTC; every zone 1-7 can be ticked)
 ZONE_NAMES = [f"Zone {i}" for i in ZONE_IDS]
 
 # ==== CORE-BEGIN (pure logic, no GUI: unit-tested by tests/test_core.py) ====
@@ -3746,7 +3746,7 @@ class Run1App:
         self.record_start_var = tk.StringVar(value=DEFAULT_SETTINGS["record_start_s"])
         self.record_end_var = tk.StringVar(value=DEFAULT_SETTINGS["record_end_s"])
         self.run3_lc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["lc_zones"])) for z in ZONE_IDS}
-        self.run3_pet_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["pet_zones"])) for z in CONFLICT_ZONE_IDS}
+        self.run3_pet_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["pet_zones"])) for z in ZONE_IDS}
         self.run3_pet_zone6_var = self.run3_pet_zone_vars[6]   # backward-compatible alias
         self.run3_ttc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["ttc_zones"])) for z in ZONE_IDS}
         self.run3_ldp_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["ldp_zones"])) for z in ZONE_IDS}
@@ -4234,8 +4234,8 @@ class Run1App:
                                           ("มุมความขัดแย้ง: มากกว่านี้ = Crossing (deg), ระหว่างกลาง = Lane change", self.run3_ttc_angle_cross_var))):
             self._entry_row(box, 2 + i, label, var, span=7)
 
-        box = self._indicator_box("PET", self.run3_pet_enabled_var, "PET คำนวณแยกในแต่ละ Conflict Zone (Zone 3 / Zone 6)")
-        self._zone_checks(box, self.run3_pet_zone_vars, 1, "Conflict Zone")
+        box = self._indicator_box("PET", self.run3_pet_enabled_var, "PET คำนวณแยกในแต่ละโซนที่ติ๊ก (ค่าเริ่มต้น Zone 3 / Zone 6)")
+        self._zone_checks(box, self.run3_pet_zone_vars, 1)
         for i, (label, var) in enumerate((("Interaction distance (m)", self.run3_pet_interaction_distance_var),
                                           ("PET threshold (s)", self.run3_pet_threshold_var),
                                           ("PET max (s) — ว่าง = ไม่จำกัด", self.run3_pet_max_var))):
@@ -6843,7 +6843,7 @@ class Run1App:
             for key in ("lane_entry_motorcycle_m", "lane_entry_car_m", "lane_opp_motorcycle_m", "lane_opp_car_m"):
                 self._run3_float(self.run3_geometry_vars[key].get(), f"road geometry {key} (required by LDP)")
         if enabled["pet"]:
-            need_zone(self.run3_pet_zone_vars, "PET (Zone 3 / Zone 6)")
+            need_zone(self.run3_pet_zone_vars, "PET")
             self._run3_float(self.run3_pet_interaction_distance_var.get(), "PET interaction distance (m)")
             self._run3_float(self.run3_pet_threshold_var.get(), "PET threshold (s)")
             if str(self.run3_pet_max_var.get()).strip():
