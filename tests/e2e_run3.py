@@ -247,10 +247,11 @@ def scene1(app):
     check("Lateral Clearance A-E zone 4 = 1.6 - 1.3 = 0.30 m", bool(ae) and all(abs(v - 0.30) < 0.03 for v in ae),
           f"n={len(ae)}" + (f" mean={sum(ae)/len(ae):.3f}" if ae else ""))
     tvr = read_csv(os.path.join(out, "Detection_Records_Topview.csv"))
-    check("Topview records: one row per observed point, in metres", len(tvr) > 0 and {"x_m", "y_m", "cx_m", "cy_m", "speed_kmh"} <= set(tvr[0]),
+    check("Topview records: one row per observed point, in metres (the speed lives in Speed.csv since v28(131))", len(tvr) > 0 and {"x_m", "y_m", "cx_m", "cy_m"} <= set(tvr[0]) and "speed_kmh" not in tvr[0],
           str(len(tvr)))
-    sp = [float(r["speed_kmh"]) for r in tvr if r["speed_kmh"] != "" and r["track_id"] == "1"]
-    check("Topview records: the speed of every frame (vehicle A of scene 1 drives 10 m/s = 36 km/h, weaving a little)", len(sp) > 10 and all(abs(v - 36.0) < 2.5 for v in sp),
+    spd_rows = read_csv(os.path.join(out, "Speed.csv"))
+    sp = [float(r["Speed_kmh"]) for r in spd_rows if r["Vehicle_ID"] == "1" and r["Speed_kmh"] != ""]
+    check("Speed.csv: the speed of every frame (vehicle A of scene 1 drives 10 m/s = 36 km/h, weaving a little)", len(sp) > 10 and all(abs(v - 36.0) < 2.5 for v in sp),
           f"{len(sp)} values, min {min(sp) if sp else None}, max {max(sp) if sp else None}")
     tvv = os.path.join(out, "Tracking_Topview.mp4")
     cap_tv = cv2.VideoCapture(tvv)
@@ -277,7 +278,7 @@ def scene1(app):
     lim = {r["Pair_ID"] for r in read_csv(os.path.join(out_l, "Lateral_Clearance.csv"))}
     check("Lateral Clearance sideways limit 3.5 m drops D-E (4.1 m) and keeps the closer pairs", "4_5" not in lim and {"1_2", "1_5", "2_5"} <= lim, str(sorted(lim)))
     ind = read_csv(os.path.join(out, "Indicator_Summary.csv"))
-    check("indicator summary lists LDP, Lateral Clearance, Speed", any("LDP" in r["Indicator"] for r in ind) and any("Lateral Clearance" in r["Indicator"] for r in ind) and any("Speed" in r["Indicator"] for r in ind))
+    check("indicator summary lists LDP and Lateral Clearance (Speed is per frame in Speed.csv since v28(131), no statistics rows)", any("LDP" in r["Indicator"] for r in ind) and any("Lateral Clearance" in r["Indicator"] for r in ind) and not any(r["Indicator"].startswith("Speed") for r in ind))
 
 
 def scene2(app):
