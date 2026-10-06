@@ -489,7 +489,8 @@ RUN3_DEFAULTS = {
     "pet_max_s": "10.0",                    # pairs/events above this are not PET conflicts; blank = no limit
     "ttc_max_record_s": "3.0",              # record TTC events with TTCmin <= this value
     "ttc_velocity_window_s": "0.50",        # centred window of observed samples for velocity
-    "ttc_min_speed_kmh": "2.0",             # a vehicle slower than this has no heading (conflict angle -> Unclassified)
+    "ttc_min_speed_kmh": "5.0",             # a frame where either vehicle is slower than this is skipped (a parked vehicle whose box flickers has a false velocity)
+    "ttc_miss_margin_m": "0.5",             # TTC counts only when the vehicles come within (W_A + W_B)/2 + this (m); a very large value switches the rule off
     # Vector TTC (SPEC v28 section 7, formula of Yaibok et al. 2026):
     "ttc_min_rel_speed_ms": "0.5",          # pairs with a smaller relative speed (m/s) are skipped (unstable TTC)
     "ttc_pair_radius_m": "20",              # only pairs closer than this (m) are evaluated (the reference paper has a screening radius, value not given)
@@ -888,6 +889,12 @@ def vector_ttc(p_a, v_a, p_b, v_b, min_rel_speed):
     return {"TTC": ttc, "r": r, "v": v, "m": m, "miss": math.hypot(m[0], m[1]), "rel_speed": rel,
             "ttc_x": (-r[0] / v[0]) if r[0] * v[0] < 0 else None,
             "ttc_y": (-r[1] / v[1]) if r[1] * v[1] < 0 else None}
+
+
+def ttc_miss_limit(width_a, width_b, margin=0.5):
+    """How close the two vehicles must come for the TTC to count (SPEC v28 section 7): half of the two widths (the vehicles are points, so their
+    size is allowed for) plus `margin` (m, room for the position error). TTC alone only says WHEN they are closest, not how close."""
+    return (float(width_a) + float(width_b)) / 2.0 + float(margin)
 
 
 def conflict_angle_deg(v_a, v_b, min_speed=0.0):
@@ -3613,6 +3620,7 @@ class Run1App:
         self.run3_ttc_velocity_window_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_velocity_window_s"])
         self.run3_ttc_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_speed_kmh"])
         self.run3_risk_vars = {key: tk.StringVar(value=RUN3_DEFAULTS[key]) for key in RISK_SETTING_KEYS}
+        self.run3_ttc_miss_margin_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_miss_margin_m"])
         self.run3_ttc_min_rel_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_rel_speed_ms"])
         self.run3_ttc_pair_radius_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_pair_radius_m"])
         self.run3_ttc_angle_rear_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_angle_rear_end_deg"])
@@ -4034,7 +4042,8 @@ class Run1App:
         self._zone_checks(box, self.run3_ttc_zone_vars, 1)
         for i, (label, var) in enumerate((("บันทึกเมื่อ TTCmin ≤ (s)", self.run3_ttc_max_record_var),
                                           ("หน้าต่างคำนวณความเร็ว (s)", self.run3_ttc_velocity_window_var),
-                                          ("ความเร็วขั้นต่ำของแต่ละคัน เพื่อหาทิศ/มุม (km/h)", self.run3_ttc_min_speed_var),
+                                          ("ความเร็วขั้นต่ำของแต่ละคัน (km/h) — คันใดต่ำกว่านี้ข้ามเฟรมนั้น (รถจอด กรอบกระพริบ)", self.run3_ttc_min_speed_var),
+                                          ("ระยะพลาดกันที่ยังนับ = ครึ่งความกว้างรวม + ค่านี้ (m)", self.run3_ttc_miss_margin_var),
                                           ("ความเร็วสัมพัทธ์ขั้นต่ำที่ยังคิด (m/s)", self.run3_ttc_min_rel_speed_var),
                                           ("ระยะคัดกรองคู่รถ — ห่างกันไม่เกิน (m)", self.run3_ttc_pair_radius_var),
                                           ("มุมความขัดแย้ง: น้อยกว่านี้ = Rear-end (deg)", self.run3_ttc_angle_rear_var),
@@ -5497,6 +5506,7 @@ class Run1App:
                 "ttc_velocity_window_s": self.run3_ttc_velocity_window_var.get(),
                 "ttc_min_speed_kmh": self.run3_ttc_min_speed_var.get(),
                 **{key: var.get() for key, var in self.run3_risk_vars.items()},
+                "ttc_miss_margin_m": self.run3_ttc_miss_margin_var.get(),
                 "ttc_min_rel_speed_ms": self.run3_ttc_min_rel_speed_var.get(),
                 "ttc_pair_radius_m": self.run3_ttc_pair_radius_var.get(),
                 "ttc_angle_rear_end_deg": self.run3_ttc_angle_rear_var.get(),
@@ -5644,6 +5654,7 @@ class Run1App:
                 ("ttc_velocity_window_s", self.run3_ttc_velocity_window_var),
                 ("ttc_min_speed_kmh", self.run3_ttc_min_speed_var),
                 *[(key, var) for key, var in self.run3_risk_vars.items()],
+                ("ttc_miss_margin_m", self.run3_ttc_miss_margin_var),
                 ("ttc_min_rel_speed_ms", self.run3_ttc_min_rel_speed_var),
                 ("ttc_pair_radius_m", self.run3_ttc_pair_radius_var),
                 ("ttc_angle_rear_end_deg", self.run3_ttc_angle_rear_var),
@@ -6606,6 +6617,9 @@ class Run1App:
             self._run3_float(self.run3_ttc_velocity_window_var.get(), "TTC velocity window (s)")
             self._run3_float(self.run3_ttc_min_speed_var.get(), "TTC minimum vehicle speed (km/h)", positive=False)
             self._run3_float(self.run3_ttc_min_rel_speed_var.get(), "TTC minimum relative speed (m/s)", positive=False)
+            self._run3_float(self.run3_ttc_miss_margin_var.get(), "TTC miss-distance margin (m)", positive=False)
+            for name in RUN3_VEHICLE_CLASSES:
+                self._run3_float(self.run3_width_vars[name].get(), f"vehicle width for {name} (the TTC miss-distance limit needs the width)")
             self._run3_float(self.run3_ttc_pair_radius_var.get(), "TTC pair screening radius (m)")
             a1 = self._run3_float(self.run3_ttc_angle_rear_var.get(), "TTC rear-end angle (deg)")
             a2 = self._run3_float(self.run3_ttc_angle_cross_var.get(), "TTC crossing angle (deg)")
@@ -8905,12 +8919,13 @@ class Run1App:
             "pet_max_s": pet_max if (pet_max is not None and pet_max > 0) else None,
             "ttc_max_record_s": num(self.run3_ttc_max_record_var, 3.0),
             "ttc_velocity_window_s": num(self.run3_ttc_velocity_window_var, 0.5),
-            "ttc_min_speed_kmh": num(self.run3_ttc_min_speed_var, 2.0),
+            "ttc_min_speed_kmh": num(self.run3_ttc_min_speed_var, 5.0),
             "risk_limits": {
                 "ttc_s": self._risk_limits("risk_ttc_limits_s", "ttc_s"), "pet_s": self._risk_limits("risk_pet_limits_s", "pet_s"),
                 "ldp_pct": self._risk_limits("risk_ldp_limits_pct", "ldp_pct"), "speed_kmh": self._risk_limits("risk_speed_limits_kmh", "speed_kmh"),
                 "ldp_speed_kmh": self._risk_limits("risk_ldp_speed_limits_kmh", "ldp_speed_kmh"),
             },
+            "ttc_miss_margin_m": num(self.run3_ttc_miss_margin_var, 0.5),
             "ttc_min_rel_speed_ms": num(self.run3_ttc_min_rel_speed_var, 0.5),
             "ttc_pair_radius_m": num(self.run3_ttc_pair_radius_var, 20.0),
             "ttc_angle_rear_end_deg": num(self.run3_ttc_angle_rear_var, TTC_ANGLE_REAR_END_DEG),
@@ -10120,19 +10135,25 @@ class Run1App:
     def _run3_ttc(self, tracks, c, movement_by_id):
         """Vector TTC (SPEC v28 section 7) for vehicles standing in the selected zones (default Zones 3 and 6) at the same frame.
 
-        Every pair of vehicles seen in the same frame, closer than `ttc_pair_radius_m`: r = P_B - P_A, v = V_B - V_A (metres, from the Trajectory
-        Position; velocities from a short centred window of observed samples, no interpolation); TTC = -(r . v) / (v . v) when r . v < 0
-        (approaching) and |v| >= the minimum relative speed. One row per event (pair; frames more than 1 s apart start a new event) = the frame
-        with the smallest TTC. The conflict type comes from the angle between the two velocity vectors at that frame:
-        < 30 deg Rear-end, 30 - 85 Lane change, > 85 Crossing (Yaibok et al. 2026)."""
+        Every pair of vehicles seen in the same frame, closer than `ttc_pair_radius_m`, both moving at least `ttc_min_speed_kmh` (a parked vehicle
+        whose box flickers has a false velocity: that frame is skipped): r = P_B - P_A, v = V_B - V_A (metres, from the Trajectory Position; velocities
+        from a short centred window of observed samples, no interpolation); TTC = -(r . v) / (v . v) when r . v < 0 (approaching) and |v| >= the minimum
+        relative speed. TTC says WHEN the two are closest, so the frame only counts when they come within (W_A + W_B)/2 + margin of each other
+        (miss distance |r + v TTC|); without that every pair that merely passes each other has a TTC that falls to ~0 at the closest point.
+        One row per event (pair; counted frames more than 1 s apart start a new event) = the counted frame with the smallest TTC. The conflict type comes
+        from the angle between the two velocity vectors at that frame: < 30 deg Rear-end, 30 - 85 Lane change, > 85 Crossing (Yaibok et al. 2026).
+        Returns (event rows, diagnostics, frame rows: every pair frame with a TTC, counted or not, for TTC_Frames.csv)."""
         zones = c["ttc_zones"]
         win = max(1e-3, c["ttc_velocity_window_s"]) / 2.0
         vmin = c["ttc_min_speed_kmh"] / 3.6
         rel_min = c["ttc_min_rel_speed_ms"]
         radius = c["ttc_pair_radius_m"]
         ttc_max = c["ttc_max_record_s"]
+        margin = c["ttc_miss_margin_m"]
+        widths = c["widths"]
         a_rear, a_cross = c["ttc_angle_rear_end_deg"], c["ttc_angle_crossing_deg"]
-        diag = {"frames_with_pairs": 0, "pairs_evaluated": 0, "pairs_outside_radius": 0, "pairs_approaching": 0, "candidates": 0}
+        diag = {"frames_with_pairs": 0, "pairs_evaluated": 0, "pairs_outside_radius": 0, "pairs_slow_vehicle": 0, "pairs_approaching": 0,
+                "frames_too_far_to_collide": 0, "frames_above_ttc_max": 0, "candidates": 0}
 
         per_frame = defaultdict(list)
         for tid, rows in tracks.items():
@@ -10163,6 +10184,7 @@ class Run1App:
                                       "v": (float(v[0]), float(v[1])), "zone": r["_zone_num"]})
 
         cand = defaultdict(list)
+        frame_rows = []
         for fr, items in per_frame.items():
             n = len(items)
             if n < 2:
@@ -10174,17 +10196,34 @@ class Run1App:
                     if str(B["tid"]) < str(A["tid"]):
                         A, B = B, A                                   # A = the smaller ID (stable, one row per pair)
                     diag["pairs_evaluated"] += 1
-                    if math.hypot(B["p"][0] - A["p"][0], B["p"][1] - A["p"][1]) > radius:
+                    dist = math.hypot(B["p"][0] - A["p"][0], B["p"][1] - A["p"][1])
+                    if dist > radius:
                         diag["pairs_outside_radius"] += 1
+                        continue
+                    sp_a, sp_b = math.hypot(*A["v"]), math.hypot(*B["v"])
+                    if sp_a < vmin or sp_b < vmin:
+                        diag["pairs_slow_vehicle"] += 1
                         continue
                     res = vector_ttc(A["p"], A["v"], B["p"], B["v"], rel_min)
                     if res is None:
                         continue
                     diag["pairs_approaching"] += 1
-                    if res["TTC"] > ttc_max:
-                        continue
-                    diag["candidates"] += 1
-                    cand[(A["tid"], B["tid"])].append({"t": A["t"], "fr": fr, "ttc": res["TTC"], "res": res, "a": A, "b": B})
+                    limit = ttc_miss_limit(widths.get(A["cls"]) or 1.8, widths.get(B["cls"]) or 1.8, margin)
+                    theta = conflict_angle_deg(A["v"], B["v"], vmin)
+                    if res["miss"] > limit:
+                        status = "Miss_Too_Far"
+                        diag["frames_too_far_to_collide"] += 1
+                    elif res["TTC"] > ttc_max:
+                        status = "Above_TTC_Max"
+                        diag["frames_above_ttc_max"] += 1
+                    else:
+                        status = "Counted"
+                        diag["candidates"] += 1
+                    entry = {"t": A["t"], "fr": fr, "ttc": res["TTC"], "res": res, "a": A, "b": B, "theta": theta, "limit": limit,
+                             "status": status, "dist": dist, "sp_a": sp_a, "sp_b": sp_b}
+                    frame_rows.append(entry)
+                    if status == "Counted":
+                        cand[(A["tid"], B["tid"])].append(entry)
 
         out = []
         event_gap = 1.0
@@ -10199,15 +10238,19 @@ class Run1App:
             for ev in events:
                 best = min(ev, key=lambda x: x["ttc"])
                 a_, b_, res = best["a"], best["b"], best["res"]
-                sp_a, sp_b = math.hypot(*a_["v"]), math.hypot(*b_["v"])
-                theta = conflict_angle_deg(a_["v"], b_["v"], vmin)
+                sp_a, sp_b = best["sp_a"], best["sp_b"]
+                theta = best["theta"]
+                event_id = f"TTC_{a_['tid']}_{b_['tid']}_{ev[0]['t']:.6f}"
+                for e_ in ev:
+                    e_["event_id"] = event_id
+                best["is_min"] = True
                 out.append({
                     "Site_ID": c["site_id"],
-                    "Event_ID": f"TTC_{a_['tid']}_{b_['tid']}_{ev[0]['t']:.6f}",
+                    "Event_ID": event_id,
                     "TTC_Type": ttc_conflict_type(theta, a_rear, a_cross),
                     "Vehicle_A_ID": a_["tid"], "Vehicle_A_Class": a_["cls"], "Movement_A": movement_by_id.get(str(a_["tid"]), ""),
                     "Vehicle_B_ID": b_["tid"], "Vehicle_B_Class": b_["cls"], "Movement_B": movement_by_id.get(str(b_["tid"]), ""),
-                    "Zone": f"Zone {best['a']['zone']}", "Event_Start": f"{ev[0]['t']:.6f}", "Event_End": f"{ev[-1]['t']:.6f}",
+                    "Zone": f"Zone {a_['zone']}", "Event_Start": f"{ev[0]['t']:.6f}", "Event_End": f"{ev[-1]['t']:.6f}",
                     "Event_Frames": len(ev), "TTCmin_Time": f"{best['t']:.6f}", "TTCmin_Frame": best["fr"],
                     "Theta_deg": "" if theta is None else f"{theta:.2f}",
                     "Rel_X_m": f"{res['r'][0]:.4f}", "Rel_Y_m": f"{res['r'][1]:.4f}",
@@ -10228,7 +10271,18 @@ class Run1App:
                     ] if x),
                 })
         out.sort(key=lambda r: float(r["TTCmin_Time"]))
-        return out, diag
+        frames_out = []
+        for e_ in sorted(frame_rows, key=lambda x: (str(x["a"]["tid"]), str(x["b"]["tid"]), x["t"])):
+            a_, b_, res = e_["a"], e_["b"], e_["res"]
+            frames_out.append({
+                "Site_ID": c["site_id"], "Vehicle_A_ID": a_["tid"], "Vehicle_B_ID": b_["tid"], "Frame": e_["fr"], "Time_s": f"{e_['t']:.6f}",
+                "Zone_A": f"Zone {a_['zone']}", "Zone_B": f"Zone {b_['zone']}", "Distance_m": f"{e_['dist']:.4f}",
+                "TTC_s": f"{e_['ttc']:.6f}", "Miss_Distance_m": f"{res['miss']:.4f}", "Miss_Limit_m": f"{e_['limit']:.4f}",
+                "Theta_deg": "" if e_["theta"] is None else f"{e_['theta']:.2f}", "Rel_Speed_kmh": f"{res['rel_speed'] * 3.6:.4f}",
+                "Speed_A_kmh": f"{e_['sp_a'] * 3.6:.4f}", "Speed_B_kmh": f"{e_['sp_b'] * 3.6:.4f}",
+                "Status": e_["status"], "Event_ID": e_.get("event_id", ""), "Is_Event_Min": "1" if e_.get("is_min") else "",
+            })
+        return out, diag, frames_out
 
     # ========================================================
     # LDP (Lane / Lateral Deviation Position)
@@ -10482,10 +10536,12 @@ class Run1App:
         # ---------------- TTC (time) ----------------
         def do_ttc():
             status("Run 3 — TTC...")
-            rows, diag = self._run3_ttc(tracks, c, movement_by_id)
+            rows, diag, ttc_frames = self._run3_ttc(tracks, c, movement_by_id)
             fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","Rel_X_m","Rel_Y_m","RelV_X_mps","RelV_Y_mps","Rel_Speed_kmh","Miss_X_m","Miss_Y_m","Miss_Distance_m","TTC_X_s","TTC_Y_s","Speed_A_kmh","Speed_B_kmh","TTC_s","TTC_Level","Speed_Level","TTC_Risk_Level","QC_Flag"]
             row_counts["ttc"] = len(rows)
             outputs["ttc"] = write_csv("TTC.csv", fields, rows)
+            outputs["ttc_frames"] = write_csv("TTC_Frames.csv", ["Site_ID","Vehicle_A_ID","Vehicle_B_ID","Frame","Time_s","Zone_A","Zone_B","Distance_m","TTC_s","Miss_Distance_m","Miss_Limit_m","Theta_deg","Rel_Speed_kmh","Speed_A_kmh","Speed_B_kmh","Status","Event_ID","Is_Event_Min"], ttc_frames)
+            diag["frame_rows_written"] = len(ttc_frames)
             vals = [float(r["TTC_s"]) for r in rows]
             s_ = indicator("Time-to-Collision (TTCmin per event)", "Time", "s", "All", vals,
                            f"events with TTCmin <= {c['ttc_max_record_s']} s")
@@ -10495,7 +10551,8 @@ class Run1App:
             s_["Level_Counts"] = {lv: sum(1 for r in rows if r["TTC_Level"] == lv) for lv in ("High", "Moderate", "Low", "Interaction")}
             s_["Risk_Counts"] = {lv: sum(1 for r in rows if r["TTC_Risk_Level"] == lv) for lv in ("High", "Moderate", "Low", "Interaction")}
             summary["indicators"]["TTC"] = s_
-            diag["rule"] = {"formula": "TTC = -(r.v)/(v.v), r.v < 0", "min_rel_speed_ms": c["ttc_min_rel_speed_ms"], "pair_radius_m": c["ttc_pair_radius_m"],
+            diag["rule"] = {"formula": "TTC = -(r.v)/(v.v), r.v < 0", "min_vehicle_speed_kmh": c["ttc_min_speed_kmh"], "miss_margin_m": c["ttc_miss_margin_m"],
+                            "min_rel_speed_ms": c["ttc_min_rel_speed_ms"], "pair_radius_m": c["ttc_pair_radius_m"],
                             "angle_rear_end_deg": c["ttc_angle_rear_end_deg"], "angle_crossing_deg": c["ttc_angle_crossing_deg"]}
             summary["diagnostics"]["ttc"] = diag
         run_step("ttc", "TTC.csv", do_ttc)

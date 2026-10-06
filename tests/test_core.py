@@ -450,6 +450,25 @@ class VectorTtc(unittest.TestCase):
             self.assertAlmostEqual(r["miss"], miss, places=9)
 
 
+class TtcMissLimit(unittest.TestCase):
+    def test_half_the_widths_plus_the_margin(self):
+        f = CORE["ttc_miss_limit"]
+        self.assertAlmostEqual(f(1.8, 1.8), 2.3)                  # car - car, margin 0.5
+        self.assertAlmostEqual(f(1.8, 0.8), 1.8)                  # car - motorcycle
+        self.assertAlmostEqual(f(0.8, 0.8, margin=0.0), 0.8)
+        self.assertGreater(f(1.8, 1.8, margin=100.0), 100.0)      # a very large margin switches the rule off
+
+    def test_a_passing_pair_has_a_ttc_that_falls_to_zero_but_a_large_miss(self):
+        # B parked-ish beside the road, A drives by 4 m away: the TTC series ends near 0 but the miss distance stays 4 m
+        for t in (0.0, 0.4, 0.7):
+            r = CORE["vector_ttc"]((10.0 * t, 0.0), (10.0, 0.0), (4.0, -4.0), (0.0, 0.0), 0.5)
+            if r is not None:
+                self.assertAlmostEqual(r["miss"], 4.0, places=9)
+                self.assertGreater(r["miss"], CORE["ttc_miss_limit"](1.8, 1.8))
+        late = CORE["vector_ttc"]((3.99, 0.0), (10.0, 0.0), (4.0, -4.0), (0.0, 0.0), 0.5)
+        self.assertLess(late["TTC"], 0.01)                          # TTC ~ 0 although they miss each other by 4 m
+
+
 class ConflictAngle(unittest.TestCase):
     def test_angle_between_velocities(self):
         ang = CORE["conflict_angle_deg"]
