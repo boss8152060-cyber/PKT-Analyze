@@ -35,7 +35,7 @@ STATISTICS = {
     "LDP": ("LDP", "LDP_percent", ("Zone",)),
     "Lateral_Clearance_Pairs": ("Lateral Clearance (pair minimum)", "Lateral_Clearance_Min_m", ("Zone",)),
     "TTC": ("TTC", "TTC_s", ("TTC_Type",)),
-    "PET": ("PET", "PET_s", ("Conflict_Zone",)),
+    "PET": ("PET", "PET_s", ("Conflict_Type", "Conflict_Zone")),
     "Gap_Acceptance": ("Gap Acceptance (available gap)", "Available_Gap_s", ("Decision_Stage", "Gap_Role")),
 }
 
