@@ -178,6 +178,28 @@ app.zones["Zone 3"] = [(40 * PPM, 10 * PPM), (50 * PPM, 10 * PPM), (50 * PPM, 20
 rows_out, diag_out, fr_out, _sh2 = app._run3_ttc(tr2, cp_, {})
 check("zone filter: the collision point is outside the selected zone -> no event (even with both vehicles recorded inside Zone 3), the frames say Outside_Zone",
       not rows_out and any(r["Status"] == "Outside_Zone" for r in fr_out) and diag_out["frames_collision_point_outside_zone"] > 0, str(diag_out["frames_collision_point_outside_zone"]))
+# ---- Zone Sequence: both vehicles must be in the collision zone now or enter it later (never visited / already left -> not counted)
+app.zones["Zone 3"] = [(20 * PPM, 10 * PPM), (30 * PPM, 10 * PPM), (30 * PPM, 20 * PPM), (20 * PPM, 20 * PPM)]
+def with_zones(z1, z2):
+    """z1 / z2: function of the time t -> zone number or None for car 1 / car 2"""
+    out_ = {1: [], 2: []}
+    for tid, zf in ((1, z1), (2, z2)):
+        for r in tr2[tid]:
+            z = zf(r["_timestamp"])
+            out_[tid].append(dict(r, zone="" if z is None else f"Zone {z}", _zone_num=z))
+    return out_
+ev_ok = app._run3_ttc(with_zones(lambda t: 3, lambda t: 3 if t >= 1.5 else 2), cp_, {})
+check("Zone Sequence: car 2 comes from Zone 2 and enters Zone 3 later (1.5 s) -> the zone is on its way: the event is found (frames before it enters count)",
+      len(ev_ok[0]) == 1 and ev_ok[0][0]["QC_Flag"].find("Zone_Sequence_Incomplete") < 0 and ev_ok[3][5]["marks"], str([(r["Zone"], r["TTC_s"], r["QC_Flag"]) for r in ev_ok[0]]))
+ev_never = app._run3_ttc(with_zones(lambda t: 3, lambda t: 2), cp_, {})
+check("Zone Sequence: car 2 never goes to Zone 3 (always Zone 2) -> nothing is counted; the frames say Zone_Not_On_Path",
+      not ev_never[0] and any(r["Status"] == "Zone_Not_On_Path" for r in ev_never[2]) and ev_never[1]["frames_zone_not_on_path"] > 0, str(ev_never[1]["frames_zone_not_on_path"]))
+ev_left = app._run3_ttc(with_zones(lambda t: 3, lambda t: 3 if t <= 0.4 else 2), cp_, {})
+check("Zone Sequence: car 2 was in Zone 3 only before 0.4 s and has left it -> only the early frames (it is still in the zone) count: TTC >= 1.4 s, not the 0.1 s of the late frames",
+      len(ev_left[0]) == 1 and float(ev_left[0][0]["TTC_s"]) > 1.4 and float(ev_left[0][0]["Event_End"]) <= 0.55, str([(r['Zone'], r['TTC_s'], r['Event_End']) for r in ev_left[0]]))
+ev_inc = app._run3_ttc(with_zones(lambda t: 3, lambda t: None), cp_, {})
+check("a vehicle never seen in any zone has no sequence: the rule is skipped for it and the event is flagged Zone_Sequence_Incomplete",
+      len(ev_inc[0]) == 1 and "Zone_Sequence_Incomplete" in ev_inc[0][0]["QC_Flag"], str([(r["QC_Flag"]) for r in ev_inc[0]]))
 app.zones["Zone 3"] = keep_zone
 
 root.destroy()

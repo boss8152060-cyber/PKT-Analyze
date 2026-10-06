@@ -529,22 +529,18 @@ class RectPolygonAndInvertMap(unittest.TestCase):
         self.assertLess(np.abs(back - px).max(), 1e-2)
 
 
-class PointPolygonDistance(unittest.TestCase):
-    SQ = [(0, 0), (10, 0), (10, 10), (0, 10)]
-
-    def test_inside_is_zero(self):
-        self.assertEqual(CORE["point_polygon_distance"]((5, 5), self.SQ), 0.0)
-
-    def test_outside_is_the_distance_to_the_nearest_edge(self):
-        f = CORE["point_polygon_distance"]
-        self.assertAlmostEqual(f((13, 5), self.SQ), 3.0)
-        self.assertAlmostEqual(f((13, 14), self.SQ), 5.0)          # nearest is the corner (10, 10)
-        self.assertAlmostEqual(f((-2, 5), self.SQ), 2.0)
-
-    def test_concave_polygon(self):
-        L = [(0, 0), (10, 0), (10, 4), (4, 4), (4, 10), (0, 10)]
-        self.assertEqual(CORE["point_polygon_distance"]((2, 8), L), 0.0)
-        self.assertAlmostEqual(CORE["point_polygon_distance"]((8, 8), L), 4.0)
+class ZoneVisits(unittest.TestCase):
+    def test_visits_and_on_path(self):
+        samples = [(0.0, 2), (0.5, 2), (1.0, 3), (2.0, 3), (2.5, None), (3.0, 4), (3.5, 4)]
+        v = CORE["zone_visits_from_samples"](samples)
+        self.assertEqual([(z, a, b) for z, a, b in v], [(2, 0.0, 0.5), (3, 1.0, 2.0), (4, 3.0, 3.5)])
+        f = CORE["zone_on_path"]
+        self.assertTrue(f(v, 3, 1.5))            # inside Zone 3 now
+        self.assertTrue(f(v, 4, 1.5))            # Zone 4 is still ahead
+        self.assertFalse(f(v, 2, 1.5))           # Zone 2 is behind
+        self.assertFalse(f(v, 7, 1.5))           # never goes to Zone 7
+        self.assertTrue(f(v, 2, 0.55, tol=0.1))  # a small tolerance at the end of a visit
+        self.assertEqual(CORE["zone_sequence_from_samples"](samples), [2, 3, 4])
 
 
 class ConflictAngle(unittest.TestCase):

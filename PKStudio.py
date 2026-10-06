@@ -668,10 +668,9 @@ MOVEMENT_PATTERNS = {
 MOVEMENT_IDS = list(MOVEMENT_PATTERNS)
 
 
-def zone_sequence_from_samples(samples, merge_gap_s=ZONE_FLICKER_MERGE_S):
+def zone_visits_from_samples(samples, merge_gap_s=ZONE_FLICKER_MERGE_S):
     """samples = [(timestamp, zone_number_or_None), ...] of ONE track (time order).
-    Returns the flicker-cleaned zone sequence as a list of ints with no
-    consecutive duplicates. A sample outside every zone (None) ends a visit."""
+    Returns the flicker-cleaned visits [(zone, first_time, last_time), ...]. A sample outside every zone (None) ends a visit."""
     visits = []
     cur = None
     for t, z in samples:
@@ -683,11 +682,26 @@ def zone_sequence_from_samples(samples, merge_gap_s=ZONE_FLICKER_MERGE_S):
         else:
             visits.append([z, t, t])
             cur = z
+    return clean_zone_visits(visits, merge_gap_s)
+
+
+def zone_sequence_from_samples(samples, merge_gap_s=ZONE_FLICKER_MERGE_S):
+    """samples = [(timestamp, zone_number_or_None), ...] of ONE track (time order).
+    Returns the flicker-cleaned zone sequence as a list of ints with no
+    consecutive duplicates. A sample outside every zone (None) ends a visit."""
     seq = []
-    for z, _s, _e in clean_zone_visits(visits, merge_gap_s):
+    for z, _s, _e in zone_visits_from_samples(samples, merge_gap_s):
         if not seq or seq[-1] != z:
             seq.append(z)
     return seq
+
+
+def zone_on_path(visits, zone, t, tol=0.0):
+    """True when the vehicle with these visits is in `zone` at time t or enters it later (the zone is on its way); False when it never goes there or
+    has already left it. `visits` = zone_visits_from_samples(...)."""
+    return any(z == zone and last >= t - tol for z, _first, last in visits)
+
+
 
 
 def classify_movement(sequence):
@@ -10485,7 +10499,8 @@ class Run1App:
                     return zn
             return None
 
-        diag = {"zone_geometry": bool(geom), "frames_collision_point_outside_zone": 0, "frames_with_pairs": 0, "pairs_evaluated": 0, "pairs_outside_radius": 0, "pairs_slow_vehicle": 0, "pairs_slow_relative": 0,
+        visits_of = {}                                        # tid -> flicker-cleaned zone visits (the Zone Sequence with its times)
+        diag = {"zone_geometry": bool(geom), "frames_zone_not_on_path": 0, "frames_collision_point_outside_zone": 0, "frames_with_pairs": 0, "pairs_evaluated": 0, "pairs_outside_radius": 0, "pairs_slow_vehicle": 0, "pairs_slow_relative": 0,
                 "frames_boxes_never_touch": 0, "frames_already_overlapping": 0, "frames_above_ttc_max": 0, "candidates": 0}
 
         def size_of(cls):
@@ -10502,6 +10517,7 @@ class Run1App:
             if len(valid) < 2:
                 continue
             t = np.array([r["_timestamp"] for r in valid]); m = np.array([r["_m"] for r in valid])
+            visits_of[tid] = zone_visits_from_samples([(r["_timestamp"], r.get("_zone_num")) for r in valid])
             lo = np.searchsorted(t, t - win, side="left")
             hi = np.searchsorted(t, t + win, side="right") - 1
             for k, r in enumerate(valid):
@@ -10595,6 +10611,15 @@ class Run1App:
                             entry["status"] = "Outside_Zone"
                             diag["frames_collision_point_outside_zone"] += 1
                             diag["candidates"] -= 1
+                        else:
+                            # both vehicles must be in that zone now or enter it later (Zone Sequence); a vehicle that was never seen in any zone has no
+                            # sequence to test: the rule is skipped for it and the event is flagged
+                            va, vb = visits_of.get(A["tid"], []), visits_of.get(B["tid"], [])
+                            entry["seq_incomplete"] = (not va) or (not vb)
+                            if (va and not zone_on_path(va, entry["zone_hit"], A["t"], 0.1)) or (vb and not zone_on_path(vb, entry["zone_hit"], A["t"], 0.1)):
+                                entry["status"] = "Zone_Not_On_Path"
+                                diag["frames_zone_not_on_path"] += 1
+                                diag["candidates"] -= 1
                     if entry["status"] == "Counted":
                         cand[(A["tid"], B["tid"])].append(entry)
                         shapes[fr]["hot"].update((A["tid"], B["tid"]))
@@ -10653,6 +10678,7 @@ class Run1App:
                     "QC_Flag": ";".join(x for x in [
                         "Single_Frame_Event" if len(ev) == 1 else "",
                         "No_Heading" if theta is None else "",
+                        "Zone_Sequence_Incomplete" if any(e_.get("seq_incomplete") for e_ in ev) else "",
                         self._run3_qc_calibration(c),
                     ] if x),
                 })
