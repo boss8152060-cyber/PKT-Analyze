@@ -27,18 +27,21 @@ ID_COLUMNS = ("track_id", "Vehicle_ID", "Vehicle_ID_A", "Vehicle_ID_B", "Vehicle
               "Event_ID", "Decision_Event_ID")
 
 # kinds of CSV that are put together (the file of a clip is <clip>_<kind>.csv; older runs: Run_3_<kind>.csv)
-KINDS = ("Gap_Acceptance", "Critical_Gap", "LDP", "Lateral_Clearance", "Lateral_Clearance_Pairs", "TTC", "PET",
-         "Speed", "Speed_Detail", "Duplicate_Tracks", "ID_Zone_Summary")
+KINDS = ("Gap_Acceptance", "Critical_Gap", "LDP", "Lateral_Clearance", "Lateral_Clearance_Pairs", "TTC", "TTC_Detail", "PET",
+         "Speed", "Speed_Detail", "Duplicate_Tracks", "ID_Zone_Summary")      # Speed = the speed of every frame; Speed_Detail only exists in older results (merged, no statistics)
 
 # kind -> (indicator name, value column, group columns) for All_Statistics.csv
 STATISTICS = {
-    "Speed_Detail": ("Speed", "Speed_kmh", ("Scope", "Key", "Vehicle_Class")),
     "LDP": ("LDP", "LDP_percent", ("Zone",)),
     "Lateral_Clearance_Pairs": ("Lateral Clearance (pair minimum)", "Lateral_Clearance_Min_m", ("Zone",)),
     "TTC": ("TTC", "TTC_s", ("TTC_Type",)),
     "PET": ("PET", "PET_s", ("Conflict_Type", "Conflict_Zone")),
-    "Gap_Acceptance": ("Gap Acceptance (available gap)", "X31_Available_Gap", ("Decision_Stage", "Gap_Role")),
+    "Gap_Acceptance": ("Gap Acceptance (available gap)", "Available_Gap_s", ("Decision_Stage", "Gap_Role")),
 }
+
+
+# column renamed in v28(129) -> its name in older results (so All_Statistics still reads them)
+OLD_COLUMN_NAMES = {"Available_Gap_s": "X31_Available_Gap"}
 
 
 def result_file(folder, new_name, clip_name=None):
@@ -200,7 +203,7 @@ def combine(clips, target_dir):
         for r in merged.get(kind, []):
             if "Speed_Above_Max" in str(r.get("QC_Flag", "")):
                 continue
-            v = to_float(r.get(column))
+            v = to_float(r.get(column, r.get(OLD_COLUMN_NAMES.get(column, ""))))     # results of older versions use the old column name
             if v is None:
                 continue
             key = " | ".join(str(r.get(c, "")) for c in group_cols)

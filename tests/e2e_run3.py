@@ -63,12 +63,10 @@ def make_rows(tid, cls, path_fn, zone_fn, n_frames, size_m):
         x, y = pos
         cx, cy = x * PPM, y * PPM
         rows.append({
-            "frame": i + 1, "timestamp": f"{(i + 1) / FPS:.6f}", "track_id": tid, "class_id": 0,
+            "frame": i + 1, "timestamp": f"{(i + 1) / FPS:.6f}", "track_id": tid,
             "class_name": cls, "confidence": "0.9",
             "bbox_x1": int(cx - hl), "bbox_y1": int(cy - hw), "bbox_x2": int(cx + hl), "bbox_y2": int(cy + hw),
-            "bbox_width": int(2 * hl), "bbox_height": int(2 * hw), "bbox_area": 0,
             "trajectory_x": int(cx), "trajectory_y": int(cy),
-            "trajectory_position": "Center", "trajectory_offset": "0.00",
             "zone": zone_name(zone_fn(x, y)),
         })
     return rows
@@ -101,6 +99,11 @@ def read_csv(path, raw=False):
         rows = list(csv.DictReader(f))
     if not raw:
         rows = [{k: (v.replace("→", "-") if isinstance(v, str) else v) for k, v in r.items()} for r in rows]
+    detail = os.path.join(os.path.dirname(path), "TTC_Detail.csv")
+    if os.path.basename(path) == "TTC.csv" and os.path.isfile(detail):          # TTC.csv keeps the core columns; the relative vectors etc. are in TTC_Detail.csv
+        with open(detail, newline="", encoding="utf-8-sig") as f:
+            extra = {r["Event_ID"]: r for r in csv.DictReader(f)}
+        rows = [dict(extra.get(r["Event_ID"], {}), **r) for r in rows]
     return rows
 
 
@@ -153,56 +156,58 @@ def scene1(app):
     check("movement 5-6-7 = 1 vehicle (C)", mc.get("5-6-7") == 1, str(mc))
     check("movement 1-3-4 = 1 vehicle (E)", mc.get("1-3-4") == 1, str(mc))
 
-    # ---- Speed ----
-    det = read_csv(os.path.join(out, "Speed_Detail.csv"))
-    by = {(r["Vehicle_ID"], r["Scope"], r["Key"]): float(r["Speed_kmh"]) for r in det}
+    # ---- Speed (every frame, inside the selected zones; no statistics) ----
+    sp = read_csv(os.path.join(out, "Speed.csv"))
+    check("Speed.csv columns: one row per vehicle x frame", [*sp[0]] == ["Frame", "Time_s", "Vehicle_ID", "Vehicle_Class", "Zone", "Movement", "Speed_kmh", "QC_Flag"], str([*sp[0]]) if sp else "no rows")
     for vid, kmh in (("1", 36.0), ("2", 36.0), ("3", 18.0)):
-        zs = [k for (v, sc, k) in by if v == vid and sc == "Zone"]
-        check(f"vehicle {vid} has 3 zone speeds", len(zs) == 3, str(zs))
-        check(f"vehicle {vid} zone speeds ~{kmh} km/h",
-              all(abs(by[(vid, 'Zone', k)] - kmh) < 0.6 for k in zs), str({k: round(by[(vid, 'Zone', k)], 2) for k in zs}))
-    check("vehicle 1 Movement 2-3-4 speed ~36", abs(by.get(("1", "Movement", "2-3-4"), 0) - 36.0) < 0.6)
-    check("vehicle 3 Movement 5-6-7 speed ~18", abs(by.get(("3", "Movement", "5-6-7"), 0) - 18.0) < 0.6)
-    stats = read_csv(os.path.join(out, "Speed_Statistics.csv"))
-    z2 = [r for r in stats if r["Scope"] == "Zone" and r["Key"] == "Zone 2" and r["Vehicle_Class"] == "All"][0]
-    check("Speed stats Zone 2: N=2, V50 ~36", z2["N"] == "2" and abs(float(z2["V50_kmh"]) - 36.0) < 0.6, str(z2))
+        vr = [r for r in sp if r["Vehicle_ID"] == vid]
+        zs = sorted({r["Zone"] for r in vr})
+        check(f"vehicle {vid} has speeds in 3 zones", len(zs) == 3, str(zs))
+        check(f"vehicle {vid} speed ~{kmh} km/h in every frame (a few hundred rows)", len(vr) > 100 and all(abs(float(r["Speed_kmh"]) - kmh) < 1.0 for r in vr),
+              f"{len(vr)} rows, min {min(float(r['Speed_kmh']) for r in vr):.2f} max {max(float(r['Speed_kmh']) for r in vr):.2f}" if vr else "no rows")
+    check("vehicle 1 rows carry its Movement 2-3-4; the duplicate ID 6 has no rows", all(r["Movement"] == "2-3-4" for r in sp if r["Vehicle_ID"] == "1")
+          and not any(r["Vehicle_ID"] == "6" for r in sp))
+    check("no old Speed files: Speed_Detail.csv / Speed_Statistics.csv are not written", not os.path.exists(os.path.join(out, "Speed_Detail.csv"))
+          and not os.path.exists(os.path.join(out, "Speed_Statistics.csv")))
     check("untracked detections diagnostic present (0 here)", summary["diagnostics"]["untracked_detections"]["rows_with_track_id_minus_1"] == 0)
+    raw_sp = read_csv(os.path.join(out, "Speed.csv"), raw=True)
+    check("CSV movement cells use arrows (Excel would turn 2-3-4 into a date)",
+          any(r["Movement"] == "2→3→4" for r in raw_sp) and not any("-" in r["Movement"] for r in raw_sp), str([r["Movement"] for r in raw_sp][:3]))
+    # only the ticked zones: Zone 3 alone
+    for zz, vv in app.run3_speed_zone_vars.items():
+        vv.set(zz == 3)
+    out_zs, _ = run_scene(app, veh)
+    for vv in app.run3_speed_zone_vars.values():
+        vv.set(True)
+    sp_z3 = read_csv(os.path.join(out_zs, "Speed.csv"))
+    check("speed zones: with only Zone 3 ticked every row is in Zone 3", len(sp_z3) > 0 and {r["Zone"] for r in sp_z3} == {"Zone 3"}, str({r["Zone"] for r in sp_z3}))
     # --- per-zone calibration: Zone 3 has its own reference quad measured at 50 px/m (base = 100 px/m) ---
     app.run3_zone_calibrations = {"3": {"points": [[1000, -200], [2000, -200], [2000, 800], [1000, 800]], "lengths": [20, 20, 20, 20]}}
     out_z, summary_z = run_scene(app, veh)
     app.run3_zone_calibrations = {}
-    det_z = read_csv(os.path.join(out_z, "Speed_Detail.csv"))
-    bz = {(r["Vehicle_ID"], r["Key"]): (float(r["Speed_kmh"]), r["Calibration_Mode"]) for r in det_z if r["Scope"] == "Zone"}
-    check("zone calibration: Zone 3 speed of vehicle 1 doubles (36 -> 72 km/h, own scale 50 px/m)", abs(bz[("1", "Zone 3")][0] - 72.0) < 1.5 and bz[("1", "Zone 3")][1] == "Zone_Homography", str(bz[("1", "Zone 3")]))
-    check("zone calibration: Zone 2 and Zone 4 keep the base scale (36 km/h)", abs(bz[("1", "Zone 2")][0] - 36.0) < 1.0 and abs(bz[("1", "Zone 4")][0] - 36.0) < 1.0 and bz[("1", "Zone 2")][1] != "Zone_Homography", str((bz[("1", "Zone 2")], bz[("1", "Zone 4")])))
+    sp_z = read_csv(os.path.join(out_z, "Speed.csv"))
+    bz = {z: [float(r["Speed_kmh"]) for r in sp_z if r["Vehicle_ID"] == "1" and r["Zone"] == z] for z in ("Zone 2", "Zone 3", "Zone 4")}
+    check("zone calibration: Zone 3 speed of vehicle 1 doubles (36 -> 72 km/h, own scale 50 px/m)", bool(bz["Zone 3"]) and all(abs(v - 72.0) < 1.5 for v in bz["Zone 3"]),
+          f"{min(bz['Zone 3']):.2f}..{max(bz['Zone 3']):.2f}" if bz["Zone 3"] else "no rows")
+    check("zone calibration: Zone 2 and Zone 4 keep the base scale (36 km/h)", bool(bz["Zone 2"]) and bool(bz["Zone 4"]) and all(abs(v - 36.0) < 1.0 for v in bz["Zone 2"] + bz["Zone 4"]),
+          str({k: (round(min(v), 2), round(max(v), 2)) for k, v in bz.items() if v}))
     zinfo = summary_z["calibration"].get("zone_calibrations", {})
     check("zone calibration is reported in the summary with its alignment check", "Zone 3" in zinfo and zinfo["Zone 3"]["alignment_rms_m"] > 1.0, str(zinfo))
-    # --- speed above the plausible maximum is flagged and left out of the statistics ---
+    # --- speed above the plausible maximum is flagged (the rows stay) ---
     app.run3_speed_max_var.set("30")
     out_o, summary_o = run_scene(app, veh)
     app.run3_speed_max_var.set("80")
-    det_o = read_csv(os.path.join(out_o, "Speed_Detail.csv"))
-    flagged = {r["Vehicle_ID"] for r in det_o if "Speed_Above_Max" in r["QC_Flag"]}
+    sp_o = read_csv(os.path.join(out_o, "Speed.csv"))
+    flagged = {r["Vehicle_ID"] for r in sp_o if "Speed_Above_Max" in r["QC_Flag"]}
     check("max speed 30: the 36 km/h vehicles 1, 2, 4, 5 are flagged, the 18 km/h vehicle 3 is not", flagged == {"1", "2", "4", "5"}, str(flagged))
-    st_o = read_csv(os.path.join(out_o, "Speed_Statistics.csv"))
-    z2o = [r for r in st_o if r["Scope"] == "Zone" and r["Key"] == "Zone 2" and r["Vehicle_Class"] == "All"]
-    check("flagged speeds are left out of the statistics (Zone 2 has no 18 km/h vehicle -> no row)", not z2o, str(z2o))
-    check("flagged rows stay in the detail file", len(det_o) == len(det))
-    # --- tools/sensitivity.py: re-run Run 3 for several values of one setting ---
+    check("flagged rows stay in the file", len(sp_o) == len(sp))
+    # --- tools/sensitivity.py: re-run Run 3 for several values of one setting (the Lateral Clearance side limit changes how many samples are measured) ---
     sys.path.insert(0, os.path.join(HERE, "..", "tools"))
     import sensitivity
-    sens = sensitivity.run_sensitivity(app, out, "T", {"speed_max_kmh": ["30", "80"]})
-    zs = {(r["Value"]): r for r in sens if r["Group"] == "Zone 2" and r["Indicator"].startswith("Speed")}
-    check("sensitivity: speed_max 80 -> Zone 2 N=2; 30 -> Zone 2 has no row (both 36 km/h vehicles excluded)",
-          zs.get("80", {}).get("N") == "2" and "30" not in zs, str(zs))
-    check("sensitivity leaves the source folder untouched", not os.path.exists(os.path.join(out, "Sensitivity_speed_max_kmh.csv")))
-    raw_speed = read_csv(os.path.join(out, "Speed.csv"), raw=True)
-    check("CSV movement / zone-sequence cells use arrows (Excel would turn 2-3-4 into a date)",
-          any(r["Zone_Sequence"] == "2→3→4" for r in raw_speed) and not any("-" in r["Zone_Sequence"] for r in raw_speed),
-          str([r["Zone_Sequence"] for r in raw_speed][:5]))
-    wide = read_csv(os.path.join(out, "Speed.csv"))
-    check("vehicle summary rows = 5 (the duplicate ID 6 has no rows left)", len(wide) == 5, str(len(wide)))
-    check("vehicle summary has Zone_Sequence 2-3-4", any(r["Zone_Sequence"] == "2-3-4" for r in wide))
+    sens = sensitivity.run_sensitivity(app, out, "T", {"lc_max_lateral_m": ["0.5", "3.5"]})
+    lcn = {r["Value"]: int(r["N"]) for r in sens if r["Indicator"].startswith("Lateral Clearance") and r["Group"] == "All samples"}
+    check("sensitivity: a 3.5 m side limit measures more Lateral Clearance samples than 0.5 m", lcn.get("3.5", 0) > lcn.get("0.5", 0), str(lcn))
+    check("sensitivity leaves the source folder untouched", not os.path.exists(os.path.join(out, "Sensitivity_lc_max_lateral_m.csv")))
 
     # ---- LDP ----
     ldp = read_csv(os.path.join(out, "LDP.csv"))
@@ -217,8 +222,8 @@ def scene1(app):
     check("LDP A zone 2 ~ 0 %", float(lz[("1", "Zone 2")]["LDP_percent"]) < 0.5)
     c6 = float(lz[("3", "Zone 6")]["LDP_percent"])
     check("LDP C zone 6 ~ 0.60/(4.20/2) = 28.57 % (opposite-side W)", abs(c6 - 28.57) < 1.2, f"{c6:.3f}")
-    check("LDP W_entry for A, W_opp for C",
-          lz[("1", "Zone 3")]["Lane_Width_W_m"] == "4.750" and lz[("3", "Zone 6")]["Lane_Width_W_m"] == "4.200")
+    check("LDP W_entry for A, W_opp for C: LDP = Delta_Y / (W/2) x 100 with W 4.75 and 4.20",
+          abs(float(lz[("1", "Zone 3")]["Delta_Y_m"]) / (4.75 / 2) * 100 - a3) < 0.05 and abs(float(lz[("3", "Zone 6")]["Delta_Y_m"]) / (4.20 / 2) * 100 - c6) < 0.05)
     check("LDP zone 1 never reported", all(r["Zone"] != "Zone 1" for r in ldp))
 
     # ---- Lateral Clearance ----
@@ -242,8 +247,11 @@ def scene1(app):
     check("Lateral Clearance A-E zone 4 = 1.6 - 1.3 = 0.30 m", bool(ae) and all(abs(v - 0.30) < 0.03 for v in ae),
           f"n={len(ae)}" + (f" mean={sum(ae)/len(ae):.3f}" if ae else ""))
     tvr = read_csv(os.path.join(out, "Detection_Records_Topview.csv"))
-    check("Topview records: one row per observed point, in metres", len(tvr) > 0 and {"x_m", "y_m", "cx_m", "cy_m"} <= set(tvr[0]),
+    check("Topview records: one row per observed point, in metres", len(tvr) > 0 and {"x_m", "y_m", "cx_m", "cy_m", "speed_kmh"} <= set(tvr[0]),
           str(len(tvr)))
+    sp = [float(r["speed_kmh"]) for r in tvr if r["speed_kmh"] != "" and r["track_id"] == "1"]
+    check("Topview records: the speed of every frame (vehicle A of scene 1 drives 10 m/s = 36 km/h, weaving a little)", len(sp) > 10 and all(abs(v - 36.0) < 2.5 for v in sp),
+          f"{len(sp)} values, min {min(sp) if sp else None}, max {max(sp) if sp else None}")
     tvv = os.path.join(out, "Tracking_Topview.mp4")
     cap_tv = cv2.VideoCapture(tvv)
     dur_tv = cap_tv.get(cv2.CAP_PROP_FRAME_COUNT) / (cap_tv.get(cv2.CAP_PROP_FPS) or 1.0)
@@ -308,7 +316,7 @@ def scene2(app):
 
     # ---- PET ----
     pet = read_csv(os.path.join(out, "PET.csv"))
-    pairs = {(r["Vehicle_ID_A"], r["Vehicle_ID_B"]): r for r in pet}
+    pairs = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]): r for r in pet}
     check("PET (conflict area, radius (W_A+W_B)/2 = 1.8 m): one event P-Q (P-R are in the area at the same time = undefined, Q-R never cross, F/L no movement)",
           set(pairs) == {("1", "2")}, str(sorted(pairs)))
     if ("1", "2") in pairs:
@@ -317,19 +325,19 @@ def scene2(app):
         check("PET area radius written: 1.8 m", abs(float(r["Area_Radius_m"]) - 1.8) < 0.01, r["Area_Radius_m"])
         check("PET crossing point written: (15, 0)", abs(float(r["Cross_X_m"]) - 15.0) < 0.05 and abs(float(r["Cross_Y_m"])) < 0.05,
               f"{r['Cross_X_m']} {r['Cross_Y_m']}")
-        check("PET conflict type Crossing in Zone 3", r["Conflict_Type"] == "Crossing" and r["Conflict_Zone"] == "Zone 3",
-              f"{r['Conflict_Type']} {r['Conflict_Zone']}")
+        check("PET conflict zone 3, type by the TTC angle rule: P (+x) and Q (+y) meet at 90 deg = Crossing",
+              r["Conflict_Zone"] == "Zone 3" and r["Conflict_Type"] == "Crossing" and abs(float(r["Theta_deg"]) - 90.0) < 3.0, f"{r['Conflict_Zone']} {r['Conflict_Type']} {r['Theta_deg']}")
         lim_pet = m.RISK_DEFAULT_LIMITS["pet_s"]
         check("PET levels follow the limits: PET level from PET_s, speed level from the 36 km/h of P and Q (Moderate), overall = the less severe",
               r["PET_Level"] == m.risk_level_low_is_risky(float(r["PET_s"]), lim_pet) and r["Speed_Level"] == "Moderate"
-              and r["PET_Risk_Level"] == m.combine_risk(r["PET_Level"], "Moderate") and abs(float(r["Speed_A_kmh"]) - 36.0) < 0.5,
-              f"{r['PET_s']} {r['PET_Level']} {r['Speed_Level']} {r['PET_Risk_Level']} speeds {r['Speed_A_kmh']} {r['Speed_B_kmh']}")
+              and r["PET_Risk_Level"] == m.combine_risk(r["PET_Level"], "Moderate") and abs(float(r["Speed_A_At_Crossing_kmh"]) - 36.0) < 0.5,
+              f"{r['PET_s']} {r['PET_Level']} {r['Speed_Level']} {r['PET_Risk_Level']} speeds {r['Speed_A_At_Crossing_kmh']} {r['Speed_B_At_Crossing_kmh']}")
 
     # PET with the area switched off = the crossing point only: PET = the difference of the times at the point
     app.run3_pet_use_area_var.set(False)
     out_pt, _ = run_scene(app, veh)
     app.run3_pet_use_area_var.set(True)
-    pet_pt = {(r["Vehicle_ID_A"], r["Vehicle_ID_B"]): r for r in read_csv(os.path.join(out_pt, "PET.csv"))}
+    pet_pt = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]): r for r in read_csv(os.path.join(out_pt, "PET.csv"))}
     check("PET point only: events P-Q and P-R", set(pet_pt) == {("1", "2"), ("1", "3")}, str(sorted(pet_pt)))
     if ("1", "2") in pet_pt and ("1", "3") in pet_pt:
         check("PET point only: PET(P,Q) = 1.6 s, PET(P,R) = 0.1 s, no radius",
@@ -493,24 +501,24 @@ def scene3(app):
     gap = read_csv(os.path.join(out, "Gap_Acceptance.csv"))
     roles = sorted(r["Gap_Role"] for r in gap)
     check("Gap Acceptance exactly one rejected + one accepted gap (jitter did not add gaps)",
-          roles == ["Accepted", "Rejected"], str(roles) + " " + str([r["X31_Available_Gap"] for r in gap]))
+          roles == ["Accepted", "Rejected"], str(roles) + " " + str([r["Available_Gap_s"] for r in gap]))
     by = {r["Gap_Role"]: r for r in gap}
     rej, acc = by.get("Rejected"), by.get("Accepted")
     if rej and acc:
-        check("Gap Acceptance rejected gap ~ 0.92 s (closed before the subject entered)", abs(float(rej["X31_Available_Gap"]) - 0.917) < 0.06,
-              rej["X31_Available_Gap"])
-        check("Gap Acceptance accepted gap = time left at zone-3 entry = 1.0 s", abs(float(acc["X31_Available_Gap"]) - 1.0) < 0.05,
-              acc["X31_Available_Gap"])
-        check("Gap Acceptance waiting time = entry 4.0 s - first seen 0.017 s ~ 3.98 s", abs(float(acc["X32_Waiting_Time"]) - 3.98) < 0.1,
-              acc["X32_Waiting_Time"])
+        check("Gap Acceptance rejected gap ~ 0.92 s (closed before the subject entered)", abs(float(rej["Available_Gap_s"]) - 0.917) < 0.06,
+              rej["Available_Gap_s"])
+        check("Gap Acceptance accepted gap = time left at zone-3 entry = 1.0 s", abs(float(acc["Available_Gap_s"]) - 1.0) < 0.05,
+              acc["Available_Gap_s"])
+        check("Gap Acceptance waiting time = entry 4.0 s - first seen 0.017 s ~ 3.98 s", abs(float(acc["Waiting_Time_s"]) - 3.98) < 0.1,
+              acc["Waiting_Time_s"])
         check("Gap Acceptance Access stage, decided in zone 3", acc["Decision_Stage"] == "Access" and acc["Decision_Zone"] == "3",
               f"{acc['Decision_Stage']} zone {acc['Decision_Zone']}")
         check("Gap Acceptance subject 4 (1-3-4) vs stream 2-3-4 on Line 1",
               acc["Subject_ID"] == "4" and acc["Subject_Movement"] == "1-3-4" and acc["Conflicting_Movement"] == "2-3-4"
               and acc["Reference_Line"] == "Line 1")
-        check("Gap Acceptance flags 1 / 0", acc["Gap_Acceptance"] == "1" and rej["Gap_Acceptance"] == "0")
+        check("Gap Acceptance Accepted / Rejected (no duplicate 1 / 0 column)", acc["Gap_Role"] == "Accepted" and rej["Gap_Role"] == "Rejected" and "Gap_Acceptance" not in acc)
         check("Gap Acceptance speeds of the subject and stream vehicles are reported",
-              acc["Subject_Speed_kmh"] != "" and acc["Conflict_Speed_A_kmh"] != "")
+              acc["Subject_Speed_At_Decision_kmh"] != "" and acc["Conflict_Speed_A_At_Decision_kmh"] != "")
 
 
 def scene4(app):
@@ -547,11 +555,11 @@ def scene4(app):
     acc = [r for r in gap if r["Gap_Role"] == "Accepted"]
     rej = [r for r in gap if r["Gap_Role"] == "Rejected"]
     check("Gap Acceptance two simultaneous streams: 1 accepted + 2 rejected", len(acc) == 1 and len(rej) == 2,
-          str([(r["Gap_Role"], r["Conflicting_Movement"], r["X31_Available_Gap"]) for r in gap]))
+          str([(r["Gap_Role"], r["Conflicting_Movement"], r["Available_Gap_s"]) for r in gap]))
     if acc:
         check("Gap Acceptance smaller remaining gap controls (5-6-7, 0.5 s)",
-              acc[0]["Conflicting_Movement"] == "5-6-7" and abs(float(acc[0]["X31_Available_Gap"]) - 0.5) < 0.05,
-              f"{acc[0]['Conflicting_Movement']} {acc[0]['X31_Available_Gap']}")
+              acc[0]["Conflicting_Movement"] == "5-6-7" and abs(float(acc[0]["Available_Gap_s"]) - 0.5) < 0.05,
+              f"{acc[0]['Conflicting_Movement']} {acc[0]['Available_Gap_s']}")
     check("Gap Acceptance rejected gaps come from both streams",
           {r["Conflicting_Movement"] for r in rej} == {"2-3-4", "5-6-7"}, str([r["Conflicting_Movement"] for r in rej]))
     app.run3_gap_subject_134_var.set(True)
@@ -581,12 +589,12 @@ def scene6(app):
     print("scene 6 output:", out)
     gap = read_csv(os.path.join(out, "Gap_Acceptance.csv"))
     check("Gap Acceptance works without a Line (origin-zone fallback): 1 accepted + 1 rejected",
-          sorted(r["Gap_Role"] for r in gap) == ["Accepted", "Rejected"], str([(r["Gap_Role"], r["X31_Available_Gap"]) for r in gap]))
+          sorted(r["Gap_Role"] for r in gap) == ["Accepted", "Rejected"], str([(r["Gap_Role"], r["Available_Gap_s"]) for r in gap]))
     by = {r["Gap_Role"]: r for r in gap}
     if by.get("Accepted") and by.get("Rejected"):
-        check("fallback: accepted gap 2->5 s leaves 1.0 s at t = 4.0 s", abs(float(by["Accepted"]["X31_Available_Gap"]) - 1.0) < 0.05,
-              by["Accepted"]["X31_Available_Gap"])
-        check("fallback: rejected gap 1->2 s = ~1.0 s", abs(float(by["Rejected"]["X31_Available_Gap"]) - 1.0) < 0.06, by["Rejected"]["X31_Available_Gap"])
+        check("fallback: accepted gap 2->5 s leaves 1.0 s at t = 4.0 s", abs(float(by["Accepted"]["Available_Gap_s"]) - 1.0) < 0.05,
+              by["Accepted"]["Available_Gap_s"])
+        check("fallback: rejected gap 1->2 s = ~1.0 s", abs(float(by["Rejected"]["Available_Gap_s"]) - 1.0) < 0.06, by["Rejected"]["Available_Gap_s"])
         check("fallback is named in Reference_Line / QC_Flag", by["Accepted"]["Reference_Line"] == "Observed Zone 2"
               and "Origin_Zone" in by["Accepted"]["QC_Flag"], f"{by['Accepted']['Reference_Line']} | {by['Accepted']['QC_Flag']}")
     for k, v in saved.items():
@@ -619,19 +627,19 @@ def scene7(app):
     out, summary = run_scene(app, veh)
     print("scene 7 output:", out)
     gap = read_csv(os.path.join(out, "Gap_Acceptance.csv"))
-    rows = [(r["Decision_Stage"], r["Gap_Role"], round(float(r["X31_Available_Gap"]), 2)) for r in gap]
+    rows = [(r["Decision_Stage"], r["Gap_Role"], round(float(r["Available_Gap_s"]), 2)) for r in gap]
     print("   rows:", rows)
     access = [r for r in gap if r["Decision_Stage"] == "Access"]
     exit_ = [r for r in gap if r["Decision_Stage"] == "Exit"]
     check("stop in the conflict zone: Access has 2 rejected gaps, no accepted one",
           len(access) == 2 and all(r["Gap_Role"] == "Rejected" for r in access), str(rows))
     check("Access rejected gaps are ~1.0 s (2->3) and ~2.0 s (3->6, open at entry)",
-          sorted(round(float(r["X31_Available_Gap"]), 1) for r in access) == [1.0, 2.0], str(rows))
+          sorted(round(float(r["Available_Gap_s"]), 1) for r in access) == [1.0, 2.0], str(rows))
     check("Exit stage: exactly one accepted gap (6->8 contains the target-zone entry)",
-          len(exit_) == 1 and exit_[0]["Gap_Role"] == "Accepted" and abs(float(exit_[0]["X31_Available_Gap"]) - 1.4) < 0.1, str(rows))
+          len(exit_) == 1 and exit_[0]["Gap_Role"] == "Accepted" and abs(float(exit_[0]["Available_Gap_s"]) - 1.4) < 0.1, str(rows))
     check("Exit stage is decided in the target zone 4", bool(exit_) and exit_[0]["Decision_Zone"] == "4")
     check("the gap 3->6 of the Access stage is NOT reused in Exit",
-          not any(abs(float(r["Gap_Start_Time"]) - 3.0) < 0.05 for r in exit_))
+          not any(abs(float(r["Gap_Start_Time_s"]) - 3.0) < 0.05 for r in exit_))
     check("QC tells about the stop", all("Stop_" in r["QC_Flag"] for r in gap), str([r["QC_Flag"] for r in gap][:2]))
     app.run3_gap_subject_1367_var.set(True)
     app.run3_gap_subject_5631_var.set(True)
@@ -649,14 +657,15 @@ def scene5(app):
           and summary["source_counts"]["movement_counts"].get("2-3-4") == 1, str(ms))
     ldp = read_csv(os.path.join(out, "LDP.csv"))
     check("LDP is computed for it (status Exact_AfterDedupe counts as Exact)", len(ldp) >= 2, str(len(ldp)))
-    wide = read_csv(os.path.join(out, "Speed.csv"))
-    check("vehicle speed table shows status and movement", wide[0]["Movement"] == "2-3-4" and wide[0]["Movement_Status"] == "Exact_AfterDedupe")
+    spd5 = read_csv(os.path.join(out, "Speed.csv"))
+    check("the speed rows of the wobbling car carry its Movement 2-3-4", len(spd5) > 0 and all(r["Movement"] == "2-3-4" for r in spd5))
 
 
 def main():
     root = tk.Tk()
     root.withdraw()
     app = m.Run1App(root)
+    app.run3_write_detail_var.set(True)           # Lateral_Clearance.csv (every sample), TTC_Detail.csv, TTC_Frames.csv are checked below (off by default)
     app.run3_lc_max_lateral_var.set("0")          # the scene's D-E pair is 4.1 m apart sideways; the default limit (3.5 m) is tested below
     app.run3_site_id_var.set("8")
     app.run3_ppm_var.set(str(PPM))

@@ -3,7 +3,7 @@
 # V28: 6 safety indicators in 3 domains (definitions: SPEC_v28_NewIndicators.md)
 #   Distance: LDP, Lateral Clearance
 #   Time    : Gap Acceptance, TTC (rear-end + side), PET
-#   Speed   : Speed (per zone and per Movement; V50, V85, Mean, SD)
+#   Speed   : Speed (every frame, inside the selected zones)
 #   Zones 1-7; conflict zones 3 and 6. Movement = full zone sequence (6 patterns).
 #   No Tk access from worker thread.
 # ============================================================
@@ -515,6 +515,7 @@ RUN3_DEFAULTS = {
     # V27 implementation starter values (editable; verify per site):
     "pet_show_point_xy": True,              # draw the PET crossing point (magenta X + PET) in the X-Y video
     "pet_show_point_video": False,         # draw it also on the normal roadside video (Tracking_Result.mp4) after Run 3
+    "write_detail_files": False,           # also write the checking files: Lateral_Clearance.csv (every sample), TTC_Detail.csv, TTC_Frames.csv
     "pet_use_area": True,                  # conflict AREA = circle around the crossing point, radius (W_A + W_B) / 2; off = the crossing point only
     "pet_min_speed_kmh": "",                # a vehicle slower than this while passing the crossing point skips the pair; blank = no limit
     "pet_max_s": "10.0",                    # pairs/events above this are not PET conflicts; blank = no limit
@@ -544,6 +545,7 @@ RUN3_DEFAULTS = {
     # to the research role: Zone 1 = access mouth, 2/4 = approach, 3/5 = exit, 6 = middle/access.
     "speed_zones": [1, 2, 3, 4, 5, 6, 7],
     "speed_smoothing_samples": "5",         # rolling-median window on positions before Speed (1 = off)
+    "speed_frame_window_s": "0.50",        # the speed written for every frame (Detection_Records_Topview.csv) uses the vehicle positions within +-this/2 s
     "speed_max_kmh": "80",                  # Speed above this is flagged Speed_Above_Max and left out of the statistics (0 = off)
     "lc_zones": [2, 3, 4, 5, 6, 7],
     "lc_motorcycle_pairs_only": False,      # False = every pair of vehicles; True = only pairs that include a motorcycle
@@ -752,62 +754,6 @@ def rolling_median(values, k):
         k += 1
     h = k // 2
     return np.array([np.median(a[max(0, i - h): i + h + 1]) for i in range(len(a))])
-
-
-def path_speed(times, points, smoothing=1):
-    """(distance_m, duration_s, speed_kmh) of one sample series, or None.
-    points are metric (x, y). smoothing = rolling-median window (samples):
-    only FULL symmetric windows are used, so the series is shortened by half a
-    window at each end (a shrinking window at the ends would bias the path
-    length of a moving vehicle low)."""
-    n = len(times)
-    if n < 2:
-        return None
-    pts = np.asarray(points, dtype=float).reshape(-1, 2)
-    ts = list(times)
-    k = int(smoothing) if smoothing else 1
-    if k > 1:
-        h = min(k // 2, (n - 2) // 2)
-        if h >= 1:
-            sx = [float(np.median(pts[i - h: i + h + 1, 0])) for i in range(h, n - h)]
-            sy = [float(np.median(pts[i - h: i + h + 1, 1])) for i in range(h, n - h)]
-            pts = np.stack([sx, sy], axis=1)
-            ts = ts[h: n - h]
-    dist = float(np.sum(np.hypot(np.diff(pts[:, 0]), np.diff(pts[:, 1]))))
-    dur = float(ts[-1] - ts[0])
-    if dur <= 0 or dist <= 0:
-        return None
-    return dist, dur, dist / dur * 3.6
-
-
-def track_speed_records(rows, speed_zones, movement_id="", movement_status="", smoothing=1):
-    """Speed records of ONE track (rows in time order; dict rows with
-    _timestamp, _m, _zone_num, frame): one record per selected zone plus one
-    for the whole Movement (all samples inside the movement's zones)."""
-    valid = [r for r in rows if r.get("_m") is not None and r.get("_zone_num") is not None]
-    out = []
-
-    def add(scope, key, sel, flag=""):
-        if len(sel) < 2:
-            return
-        res = path_speed([r["_timestamp"] for r in sel], [r["_m"] for r in sel], smoothing)
-        if res is None:
-            return
-        dist, dur, speed = res
-        out.append({
-            "Scope": scope, "Key": key, "Samples": len(sel),
-            "Start_Time": sel[0]["_timestamp"], "End_Time": sel[-1]["_timestamp"],
-            "Start_Frame": sel[0].get("frame", ""), "End_Frame": sel[-1].get("frame", ""),
-            "Distance_m": dist, "Duration_s": dur, "Speed_kmh": speed, "Flag": flag,
-        })
-
-    for zone in sorted(speed_zones):
-        add("Zone", f"Zone {zone}", [r for r in valid if r["_zone_num"] == zone])
-    if movement_id:
-        zones = set(MOVEMENT_PATTERNS[movement_id]["sequence"])
-        add("Movement", movement_id, [r for r in valid if r["_zone_num"] in zones],
-            "Partial_Movement" if str(movement_status).startswith("Partial") else "")
-    return out
 
 
 LDP_MIN_CHORD_M = 1.0   # the entry->exit reference line must be at least this long
@@ -1814,6 +1760,90 @@ def circle_interval(P, t, center, r):
     t_in = float((seg_t0 + lo * seg_dt)[hit].min())
     t_out = float((seg_t0 + hi * seg_dt)[hit].max())
     return t_in, t_out
+
+
+# Names of the columns as the CSV files show them (v28(129)): the code keeps its own keys, `apply_csv_renames` translates them when a file is written.
+# Convention: every time column ends in _s, every speed column says WHEN the speed is taken (Speed_A_At_Crossing_kmh ...), A/B vehicle columns are
+# Vehicle_A_ID / Vehicle_A_Class / Movement_A in every file.
+# Columns that are NOT written (v28(131)): the same information is in another column of the file, the value is the same on every row of a run
+# (it is in Summary.json / Settings.json), or it can be worked out from other columns. "*" = every file written by Run 3.
+CSV_COLUMN_DROPS = {
+    "*": ("Site_ID", "Calibration_Mode"),
+    "Gap_Acceptance.csv": ("Gap_Acceptance", "Gap_Evaluation_Time"),              # = Gap_Role (Accepted / Rejected); = Decision_Time
+    "PET.csv": ("Interaction_Start", "Interaction_End"),                          # = T1_Exit_Time / T2_Entry_Time
+    "LDP.csv": ("Side", "Lane_Width_W_m", "Chord_Length_m"),                      # Movement tells the side; the widths are in Settings; = |P_out - P_in|
+    "Lateral_Clearance.csv": ("Width_A_m", "Width_B_m", "Length_A_m", "Length_B_m", "Zone_Sequence_A", "Zone_Sequence_B"),   # per class / per pair
+    "Detection_Records_Topview.csv": ("calibration_mode",),
+}
+
+CSV_COLUMN_RENAMES = {
+    "LDP.csv": {"Start_Time": "Start_Time_s", "End_Time": "End_Time_s", "Mean_Speed_kmh": "Mean_Speed_In_Zone_kmh"},
+    "Lateral_Clearance.csv": {"Timestamp": "Time_s", "LS_Meter": "LS_m"},
+    "Lateral_Clearance_Pairs.csv": {"Start_Time": "Start_Time_s", "End_Time": "End_Time_s"},
+    "Gap_Acceptance.csv": {"Gap_Start_Time": "Gap_Start_Time_s", "Gap_End_Time": "Gap_End_Time_s",
+                           "Decision_Time": "Decision_Time_s", "Subject_Speed_kmh": "Subject_Speed_At_Decision_kmh",
+                           "Conflict_Speed_A_kmh": "Conflict_Speed_A_At_Decision_kmh", "Conflict_Speed_B_kmh": "Conflict_Speed_B_At_Decision_kmh"},
+    "TTC.csv": {"Event_Start": "Start_Time_s", "Event_End": "End_Time_s", "TTCmin_Time": "TTCmin_Time_s",
+                "Speed_A_kmh": "Speed_A_At_TTCmin_kmh", "Speed_B_kmh": "Speed_B_At_TTCmin_kmh"},
+    "PET.csv": {"Vehicle_ID_A": "Vehicle_A_ID", "Vehicle_Class_A": "Vehicle_A_Class", "Vehicle_ID_B": "Vehicle_B_ID", "Vehicle_Class_B": "Vehicle_B_Class",
+                "T1_Exit_Time": "T1_Exit_Time_s", "T2_Entry_Time": "T2_Entry_Time_s",
+                "Speed_A_kmh": "Speed_A_At_Crossing_kmh", "Speed_B_kmh": "Speed_B_At_Crossing_kmh"},
+}
+
+
+def apply_csv_renames(filename, fields, rows):
+    """(fields, rows) as the file shows them: the columns of `CSV_COLUMN_DROPS` removed, then the names of `CSV_COLUMN_RENAMES[filename]` applied;
+    a file that is in neither table passes through unchanged."""
+    drop = set(CSV_COLUMN_DROPS.get("*", ())) | set(CSV_COLUMN_DROPS.get(filename, ()))
+    ren = CSV_COLUMN_RENAMES.get(filename, {})
+    fields = [ren.get(f, f) for f in fields if f not in drop]
+    rows = [{ren.get(k, k): v for k, v in r.items() if k not in drop} for r in rows]
+    return fields, rows
+
+
+def path_velocity_at(points, times, t, window_s, seg=None):
+    """The velocity vector (m/s) of a vehicle around time `t`: the straight displacement between the first and the last sample within +-window_s/2
+    divided by their time difference. With fewer than 2 samples in the window: the direction of the segment `seg` = (index, fraction) it is on
+    (None for it = (0, 0))."""
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    T = np.asarray(times, dtype=float)
+    idx = np.flatnonzero(np.abs(T - t) <= window_s / 2.0)
+    if len(idx) >= 2 and T[idx[-1]] > T[idx[0]]:
+        v = (P[idx[-1]] - P[idx[0]]) / (T[idx[-1]] - T[idx[0]])
+        return float(v[0]), float(v[1])
+    if seg is not None and seg[0] + 1 < len(T) and T[seg[0] + 1] > T[seg[0]]:
+        v = (P[seg[0] + 1] - P[seg[0]]) / (T[seg[0] + 1] - T[seg[0]])
+        return float(v[0]), float(v[1])
+    return 0.0, 0.0
+
+
+def frame_speeds_kmh(times, points, window_s=0.5, smoothing=1):
+    """The speed of a vehicle at every one of its samples (km/h; None where it cannot be told): the positions are smoothed with a rolling median
+    (`smoothing` samples, 1 = off; the first and last samples keep their own position), then the speed at a sample is the straight distance between the first and the last sample inside +-window_s/2
+    around it, divided by their time difference (shrinks to one side at the ends of the track)."""
+    t = np.asarray(times, dtype=float)
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    n = len(t)
+    if n < 2:
+        return [None] * n
+    k = int(smoothing) if smoothing else 1
+    if k > 1:
+        k = k + 1 if k % 2 == 0 else k
+        h = k // 2
+        if n >= 2 * h + 1:                     # only FULL symmetric windows: a shrinking window at the ends would shift the position and bias the edge speeds
+            sm = P.copy()
+            for i in range(h, n - h):
+                sm[i] = np.median(P[i - h:i + h + 1], axis=0)
+            P = sm
+    half = max(1e-6, float(window_s)) / 2.0
+    lo = np.searchsorted(t, t - half, side="left")
+    hi = np.searchsorted(t, t + half, side="right") - 1
+    out = []
+    for i in range(n):
+        a, b = int(lo[i]), int(hi[i])
+        dt = t[b] - t[a] if b > a else 0.0
+        out.append(None if dt <= 0 else float(np.hypot(*(P[b] - P[a])) / dt * 3.6))
+    return out
 
 
 # ==== CORE-END ====
@@ -3815,6 +3845,7 @@ class Run1App:
         self.run3_speed_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_zones"])) for z in ZONE_IDS}
         self.run3_speed_smoothing_var = tk.StringVar(value=RUN3_DEFAULTS["speed_smoothing_samples"])
         self.run3_speed_max_var = tk.StringVar(value=RUN3_DEFAULTS["speed_max_kmh"])
+        self.run3_speed_frame_window_var = tk.StringVar(value=RUN3_DEFAULTS["speed_frame_window_s"])
         self.run3_zone_calibrations = {}          # {"4": {"points": [[x, y] x 4], "lengths": [l12, l23, l34, l41]}}: own reference quad per zone
         self.run3_zone_cal_text = tk.StringVar(value="")
         self.analysis_start_var = tk.StringVar(value=DEFAULT_SETTINGS["analysis_start_s"])
@@ -3828,6 +3859,7 @@ class Run1App:
         self.run3_ldp_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["ldp_zones"])) for z in ZONE_IDS}
         self.run3_pet_max_var = tk.StringVar(value=RUN3_DEFAULTS["pet_max_s"])
         self.run3_pet_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["pet_min_speed_kmh"])
+        self.run3_write_detail_var = tk.BooleanVar(value=RUN3_DEFAULTS["write_detail_files"])
         self.run3_pet_use_area_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_use_area"])
         self.run3_pet_show_xy_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_show_point_xy"])
         self.run3_pet_show_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_show_point_video"])
@@ -4268,6 +4300,9 @@ class Run1App:
         gray = "#666666"
         ttk.Label(self._page, text="ติ๊กหน้าชื่อตัวชี้วัดเพื่อเปิด/ปิด — ค่าอื่นเป็นค่าเริ่มต้นที่ใช้ได้เลย ปรับเมื่อจำเป็น", foreground=gray).grid(row=self._flow_row, column=0, sticky="w", padx=6)
         self._flow_row += 1
+        ttk.Checkbutton(self._page, text="เขียนไฟล์ตรวจสอบเพิ่ม (Lateral_Clearance.csv ทุกตัวอย่าง, TTC_Detail.csv, TTC_Frames.csv) — ไฟล์ใหญ่ ปิดไว้ได้ถ้าไม่ได้ใช้",
+                        variable=self.run3_write_detail_var).grid(row=self._flow_row, column=0, sticky="w", padx=6)
+        self._flow_row += 1
 
         box = self._indicator_box("LDP", self.run3_ldp_enabled_var,
                                   "ΔY ÷ (W/2) × 100 — ΔY = ระยะตั้งฉากของเส้นทางรถจากเส้นอ้างอิง (จุดเข้า→จุดออกโซน) เฉพาะรถทางหลัก 2-3-4 (W_entry) และ 5-6-7 (W_opp) ทุกประเภทรถ")
@@ -4332,11 +4367,12 @@ class Run1App:
         ttk.Checkbutton(box, text="ใช้พื้นที่ขัดแย้ง: วงกลมรอบจุดตัด รัศมี = (W_A + W_B) / 2 ของรถสองคัน  (ไม่ติ๊ก = ใช้แค่จุดตัด)",
                         variable=self.run3_pet_use_area_var).grid(row=5, column=0, columnspan=8, sticky="w", pady=2)
 
-        box = self._indicator_box("Speed (V50, V85, Mean, SD)", self.run3_speed_enabled_var,
+        box = self._indicator_box("Speed (ทุกเฟรม)", self.run3_speed_enabled_var,
                                   "ความเร็วต่อโซน + ความเร็วภาพรวมตาม Movement (เช่น 2-3-4) — ความยาวเส้นทางเมตร ÷ เวลา")
         self._zone_checks(box, self.run3_speed_zone_vars, 1)
         self._entry_row(box, 2, "Median smoothing (จำนวนตัวอย่าง, 1 = ปิด)", self.run3_speed_smoothing_var)
-        self._entry_row(box, 3, "ความเร็วสูงสุดที่สมเหตุสมผล (km/h, 0 = ปิด) — เกินนี้ติดธง ไม่นับในสถิติ", self.run3_speed_max_var, span=6)
+        self._entry_row(box, 3, "ความเร็วสูงสุดที่สมเหตุสมผล (km/h, 0 = ปิด) — เกินนี้ติดธง Speed_Above_Max ในไฟล์ Speed.csv (ไม่ลบแถว)", self.run3_speed_max_var, span=6)
+        self._entry_row(box, 4, "หน้าต่างความเร็วต่อเฟรม (s) — ความเร็วทุกเฟรมในตารางพิกัดเมตร ใช้ตำแหน่งในช่วง ± ครึ่งหนึ่งของค่านี้", self.run3_speed_frame_window_var)
 
         box = ttk.LabelFrame(self._page, text="เกณฑ์ระดับความเสี่ยง (ดัชนี + ความเร็ว) — ค่าตั้งต้นตามสไลด์สัมมนา / CROW 2009", padding=10)
         box.grid(row=self._flow_row, column=0, sticky="ew", padx=5, pady=5)
@@ -5772,6 +5808,7 @@ class Run1App:
                 "speed_zones": [z for z,v in self.run3_speed_zone_vars.items() if v.get()],
                 "speed_smoothing_samples": self.run3_speed_smoothing_var.get(),
                 "speed_max_kmh": self.run3_speed_max_var.get(),
+                "speed_frame_window_s": self.run3_speed_frame_window_var.get(),
                 "zone_calibrations": json.loads(json.dumps(self.run3_zone_calibrations)),
                 "lc_zones": [z for z,v in self.run3_lc_zone_vars.items() if v.get()],
                 "pet_zone6": self.run3_pet_zone6_var.get(),
@@ -5780,6 +5817,7 @@ class Run1App:
                 "ldp_zones": [z for z, v in self.run3_ldp_zone_vars.items() if v.get()],
                 "pet_max_s": self.run3_pet_max_var.get(),
                 "pet_min_speed_kmh": self.run3_pet_min_speed_var.get(),
+                "write_detail_files": self.run3_write_detail_var.get(),
                 "pet_use_area": self.run3_pet_use_area_var.get(),
                 "pet_show_point_xy": self.run3_pet_show_xy_var.get(),
                 "pet_show_point_video": self.run3_pet_show_video_var.get(),
@@ -5941,6 +5979,7 @@ class Run1App:
                 ("perspective_l41_m", self.run3_perspective_l41_var),
                 ("pet_max_s", self.run3_pet_max_var),
                 ("pet_min_speed_kmh", self.run3_pet_min_speed_var),
+                ("write_detail_files", self.run3_write_detail_var),
                 ("pet_use_area", self.run3_pet_use_area_var),
                 ("pet_show_point_xy", self.run3_pet_show_xy_var),
                 ("pet_show_point_video", self.run3_pet_show_video_var),
@@ -5959,6 +5998,7 @@ class Run1App:
                 ("ttc_angle_crossing_deg", self.run3_ttc_angle_cross_var),
                 ("speed_smoothing_samples", self.run3_speed_smoothing_var),
                 ("speed_max_kmh", self.run3_speed_max_var),
+                ("speed_frame_window_s", self.run3_speed_frame_window_var),
                 ("ldp_smoothing_samples", self.run3_ldp_smoothing_var),
                 ("waiting_speed_threshold", self.run3_waiting_speed_threshold_var),
                 ("gap_hold_min_duration_s", self.run3_hold_min_duration_var),
@@ -6899,6 +6939,7 @@ class Run1App:
             need_zone(self.run3_speed_zone_vars, "Speed")
             self._run3_float(self.run3_speed_smoothing_var.get(), "speed smoothing samples")
             self._run3_float(self.run3_speed_max_var.get(), "max plausible speed (km/h)")
+            self._run3_float(self.run3_speed_frame_window_var.get(), "per-frame speed window (s)")
         if enabled["lc"]:
             need_zone(self.run3_lc_zone_vars, "Lateral Clearance")
             self._run3_float(self.run3_lc_heading_window_var.get(), "LC heading window (s)")
@@ -7576,12 +7617,12 @@ class Run1App:
                     csv_file
                 )
 
+                # v28(131): no class_id (class_name says it), no bbox width / height / area (from the corners), no trajectory_position / trajectory_offset
+                # (the same on every row, they are in Settings.json)
                 csv_writer.writerow([
-                    "frame", "timestamp", "track_id", "class_id", "class_name",
+                    "frame", "timestamp", "track_id", "class_name",
                     "confidence", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
-                    "bbox_width", "bbox_height", "bbox_area",
                     "trajectory_x", "trajectory_y",
-                    "trajectory_position", "trajectory_offset",
                     "zone"
                 ])
 
@@ -8339,15 +8380,10 @@ class Run1App:
                                 )
 
                                 trajectory_point_csv = self.get_zone_reference_point(x1, y1, x2, y2)
-                                bbox_width_csv = max(0, x2 - x1)
-                                bbox_height_csv = max(0, y2 - y1)
-                                bbox_area_csv = bbox_width_csv * bbox_height_csv
                                 csv_writer.writerow([
-                                    frame_index, f"{timestamp:.6f}", track_id, class_id, class_name,
+                                    frame_index, f"{timestamp:.6f}", track_id, class_name,
                                     f"{confidence:.6f}", x1, y1, x2, y2,
-                                    bbox_width_csv, bbox_height_csv, bbox_area_csv,
                                     trajectory_point_csv[0], trajectory_point_csv[1],
-                                    trajectory_position, f"{trajectory_offset:.2f}",
                                     (zone_track_state.get(track_id, {}).get("confirmed_zone", "") if measurement_enabled else "")
                                 ])
 
@@ -9204,6 +9240,7 @@ class Run1App:
             "speed_zones": zones_of(self.run3_speed_zone_vars),
             "speed_smoothing_samples": max(1, int(num(self.run3_speed_smoothing_var, 5) or 1)),
             "speed_max_kmh": max(0.0, num(self.run3_speed_max_var, 80.0) or 0.0),
+            "speed_frame_window_s": max(0.05, num(self.run3_speed_frame_window_var, 0.5) or 0.5),
             "zone_calibrations": self._run3_clean_zone_calibrations(),
             "lc_zones": zones_of(self.run3_lc_zone_vars),
             "pet_zones": zones_of(self.run3_pet_zone_vars),
@@ -9218,6 +9255,7 @@ class Run1App:
             "lc_motorcycle_pairs_only": bool(self.run3_lc_motorcycle_pairs_only_var.get()),
             "pet_threshold": num(self.run3_pet_threshold_var, 1.0),
             "pet_max_s": pet_max if (pet_max is not None and pet_max > 0) else None,
+            "write_detail_files": bool(self.run3_write_detail_var.get()),
             "pet_use_area": bool(self.run3_pet_use_area_var.get()),
             "pet_show_point_xy": bool(self.run3_pet_show_xy_var.get()),
             "pet_show_point_video": bool(self.run3_pet_show_video_var.get()),
@@ -9850,15 +9888,17 @@ class Run1App:
         return index_level, speed_level, combine_risk(index_level, speed_level)
 
     # ========================================================
-    # SPEED (per Zone 1-7 and per Movement; V50, V85, Mean, SD)
+    # SPEED (the speed of every vehicle at every frame inside the selected zones)
     # ========================================================
 
-    def _run3_speed(self, tracks, c, movement_by_id, status_by_id):
-        """Speed detail rows: one per vehicle x zone and one per vehicle x Movement."""
-        mode = self._run3_calibration_mode(c)
-        qc_cal = self._run3_qc_calibration(c)
+    def _run3_speed(self, tracks, c, movement_by_id):
+        """Speed rows: one per vehicle x frame inside a selected zone. The speed comes from `frame_speeds_kmh` (rolling-median smoothed positions,
+        +-speed_frame_window_s/2 around the frame) and is worked out separately for every stay in a zone, so a window never mixes two zones (each
+        zone can have its own scale: zone calibration). Speeds above `speed_max_kmh` are flagged (Speed_Above_Max), not removed."""
+        window = c.get("speed_frame_window_s", 0.5)
         k = c["speed_smoothing_samples"]
         vmax = c.get("speed_max_kmh", 0)
+        zones = set(c["speed_zones"])
         results = []
         for tid, rows in tracks.items():
             if not rows:
@@ -9867,89 +9907,22 @@ class Run1App:
             if str(cls).lower() == "person":
                 continue
             movement = movement_by_id.get(str(tid), "")
-            status = status_by_id.get(str(tid), "")
-            for rec in track_speed_records(rows, c["speed_zones"], movement, status, k):
-                results.append({
-                    "Site_ID": c["site_id"], "Vehicle_ID": tid, "Vehicle_Class": cls,
-                    "Scope": rec["Scope"], "Key": rec["Key"],
-                    "Movement": movement, "Movement_Status": status,
-                    "Start_Time": f"{rec['Start_Time']:.6f}", "End_Time": f"{rec['End_Time']:.6f}",
-                    "Start_Frame": str(rec["Start_Frame"]), "End_Frame": str(rec["End_Frame"]),
-                    "Samples": rec["Samples"],
-                    "Distance_m": f"{rec['Distance_m']:.6f}", "Duration_s": f"{rec['Duration_s']:.6f}",
-                    "Speed_kmh": f"{rec['Speed_kmh']:.6f}",
-                    "Calibration_Mode": ("Zone_Homography" if rec["Scope"] == "Zone" and rec["Key"].split()[-1].isdigit()
-                                         and int(rec["Key"].split()[-1]) in (c.get("zone_calibrations") or {}) else mode),
-                    "QC_Flag": ";".join(x for x in (rec["Flag"], qc_cal, "Speed_Above_Max" if is_speed_outlier(rec["Speed_kmh"], vmax) else "") if x),
-                })
+            run = []
+            for r in list(rows) + [None]:                                   # None = flush the last stay
+                z = None if r is None else r.get("_zone_num")
+                if run and (r is None or z != run[0].get("_zone_num") or r.get("_m") is None):
+                    if run[0].get("_zone_num") in zones and len(run) >= 2:
+                        speeds = frame_speeds_kmh([x["_timestamp"] for x in run], [x["_m"] for x in run], window, k)
+                        for x, v in zip(run, speeds):
+                            if v is None:
+                                continue
+                            results.append({"Frame": str(x.get("frame", "")), "Time_s": f"{x['_timestamp']:.6f}", "Vehicle_ID": tid, "Vehicle_Class": cls,
+                                            "Zone": f"Zone {x['_zone_num']}", "Movement": movement, "Speed_kmh": f"{v:.2f}",
+                                            "QC_Flag": "Speed_Above_Max" if is_speed_outlier(v, vmax) else ""})
+                    run = []
+                if r is not None and r.get("_m") is not None and z is not None:
+                    run.append(r)
         return results
-
-    def _run3_speed_vehicle_summary_fields(self):
-        fields = ["Site_ID", "Vehicle_ID", "Vehicle_Class", "Zone_Sequence", "Movement", "Movement_Status"]
-        for zone in ZONE_IDS:
-            fields += [f"Zone{zone}_Speed_kmh", f"Zone{zone}_Distance_m", f"Zone{zone}_Duration_s"]
-        return fields + ["Movement_Speed_kmh", "Movement_Distance_m", "Movement_Duration_s", "Calibration_Mode", "QC_Flag"]
-
-    def _run3_speed_vehicle_summary(self, speed_rows, tracks, c, movement_by_id, status_by_id, sequence_by_id):
-        """One row per Vehicle_ID: speed in every Zone 1-7 and over the whole Movement."""
-        by_vehicle = defaultdict(dict)
-        for row in speed_rows:
-            by_vehicle[str(row["Vehicle_ID"])][(row["Scope"], row["Key"])] = row
-        out = []
-        for tid in sorted((str(t) for t in tracks), key=lambda x: (int(x) if x.isdigit() else 10**18, x)):
-            rows = tracks.get(tid, [])
-            if not rows:
-                continue
-            cls = str(rows[0].get("class_name", ""))
-            if cls.lower() == "person":
-                continue
-            row = {"Site_ID": c["site_id"], "Vehicle_ID": tid, "Vehicle_Class": cls,
-                   "Zone_Sequence": "-".join(str(z) for z in sequence_by_id.get(tid, [])),
-                   "Movement": movement_by_id.get(tid, ""), "Movement_Status": status_by_id.get(tid, "")}
-            items = by_vehicle.get(tid, {})
-            for zone in ZONE_IDS:
-                it = items.get(("Zone", f"Zone {zone}"))
-                row[f"Zone{zone}_Speed_kmh"] = it["Speed_kmh"] if it else ""
-                row[f"Zone{zone}_Distance_m"] = it["Distance_m"] if it else ""
-                row[f"Zone{zone}_Duration_s"] = it["Duration_s"] if it else ""
-            mv = next((v for (sc, _k), v in items.items() if sc == "Movement"), None)
-            row["Movement_Speed_kmh"] = mv["Speed_kmh"] if mv else ""
-            row["Movement_Distance_m"] = mv["Distance_m"] if mv else ""
-            row["Movement_Duration_s"] = mv["Duration_s"] if mv else ""
-            row["Calibration_Mode"] = ";".join(sorted({v["Calibration_Mode"] for v in items.values() if v.get("Calibration_Mode")}))
-            row["QC_Flag"] = ";".join(sorted({f for v in items.values() for f in str(v.get("QC_Flag", "")).split(";") if f}))
-            out.append(row)
-        return out
-
-    def _run3_speed_statistics(self, speed_rows, c):
-        """Speed statistics (Mean, SD, V50 = median, V85 = P85) per Zone / per Movement x class."""
-        groups = defaultdict(list)
-        for r in speed_rows:
-            if "Speed_Above_Max" in str(r.get("QC_Flag", "")):
-                continue
-            v = float(r["Speed_kmh"])
-            groups[(r["Scope"], r["Key"], "All")].append(v)
-            groups[(r["Scope"], r["Key"], r["Vehicle_Class"])].append(v)
-
-        def order(k):
-            scope, key, cls = k
-            if scope == "Zone":
-                pos = (0, int(key.split()[-1]))
-            else:
-                pos = (1, MOVEMENT_IDS.index(key) if key in MOVEMENT_IDS else 99)
-            return (pos, cls != "All", cls)
-
-        out = []
-        for (scope, key, cls) in sorted(groups, key=order):
-            s_ = self._run3_stats(groups[(scope, key, cls)])
-            out.append({
-                "Site_ID": c["site_id"], "Scope": scope, "Key": key, "Vehicle_Class": cls, "N": s_["N"],
-                "Mean_kmh": self._fmt(s_["Mean"], 3), "SD_kmh": self._fmt(s_["SD"], 3),
-                "V50_kmh": self._fmt(s_["P50"], 3), "V85_kmh": self._fmt(s_["P85"], 3),
-                "V85_minus_V50_kmh": self._fmt(None if s_["N"] == 0 else s_["P85"] - s_["P50"], 3),
-                "Min_kmh": self._fmt(s_["Min"], 3), "Max_kmh": self._fmt(s_["Max"], 3),
-            })
-        return out
 
     # ========================================================
     # REFERENCE LINE MAPPING
@@ -10027,7 +10000,7 @@ class Run1App:
         Stage 2 - Exit (only after such a stop): that gap becomes Rejected and the driver
           decides again after it resumes: only NEW gaps (starting after the resumption) count;
           the gap that contains the target-zone entry is Accepted, earlier new gaps Rejected.
-        The available gap X31 is the time left until the gap closes at the decision time."""
+        The available gap (Available_Gap_s) is the time left until the gap closes at the decision time."""
         selected = c["gap_movements"]
         site = c["site_id"]
         thr = c["waiting_threshold"]
@@ -10209,13 +10182,13 @@ class Run1App:
                     "Subject_ID": tid, "Subject_Class": subject_class, "Subject_Movement": movement,
                     "Decision_Stage": o["stage"], "Decision_Zone": o["decision_zone"],
                     "Gap_Evaluation_Time": f"{o['opportunity_time']:.6f}",
-                    "X32_Waiting_Time": f"{max(0.0, o['opportunity_time'] - wait_start):.6f}",
+                    "Waiting_Time_s": f"{max(0.0, o['opportunity_time'] - wait_start):.6f}",
                     "Conflicting_Movement": o["conflict_movement"],
                     "Conflicting_ID_A": o["id_a"], "Conflicting_Class_A": o["class_a"],
                     "Conflicting_ID_B": o["id_b"], "Conflicting_Class_B": o["class_b"],
                     "Reference_Line": o["reference"],
                     "Gap_Start_Time": f"{o['gap_start']:.6f}", "Gap_End_Time": f"{o['gap_end']:.6f}",
-                    "X31_Available_Gap": f"{o['gap']:.6f}",
+                    "Available_Gap_s": f"{o['gap']:.6f}",
                     "Subject_Speed_kmh": self._fmt(sp_subject, 3), "Conflict_Speed_A_kmh": self._fmt(sp_a, 3),
                     "Conflict_Speed_B_kmh": self._fmt(sp_b, 3),
                     "Gap_Role": "Accepted" if o["accepted"] == 1 else "Rejected", "Gap_Acceptance": int(o["accepted"]),
@@ -10516,10 +10489,15 @@ class Run1App:
                     if cr is None:
                         diag["no_crossing"] += 1
                         continue
-                    ip, ctype = cr["ip"], "Crossing"
+                    ip = cr["ip"]
                     diag["interaction_candidates"] += 1
                     t_a, t_b = path_pass_time(At, cr["seg_a"]), path_pass_time(Bt, cr["seg_b"])
                     ia_, ib_ = cr["seg_a"][0], cr["seg_b"][0]
+                    # Conflict type as TTC does it: the angle between the two velocity vectors where the vehicles pass the crossing (same limits as
+                    # TTC: < 30 Rear-end, 30 - 85 Lane change, > 85 Crossing; a vehicle that stands still there = Unclassified)
+                    theta = conflict_angle_deg(path_velocity_at(A, At, t_a, PET_SPEED_WINDOW_S, cr["seg_a"]), path_velocity_at(B, Bt, t_b, PET_SPEED_WINDOW_S, cr["seg_b"]),
+                                               c.get("ttc_min_speed_kmh", 5.0) / 3.6)
+                    ctype = ttc_conflict_type(theta, c.get("ttc_angle_rear_end_deg", TTC_ANGLE_REAR_END_DEG), c.get("ttc_angle_crossing_deg", TTC_ANGLE_CROSSING_DEG))
                     gap_flag = max(At[ia_ + 1] - At[ia_], Bt[ib_ + 1] - Bt[ib_]) > PET_GAP_FLAG_S
                     if gap_flag:
                         diag["interpolated_gap"] += 1
@@ -10563,7 +10541,7 @@ class Run1App:
                         "Interaction_ID": f"{a_id}_{b_id}_Z{zone}_{span_start:.6f}",
                         "Vehicle_ID_A": a_id, "Vehicle_Class_A": a_rows[0].get("class_name", ""), "Movement_A": ma,
                         "Vehicle_ID_B": b_id, "Vehicle_Class_B": b_rows[0].get("class_name", ""), "Movement_B": mb,
-                        "Conflict_Type": ctype, "Conflict_Zone": f"Zone {zone}",
+                        "Conflict_Type": ctype, "Theta_deg": "" if theta is None else f"{theta:.2f}", "Conflict_Zone": f"Zone {zone}",
                         "Interaction_Start": f"{span_start:.6f}", "Interaction_End": f"{span_end:.6f}",
                         "Cross_X_m": f"{ip[0]:.4f}", "Cross_Y_m": f"{ip[1]:.4f}", "Area_Radius_m": "" if rad is None else f"{rad:.3f}",
                         "T1_Exit_Time": f"{t1:.6f}", "T2_Entry_Time": f"{t2:.6f}", "PET_s": f"{pet:.6f}",
@@ -10988,6 +10966,7 @@ class Run1App:
         row_counts = {}
 
         def write_csv(filename, fields, rows):
+            fields, rows = apply_csv_renames(filename, fields, rows)
             csv_file, actual = self._run3_open_csv_safe(os.path.join(output_dir, filename))
             with csv_file as f:
                 w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
@@ -11012,8 +10991,10 @@ class Run1App:
             try:
                 func()
             except Exception as e:
-                outputs[key] = write_csv(filename, ["Error"], [{"Error": str(e)}])
-                summary["diagnostics"][key] = f"ERROR: {e}"
+                # The failure goes to its own <name>_ERROR.csv: the real output name is not reused, so a failed indicator can never be mistaken for an empty result
+                error_name = os.path.splitext(filename)[0] + "_ERROR.csv"
+                outputs[key + "_error"] = write_csv(error_name, ["Error"], [{"Error": str(e)}])
+                summary["diagnostics"][key] = f"ERROR: {e} (see {error_name}; any {filename} in this folder is from an earlier run)"
             timings[key] = round(time.time() - t0, 3)
 
         # ---------------- Lateral Clearance (distance) ----------------
@@ -11022,9 +11003,16 @@ class Run1App:
             rows, lc_diag = self._run3_lateral_clearance(tracks, c, sequence_by_id)
             fields = ["Site_ID","Pair_ID","Timestamp","Zone","Vehicle_A_ID","Vehicle_A_Class","Vehicle_B_ID","Vehicle_B_Class","Zone_Sequence_A","Zone_Sequence_B","Along_m","LS_Meter","Signed_Lateral_m","Width_A_m","Width_B_m","Length_A_m","Length_B_m","Lateral_Clearance_m","QC_Flag"]
             row_counts["lc"] = len(rows)
-            outputs["lateral_clearance"] = write_csv("Lateral_Clearance.csv", fields, rows)
             pairs = self._run3_lc_pair_summary(rows)
-            pair_fields = ["Site_ID","Pair_ID","Zone","Vehicle_A_ID","Vehicle_A_Class","Vehicle_B_ID","Vehicle_B_Class","Zone_Sequence_A","Zone_Sequence_B","Start_Time","End_Time","Samples","Lateral_Clearance_Min_m","Lateral_Clearance_Mean_m","QC_Flag"]
+            mode_ = self._run3_calibration_mode(c)
+            for r in rows + pairs:
+                r["Movement_A"] = movement_by_id.get(str(r["Vehicle_A_ID"]), "")
+                r["Movement_B"] = movement_by_id.get(str(r["Vehicle_B_ID"]), "")
+                r["Calibration_Mode"] = mode_
+            fields = fields[:fields.index("Zone_Sequence_B") + 1] + ["Movement_A", "Movement_B"] + fields[fields.index("Zone_Sequence_B") + 1:-1] + ["Calibration_Mode", "QC_Flag"]
+            if c.get("write_detail_files"):
+                outputs["lateral_clearance"] = write_csv("Lateral_Clearance.csv", fields, rows)      # every sample: the checking file (Pairs = the summary)
+            pair_fields = ["Site_ID","Pair_ID","Zone","Vehicle_A_ID","Vehicle_A_Class","Vehicle_B_ID","Vehicle_B_Class","Zone_Sequence_A","Zone_Sequence_B","Movement_A","Movement_B","Start_Time","End_Time","Samples","Lateral_Clearance_Min_m","Lateral_Clearance_Mean_m","Calibration_Mode","QC_Flag"]
             outputs["lateral_clearance_pairs"] = write_csv("Lateral_Clearance_Pairs.csv", pair_fields, pairs)
             s_ = indicator("Lateral Clearance (all measured samples)", "Distance", "m", "All samples",
                            [float(r["Lateral_Clearance_m"]) for r in rows])
@@ -11065,13 +11053,13 @@ class Run1App:
         def do_gap():
             status("Run 3 — Gap Acceptance...")
             gap_rows = self._run3_gap(tracks, c, mapping, movement_by_id)
-            fields = ["Site_ID","Decision_Event_ID","Opportunity_No","Subject_ID","Subject_Class","Subject_Movement","Decision_Stage","Decision_Zone","Gap_Evaluation_Time","X32_Waiting_Time","Conflicting_Movement","Conflicting_ID_A","Conflicting_Class_A","Conflicting_ID_B","Conflicting_Class_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","Subject_Speed_kmh","Conflict_Speed_A_kmh","Conflict_Speed_B_kmh","Gap_Role","Gap_Acceptance","Decision_Time","QC_Flag"]
+            fields = ["Site_ID","Decision_Event_ID","Opportunity_No","Subject_ID","Subject_Class","Subject_Movement","Decision_Stage","Decision_Zone","Gap_Evaluation_Time","Waiting_Time_s","Conflicting_Movement","Conflicting_ID_A","Conflicting_Class_A","Conflicting_ID_B","Conflicting_Class_B","Reference_Line","Gap_Start_Time","Gap_End_Time","Available_Gap_s","Subject_Speed_kmh","Conflict_Speed_A_kmh","Conflict_Speed_B_kmh","Gap_Role","Gap_Acceptance","Decision_Time","QC_Flag"]
             row_counts["gap"] = len(gap_rows)
             outputs["gap_acceptance"] = write_csv("Gap_Acceptance.csv", fields, gap_rows)
             rejected = defaultdict(list); accepted = defaultdict(list)
             for r in gap_rows:
                 key = (r["Subject_Class"], r["Subject_Movement"], r["Subject_ID"])
-                (accepted if r["Gap_Acceptance"] == 1 else rejected)[key].append(float(r["X31_Available_Gap"]))
+                (accepted if r["Gap_Acceptance"] == 1 else rejected)[key].append(float(r["Available_Gap_s"]))
             groups = defaultdict(lambda: {"accepted": [], "rejected": [], "intervals": []})
             for key in set(rejected) | set(accepted):
                 acc = accepted.get(key, []); rej = rejected.get(key, [])
@@ -11091,8 +11079,8 @@ class Run1App:
                 })
             if critical:
                 outputs["critical_gap"] = write_csv("Critical_Gap.csv", list(critical[0].keys()), critical)
-            acc_vals = [float(r["X31_Available_Gap"]) for r in gap_rows if r["Gap_Acceptance"] == 1]
-            rej_vals = [float(r["X31_Available_Gap"]) for r in gap_rows if r["Gap_Acceptance"] == 0]
+            acc_vals = [float(r["Available_Gap_s"]) for r in gap_rows if r["Gap_Acceptance"] == 1]
+            rej_vals = [float(r["Available_Gap_s"]) for r in gap_rows if r["Gap_Acceptance"] == 0]
             indicator("Gap Acceptance — accepted gaps", "Time", "s", "Accepted", acc_vals)
             indicator("Gap Acceptance — rejected gaps", "Time", "s", "Rejected", rej_vals)
             summary["indicators"]["Gap_Acceptance"] = {
@@ -11109,11 +11097,18 @@ class Run1App:
         def do_ttc():
             status("Run 3 — TTC...")
             rows, diag, ttc_frames, self._run3_ttc_shapes = self._run3_ttc(tracks, c, movement_by_id)
-            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","Rel_X_m","Rel_Y_m","RelV_X_mps","RelV_Y_mps","Rel_Speed_kmh","DTC_m","Collide_X_m","Collide_Y_m","Collide_Frame_Time_s","Dist_A_to_Collide_m","Dist_B_to_Collide_m","Arrival_A_s","Arrival_B_s","Miss_Distance_m","Speed_A_kmh","Speed_B_kmh","TTC_s","TTC_Level","Speed_Level","TTC_Risk_Level","QC_Flag"]
+            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","DTC_m","Collide_X_m","Collide_Y_m","Miss_Distance_m","Speed_A_kmh","Speed_B_kmh","TTC_s","TTC_Level","Speed_Level","TTC_Risk_Level","Calibration_Mode","QC_Flag"]
+            detail_fields = ["Site_ID","Event_ID","Rel_X_m","Rel_Y_m","RelV_X_mps","RelV_Y_mps","Rel_Speed_kmh","Collide_Frame_Time_s","Dist_A_to_Collide_m","Dist_B_to_Collide_m","Arrival_A_s","Arrival_B_s"]
             row_counts["ttc"] = len(rows)
+            mode_ = self._run3_calibration_mode(c)
+            for r in rows:
+                r["Calibration_Mode"] = mode_
             outputs["ttc"] = write_csv("TTC.csv", fields, rows)
-            outputs["ttc_frames"] = write_csv("TTC_Frames.csv", ["Site_ID","Vehicle_A_ID","Vehicle_B_ID","Frame","Time_s","Zone_A","Zone_B","Distance_m","TTC_s","DTC_m","Collide_X_m","Collide_Y_m","Miss_Distance_m","Theta_deg","Rel_Speed_kmh","Speed_A_kmh","Speed_B_kmh","Status","Event_ID","Is_Event_Min"], ttc_frames)
-            diag["frame_rows_written"] = len(ttc_frames)
+            if c.get("write_detail_files"):
+                outputs["ttc_detail"] = write_csv("TTC_Detail.csv", detail_fields, rows)     # the relative vectors / arrival times behind each event (checking values)
+            if c.get("write_detail_files"):
+                outputs["ttc_frames"] = write_csv("TTC_Frames.csv", ["Site_ID","Vehicle_A_ID","Vehicle_B_ID","Frame","Time_s","Zone_A","Zone_B","Distance_m","TTC_s","DTC_m","Collide_X_m","Collide_Y_m","Miss_Distance_m","Theta_deg","Rel_Speed_kmh","Speed_A_kmh","Speed_B_kmh","Status","Event_ID","Is_Event_Min"], ttc_frames)
+            diag["frame_rows_written"] = len(ttc_frames) if c.get("write_detail_files") else 0
             vals = [float(r["TTC_s"]) for r in rows]
             s_ = indicator("Time-to-Collision (TTCmin per event)", "Time", "s", "All", vals,
                            f"events with TTCmin <= {c['ttc_max_record_s']} s")
@@ -11136,8 +11131,11 @@ class Run1App:
         def do_pet():
             status("Run 3 — PET...")
             rows, diag = self._run3_pet(tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
-            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","Cross_X_m","Cross_Y_m","Area_Radius_m","T1_Exit_Time","T2_Entry_Time","PET_s","Speed_A_kmh","Speed_B_kmh","PET_Level","Speed_Level","PET_Risk_Level","QC_Flag"]
+            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Theta_deg","Conflict_Zone","Interaction_Start","Interaction_End","Cross_X_m","Cross_Y_m","Area_Radius_m","T1_Exit_Time","T2_Entry_Time","PET_s","Speed_A_kmh","Speed_B_kmh","PET_Level","Speed_Level","PET_Risk_Level","Calibration_Mode","QC_Flag"]
             row_counts["pet"] = len(rows)
+            mode_ = self._run3_calibration_mode(c)
+            for r in rows:
+                r["Calibration_Mode"] = mode_
             outputs["pet"] = write_csv("PET.csv", fields, rows)
             vals = [float(r["PET_s"]) for r in rows]
             s = indicator("Post-Encroachment Time", "Time", "s", "All", vals)
@@ -11147,44 +11145,26 @@ class Run1App:
             for z in sorted(c["pet_zones"]):
                 indicator("Post-Encroachment Time", "Time", "s", f"Zone {z}",
                           [float(r["PET_s"]) for r in rows if r["Conflict_Zone"] == f"Zone {z}"])
-            for ctype in ("Crossing", "Merging", "Diverging", "Merging/Diverging"):
+            for ctype in ("Rear-end", "Lane change", "Crossing", "Unclassified"):
                 sub = [float(r["PET_s"]) for r in rows if r["Conflict_Type"] == ctype]
                 if sub:
                     indicator("Post-Encroachment Time", "Time", "s", f"Conflict type {ctype}", sub)
             s["Conflict_Type_Counts"] = {ct: sum(1 for r in rows if r["Conflict_Type"] == ct)
-                                         for ct in ("Crossing", "Merging", "Diverging", "Merging/Diverging")}
+                                         for ct in ("Rear-end", "Lane change", "Crossing", "Unclassified")}
             summary["indicators"]["PET"] = s
             summary["diagnostics"]["pet"] = diag
         run_step("pet", "PET.csv", do_pet)
 
-        # ---------------- Speed (V50, V85, Mean, SD) ----------------
+        # ---------------- Speed (every frame) ----------------
         def do_speed():
             status("Run 3 — Speed...")
-            speed_rows = self._run3_speed(tracks, c, movement_by_id, movement_source_by_id)
-            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Scope","Key","Movement","Movement_Status","Start_Time","End_Time","Start_Frame","End_Frame","Samples","Distance_m","Duration_s","Speed_kmh","Calibration_Mode","QC_Flag"]
+            speed_rows = self._run3_speed(tracks, c, movement_by_id)
             row_counts["speed"] = len(speed_rows)
-            outputs["speed_detail"] = write_csv("Speed_Detail.csv", fields, speed_rows)
-            vs = self._run3_speed_vehicle_summary(speed_rows, tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
-            outputs["speed"] = write_csv("Speed.csv", self._run3_speed_vehicle_summary_fields(), vs)
-            stats = self._run3_speed_statistics(speed_rows, c)
-            outputs["speed_statistics"] = write_csv("Speed_Statistics.csv",
-                ["Site_ID","Scope","Key","Vehicle_Class","N","Mean_kmh","SD_kmh","V50_kmh","V85_kmh","V85_minus_V50_kmh","Min_kmh","Max_kmh"], stats)
-            groups = defaultdict(list)
-            n_outliers = sum(1 for r in speed_rows if "Speed_Above_Max" in str(r.get("QC_Flag", "")))
-            for r in speed_rows:
-                if "Speed_Above_Max" in str(r.get("QC_Flag", "")):
-                    continue
-                groups[(r["Scope"], r["Key"])].append(float(r["Speed_kmh"]))
-            spd = {}
-            for (scope, key) in sorted(groups, key=lambda k: (k[0] != "Zone", MOVEMENT_IDS.index(k[1]) if k[1] in MOVEMENT_IDS else 0, k[1])):
-                # One row per group: Median column = V50, P85 column = V85
-                s_ = indicator("Speed (Mean, SD, V50 = Median, V85 = P85)", "Speed", "km/h",
-                               key if scope == "Zone" else f"Movement {key}", groups[(scope, key)])
-                spd[f"{scope} {key}"] = {"N": s_["N"], "Mean": s_["Mean"], "SD": s_["SD"], "V50": s_["P50"], "V85": s_["P85"]}
-            summary["indicators"]["Speed"] = spd
-            summary["diagnostics"]["speed"] = (f"vehicle_rows={len(vs)}; detail_rows={len(speed_rows)}; "
-                                               f"zones={sorted(c['speed_zones'])}; smoothing_samples={c['speed_smoothing_samples']}; "
-                                               f"max_plausible_kmh={c.get('speed_max_kmh', 0)}; above_max_excluded_from_statistics={n_outliers}")
+            outputs["speed"] = write_csv("Speed.csv", ["Frame","Time_s","Vehicle_ID","Vehicle_Class","Zone","Movement","Speed_kmh","QC_Flag"], speed_rows)
+            n_flag = sum(1 for r in speed_rows if "Speed_Above_Max" in r["QC_Flag"])
+            summary["indicators"]["Speed"] = {"rows": len(speed_rows), "vehicles": len({r["Vehicle_ID"] for r in speed_rows}), "above_max_flagged": n_flag}
+            summary["diagnostics"]["speed"] = (f"rows={len(speed_rows)}; zones={sorted(c['speed_zones'])}; smoothing_samples={c['speed_smoothing_samples']}; "
+                                               f"frame_window_s={c.get('speed_frame_window_s', 0.5)}; max_plausible_kmh={c.get('speed_max_kmh', 0)}; flagged_above_max={n_flag}")
         run_step("speed", "Speed.csv", do_speed)
 
         # Topview: the metric points the indicators used, as a file and (optionally) a road-plane video
@@ -11257,7 +11237,7 @@ class Run1App:
             print("Run 3 —", line)
 
         summary["architecture"] = {
-            "indicators": "LDP, Lateral Clearance, Gap Acceptance, TTC, PET, Speed (V50, V85, Mean, SD)",
+            "indicators": "LDP, Lateral Clearance, Gap Acceptance, TTC, PET, Speed (every frame)",
             "domains": {"Distance": ["LDP", "Lateral Clearance"], "Time": ["Gap Acceptance", "TTC", "PET"], "Speed": ["Speed"]},
             "movement_resolver": "Full flicker-cleaned zone sequence of each track matched to 6 patterns (1-3-4, 2-3-1, 1-3-6-7, 5-6-3-1, 2-3-4, 5-6-7); ambiguous fragments stay unclassified",
             "metric_coordinates": "Computed once per sample (batch); perspective or PPM + road angle",
