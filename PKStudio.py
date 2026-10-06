@@ -587,8 +587,9 @@ RUN3_DEFAULTS = {
 # ============================================================
 
 ZONE_IDS = list(range(1, 8))
-CONFLICT_ZONE_IDS = (3, 6)              # V28: conflict zones (PET / TTC); ordinary path zones for Movement
+CONFLICT_ZONE_IDS = (3, 6)              # V28: conflict zones (default zones of PET / TTC; every zone 1-7 can be ticked)
 ZONE_NAMES = [f"Zone {i}" for i in ZONE_IDS]
+LDP_LOCKED_ZONES = (1,)                 # LDP only measures main-road movements (2-3-4, 5-6-7): Zone 1 can never have a value
 
 # ==== CORE-BEGIN (pure logic, no GUI: unit-tested by tests/test_core.py) ====
 import math
@@ -3746,7 +3747,7 @@ class Run1App:
         self.record_start_var = tk.StringVar(value=DEFAULT_SETTINGS["record_start_s"])
         self.record_end_var = tk.StringVar(value=DEFAULT_SETTINGS["record_end_s"])
         self.run3_lc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["lc_zones"])) for z in ZONE_IDS}
-        self.run3_pet_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["pet_zones"])) for z in CONFLICT_ZONE_IDS}
+        self.run3_pet_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["pet_zones"])) for z in ZONE_IDS}
         self.run3_pet_zone6_var = self.run3_pet_zone_vars[6]   # backward-compatible alias
         self.run3_ttc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["ttc_zones"])) for z in ZONE_IDS}
         self.run3_ldp_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["ldp_zones"])) for z in ZONE_IDS}
@@ -4167,10 +4168,15 @@ class Run1App:
         return box
 
     @staticmethod
-    def _zone_checks(box, var_map, row, label="โซนที่คำนวณ"):
+    def _zone_checks(box, var_map, row, label="โซนที่คำนวณ", locked=()):
+        """`locked` zones are shown greyed out and cannot be ticked (their variable is forced off)."""
         ttk.Label(box, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
         for i, z in enumerate(sorted(var_map)):
-            ttk.Checkbutton(box, text=f"Zone {z}", variable=var_map[z]).grid(row=row, column=1 + i, sticky="w", padx=(2, 10), pady=2)
+            btn = ttk.Checkbutton(box, text=f"Zone {z}", variable=var_map[z])
+            if z in locked:
+                var_map[z].set(False)
+                btn.state(["disabled"])
+            btn.grid(row=row, column=1 + i, sticky="w", padx=(2, 10), pady=2)
 
     @staticmethod
     def _entry_row(box, row, label, var, width=8, col=0, span=5):
@@ -4184,8 +4190,10 @@ class Run1App:
 
         box = self._indicator_box("LDP", self.run3_ldp_enabled_var,
                                   "ΔY ÷ (W/2) × 100 — ΔY = ระยะตั้งฉากของเส้นทางรถจากเส้นอ้างอิง (จุดเข้า→จุดออกโซน) เฉพาะรถทางหลัก 2-3-4 (W_entry) และ 5-6-7 (W_opp) ทุกประเภทรถ")
-        self._zone_checks(box, self.run3_ldp_zone_vars, 1)
+        self._zone_checks(box, self.run3_ldp_zone_vars, 1, locked=LDP_LOCKED_ZONES)
         self._entry_row(box, 2, "Median smoothing (จำนวนตัวอย่าง, 1 = ปิด)", self.run3_ldp_smoothing_var)
+        ttk.Label(box, text="หมายเหตุ: เลือก Zone 1 ไม่ได้ — LDP คิดเฉพาะทางหลัก 2-3-4 และ 5-6-7 ซึ่งไม่ผ่านโซน 1 (ทางเชื่อม/ซอย)",
+                  foreground="#666666").grid(row=3, column=0, columnspan=8, sticky="w", pady=2)
 
         box = self._indicator_box("Lateral Clearance", self.run3_lc_enabled_var,
                                   "คู่รถทิศทางเดียวกันในโซนเดียวกัน วัดตั้งฉากกับทิศที่รถ A เคลื่อนที่เมื่อกรอบรถซ้อนกันตามแนวยาว (ถ้ามีจักรยานยนต์ในคู่ จักรยานยนต์คือ A)")
@@ -4234,8 +4242,8 @@ class Run1App:
                                           ("มุมความขัดแย้ง: มากกว่านี้ = Crossing (deg), ระหว่างกลาง = Lane change", self.run3_ttc_angle_cross_var))):
             self._entry_row(box, 2 + i, label, var, span=7)
 
-        box = self._indicator_box("PET", self.run3_pet_enabled_var, "PET คำนวณแยกในแต่ละ Conflict Zone (Zone 3 / Zone 6)")
-        self._zone_checks(box, self.run3_pet_zone_vars, 1, "Conflict Zone")
+        box = self._indicator_box("PET", self.run3_pet_enabled_var, "PET คำนวณแยกในแต่ละโซนที่ติ๊ก (ค่าเริ่มต้น Zone 3 / Zone 6)")
+        self._zone_checks(box, self.run3_pet_zone_vars, 1)
         for i, (label, var) in enumerate((("Interaction distance (m)", self.run3_pet_interaction_distance_var),
                                           ("PET threshold (s)", self.run3_pet_threshold_var),
                                           ("PET max (s) — ว่าง = ไม่จำกัด", self.run3_pet_max_var))):
@@ -5890,7 +5898,7 @@ class Run1App:
             for key, var_map in (("ttc_zones", self.run3_ttc_zone_vars), ("ldp_zones", self.run3_ldp_zone_vars)):
                 if key in run3:
                     for z, var in var_map.items():
-                        var.set(z in set(run3.get(key) or []))
+                        var.set(z in set(run3.get(key) or []) and not (key == "ldp_zones" and z in LDP_LOCKED_ZONES))
             lengths = run3.get("vehicle_lengths", {})
             if isinstance(lengths, dict):
                 for name, var in self.run3_length_vars.items():
@@ -6843,7 +6851,7 @@ class Run1App:
             for key in ("lane_entry_motorcycle_m", "lane_entry_car_m", "lane_opp_motorcycle_m", "lane_opp_car_m"):
                 self._run3_float(self.run3_geometry_vars[key].get(), f"road geometry {key} (required by LDP)")
         if enabled["pet"]:
-            need_zone(self.run3_pet_zone_vars, "PET (Zone 3 / Zone 6)")
+            need_zone(self.run3_pet_zone_vars, "PET")
             self._run3_float(self.run3_pet_interaction_distance_var.get(), "PET interaction distance (m)")
             self._run3_float(self.run3_pet_threshold_var.get(), "PET threshold (s)")
             if str(self.run3_pet_max_var.get()).strip():
