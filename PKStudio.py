@@ -514,6 +514,7 @@ RUN3_DEFAULTS = {
     "pet_interaction_distance_m": "3.00",   # implementation starter value
     "pet_threshold_s": "1.00",
     # V27 implementation starter values (editable; verify per site):
+    "pet_min_speed_kmh": "",                # a vehicle whose mean speed in the zone is below this is skipped; blank = no limit
     "pet_max_s": "10.0",                    # pairs/events above this are not PET conflicts; blank = no limit
     "ttc_max_record_s": "3.0",              # record TTC events with TTCmin <= this value
     "ttc_velocity_window_s": "0.50",        # centred window of observed samples for velocity
@@ -3752,6 +3753,7 @@ class Run1App:
         self.run3_ttc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["ttc_zones"])) for z in ZONE_IDS}
         self.run3_ldp_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["ldp_zones"])) for z in ZONE_IDS}
         self.run3_pet_max_var = tk.StringVar(value=RUN3_DEFAULTS["pet_max_s"])
+        self.run3_pet_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["pet_min_speed_kmh"])
         self.run3_ttc_max_record_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_max_record_s"])
         self.run3_ttc_velocity_window_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_velocity_window_s"])
         self.run3_ttc_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_speed_kmh"])
@@ -4246,7 +4248,8 @@ class Run1App:
         self._zone_checks(box, self.run3_pet_zone_vars, 1)
         for i, (label, var) in enumerate((("Interaction distance (m)", self.run3_pet_interaction_distance_var),
                                           ("PET threshold (s)", self.run3_pet_threshold_var),
-                                          ("PET max (s) — ว่าง = ไม่จำกัด", self.run3_pet_max_var))):
+                                          ("PET max (s) — ว่าง = ไม่จำกัด", self.run3_pet_max_var),
+                                          ("ความเร็วขั้นต่ำของรถ (km/h) — ความเร็วเฉลี่ยของคันนั้นในโซนต่ำกว่านี้ข้ามคู่นั้น ว่าง = ไม่จำกัด", self.run3_pet_min_speed_var))):
             self._entry_row(box, 2 + i, label, var)
 
         box = self._indicator_box("Speed (V50, V85, Mean, SD)", self.run3_speed_enabled_var,
@@ -5697,6 +5700,7 @@ class Run1App:
                 "ttc_zones": [z for z, v in self.run3_ttc_zone_vars.items() if v.get()],
                 "ldp_zones": [z for z, v in self.run3_ldp_zone_vars.items() if v.get()],
                 "pet_max_s": self.run3_pet_max_var.get(),
+                "pet_min_speed_kmh": self.run3_pet_min_speed_var.get(),
                 "ttc_max_record_s": self.run3_ttc_max_record_var.get(),
                 "ttc_velocity_window_s": self.run3_ttc_velocity_window_var.get(),
                 "ttc_min_speed_kmh": self.run3_ttc_min_speed_var.get(),
@@ -5854,6 +5858,7 @@ class Run1App:
                 ("perspective_l34_m", self.run3_perspective_l34_var),
                 ("perspective_l41_m", self.run3_perspective_l41_var),
                 ("pet_max_s", self.run3_pet_max_var),
+                ("pet_min_speed_kmh", self.run3_pet_min_speed_var),
                 ("ttc_max_record_s", self.run3_ttc_max_record_var),
                 ("ttc_velocity_window_s", self.run3_ttc_velocity_window_var),
                 ("ttc_min_speed_kmh", self.run3_ttc_min_speed_var),
@@ -6856,6 +6861,8 @@ class Run1App:
             self._run3_float(self.run3_pet_threshold_var.get(), "PET threshold (s)")
             if str(self.run3_pet_max_var.get()).strip():
                 self._run3_float(self.run3_pet_max_var.get(), "PET max (s)")
+            if str(self.run3_pet_min_speed_var.get()).strip():
+                self._run3_float(self.run3_pet_min_speed_var.get(), "PET minimum vehicle speed (km/h)")
         if enabled["gap"]:
             if not any([
                 self.run3_gap_subject_134_var.get(),
@@ -9092,6 +9099,7 @@ class Run1App:
             if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
         )
         pet_max = num(self.run3_pet_max_var, None)
+        pet_min_speed = num(self.run3_pet_min_speed_var, None)
         geometry = {key: num(self.run3_geometry_vars[key], None) for key in RUN3_GEOMETRY_KEYS}
         def lane_total(a, b):
             return geometry[a] + geometry[b] if geometry[a] is not None and geometry[b] is not None else None
@@ -9128,6 +9136,7 @@ class Run1App:
             "pet_interaction": num(self.run3_pet_interaction_distance_var, 3.0),
             "pet_threshold": num(self.run3_pet_threshold_var, 1.0),
             "pet_max_s": pet_max if (pet_max is not None and pet_max > 0) else None,
+            "pet_min_speed_kmh": pet_min_speed if (pet_min_speed is not None and pet_min_speed > 0) else None,
             "ttc_max_record_s": (None if not str(self.run3_ttc_max_record_var.get()).strip() else num(self.run3_ttc_max_record_var, 3.0)),
             "ttc_velocity_window_s": num(self.run3_ttc_velocity_window_var, 0.5),
             "ttc_min_speed_kmh": num(self.run3_ttc_min_speed_var, 5.0),
@@ -10371,11 +10380,11 @@ class Run1App:
         never be smaller than that gap, so no valid event is lost);
         (4) segment intersection is vectorised.
         """
-        radius = c["pet_interaction"]; pet_max = c["pet_max_s"]; threshold = c["pet_threshold"]
+        radius = c["pet_interaction"]; pet_max = c["pet_max_s"]; threshold = c["pet_threshold"]; min_speed = c.get("pet_min_speed_kmh")
         ids = list(tracks)
         diag = {"zone_tracks": {}, "pairs_with_both_in_zone": 0, "pairs_skipped_time_window": 0,
                 "no_crossing": 0, "no_movement_both": 0, "interaction_candidates": 0,
-                "overlap_intervals": 0, "above_pet_max": 0,
+                "overlap_intervals": 0, "above_pet_max": 0, "slow_vehicle": 0,
                 "tracks_with_movement": sum(1 for t in ids if movement_by_id.get(t))}
         out = []
         for zone in sorted(c["pet_zones"]):
@@ -10426,6 +10435,9 @@ class Run1App:
                     if pet <= 0:
                         continue
                     sp_a, sp_b = self._run3_mean_speed_kmh(A, At), self._run3_mean_speed_kmh(B, Bt)
+                    if min_speed is not None and ((sp_a is not None and sp_a < min_speed) or (sp_b is not None and sp_b < min_speed)):
+                        diag["slow_vehicle"] += 1             # blank setting = no limit; a parked vehicle's jitter can fake a crossing
+                        continue
                     if pet_max is not None and pet > pet_max:
                         diag["above_pet_max"] += 1
                         continue
