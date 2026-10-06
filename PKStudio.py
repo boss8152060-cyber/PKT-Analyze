@@ -518,8 +518,10 @@ RUN3_DEFAULTS = {
     "ttc_max_record_s": "3.0",              # record TTC events with TTCmin <= this value
     "ttc_velocity_window_s": "0.50",        # centred window of observed samples for velocity
     "ttc_min_speed_kmh": "5.0",             # a frame where either vehicle is slower than this is skipped (a parked vehicle whose box flickers has a false velocity)
-    "ttc_show_boxes_xy": True,              # draw the vehicle rectangles that TTC uses in the X-Y video (red = in a counted TTC frame)
-    "ttc_show_boxes_video": False,          # draw them also on the normal roadside video (Tracking_Result.mp4) after Run 3
+    "ttc_method": "point",                  # point: one point per vehicle (vector TTC, with the miss-distance rule) | box: vehicle rectangles
+    "ttc_miss_margin_m": "0.5",             # point method: counts only when the two points come within (W_A + W_B)/2 + this (m)
+    "ttc_show_boxes_xy": True,              # draw what TTC used in the X-Y video: the expected collision point (point method) / the rectangles (box method)
+    "ttc_show_boxes_video": False,          # draw it also on the normal roadside video (Tracking_Result.mp4) after Run 3
     "ttc_box_margin_m": "0.25",             # every vehicle rectangle (length x width by class) is enlarged by this on each side (m): room for the position error
     # Vector TTC (SPEC v28 section 7, formula of Yaibok et al. 2026):
     "ttc_min_rel_speed_ms": "0.5",          # pairs with a smaller relative speed (m/s) are skipped (unstable TTC)
@@ -965,6 +967,33 @@ def invert_map(fwd, dst, init, iters=30, tol=1e-4, h=0.5):
         det = np.where(np.abs(det) < 1e-12, 1e-12, det)
         x = x - np.stack([(d * f[:, 0] - b * f[:, 1]) / det, (-c_ * f[:, 0] + a * f[:, 1]) / det], axis=1)
     return x
+
+
+def vector_ttc(p_a, v_a, p_b, v_b, min_rel_speed=0.0):
+    """Point-vehicle TTC (SPEC v28 section 7; Eq. 11 of Yaibok et al. 2026 = TCPA of marine navigation). r = p_b - p_a, v = v_b - v_a; constant velocities,
+    r(t) = r + v t:  TTC = -(r . v) / (v . v) when r . v < 0 (approaching), else None (also None when |v| < min_rel_speed).
+    Returns {"TTC", "r", "v", "rel_speed", "pa", "pb" (positions of A and B at TTC), "point" (the middle between them = where the vehicles are expected to meet),
+    "miss" (distance between them then: how close they come)}."""
+    r = (p_b[0] - p_a[0], p_b[1] - p_a[1])
+    v = (v_b[0] - v_a[0], v_b[1] - v_a[1])
+    vv = v[0] * v[0] + v[1] * v[1]
+    rel = math.sqrt(vv)
+    if rel <= 0.0 or rel < min_rel_speed:
+        return None
+    rv = r[0] * v[0] + r[1] * v[1]
+    if rv >= 0.0:
+        return None
+    ttc = -rv / vv
+    pa = (p_a[0] + v_a[0] * ttc, p_a[1] + v_a[1] * ttc)
+    pb = (p_b[0] + v_b[0] * ttc, p_b[1] + v_b[1] * ttc)
+    return {"TTC": ttc, "r": r, "v": v, "rel_speed": rel, "pa": pa, "pb": pb, "point": ((pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0),
+            "miss": math.hypot(pb[0] - pa[0], pb[1] - pa[1])}
+
+
+def ttc_miss_limit(width_a, width_b, margin=0.5):
+    """How close two POINT vehicles must come for the TTC to count: half of the two widths plus `margin` (m). TTC only says WHEN they are closest, not
+    how close - without this every pair that merely passes each other has a TTC that falls to ~0 at the closest point."""
+    return (float(width_a) + float(width_b)) / 2.0 + float(margin)
 
 
 def conflict_angle_deg(v_a, v_b, min_speed=0.0):
@@ -3694,6 +3723,8 @@ class Run1App:
         self.run3_ttc_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_speed_kmh"])
         self.run3_risk_vars = {key: tk.StringVar(value=RUN3_DEFAULTS[key]) for key in RISK_SETTING_KEYS}
         self.run3_ttc_box_margin_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_box_margin_m"])
+        self.run3_ttc_method_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_method"])
+        self.run3_ttc_miss_margin_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_miss_margin_m"])
         self.run3_ttc_show_xy_var = tk.BooleanVar(value=RUN3_DEFAULTS["ttc_show_boxes_xy"])
         self.run3_ttc_show_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["ttc_show_boxes_video"])
         self.run3_ttc_min_rel_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_rel_speed_ms"])
@@ -3982,11 +4013,11 @@ class Run1App:
              dict(items=[("ID", xyv["xy_show_prefix_id"]), ("Class", xyv["xy_show_prefix_class"]), ("Conf", xyv["xy_show_prefix_conf"]),
                          ("Zone", xyv["xy_show_prefix_zone"]), ("Speed", xyv["xy_show_prefix_speed"])]))
         trow("กรอบวัตถุ (bbox)", dict(items=[("แสดง", self.show_bbox_var)]), dict(text="— (ผังเมตรไม่มีกรอบภาพ ดูสี่เหลี่ยมรถของ TTC)"))
-        trow("สี่เหลี่ยมรถของ TTC", dict(items=[("แสดง (วาดเพิ่มหลังคำนวณ TTC เสร็จ ใช้เวลาเพิ่ม)", self.run3_ttc_show_video_var)]),
-             dict(items=[("แสดง (แดง = เฟรมที่ TTC นับ)", self.run3_ttc_show_xy_var)]))
+        trow("จุดที่คาดว่าจะชน (TTC)", dict(items=[("แสดง (วาดเพิ่มหลังคำนวณ TTC เสร็จ ใช้เวลาเพิ่ม)", self.run3_ttc_show_video_var)]),
+             dict(items=[("แสดง (กากบาท = จุดที่คาดว่าจะเจอกัน + ค่า TTC)", self.run3_ttc_show_xy_var)]))
         trow("ข้อความที่มุม/ล่างภาพ", dict(items=[("Frame / FPS / เวลา / ETA", self.show_info_text_var)]), dict(items=[("t = … s  frame …", xyv["xy_show_time"])]))
         trow("ตารางเมตร", dict(text="—"), dict(items=[("เส้นตารางและตัวเลข", xyv["xy_show_grid"])]))
-        ttk.Label(box, text="สี่เหลี่ยมรถของ TTC ต้องเปิดตัวชี้วัด TTC;  แต่ละวิดีโอตั้งได้เป็นอิสระ (เช่น วิดีโอปกติโชว์ Speed แต่ X–Y ไม่โชว์)", foreground=gray).grid(
+        ttk.Label(box, text="จุดชน/สี่เหลี่ยมของ TTC ต้องเปิดตัวชี้วัด TTC;  แต่ละวิดีโอตั้งได้เป็นอิสระ (เช่น วิดีโอปกติโชว์ Speed แต่ X–Y ไม่โชว์)", foreground=gray).grid(
             row=row[0], column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     # ---------------- tab 2: site ----------------
@@ -4151,10 +4182,19 @@ class Run1App:
         box = self._indicator_box("TTC", self.run3_ttc_enabled_var,
                                   "รถแต่ละคัน = สี่เหลี่ยม ยาว×กว้างตามชนิดรถ (หันตามทิศความเร็ว) — TTC = เวลาที่สี่เหลี่ยมสองอันจะแตะกัน ถ้าทั้งคู่วิ่งตรงด้วยเวกเตอร์ความเร็วของเฟรมนั้น (ไม่แตะ = ไม่มี TTC)   |   เลือกค่าต่ำสุดต่อเหตุการณ์   |   ชนิดแยกด้วยมุมระหว่างทิศวิ่ง (Yaibok et al. 2026)")
         self._zone_checks(box, self.run3_ttc_zone_vars, 1)
+        ttk.Label(box, text="รูปแบบรถ").grid(row=11, column=0, sticky="w", pady=(6, 2))
+        METHODS = {"point": "จุดเดียวต่อรถ (เวกเตอร์ + เก็บจุดที่คาดว่าจะชน)", "box": "สี่เหลี่ยมรถ ยาว×กว้าง"}
+        shown_m = tk.StringVar(value=METHODS.get(self.run3_ttc_method_var.get(), METHODS["point"]))
+        cbm = ttk.Combobox(box, textvariable=shown_m, values=list(METHODS.values()), state="readonly", width=44)
+        cbm.grid(row=11, column=1, columnspan=6, sticky="w", pady=(6, 2))
+        cbm.bind("<<ComboboxSelected>>", lambda e: self.run3_ttc_method_var.set(next((k for k, t in METHODS.items() if t == shown_m.get()), "point")))
+        self.run3_ttc_method_var.trace_add("write", lambda *_: shown_m.set(METHODS.get(self.run3_ttc_method_var.get(), METHODS["point"])))
+        for i, (label, var) in enumerate((("ระยะที่ยังนับ (แบบจุดเดียว) = ครึ่งความกว้างรวม + ค่านี้ (m) — กันคู่ที่แค่ผ่านกันห่าง ๆ", self.run3_ttc_miss_margin_var),)):
+            self._entry_row(box, 12 + i, label, var, span=7)
         for i, (label, var) in enumerate((("บันทึกเมื่อ TTCmin ≤ (s) — ว่าง = บันทึกทั้งหมด", self.run3_ttc_max_record_var),
                                           ("หน้าต่างคำนวณความเร็ว (s)", self.run3_ttc_velocity_window_var),
                                           ("ความเร็วขั้นต่ำของแต่ละคัน (km/h) — คันใดต่ำกว่านี้ข้ามเฟรมนั้น (รถจอด กรอบกระพริบ)", self.run3_ttc_min_speed_var),
-                                          ("เผื่อขอบสี่เหลี่ยมรถ ด้านละ (m) — รถ = สี่เหลี่ยม ยาว×กว้างตามชนิดรถ", self.run3_ttc_box_margin_var),
+                                          ("เผื่อขอบสี่เหลี่ยมรถ ด้านละ (m) — เฉพาะแบบสี่เหลี่ยม", self.run3_ttc_box_margin_var),
                                           ("ความเร็วสัมพัทธ์ขั้นต่ำที่ยังคิด (m/s)", self.run3_ttc_min_rel_speed_var),
                                           ("ระยะคัดกรองคู่รถ — ห่างกันไม่เกิน (m)", self.run3_ttc_pair_radius_var),
                                           ("มุมความขัดแย้ง: น้อยกว่านี้ = Rear-end (deg)", self.run3_ttc_angle_rear_var),
@@ -5621,6 +5661,8 @@ class Run1App:
                 "ttc_min_speed_kmh": self.run3_ttc_min_speed_var.get(),
                 **{key: var.get() for key, var in self.run3_risk_vars.items()},
                 "ttc_box_margin_m": self.run3_ttc_box_margin_var.get(),
+                "ttc_method": self.run3_ttc_method_var.get(),
+                "ttc_miss_margin_m": self.run3_ttc_miss_margin_var.get(),
                 "ttc_show_boxes_xy": self.run3_ttc_show_xy_var.get(),
                 "ttc_show_boxes_video": self.run3_ttc_show_video_var.get(),
                 "ttc_min_rel_speed_ms": self.run3_ttc_min_rel_speed_var.get(),
@@ -5776,6 +5818,8 @@ class Run1App:
                 ("ttc_min_speed_kmh", self.run3_ttc_min_speed_var),
                 *[(key, var) for key, var in self.run3_risk_vars.items()],
                 ("ttc_box_margin_m", self.run3_ttc_box_margin_var),
+                ("ttc_method", self.run3_ttc_method_var),
+                ("ttc_miss_margin_m", self.run3_ttc_miss_margin_var),
                 ("ttc_show_boxes_xy", self.run3_ttc_show_xy_var),
                 ("ttc_show_boxes_video", self.run3_ttc_show_video_var),
                 ("ttc_min_rel_speed_ms", self.run3_ttc_min_rel_speed_var),
@@ -6742,6 +6786,7 @@ class Run1App:
             self._run3_float(self.run3_ttc_min_speed_var.get(), "TTC minimum vehicle speed (km/h)", positive=False)
             self._run3_float(self.run3_ttc_min_rel_speed_var.get(), "TTC minimum relative speed (m/s)", positive=False)
             self._run3_float(self.run3_ttc_box_margin_var.get(), "TTC vehicle-box margin (m)", positive=False)
+            self._run3_float(self.run3_ttc_miss_margin_var.get(), "TTC miss-distance margin (m)", positive=False)
             for name in RUN3_VEHICLE_CLASSES:
                 self._run3_float(self.run3_width_vars[name].get(), f"vehicle width for {name} (TTC uses the vehicle rectangle)")
                 self._run3_float(self.run3_length_vars[name].get(), f"vehicle length for {name} (TTC uses the vehicle rectangle)")
@@ -9051,6 +9096,8 @@ class Run1App:
                 "ldp_speed_kmh": self._risk_limits("risk_ldp_speed_limits_kmh", "ldp_speed_kmh"),
             },
             "ttc_box_margin_m": num(self.run3_ttc_box_margin_var, 0.25),
+            "ttc_method": "box" if str(self.run3_ttc_method_var.get()).strip() == "box" else "point",
+            "ttc_miss_margin_m": num(self.run3_ttc_miss_margin_var, 0.5),
             "ttc_show_boxes_xy": bool(self.run3_ttc_show_xy_var.get()),
             "ttc_show_boxes_video": bool(self.run3_ttc_show_video_var.get()),
             "ttc_min_rel_speed_ms": num(self.run3_ttc_min_rel_speed_var, 0.5),
@@ -9142,6 +9189,17 @@ class Run1App:
     def _run3_draw_ttc_boxes(img, sh, to_px):
         """The vehicle rectangles TTC used in one frame (green; red when the vehicle is in a counted TTC frame, with the TTC of the pair written at the
         middle between the two). `to_px` maps metres -> picture pixels (the X-Y canvas)."""
+        for mk in sh.get("marks", ()):
+            pts = np.asarray(to_px(np.array([mk["pa"], mk["pa2"], mk["pb"], mk["pb2"], mk["mid"]], dtype=float)), dtype=float)
+            for a_, b_ in ((0, 1), (2, 3)):                                   # each vehicle -> where it will be when the TTC has run out
+                cv2.line(img, tuple(int(round(v)) for v in pts[a_]), tuple(int(round(v)) for v in pts[b_]), (0, 165, 255), 2, cv2.LINE_AA)
+            for k in (0, 2):
+                cv2.circle(img, tuple(int(round(v)) for v in pts[k]), 4, (255, 255, 255), -1, cv2.LINE_AA)
+            cx, cy = int(round(pts[4][0])), int(round(pts[4][1]))
+            cv2.line(img, (cx - 9, cy - 9), (cx + 9, cy + 9), (0, 0, 255), 3, cv2.LINE_AA)
+            cv2.line(img, (cx - 9, cy + 9), (cx + 9, cy - 9), (0, 0, 255), 3, cv2.LINE_AA)
+            cv2.putText(img, f"{mk['ttc']:.2f}s", (cx + 10, cy - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 3, cv2.LINE_AA)
+            cv2.putText(img, f"{mk['ttc']:.2f}s", (cx + 10, cy - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
         ov = img.copy()
         quads = []
         for rc in sh["rects"]:
@@ -9153,7 +9211,7 @@ class Run1App:
         for q, hot in quads:
             cv2.polylines(img, [q], True, (0, 0, 255) if hot else (0, 210, 0), 2 if hot else 1, cv2.LINE_AA)
         centres = {rc["tid"]: np.asarray(to_px(rc["poly"]), dtype=float).mean(axis=0) for rc in sh["rects"]}
-        for a, b, ttc in sh["pairs"]:
+        for a, b, ttc in (sh["pairs"] if sh["rects"] else ()):
             if a in centres and b in centres:
                 mid = (centres[a] + centres[b]) / 2.0
                 cv2.putText(img, f"{ttc:.2f}s", (int(mid[0]) + 4, int(mid[1]) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
@@ -9209,11 +9267,16 @@ class Run1App:
                     break
                 sh = shapes.get(first_frame + i)
                 rects = [rc for rc in (sh["rects"] if sh else []) if rc.get("px") is not None]
-                if rects:
-                    dst = np.concatenate([rc["poly"] for rc in rects])
-                    init = np.concatenate([np.tile(np.asarray(rc["px"], dtype=float), (4, 1)) for rc in rects])
-                    pix = invert_map(fwd, dst, init).reshape(len(rects), 4, 2)
-                    sh2 = {"rects": [{"tid": rc["tid"], "poly": pix[k]} for k, rc in enumerate(rects)], "hot": sh["hot"], "pairs": sh["pairs"]}
+                marks = [mk for mk in (sh.get("marks", []) if sh else []) if mk.get("px") is not None]
+                if rects or marks:
+                    dst = np.concatenate([rc["poly"] for rc in rects] + [np.array([mk["pa"], mk["pa2"], mk["pb"], mk["pb2"], mk["mid"]], dtype=float) for mk in marks])
+                    init = np.concatenate([np.tile(np.asarray(rc["px"], dtype=float), (4, 1)) for rc in rects]
+                                          + [np.tile(np.asarray(mk["px"], dtype=float), (5, 1)) for mk in marks])
+                    pix = invert_map(fwd, dst, init)
+                    k0 = 4 * len(rects)
+                    sh2 = {"rects": [{"tid": rc["tid"], "poly": pix[4 * k:4 * k + 4]} for k, rc in enumerate(rects)], "hot": sh["hot"], "pairs": sh["pairs"],
+                           "marks": [dict(mk, pa=pix[k0 + 5 * k], pa2=pix[k0 + 5 * k + 1], pb=pix[k0 + 5 * k + 2], pb2=pix[k0 + 5 * k + 3], mid=pix[k0 + 5 * k + 4])
+                                     for k, mk in enumerate(marks)]}
                     img = self._run3_draw_ttc_boxes(img, sh2, lambda q: q)
                 writer.write(img)
                 i += 1
@@ -9442,7 +9505,7 @@ class Run1App:
                 img = base.copy()
                 now = per_frame[fr][0][1]
                 sh = shapes.get(fr) if shapes else None
-                if sh and sh["rects"]:
+                if sh and (sh["rects"] or sh.get("marks")):
                     img = self._run3_draw_ttc_boxes(img, sh, lambda q: topview_px(cv, q))
                 marks = []
                 for tid, t, m, rec in per_frame[fr]:
@@ -10379,6 +10442,8 @@ class Run1App:
         radius = c["ttc_pair_radius_m"]
         ttc_max = c["ttc_max_record_s"]                       # None = record everything
         margin = c["ttc_box_margin_m"]
+        method = c.get("ttc_method", "point")
+        miss_margin = c.get("ttc_miss_margin_m", 0.5)
         widths, lengths = c["widths"], c["lengths"]
         a_rear, a_cross = c["ttc_angle_rear_end_deg"], c["ttc_angle_crossing_deg"]
         diag = {"frames_with_pairs": 0, "pairs_evaluated": 0, "pairs_outside_radius": 0, "pairs_slow_vehicle": 0, "pairs_slow_relative": 0,
@@ -10419,8 +10484,8 @@ class Run1App:
         frame_rows = []
         shapes = {}
         for fr, items in per_frame.items():
-            shapes[fr] = {"rects": [{"tid": it["tid"], "poly": rect_polygon(it["p"], it["v"], size_of(it["cls"]), margin), "px": it["px"]}
-                                    for it in items if math.hypot(*it["v"]) >= vmin], "hot": set(), "pairs": []}
+            shapes[fr] = {"rects": ([{"tid": it["tid"], "poly": rect_polygon(it["p"], it["v"], size_of(it["cls"]), margin), "px": it["px"]}
+                                     for it in items if math.hypot(*it["v"]) >= vmin] if method == "box" else []), "hot": set(), "pairs": [], "marks": []}
             n = len(items)
             if n < 2:
                 continue
@@ -10439,27 +10504,54 @@ class Run1App:
                     if sp_a < vmin or sp_b < vmin:
                         diag["pairs_slow_vehicle"] += 1
                         continue
-                    res = moving_rect_ttc(A["p"], A["v"], size_of(A["cls"]), B["p"], B["v"], size_of(B["cls"]), margin, rel_min)
-                    if res["status"] == "slow":
-                        diag["pairs_slow_relative"] += 1
-                        continue
-                    if res["status"] == "none":
-                        diag["frames_boxes_never_touch"] += 1
-                        continue
                     theta = conflict_angle_deg(A["v"], B["v"], vmin)
-                    entry = {"t": A["t"], "fr": fr, "a": A, "b": B, "theta": theta, "dist": dist, "sp_a": sp_a, "sp_b": sp_b, "res": res}
-                    if res["status"] == "overlap":
-                        diag["frames_already_overlapping"] += 1
-                        entry.update({"ttc": None, "status": "Already_Overlapping"})
-                    elif ttc_max is not None and res["TTC"] > ttc_max:
-                        diag["frames_above_ttc_max"] += 1
-                        entry.update({"ttc": res["TTC"], "status": "Above_TTC_Max"})
+                    entry = {"t": A["t"], "fr": fr, "a": A, "b": B, "theta": theta, "dist": dist, "sp_a": sp_a, "sp_b": sp_b}
+                    if method == "box":
+                        res = moving_rect_ttc(A["p"], A["v"], size_of(A["cls"]), B["p"], B["v"], size_of(B["cls"]), margin, rel_min)
+                        if res["status"] == "slow":
+                            diag["pairs_slow_relative"] += 1
+                            continue
+                        if res["status"] == "none":
+                            diag["frames_boxes_never_touch"] += 1
+                            continue
+                        entry["res"] = res
+                        if res["status"] == "overlap":
+                            diag["frames_already_overlapping"] += 1
+                            entry.update({"ttc": None, "status": "Already_Overlapping"})
+                        elif ttc_max is not None and res["TTC"] > ttc_max:
+                            diag["frames_above_ttc_max"] += 1
+                            entry.update({"ttc": res["TTC"], "status": "Above_TTC_Max"})
+                        else:
+                            diag["candidates"] += 1
+                            entry.update({"ttc": res["TTC"], "status": "Counted"})
                     else:
-                        diag["candidates"] += 1
-                        entry.update({"ttc": res["TTC"], "status": "Counted"})
+                        vr = vector_ttc(A["p"], A["v"], B["p"], B["v"], rel_min)
+                        if vr is None:
+                            diag["pairs_slow_relative"] += 1             # separating (r . v >= 0) or a relative speed that is too small
+                            continue
+                        res = dict(vr, status="collision", DTC=vr["TTC"] * vr["rel_speed"])
+                        entry["res"] = res
+                        if vr["miss"] > ttc_miss_limit(widths.get(A["cls"]) or 1.8, widths.get(B["cls"]) or 1.8, miss_margin):
+                            diag["frames_boxes_never_touch"] += 1       # (counted under this name for both methods: the vehicles do not come close enough)
+                            entry.update({"ttc": vr["TTC"], "status": "Miss_Too_Far"})
+                        elif ttc_max is not None and vr["TTC"] > ttc_max:
+                            diag["frames_above_ttc_max"] += 1
+                            entry.update({"ttc": vr["TTC"], "status": "Above_TTC_Max"})
+                        else:
+                            diag["candidates"] += 1
+                            entry.update({"ttc": vr["TTC"], "status": "Counted"})
+                    if entry["ttc"] is not None:                         # where the two are when the TTC has run out: the expected meeting point
+                        pa2 = (A["p"][0] + A["v"][0] * entry["ttc"], A["p"][1] + A["v"][1] * entry["ttc"])
+                        pb2 = (B["p"][0] + B["v"][0] * entry["ttc"], B["p"][1] + B["v"][1] * entry["ttc"])
+                        entry["cp"] = {"pa2": pa2, "pb2": pb2, "mid": ((pa2[0] + pb2[0]) / 2.0, (pa2[1] + pb2[1]) / 2.0),
+                                       "gap": math.hypot(pb2[0] - pa2[0], pb2[1] - pa2[1])}
+                    if entry["status"] == "Counted":
                         cand[(A["tid"], B["tid"])].append(entry)
                         shapes[fr]["hot"].update((A["tid"], B["tid"]))
-                        shapes[fr]["pairs"].append((A["tid"], B["tid"], res["TTC"]))
+                        shapes[fr]["pairs"].append((A["tid"], B["tid"], entry["ttc"]))
+                        if method != "box" or True:
+                            shapes[fr]["marks"].append({"a": A["tid"], "b": B["tid"], "ttc": entry["ttc"], "pa": A["p"], "pb": B["p"], "pa2": entry["cp"]["pa2"],
+                                                        "pb2": entry["cp"]["pb2"], "mid": entry["cp"]["mid"], "px": A["px"]})
                     frame_rows.append(entry)
 
         out = []
@@ -10495,6 +10587,10 @@ class Run1App:
                     "Rel_X_m": f"{res['r'][0]:.4f}", "Rel_Y_m": f"{res['r'][1]:.4f}",
                     "RelV_X_mps": f"{res['v'][0]:.4f}", "RelV_Y_mps": f"{res['v'][1]:.4f}", "Rel_Speed_kmh": f"{res['rel_speed'] * 3.6:.4f}",
                     "DTC_m": f"{res['DTC']:.4f}",
+                    "Collide_X_m": f"{best['cp']['mid'][0]:.4f}", "Collide_Y_m": f"{best['cp']['mid'][1]:.4f}",
+                    "A_At_Collide_X_m": f"{best['cp']['pa2'][0]:.4f}", "A_At_Collide_Y_m": f"{best['cp']['pa2'][1]:.4f}",
+                    "B_At_Collide_X_m": f"{best['cp']['pb2'][0]:.4f}", "B_At_Collide_Y_m": f"{best['cp']['pb2'][1]:.4f}",
+                    "Miss_Distance_m": f"{best['cp']['gap']:.4f}",
                     "Speed_A_kmh": f"{sp_a * 3.6:.6f}", "Speed_B_kmh": f"{sp_b * 3.6:.6f}",
                     "TTC_s": f"{best['ttc']:.6f}",
                     "TTC_Level": lv_ttc, "Speed_Level": lv_spd, "TTC_Risk_Level": combine_risk(lv_ttc, lv_spd),
@@ -10512,6 +10608,8 @@ class Run1App:
                 "Site_ID": c["site_id"], "Vehicle_A_ID": a_["tid"], "Vehicle_B_ID": b_["tid"], "Frame": e_["fr"], "Time_s": f"{e_['t']:.6f}",
                 "Zone_A": f"Zone {a_['zone']}", "Zone_B": f"Zone {b_['zone']}", "Distance_m": f"{e_['dist']:.4f}",
                 "TTC_s": "" if e_["ttc"] is None else f"{e_['ttc']:.6f}", "DTC_m": "" if e_["ttc"] is None else f"{res['DTC']:.4f}",
+                "Collide_X_m": "" if e_["ttc"] is None else f"{e_['cp']['mid'][0]:.4f}", "Collide_Y_m": "" if e_["ttc"] is None else f"{e_['cp']['mid'][1]:.4f}",
+                "Miss_Distance_m": "" if e_["ttc"] is None else f"{e_['cp']['gap']:.4f}",
                 "Theta_deg": "" if e_["theta"] is None else f"{e_['theta']:.2f}", "Rel_Speed_kmh": f"{res['rel_speed'] * 3.6:.4f}",
                 "Speed_A_kmh": f"{e_['sp_a'] * 3.6:.4f}", "Speed_B_kmh": f"{e_['sp_b'] * 3.6:.4f}",
                 "Status": e_["status"], "Event_ID": e_.get("event_id", ""), "Is_Event_Min": "1" if e_.get("is_min") else "",
@@ -10771,10 +10869,10 @@ class Run1App:
         def do_ttc():
             status("Run 3 — TTC...")
             rows, diag, ttc_frames, self._run3_ttc_shapes = self._run3_ttc(tracks, c, movement_by_id)
-            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","Rel_X_m","Rel_Y_m","RelV_X_mps","RelV_Y_mps","Rel_Speed_kmh","DTC_m","Speed_A_kmh","Speed_B_kmh","TTC_s","TTC_Level","Speed_Level","TTC_Risk_Level","QC_Flag"]
+            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","Rel_X_m","Rel_Y_m","RelV_X_mps","RelV_Y_mps","Rel_Speed_kmh","DTC_m","Collide_X_m","Collide_Y_m","A_At_Collide_X_m","A_At_Collide_Y_m","B_At_Collide_X_m","B_At_Collide_Y_m","Miss_Distance_m","Speed_A_kmh","Speed_B_kmh","TTC_s","TTC_Level","Speed_Level","TTC_Risk_Level","QC_Flag"]
             row_counts["ttc"] = len(rows)
             outputs["ttc"] = write_csv("TTC.csv", fields, rows)
-            outputs["ttc_frames"] = write_csv("TTC_Frames.csv", ["Site_ID","Vehicle_A_ID","Vehicle_B_ID","Frame","Time_s","Zone_A","Zone_B","Distance_m","TTC_s","DTC_m","Theta_deg","Rel_Speed_kmh","Speed_A_kmh","Speed_B_kmh","Status","Event_ID","Is_Event_Min"], ttc_frames)
+            outputs["ttc_frames"] = write_csv("TTC_Frames.csv", ["Site_ID","Vehicle_A_ID","Vehicle_B_ID","Frame","Time_s","Zone_A","Zone_B","Distance_m","TTC_s","DTC_m","Collide_X_m","Collide_Y_m","Miss_Distance_m","Theta_deg","Rel_Speed_kmh","Speed_A_kmh","Speed_B_kmh","Status","Event_ID","Is_Event_Min"], ttc_frames)
             diag["frame_rows_written"] = len(ttc_frames)
             vals = [float(r["TTC_s"]) for r in rows]
             s_ = indicator("Time-to-Collision (TTCmin per event)", "Time", "s", "All", vals,
@@ -10785,8 +10883,10 @@ class Run1App:
             s_["Level_Counts"] = {lv: sum(1 for r in rows if r["TTC_Level"] == lv) for lv in ("High", "Moderate", "Low", "Interaction")}
             s_["Risk_Counts"] = {lv: sum(1 for r in rows if r["TTC_Risk_Level"] == lv) for lv in ("High", "Moderate", "Low", "Interaction")}
             summary["indicators"]["TTC"] = s_
-            diag["rule"] = {"method": "vehicle rectangles (length x width by class, long side along the velocity) moving straight; TTC = time until they first touch",
-                            "box_margin_m": c["ttc_box_margin_m"], "min_vehicle_speed_kmh": c["ttc_min_speed_kmh"],
+            diag["rule"] = {"method": ("one point per vehicle: vector TTC = -(r.v)/(v.v), r.v < 0; counted when the points come within (W_A+W_B)/2 + miss margin"
+                                       if c.get("ttc_method", "point") == "point" else
+                                       "vehicle rectangles (length x width by class, long side along the velocity) moving straight; TTC = time until they first touch"),
+                            "miss_margin_m": c.get("ttc_miss_margin_m"), "box_margin_m": c["ttc_box_margin_m"], "min_vehicle_speed_kmh": c["ttc_min_speed_kmh"],
                             "min_rel_speed_ms": c["ttc_min_rel_speed_ms"], "pair_radius_m": c["ttc_pair_radius_m"],
                             "angle_rear_end_deg": c["ttc_angle_rear_end_deg"], "angle_crossing_deg": c["ttc_angle_crossing_deg"]}
             summary["diagnostics"]["ttc"] = diag
