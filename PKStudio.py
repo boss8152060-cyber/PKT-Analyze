@@ -514,7 +514,7 @@ RUN3_DEFAULTS = {
     "pet_interaction_distance_m": "3.00",   # implementation starter value
     "pet_threshold_s": "1.00",
     # V27 implementation starter values (editable; verify per site):
-    "pet_min_speed_kmh": "",                # a vehicle whose mean speed in the zone is below this is skipped; blank = no limit
+    "pet_min_speed_kmh": "",                # a vehicle slower than this while passing the crossing point skips the pair; blank = no limit
     "pet_max_s": "10.0",                    # pairs/events above this are not PET conflicts; blank = no limit
     "ttc_max_record_s": "3.0",              # record TTC events with TTCmin <= this value
     "ttc_velocity_window_s": "0.50",        # centred window of observed samples for velocity
@@ -4249,7 +4249,7 @@ class Run1App:
         for i, (label, var) in enumerate((("Interaction distance (m)", self.run3_pet_interaction_distance_var),
                                           ("PET threshold (s)", self.run3_pet_threshold_var),
                                           ("PET max (s) — ว่าง = ไม่จำกัด", self.run3_pet_max_var),
-                                          ("ความเร็วขั้นต่ำของรถ (km/h) — ความเร็วเฉลี่ยของคันนั้นในโซนต่ำกว่านี้ข้ามคู่นั้น ว่าง = ไม่จำกัด", self.run3_pet_min_speed_var))):
+                                          ("ความเร็วขั้นต่ำของรถ (km/h) — ความเร็วตอนผ่านจุดตัดของคันใดต่ำกว่านี้ข้ามคู่นั้น ว่าง = ไม่จำกัด", self.run3_pet_min_speed_var))):
             self._entry_row(box, 2 + i, label, var)
 
         box = self._indicator_box("Speed (V50, V85, Mean, SD)", self.run3_speed_enabled_var,
@@ -10418,8 +10418,9 @@ class Run1App:
                         continue
                     ip = best[3]; ctype = "Crossing"
                     diag["interaction_candidates"] += 1
-                    a_near = At[np.hypot(A[:, 0] - ip[0], A[:, 1] - ip[1]) <= radius]
-                    b_near = Bt[np.hypot(B[:, 0] - ip[0], B[:, 1] - ip[1]) <= radius]
+                    a_mask = np.hypot(A[:, 0] - ip[0], A[:, 1] - ip[1]) <= radius
+                    b_mask = np.hypot(B[:, 0] - ip[0], B[:, 1] - ip[1]) <= radius
+                    a_near, b_near = At[a_mask], Bt[b_mask]
                     if a_near.size == 0 or b_near.size == 0:
                         continue
                     a_entry, a_exit = float(a_near.min()), float(a_near.max())
@@ -10435,9 +10436,13 @@ class Run1App:
                     if pet <= 0:
                         continue
                     sp_a, sp_b = self._run3_mean_speed_kmh(A, At), self._run3_mean_speed_kmh(B, Bt)
-                    if min_speed is not None and ((sp_a is not None and sp_a < min_speed) or (sp_b is not None and sp_b < min_speed)):
-                        diag["slow_vehicle"] += 1             # blank setting = no limit; a parked vehicle's jitter can fake a crossing
-                        continue
+                    if min_speed is not None:
+                        # the speed the vehicle really had while passing the crossing point: its samples within the interaction radius of that point
+                        # (None = too few samples to tell: not filtered). Blank setting = no limit.
+                        pa_, pb_ = self._run3_mean_speed_kmh(A[a_mask], a_near), self._run3_mean_speed_kmh(B[b_mask], b_near)
+                        if (pa_ is not None and pa_ < min_speed) or (pb_ is not None and pb_ < min_speed):
+                            diag["slow_vehicle"] += 1
+                            continue
                     if pet_max is not None and pet > pet_max:
                         diag["above_pet_max"] += 1
                         continue
