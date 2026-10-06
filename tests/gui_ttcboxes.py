@@ -167,19 +167,18 @@ check("normal video (point method): the cross is at (25 m x 20 px/m, 15 m x 20 p
 rows_h, _d, _f, shapes_h = app._run3_ttc(tracks, cp_, {})
 check("head-on cars on one line: no crossing point (parallel) - the mark has no cross", shapes_h[11]["marks"] and shapes_h[11]["marks"][0]["cross"] is None and rows_h[0]["Collide_X_m"] == "")
 
-# ---- the meeting point has to be inside a selected zone (with room at the edge for the vehicle size)
-app.zones["Zone 3"] = [(20, 100), (300, 100), (300, 600), (20, 600)]                  # x 1..15 m, y 5..30 m: the cars meet at (25, 15): 10 m outside
-zc = dict(cp_, ttc_meet_in_zone=True, ttc_zone_margin_m=1.0)
-rows_z, diag_z, frames_z, _sh = app._run3_ttc(tr2, zc, {})
-check("the cars meet 10 m outside the zone: no event with a 1 m edge margin", rows_z == [] and diag_z["frames_meeting_outside_zone"] > 0, str((len(rows_z), diag_z["frames_meeting_outside_zone"])))
-check("... the frames are listed as Outside_Zone in the frame file", any(r["Status"] == "Outside_Zone" for r in frames_z))
-rows_z2, _d2, _f2, _s2 = app._run3_ttc(tr2, dict(zc, ttc_zone_margin_m=11.0), {})
-check("with an 11 m edge margin (room for the vehicle size) the event counts", len(rows_z2) == 1 and abs(float(rows_z2[0]["Meet_X_m"]) - 25.0) < 0.5, str(rows_z2[:1]))
-rows_z3, _d3, _f3, _s3 = app._run3_ttc(tr2, dict(zc, ttc_meet_in_zone=False), {})
-check("the zone rule can be switched off", len(rows_z3) == 1)
-app.zones["Zone 3"] = [(20, 100), (1260, 100), (1260, 600), (20, 600)]
-rows_z4, _d4, _f4, _s4 = app._run3_ttc(tr2, zc, {})
-check("a zone that holds the meeting point (x 1..63 m, y 5..30 m): counted", len(rows_z4) == 1)
+# ---- the zones only filter: the collision point must lie inside a selected zone, the vehicles themselves need not be (their velocity comes from the whole track)
+tr3 = {k: [dict(r, zone="", _zone_num=None) for r in v] for k, v in tr2.items()}              # both vehicles outside every zone in every frame
+keep_zone = app.zones["Zone 3"]
+app.zones["Zone 3"] = [(20 * PPM, 10 * PPM), (30 * PPM, 10 * PPM), (30 * PPM, 20 * PPM), (20 * PPM, 20 * PPM)]     # x 20..30 m, y 10..20 m: holds the crossing (25, 15)
+rows_in, diag_in, fr_in, _sh = app._run3_ttc(tr3, cp_, {})
+check("zone filter: the collision point (25, 15) is inside Zone 3 -> the event is found although both vehicles are outside every zone", len(rows_in) == 1 and rows_in[0]["Zone"] == "Zone 3"
+      and diag_in["zone_geometry"] is True, str([(r["Zone"], r["TTC_s"]) for r in rows_in]))
+app.zones["Zone 3"] = [(40 * PPM, 10 * PPM), (50 * PPM, 10 * PPM), (50 * PPM, 20 * PPM), (40 * PPM, 20 * PPM)]     # a zone elsewhere
+rows_out, diag_out, fr_out, _sh2 = app._run3_ttc(tr2, cp_, {})
+check("zone filter: the collision point is outside the selected zone -> no event (even with both vehicles recorded inside Zone 3), the frames say Outside_Zone",
+      not rows_out and any(r["Status"] == "Outside_Zone" for r in fr_out) and diag_out["frames_collision_point_outside_zone"] > 0, str(diag_out["frames_collision_point_outside_zone"]))
+app.zones["Zone 3"] = keep_zone
 
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
