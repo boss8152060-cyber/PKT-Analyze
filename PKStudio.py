@@ -511,9 +511,12 @@ RUN3_DEFAULTS = {
     "topview_video": True,                  # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points)
     "lc_along_limit_m": "0",                # side-by-side window along the heading (m); 0 = auto (L_A + L_B) / 2
     "lc_max_lateral_m": "3.50",             # pairs further apart sideways than this (m) are unrelated; 0 = no limit
-    "pet_interaction_distance_m": "3.00",   # implementation starter value
     "pet_threshold_s": "1.00",
     # V27 implementation starter values (editable; verify per site):
+    "pet_show_point_xy": True,              # draw the PET crossing point (magenta X + PET) in the X-Y video
+    "pet_show_point_video": False,         # draw it also on the normal roadside video (Tracking_Result.mp4) after Run 3
+    "pet_use_area": True,                  # conflict AREA = circle around the crossing point, radius (W_A + W_B) / 2; off = the crossing point only
+    "pet_min_speed_kmh": "",                # a vehicle slower than this while passing the crossing point skips the pair; blank = no limit
     "pet_max_s": "10.0",                    # pairs/events above this are not PET conflicts; blank = no limit
     "ttc_max_record_s": "3.0",              # record TTC events with TTCmin <= this value
     "ttc_velocity_window_s": "0.50",        # centred window of observed samples for velocity
@@ -589,6 +592,10 @@ RUN3_DEFAULTS = {
 ZONE_IDS = list(range(1, 8))
 CONFLICT_ZONE_IDS = (3, 6)              # V28: conflict zones (default zones of PET / TTC; every zone 1-7 can be ticked)
 ZONE_NAMES = [f"Zone {i}" for i in ZONE_IDS]
+PET_SPEED_WINDOW_S = 0.5                # PET: speed at the crossing = samples within +-this/2 s of the time the vehicle passes it
+PET_SHOW_LEAD_S, PET_SHOW_TAIL_S = 1.0, 0.5   # PET picture: the crossing mark is drawn from t1 - lead to t2 + tail
+PET_RING_POINTS = 24                    # PET picture: the conflict-area circle is drawn as this many points
+PET_GAP_FLAG_S = 0.5                    # PET: a crossing interpolated across a sample gap longer than this is flagged
 LDP_LOCKED_ZONES = (1,)                 # LDP only measures main-road movements (2-3-4, 5-6-7): Zone 1 can never have a value
 
 # ==== CORE-BEGIN (pure logic, no GUI: unit-tested by tests/test_core.py) ====
@@ -1738,6 +1745,75 @@ def parse_risk_limits(text, ascending):
     if not ok:
         raise ValueError("the three numbers must be " + ("increasing" if ascending else "decreasing"))
     return vals
+
+
+def path_crossing(A, B):
+    """Where two paths (N x 2 arrays of metric points, joined by straight segments) cross: of all the crossings the one whose nearest samples are
+    closest to it (the V26 choice). None when they never cross. Returns {"score", "ia", "ib" (nearest sample of each path), "ip" (x, y),
+    "seg_a" / "seg_b" = (segment index, fraction 0-1 along it) so the time the vehicle passes the crossing can be interpolated}."""
+    if len(A) < 2 or len(B) < 2:
+        return None
+    a0 = A[:-1, None, :]; a1 = A[1:, None, :]
+    b0 = B[None, :-1, :]; b1 = B[None, 1:, :]
+    x1, y1 = a0[..., 0], a0[..., 1]; x2, y2 = a1[..., 0], a1[..., 1]
+    x3, y3 = b0[..., 0], b0[..., 1]; x4, y4 = b1[..., 0], b1[..., 1]
+    den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    ok = np.abs(den) >= 1e-9
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
+        u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / den
+    hit = ok & (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1)
+    if not hit.any():
+        return None
+    with np.errstate(invalid="ignore"):
+        ipx = x1 + t * (x2 - x1); ipy = y1 + t * (y2 - y1)
+    da0 = np.hypot(x1 - ipx, y1 - ipy); da1 = np.hypot(x2 - ipx, y2 - ipy)
+    db0 = np.hypot(x3 - ipx, y3 - ipy); db1 = np.hypot(x4 - ipx, y4 - ipy)
+    score = np.maximum(np.minimum(da0, da1), np.minimum(db0, db1))
+    score = np.where(hit, score, np.inf)
+    flat = int(np.argmin(score))
+    i, j = np.unravel_index(flat, score.shape)
+    ia = i if da0[i, j] <= da1[i, j] else i + 1
+    ib = j if db0[i, j] <= db1[i, j] else j + 1
+    return {"score": float(score[i, j]), "ia": int(ia), "ib": int(ib), "ip": (float(ipx[i, j]), float(ipy[i, j])),
+            "seg_a": (int(i), float(t[i, j])), "seg_b": (int(j), float(u[i, j]))}
+
+
+def path_pass_time(times, seg):
+    """The time a vehicle is at a point on its path given as (segment index, fraction): linear between the two samples of that segment."""
+    i, f = seg
+    return float(times[i] + f * (times[i + 1] - times[i]))
+
+
+def circle_interval(P, t, center, r):
+    """The time span a path (N x 2 metric points with their times, straight between samples) spends inside the circle (center, r): (t_in, t_out) =
+    the first moment it is inside and the last moment it is inside, interpolated linearly along the segments. None when the path never enters it."""
+    P = np.asarray(P, dtype=float); t = np.asarray(t, dtype=float)
+    if len(P) < 2:
+        return None
+    d = P[1:] - P[:-1]
+    f = P[:-1] - np.asarray(center, dtype=float)
+    a = (d * d).sum(axis=1)
+    b = 2.0 * (f * d).sum(axis=1)
+    cc = (f * f).sum(axis=1) - float(r) ** 2
+    lo = np.full(len(a), np.inf)
+    hi = np.full(len(a), -np.inf)
+    moving = a > 1e-12
+    disc = b * b - 4.0 * a * cc
+    ok = moving & (disc >= 0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        root = np.sqrt(np.where(ok, disc, 0.0))
+        s1 = np.where(ok, (-b - root) / (2.0 * np.where(moving, a, 1.0)), np.inf)
+        s2 = np.where(ok, (-b + root) / (2.0 * np.where(moving, a, 1.0)), -np.inf)
+    lo = np.maximum(s1, 0.0)
+    hi = np.minimum(s2, 1.0)
+    hit = ok & (lo <= hi)
+    if not hit.any():
+        return None
+    seg_t0, seg_dt = t[:-1], t[1:] - t[:-1]
+    t_in = float((seg_t0 + lo * seg_dt)[hit].min())
+    t_out = float((seg_t0 + hi * seg_dt)[hit].max())
+    return t_in, t_out
 
 
 # ==== CORE-END ====
@@ -3735,7 +3811,6 @@ class Run1App:
         self.run3_lc_along_limit_var = tk.StringVar(value=RUN3_DEFAULTS["lc_along_limit_m"])
         self.run3_lc_max_lateral_var = tk.StringVar(value=RUN3_DEFAULTS["lc_max_lateral_m"])
         self.run3_lc_motorcycle_pairs_only_var = tk.BooleanVar(value=RUN3_DEFAULTS["lc_motorcycle_pairs_only"])
-        self.run3_pet_interaction_distance_var = tk.StringVar(value=RUN3_DEFAULTS["pet_interaction_distance_m"])
         self.run3_pet_threshold_var = tk.StringVar(value=RUN3_DEFAULTS["pet_threshold_s"])
         self.run3_speed_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_zones"])) for z in ZONE_IDS}
         self.run3_speed_smoothing_var = tk.StringVar(value=RUN3_DEFAULTS["speed_smoothing_samples"])
@@ -3752,6 +3827,10 @@ class Run1App:
         self.run3_ttc_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["ttc_zones"])) for z in ZONE_IDS}
         self.run3_ldp_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["ldp_zones"])) for z in ZONE_IDS}
         self.run3_pet_max_var = tk.StringVar(value=RUN3_DEFAULTS["pet_max_s"])
+        self.run3_pet_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["pet_min_speed_kmh"])
+        self.run3_pet_use_area_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_use_area"])
+        self.run3_pet_show_xy_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_show_point_xy"])
+        self.run3_pet_show_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_show_point_video"])
         self.run3_ttc_max_record_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_max_record_s"])
         self.run3_ttc_velocity_window_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_velocity_window_s"])
         self.run3_ttc_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_min_speed_kmh"])
@@ -4049,6 +4128,8 @@ class Run1App:
         trow("กรอบวัตถุ (bbox)", dict(items=[("แสดง", self.show_bbox_var)]), dict(text="— (ผังเมตรไม่มีกรอบภาพ ดูสี่เหลี่ยมรถของ TTC)"))
         trow("จุดที่คาดว่าจะชน (TTC)", dict(items=[("แสดง (วาดเพิ่มหลังคำนวณ TTC เสร็จ ใช้เวลาเพิ่ม)", self.run3_ttc_show_video_var)]),
              dict(items=[("แสดง (กากบาท = จุดที่เส้นทางตรงของสองคันตัดกัน + ค่า TTC)", self.run3_ttc_show_xy_var)]))
+        trow("จุดตัดของเส้นทาง (PET)", dict(items=[("แสดง (วาดเพิ่มหลังคำนวณ PET เสร็จ ใช้เวลาเพิ่ม)", self.run3_pet_show_video_var)]),
+             dict(items=[("แสดง (กากบาทสีม่วง = จุดที่เส้นทางจริงของสองคันตัดกัน + ค่า PET)", self.run3_pet_show_xy_var)]))
         trow("ข้อความที่มุม/ล่างภาพ", dict(items=[("Frame / FPS / เวลา / ETA", self.show_info_text_var)]), dict(items=[("t = … s  frame …", xyv["xy_show_time"])]))
         trow("ตารางเมตร", dict(text="—"), dict(items=[("เส้นตารางและตัวเลข", xyv["xy_show_grid"])]))
         ttk.Label(box, text="จุดชน/สี่เหลี่ยมของ TTC ต้องเปิดตัวชี้วัด TTC;  แต่ละวิดีโอตั้งได้เป็นอิสระ (เช่น วิดีโอปกติโชว์ Speed แต่ X–Y ไม่โชว์)", foreground=gray).grid(
@@ -4244,10 +4325,12 @@ class Run1App:
 
         box = self._indicator_box("PET", self.run3_pet_enabled_var, "PET คำนวณแยกในแต่ละโซนที่ติ๊ก (ค่าเริ่มต้น Zone 3 / Zone 6)")
         self._zone_checks(box, self.run3_pet_zone_vars, 1)
-        for i, (label, var) in enumerate((("Interaction distance (m)", self.run3_pet_interaction_distance_var),
-                                          ("PET threshold (s)", self.run3_pet_threshold_var),
-                                          ("PET max (s) — ว่าง = ไม่จำกัด", self.run3_pet_max_var))):
+        for i, (label, var) in enumerate((("PET threshold (s)", self.run3_pet_threshold_var),
+                                          ("PET max (s) — ว่าง = ไม่จำกัด", self.run3_pet_max_var),
+                                          ("ความเร็วขั้นต่ำของรถ (km/h) — ความเร็วตอนผ่านจุดตัดของคันใดต่ำกว่านี้ข้ามคู่นั้น ว่าง = ไม่จำกัด", self.run3_pet_min_speed_var))):
             self._entry_row(box, 2 + i, label, var)
+        ttk.Checkbutton(box, text="ใช้พื้นที่ขัดแย้ง: วงกลมรอบจุดตัด รัศมี = (W_A + W_B) / 2 ของรถสองคัน  (ไม่ติ๊ก = ใช้แค่จุดตัด)",
+                        variable=self.run3_pet_use_area_var).grid(row=5, column=0, columnspan=8, sticky="w", pady=2)
 
         box = self._indicator_box("Speed (V50, V85, Mean, SD)", self.run3_speed_enabled_var,
                                   "ความเร็วต่อโซน + ความเร็วภาพรวมตาม Movement (เช่น 2-3-4) — ความยาวเส้นทางเมตร ÷ เวลา")
@@ -5685,7 +5768,6 @@ class Run1App:
                 "lc_along_limit_m": self.run3_lc_along_limit_var.get(),
                 "lc_max_lateral_m": self.run3_lc_max_lateral_var.get(),
                 "lc_motorcycle_pairs_only": self.run3_lc_motorcycle_pairs_only_var.get(),
-                "pet_interaction_distance_m": self.run3_pet_interaction_distance_var.get(),
                 "pet_threshold_s": self.run3_pet_threshold_var.get(),
                 "speed_zones": [z for z,v in self.run3_speed_zone_vars.items() if v.get()],
                 "speed_smoothing_samples": self.run3_speed_smoothing_var.get(),
@@ -5697,6 +5779,10 @@ class Run1App:
                 "ttc_zones": [z for z, v in self.run3_ttc_zone_vars.items() if v.get()],
                 "ldp_zones": [z for z, v in self.run3_ldp_zone_vars.items() if v.get()],
                 "pet_max_s": self.run3_pet_max_var.get(),
+                "pet_min_speed_kmh": self.run3_pet_min_speed_var.get(),
+                "pet_use_area": self.run3_pet_use_area_var.get(),
+                "pet_show_point_xy": self.run3_pet_show_xy_var.get(),
+                "pet_show_point_video": self.run3_pet_show_video_var.get(),
                 "ttc_max_record_s": self.run3_ttc_max_record_var.get(),
                 "ttc_velocity_window_s": self.run3_ttc_velocity_window_var.get(),
                 "ttc_min_speed_kmh": self.run3_ttc_min_speed_var.get(),
@@ -5854,6 +5940,10 @@ class Run1App:
                 ("perspective_l34_m", self.run3_perspective_l34_var),
                 ("perspective_l41_m", self.run3_perspective_l41_var),
                 ("pet_max_s", self.run3_pet_max_var),
+                ("pet_min_speed_kmh", self.run3_pet_min_speed_var),
+                ("pet_use_area", self.run3_pet_use_area_var),
+                ("pet_show_point_xy", self.run3_pet_show_xy_var),
+                ("pet_show_point_video", self.run3_pet_show_video_var),
                 ("ttc_max_record_s", self.run3_ttc_max_record_var),
                 ("ttc_velocity_window_s", self.run3_ttc_velocity_window_var),
                 ("ttc_min_speed_kmh", self.run3_ttc_min_speed_var),
@@ -5878,7 +5968,6 @@ class Run1App:
                 ("lc_along_limit_m", self.run3_lc_along_limit_var),
                 ("lc_max_lateral_m", self.run3_lc_max_lateral_var),
                 ("lc_motorcycle_pairs_only", self.run3_lc_motorcycle_pairs_only_var),
-                ("pet_interaction_distance_m", self.run3_pet_interaction_distance_var),
                 ("pet_threshold_s", self.run3_pet_threshold_var),
                 ("gap_subject_134", self.run3_gap_subject_134_var),
                 ("gap_subject_1367", self.run3_gap_subject_1367_var),
@@ -6852,10 +6941,11 @@ class Run1App:
                 self._run3_float(self.run3_geometry_vars[key].get(), f"road geometry {key} (required by LDP)")
         if enabled["pet"]:
             need_zone(self.run3_pet_zone_vars, "PET")
-            self._run3_float(self.run3_pet_interaction_distance_var.get(), "PET interaction distance (m)")
             self._run3_float(self.run3_pet_threshold_var.get(), "PET threshold (s)")
             if str(self.run3_pet_max_var.get()).strip():
                 self._run3_float(self.run3_pet_max_var.get(), "PET max (s)")
+            if str(self.run3_pet_min_speed_var.get()).strip():
+                self._run3_float(self.run3_pet_min_speed_var.get(), "PET minimum vehicle speed (km/h)")
         if enabled["gap"]:
             if not any([
                 self.run3_gap_subject_134_var.get(),
@@ -9092,6 +9182,7 @@ class Run1App:
             if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
         )
         pet_max = num(self.run3_pet_max_var, None)
+        pet_min_speed = num(self.run3_pet_min_speed_var, None)
         geometry = {key: num(self.run3_geometry_vars[key], None) for key in RUN3_GEOMETRY_KEYS}
         def lane_total(a, b):
             return geometry[a] + geometry[b] if geometry[a] is not None and geometry[b] is not None else None
@@ -9125,9 +9216,12 @@ class Run1App:
             "lc_along_limit_m": max(0.0, num(self.run3_lc_along_limit_var, 0.0) or 0.0),
             "lc_max_lateral_m": max(0.0, num(self.run3_lc_max_lateral_var, 3.5) or 0.0),
             "lc_motorcycle_pairs_only": bool(self.run3_lc_motorcycle_pairs_only_var.get()),
-            "pet_interaction": num(self.run3_pet_interaction_distance_var, 3.0),
             "pet_threshold": num(self.run3_pet_threshold_var, 1.0),
             "pet_max_s": pet_max if (pet_max is not None and pet_max > 0) else None,
+            "pet_use_area": bool(self.run3_pet_use_area_var.get()),
+            "pet_show_point_xy": bool(self.run3_pet_show_xy_var.get()),
+            "pet_show_point_video": bool(self.run3_pet_show_video_var.get()),
+            "pet_min_speed_kmh": pet_min_speed if (pet_min_speed is not None and pet_min_speed > 0) else None,
             "ttc_max_record_s": (None if not str(self.run3_ttc_max_record_var.get()).strip() else num(self.run3_ttc_max_record_var, 3.0)),
             "ttc_velocity_window_s": num(self.run3_ttc_velocity_window_var, 0.5),
             "ttc_min_speed_kmh": num(self.run3_ttc_min_speed_var, 5.0),
@@ -9264,6 +9358,24 @@ class Run1App:
         return img
 
     @staticmethod
+    def _run3_draw_pet_marks(img, marks, to_px):
+        """The crossing point PET used: a magenta X with the PET value written beside it (and the conflict-area circle when PET uses the area). `to_px` maps metres -> picture pixels."""
+        for mk in marks:
+            q = np.asarray(to_px(np.array([mk["cross"]], dtype=float)), dtype=float)[0]
+            cx, cy = int(round(q[0])), int(round(q[1]))
+            if mk.get("ring") is not None:                                    # the conflict area (circle around the crossing point)
+                ring = np.round(np.asarray(to_px(np.asarray(mk["ring"], dtype=float)), dtype=float)).astype(np.int32).reshape(-1, 1, 2)
+                cv2.polylines(img, [ring], True, (255, 255, 255), 3, cv2.LINE_AA)
+                cv2.polylines(img, [ring], True, (255, 0, 255), 1, cv2.LINE_AA)
+            for width, colour in ((6, (255, 255, 255)), (3, (255, 0, 255))):
+                cv2.line(img, (cx - 9, cy - 9), (cx + 9, cy + 9), colour, width, cv2.LINE_AA)
+                cv2.line(img, (cx - 9, cy + 9), (cx + 9, cy - 9), colour, width, cv2.LINE_AA)
+            label = f"PET {mk['pet']:.2f}s"
+            cv2.putText(img, label, (cx + 12, cy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 3, cv2.LINE_AA)
+            cv2.putText(img, label, (cx + 12, cy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1, cv2.LINE_AA)
+        return img
+
+    @staticmethod
     def _run3_record_first_frame(settings, video_path):
         """The number (1-based) of the first frame the normal video (Tracking_Result.mp4) holds: the start of the analysis window or of the
         recording window, as the detection run decided it. 1 when there is no window or the video cannot be opened."""
@@ -9285,13 +9397,14 @@ class Run1App:
         except Exception:
             return 1
 
-    def _run3_overlay_ttc_boxes(self, tracks, c, result_path, first_frame=1):
+    def _run3_overlay_ttc_boxes(self, tracks, c, result_path, first_frame=1, draw_ttc=True, draw_pet=False):
         """Draws the vehicle rectangles that TTC used on the NORMAL roadside video (Tracking_Result.mp4) after Run 3, so there is no third video: the
         picture i of that video is frame `first_frame + i`; the 4 corners of every rectangle (metres) are mapped back into the picture with the
         calibration that is set. The video is read, drawn on and written to a temporary file that then takes the place of the original (if that file is
         locked, e.g. open in a player, the result stays as Tracking_Result_TTC.mp4). Returns the path of the result or None."""
-        shapes = getattr(self, "_run3_ttc_shapes", None)
-        if not shapes or not result_path or not os.path.isfile(result_path):
+        shapes = getattr(self, "_run3_ttc_shapes", None) if draw_ttc else None
+        pet_shapes = getattr(self, "_run3_pet_shapes", None) if draw_pet else None      # also the PET crossing marks (magenta X)
+        if not (shapes or pet_shapes) or not result_path or not os.path.isfile(result_path):
             return None
         fwd = lambda q: self._run3_to_metric(q, c)
         cap = cv2.VideoCapture(result_path)
@@ -9310,7 +9423,7 @@ class Run1App:
                 ok, img = cap.read()
                 if not ok:
                     break
-                sh = shapes.get(first_frame + i)
+                sh = shapes.get(first_frame + i) if shapes else None
                 rects = [rc for rc in (sh["rects"] if sh else []) if rc.get("px") is not None]
                 marks = [mk for mk in (sh.get("marks", []) if sh else []) if mk.get("px") is not None]
                 if rects or marks:
@@ -9323,6 +9436,18 @@ class Run1App:
                            "marks": [dict(mk, pa=pix[k0 + 3 * k], pb=pix[k0 + 3 * k + 1], label=pix[k0 + 3 * k + 2], cross=(pix[k0 + 3 * k + 2] if mk.get("cross") is not None else None))
                                      for k, mk in enumerate(marks)]}
                     img = self._run3_draw_ttc_boxes(img, sh2, lambda q: q)
+                pm = [mk for mk in (pet_shapes.get(first_frame + i, []) if pet_shapes else []) if mk.get("px") is not None]
+                if pm:
+                    nr = PET_RING_POINTS
+                    dst = np.concatenate([np.vstack([[mk["cross"]], mk["ring"] if mk.get("ring") is not None else np.empty((0, 2))]) for mk in pm])
+                    init = np.concatenate([np.tile(np.asarray(mk["px"], dtype=float), (1 + (nr if mk.get("ring") is not None else 0), 1)) for mk in pm])
+                    ppix = invert_map(fwd, dst, init)
+                    marks_px, k0 = [], 0
+                    for mk in pm:
+                        has_ring = mk.get("ring") is not None
+                        marks_px.append(dict(mk, cross=ppix[k0], ring=(ppix[k0 + 1:k0 + 1 + nr] if has_ring else None)))
+                        k0 += 1 + (nr if has_ring else 0)
+                    img = self._run3_draw_pet_marks(img, marks_px, lambda q: q)
                 writer.write(img)
                 i += 1
         finally:
@@ -9545,6 +9670,7 @@ class Run1App:
         trails = defaultdict(deque)
         speed_hist = defaultdict(deque)
         shapes = getattr(self, "_run3_ttc_shapes", None) if (c.get("ttc_enabled") and c.get("ttc_show_boxes_xy")) else None
+        pet_shapes = getattr(self, "_run3_pet_shapes", None) if (c.get("pet_enabled") and c.get("pet_show_point_xy")) else None
         try:
             for fr in frames:
                 img = base.copy()
@@ -9552,6 +9678,9 @@ class Run1App:
                 sh = shapes.get(fr) if shapes else None
                 if sh and (sh["rects"] or sh.get("marks")):
                     img = self._run3_draw_ttc_boxes(img, sh, lambda q: topview_px(cv, q))
+                pm = pet_shapes.get(fr) if pet_shapes else None
+                if pm:
+                    img = self._run3_draw_pet_marks(img, pm, lambda q: topview_px(cv, q))
                 marks = []
                 for tid, t, m, rec in per_frame[fr]:
                     plan = outside_zone_plan(xy_mode, str(rec.get("zone", "")).strip() != "", zones_exist)
@@ -10326,33 +10455,8 @@ class Run1App:
 
     @staticmethod
     def _run3_best_intersection(A, B):
-        """Vectorised version of the V26 double loop over segment pairs.
-        Returns (score, ia, ib, ip) choosing the same pair V26 chose."""
-        if len(A) < 2 or len(B) < 2:
-            return None
-        a0 = A[:-1, None, :]; a1 = A[1:, None, :]
-        b0 = B[None, :-1, :]; b1 = B[None, 1:, :]
-        x1, y1 = a0[..., 0], a0[..., 1]; x2, y2 = a1[..., 0], a1[..., 1]
-        x3, y3 = b0[..., 0], b0[..., 1]; x4, y4 = b1[..., 0], b1[..., 1]
-        den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-        ok = np.abs(den) >= 1e-9
-        with np.errstate(divide="ignore", invalid="ignore"):
-            t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
-            u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / den
-        hit = ok & (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1)
-        if not hit.any():
-            return None
-        with np.errstate(invalid="ignore"):
-            ipx = x1 + t * (x2 - x1); ipy = y1 + t * (y2 - y1)
-        da0 = np.hypot(x1 - ipx, y1 - ipy); da1 = np.hypot(x2 - ipx, y2 - ipy)
-        db0 = np.hypot(x3 - ipx, y3 - ipy); db1 = np.hypot(x4 - ipx, y4 - ipy)
-        score = np.maximum(np.minimum(da0, da1), np.minimum(db0, db1))
-        score = np.where(hit, score, np.inf)
-        flat = int(np.argmin(score))
-        i, j = np.unravel_index(flat, score.shape)
-        ia = i if da0[i, j] <= da1[i, j] else i + 1
-        ib = j if db0[i, j] <= db1[i, j] else j + 1
-        return float(score[i, j]), int(ia), int(ib), (float(ipx[i, j]), float(ipy[i, j]))
+        cr = path_crossing(A, B)
+        return None if cr is None else (cr["score"], cr["ia"], cr["ib"], cr["ip"])
 
     @staticmethod
     def _run3_mean_speed_kmh(P, t):
@@ -10371,11 +10475,14 @@ class Run1App:
         never be smaller than that gap, so no valid event is lost);
         (4) segment intersection is vectorised.
         """
-        radius = c["pet_interaction"]; pet_max = c["pet_max_s"]; threshold = c["pet_threshold"]
+        pet_max = c["pet_max_s"]; threshold = c["pet_threshold"]; min_speed = c.get("pet_min_speed_kmh")
+        use_area = bool(c.get("pet_use_area", True)); widths = c.get("widths") or {}
+        self._run3_pet_shapes = {}
+        events = []
         ids = list(tracks)
         diag = {"zone_tracks": {}, "pairs_with_both_in_zone": 0, "pairs_skipped_time_window": 0,
-                "same_movement_excluded": 0, "no_movement_both": 0, "interaction_candidates": 0,
-                "fallback_close_pairs": 0, "overlap_intervals": 0, "above_pet_max": 0,
+                "no_crossing": 0, "no_movement_both": 0, "interaction_candidates": 0,
+                "overlap_intervals": 0, "no_area_pass": 0, "above_pet_max": 0, "slow_vehicle": 0, "interpolated_gap": 0,
                 "tracks_with_movement": sum(1 for t in ids if movement_by_id.get(t))}
         out = []
         for zone in sorted(c["pet_zones"]):
@@ -10401,50 +10508,64 @@ class Run1App:
                     if not ma and not mb:
                         diag["no_movement_both"] += 1
                         continue
-                    if ma and mb and ma == mb:
-                        diag["same_movement_excluded"] += 1
+                    # A PET pair needs a real crossing point of the two trajectories (any Movement pair, same Movement included); there is no
+                    # "closest approach" substitute and no radius: the conflict point is the crossing itself. t_A / t_B = the time each vehicle is AT that
+                    # point (linear between its two samples); PET = the later minus the earlier (the point-only form of "the second one arrives after the
+                    # first one has left"; the vehicle size is not subtracted). Two vehicles at the point at the same time give PET 0.
+                    cr = path_crossing(A, B)
+                    if cr is None:
+                        diag["no_crossing"] += 1
                         continue
-                    best = self._run3_best_intersection(A, B)
-                    if best is not None:
-                        ip = best[3]; ctype = "Crossing"
-                    else:
-                        d = np.hypot(A[:, None, 0] - B[None, :, 0], A[:, None, 1] - B[None, :, 1])
-                        flat = int(np.argmin(d))
-                        ia, ib = np.unravel_index(flat, d.shape)
-                        if d[ia, ib] > radius:
-                            continue
-                        ip = ((A[ia, 0] + B[ib, 0]) / 2.0, (A[ia, 1] + B[ib, 1]) / 2.0)
-                        ctype = conflict_type_from_sequences((sequence_by_id or {}).get(str(a_id), []),
-                                                             (sequence_by_id or {}).get(str(b_id), []), False)
-                        diag["fallback_close_pairs"] += 1
+                    ip, ctype = cr["ip"], "Crossing"
                     diag["interaction_candidates"] += 1
-                    a_near = At[np.hypot(A[:, 0] - ip[0], A[:, 1] - ip[1]) <= radius]
-                    b_near = Bt[np.hypot(B[:, 0] - ip[0], B[:, 1] - ip[1]) <= radius]
-                    if a_near.size == 0 or b_near.size == 0:
-                        continue
-                    a_entry, a_exit = float(a_near.min()), float(a_near.max())
-                    b_entry, b_exit = float(b_near.min()), float(b_near.max())
-                    if a_exit <= b_entry:
-                        t1, t2 = a_exit, b_entry
-                    elif b_exit <= a_entry:
-                        t1, t2 = b_exit, a_entry
+                    t_a, t_b = path_pass_time(At, cr["seg_a"]), path_pass_time(Bt, cr["seg_b"])
+                    ia_, ib_ = cr["seg_a"][0], cr["seg_b"][0]
+                    gap_flag = max(At[ia_ + 1] - At[ia_], Bt[ib_ + 1] - Bt[ib_]) > PET_GAP_FLAG_S
+                    if gap_flag:
+                        diag["interpolated_gap"] += 1
+                    if use_area:
+                        # Conflict AREA: the circle around the crossing point with radius (W_A + W_B) / 2 (class widths, as TTC); each vehicle's time in it
+                        # is interpolated along its path. PET = the time the second one ENTERS minus the time the first one LEAVES; both in the area at once
+                        # = PET undefined (skipped).
+                        wa = widths.get(self._run3_canonical_class(a_rows[0].get("class_name", ""))) or 1.8
+                        wb = widths.get(self._run3_canonical_class(b_rows[0].get("class_name", ""))) or 1.8
+                        rad = (wa + wb) / 2.0
+                        ia_t, ib_t = circle_interval(A, At, ip, rad), circle_interval(B, Bt, ip, rad)
+                        if ia_t is None or ib_t is None:
+                            diag["no_area_pass"] += 1
+                            continue
+                        if ia_t[1] <= ib_t[0]:
+                            t1, t2 = ia_t[1], ib_t[0]
+                        elif ib_t[1] <= ia_t[0]:
+                            t1, t2 = ib_t[1], ia_t[0]
+                        else:
+                            diag["overlap_intervals"] += 1
+                            continue
+                        span_start, span_end = min(ia_t[0], ib_t[0]), max(ia_t[1], ib_t[1])
                     else:
-                        diag["overlap_intervals"] += 1
-                        continue
+                        rad = None
+                        t1, t2 = (t_a, t_b) if t_a <= t_b else (t_b, t_a)
+                        span_start, span_end = t1, t2
                     pet = t2 - t1
-                    if pet <= 0:
+                    # Speed_A/B = the speed each vehicle had while passing the crossing point: its samples within +-PET_SPEED_WINDOW_S/2 of the time it
+                    # was there (None = fewer than 2 samples: blank in the CSV). It also feeds the optional minimum-speed filter (blank = no limit).
+                    ma_ = np.abs(At - t_a) <= PET_SPEED_WINDOW_S / 2.0
+                    mb_ = np.abs(Bt - t_b) <= PET_SPEED_WINDOW_S / 2.0
+                    sp_a, sp_b = self._run3_mean_speed_kmh(A[ma_], At[ma_]), self._run3_mean_speed_kmh(B[mb_], Bt[mb_])
+                    if min_speed is not None and ((sp_a is not None and sp_a < min_speed) or (sp_b is not None and sp_b < min_speed)):
+                        diag["slow_vehicle"] += 1
                         continue
-                    sp_a, sp_b = self._run3_mean_speed_kmh(A, At), self._run3_mean_speed_kmh(B, Bt)
                     if pet_max is not None and pet > pet_max:
                         diag["above_pet_max"] += 1
                         continue
                     out.append({
                         "Site_ID": c["site_id"],
-                        "Interaction_ID": f"{a_id}_{b_id}_Z{zone}_{min(a_entry, b_entry):.6f}",
+                        "Interaction_ID": f"{a_id}_{b_id}_Z{zone}_{span_start:.6f}",
                         "Vehicle_ID_A": a_id, "Vehicle_Class_A": a_rows[0].get("class_name", ""), "Movement_A": ma,
                         "Vehicle_ID_B": b_id, "Vehicle_Class_B": b_rows[0].get("class_name", ""), "Movement_B": mb,
                         "Conflict_Type": ctype, "Conflict_Zone": f"Zone {zone}",
-                        "Interaction_Start": f"{min(a_entry, b_entry):.6f}", "Interaction_End": f"{max(a_exit, b_exit):.6f}",
+                        "Interaction_Start": f"{span_start:.6f}", "Interaction_End": f"{span_end:.6f}",
+                        "Cross_X_m": f"{ip[0]:.4f}", "Cross_Y_m": f"{ip[1]:.4f}", "Area_Radius_m": "" if rad is None else f"{rad:.3f}",
                         "T1_Exit_Time": f"{t1:.6f}", "T2_Entry_Time": f"{t2:.6f}", "PET_s": f"{pet:.6f}",
                         "Speed_A_kmh": self._fmt(sp_a, 3), "Speed_B_kmh": self._fmt(sp_b, 3),
                         "PET_Level": risk_level_low_is_risky(pet, c["risk_limits"]["pet_s"]),
@@ -10455,12 +10576,40 @@ class Run1App:
                                                         if (sp_a is not None or sp_b is not None) else "")),
                         "QC_Flag": ";".join(x for x in [
                             "Threshold_At_or_Below" if pet <= threshold else "",
+                            "Interpolated_Across_Gap" if gap_flag else "",
                             "Movement_A_Not_Observed" if not ma else "",
                             "Movement_B_Not_Observed" if not mb else "",
                             f"MovementSourceA={movement_source_by_id.get(a_id, '')}" if ma else "",
                             f"MovementSourceB={movement_source_by_id.get(b_id, '')}" if mb else "",
                         ] if x),
                     })
+                    events.append({"a": a_id, "b": b_id, "t1": t1, "t2": t2, "pet": pet, "ip": ip, "radius": rad})
+        # per picture frame: the crossing marks to draw (from PET_SHOW_LEAD_S before the first vehicle passes to PET_SHOW_TAIL_S after the second)
+        shapes, cache = defaultdict(list), {}
+
+        def frames_of(tid):
+            if tid not in cache:
+                lst = []
+                for r in tracks[tid]:
+                    try:
+                        fr = int(float(r.get("frame", "")))
+                    except Exception:
+                        fr = int(round(r["_timestamp"] * 1000))
+                    lst.append((r["_timestamp"], fr, r.get("_point")))
+                cache[tid] = lst
+            return cache[tid]
+        for ev in events:
+            lo, hi = ev["t1"] - PET_SHOW_LEAD_S, ev["t2"] + PET_SHOW_TAIL_S
+            seen = {}
+            for tid in (ev["a"], ev["b"]):
+                for t_, fr, px in frames_of(tid):
+                    if lo <= t_ <= hi and px is not None and fr not in seen:
+                        seen[fr] = px
+            for fr, px in seen.items():
+                shapes[fr].append({"a": ev["a"], "b": ev["b"], "pet": ev["pet"], "cross": ev["ip"], "px": px, "radius": ev["radius"],
+                                   "ring": None if ev["radius"] is None else np.array([[ev["ip"][0] + ev["radius"] * math.cos(q), ev["ip"][1] + ev["radius"] * math.sin(q)]
+                                                                                      for q in np.linspace(0.0, 2 * math.pi, PET_RING_POINTS, endpoint=False)])})
+        self._run3_pet_shapes = dict(shapes)
         return out, diag
 
     # ========================================================
@@ -10987,7 +11136,7 @@ class Run1App:
         def do_pet():
             status("Run 3 — PET...")
             rows, diag = self._run3_pet(tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
-            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","PET_s","Speed_A_kmh","Speed_B_kmh","PET_Level","Speed_Level","PET_Risk_Level","QC_Flag"]
+            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Conflict_Zone","Interaction_Start","Interaction_End","Cross_X_m","Cross_Y_m","Area_Radius_m","T1_Exit_Time","T2_Entry_Time","PET_s","Speed_A_kmh","Speed_B_kmh","PET_Level","Speed_Level","PET_Risk_Level","QC_Flag"]
             row_counts["pet"] = len(rows)
             outputs["pet"] = write_csv("PET.csv", fields, rows)
             vals = [float(r["PET_s"]) for r in rows]
@@ -11049,10 +11198,13 @@ class Run1App:
                 if tv:
                     outputs["topview_video"] = tv
                     summary["diagnostics"]["topview"]["video"] = tv
-            if c.get("ttc_enabled") and c.get("ttc_show_boxes_video"):
-                status("Run 3 — drawing the TTC rectangles on the normal video...")
+            draw_ttc = bool(c.get("ttc_enabled") and c.get("ttc_show_boxes_video"))
+            draw_pet = bool(c.get("pet_enabled") and c.get("pet_show_point_video"))
+            if draw_ttc or draw_pet:
+                status("Run 3 — drawing the TTC / PET marks on the normal video...")
                 result_video = os.path.join(output_dir, "Tracking_Result.mp4")
-                bv = self._run3_overlay_ttc_boxes(tracks, c, result_video, self._run3_record_first_frame(settings, (settings or {}).get("video")))
+                bv = self._run3_overlay_ttc_boxes(tracks, c, result_video, self._run3_record_first_frame(settings, (settings or {}).get("video")),
+                                                  draw_ttc=draw_ttc, draw_pet=draw_pet)
                 if bv:
                     outputs["tracking_result_with_ttc_boxes"] = bv
                 else:

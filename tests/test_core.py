@@ -1078,5 +1078,71 @@ class ZoneEditCoreTests(unittest.TestCase):
         self.assertAlmostEqual(a[2][1], a[3][1], places=9)
 
 
+class PathCrossingTimes(unittest.TestCase):
+    """PET uses the crossing of two paths and the time each vehicle is at it (point only, no radius)."""
+
+    def test_perpendicular_crossing_point_and_pass_times(self):
+        # A along +x at y = 0, 10 m/s, samples every 0.1 s, passes (15, 0) at t = 1.5 s
+        ta = np.arange(0.0, 3.0001, 0.1)
+        A = np.stack([10.0 * ta, np.zeros_like(ta)], axis=1)
+        # B along +y at x = 15, 5 m/s, passes (15, 0) at t = 3.1 s; samples every 0.1 s from t = 2.0 (y = -5.5) to 4.0
+        tb = np.arange(2.0, 4.0001, 0.1)
+        B = np.stack([np.full_like(tb, 15.0), 5.0 * (tb - 3.1)], axis=1)
+        cr = CORE["path_crossing"](A, B)
+        self.assertIsNotNone(cr)
+        self.assertAlmostEqual(cr["ip"][0], 15.0, places=6)
+        self.assertAlmostEqual(cr["ip"][1], 0.0, places=6)
+        t_a = CORE["path_pass_time"](ta, cr["seg_a"])
+        t_b = CORE["path_pass_time"](tb, cr["seg_b"])
+        self.assertAlmostEqual(t_a, 1.5, places=6)
+        self.assertAlmostEqual(t_b, 3.1, places=6)
+        self.assertAlmostEqual(t_b - t_a, 1.6, places=6)                                   # PET of the pair
+
+    def test_time_is_interpolated_between_samples(self):
+        # crossing at (5, 0) lies between the samples at x = 4 (t = 0.4) and x = 6 (t = 0.6) of A -> exactly 0.5 s
+        ta = np.array([0.0, 0.2, 0.4, 0.6, 0.8])
+        A = np.stack([ta * 10.0, np.zeros(5)], axis=1)
+        tb = np.array([1.0, 2.0])
+        B = np.array([[5.0, -3.0], [5.0, 3.0]])
+        cr = CORE["path_crossing"](A, B)
+        self.assertAlmostEqual(CORE["path_pass_time"](ta, cr["seg_a"]), 0.5, places=6)
+        self.assertAlmostEqual(CORE["path_pass_time"](tb, cr["seg_b"]), 1.5, places=6)
+
+    def test_paths_that_do_not_cross(self):
+        A = np.array([[0.0, 0.0], [10.0, 0.0]])
+        parallel = np.array([[0.0, 1.0], [10.0, 1.0]])                                     # a vehicle following in the next lane
+        self.assertIsNone(CORE["path_crossing"](A, parallel))
+        short = np.array([[5.0, 1.0], [5.0, 3.0]])                                          # ends before reaching A
+        self.assertIsNone(CORE["path_crossing"](A, short))
+        self.assertIsNone(CORE["path_crossing"](A[:1], parallel))                           # one sample is not a path
+
+
+class CircleInterval(unittest.TestCase):
+    """PET conflict area: the time a vehicle spends inside the circle around the crossing point."""
+
+    def test_straight_pass_through_the_circle(self):
+        tt = np.arange(0.0, 3.0001, 0.1)
+        P = np.stack([10.0 * tt, np.zeros_like(tt)], axis=1)                              # 10 m/s along +x
+        t_in, t_out = CORE["circle_interval"](P, tt, (15.0, 0.0), 1.3)                       # circle x = 13.7 .. 16.3
+        self.assertAlmostEqual(t_in, 1.37, places=6)
+        self.assertAlmostEqual(t_out, 1.63, places=6)
+
+    def test_offset_chord_is_shorter(self):
+        tt = np.array([0.0, 3.0])
+        P = np.array([[0.0, 0.5], [30.0, 0.5]])                                              # passes 0.5 m beside the centre
+        t_in, t_out = CORE["circle_interval"](P, tt, (15.0, 0.0), 1.3)
+        half = math.sqrt(1.3 ** 2 - 0.5 ** 2)
+        self.assertAlmostEqual(t_in, (15.0 - half) / 10.0, places=6)
+        self.assertAlmostEqual(t_out, (15.0 + half) / 10.0, places=6)
+
+    def test_start_inside_and_miss(self):
+        P = np.array([[15.0, 0.0], [20.0, 0.0]])
+        t_in, t_out = CORE["circle_interval"](P, np.array([0.0, 1.0]), (15.0, 0.0), 1.0)
+        self.assertAlmostEqual(t_in, 0.0, places=6)                                          # already inside at the first sample
+        self.assertAlmostEqual(t_out, 0.2, places=6)
+        self.assertIsNone(CORE["circle_interval"](np.array([[0.0, 5.0], [30.0, 5.0]]), np.array([0.0, 3.0]), (15.0, 0.0), 1.3))
+        self.assertIsNone(CORE["circle_interval"](P[:1], np.array([0.0]), (15.0, 0.0), 1.0))
+
+
 if __name__ == "__main__":
     unittest.main()
