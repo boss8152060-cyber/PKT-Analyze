@@ -529,6 +529,24 @@ class RectPolygonAndInvertMap(unittest.TestCase):
         self.assertLess(np.abs(back - px).max(), 1e-2)
 
 
+class PointPolygonDistance(unittest.TestCase):
+    SQ = [(0, 0), (10, 0), (10, 10), (0, 10)]
+
+    def test_inside_is_zero(self):
+        self.assertEqual(CORE["point_polygon_distance"]((5, 5), self.SQ), 0.0)
+
+    def test_outside_is_the_distance_to_the_nearest_edge(self):
+        f = CORE["point_polygon_distance"]
+        self.assertAlmostEqual(f((13, 5), self.SQ), 3.0)
+        self.assertAlmostEqual(f((13, 14), self.SQ), 5.0)          # nearest is the corner (10, 10)
+        self.assertAlmostEqual(f((-2, 5), self.SQ), 2.0)
+
+    def test_concave_polygon(self):
+        L = [(0, 0), (10, 0), (10, 4), (4, 4), (4, 10), (0, 10)]
+        self.assertEqual(CORE["point_polygon_distance"]((2, 8), L), 0.0)
+        self.assertAlmostEqual(CORE["point_polygon_distance"]((8, 8), L), 4.0)
+
+
 class ConflictAngle(unittest.TestCase):
     def test_angle_between_velocities(self):
         ang = CORE["conflict_angle_deg"]
