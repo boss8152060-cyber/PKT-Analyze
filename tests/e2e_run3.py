@@ -327,8 +327,8 @@ def scene2(app):
     check("TTC columns: the vector columns are written, the old rear-end / crossing-point columns are gone",
           {"Theta_deg", "Rel_X_m", "RelV_X_mps", "Miss_Distance_m", "TTC_X_s", "TTC_Y_s"} <= set(ttc[0]) and "S_Conflict_Distance_m" not in ttc[0] and "Arrival_Diff_s" not in ttc[0],
           str(sorted(ttc[0])) if ttc else "no rows")
-    check("TTC events = F-L, P-R, P-L (every approaching pair inside the radius; P-L passes 12 m apart: no miss-distance rule)",
-          set(ev) == {("4", "5"), ("1", "3"), ("1", "5")}, str(sorted(ev)))
+    check("TTC events = F-L and P-R (P-L passes 12 m apart: more than (1.8 + 1.8)/2 + 0.5 m, not a collision course)",
+          set(ev) == {("4", "5"), ("1", "3")}, str(sorted(ev)))
     fl = ev.get(("4", "5"))
     if fl:
         check("TTC F-L: Rear-end, angle 0 deg", fl["TTC_Type"] == "Rear-end" and abs(float(fl["Theta_deg"])) < 1.0, f"{fl['TTC_Type']} {fl['Theta_deg']}")
@@ -354,10 +354,30 @@ def scene2(app):
     lv = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]): (r["TTC_Level"], r["TTC_Risk_Level"]) for r in read_csv(os.path.join(out_rl, "TTC.csv"))}
     check("TTC risk limits are editable (0.05 / 0.1 / 0.2 s: F-L = Interaction, P-R = High level)", lv.get(("4", "5"), ("", ""))[0] == "Interaction" and lv.get(("1", "3"), ("", ""))[0] == "High", str(lv))
     check("the limits used are written to the summary", summ_rl.get("risk_level_limits", {}).get("ttc_s") == [0.05, 0.1, 0.2], str(summ_rl.get("risk_level_limits")))
-    pl = ev.get(("1", "5"))
-    if pl:
-        check("TTC P-L: lanes 12 m apart: TTC ~ 2.0 s but the miss distance is 12 m (written, not used to filter)",
-              abs(float(pl["TTC_s"]) - 2.0) < 0.05 and abs(float(pl["Miss_Distance_m"]) - 12.0) < 0.2, f"{pl['TTC_s']} {pl['Miss_Distance_m']}")
+    # TTC_Frames.csv: every pair frame with a TTC; the chosen minimum is marked, the frames that do not count say why
+    fr_rows = read_csv(os.path.join(out, "TTC_Frames.csv"))
+    check("TTC_Frames.csv has the frames of every pair, with Status", len(fr_rows) > 50 and {"Status", "Is_Event_Min", "Miss_Limit_m"} <= set(fr_rows[0]), str(len(fr_rows)))
+    for pair in (("4", "5"), ("1", "3")):
+        mins = [r for r in fr_rows if (r["Vehicle_A_ID"], r["Vehicle_B_ID"]) == pair and r["Is_Event_Min"] == "1"]
+        check(f"TTC_Frames: exactly one marked minimum for {pair}, equal to the TTC.csv value", len(mins) == 1 and ev.get(pair) and abs(float(mins[0]["TTC_s"]) - float(ev[pair]["TTC_s"])) < 1e-6,
+              str([(r["TTC_s"], ev.get(pair, {}).get("TTC_s")) for r in mins]))
+        counted = [float(r["TTC_s"]) for r in fr_rows if (r["Vehicle_A_ID"], r["Vehicle_B_ID"]) == pair and r["Status"] == "Counted"]
+        check(f"TTC_Frames: the marked minimum is the smallest counted TTC of {pair}", counted and abs(min(counted) - float(ev[pair]["TTC_s"])) < 1e-6)
+    pl_rows = [r for r in fr_rows if (r["Vehicle_A_ID"], r["Vehicle_B_ID"]) == ("1", "5")]
+    check("TTC_Frames: P-L frames are listed as Miss_Too_Far (12 m miss), none counted", pl_rows and all(r["Status"] == "Miss_Too_Far" for r in pl_rows)
+          and all(abs(float(r["Miss_Distance_m"]) - 12.0) < 0.3 for r in pl_rows), str({r["Status"] for r in pl_rows}))
+    # a vehicle slower than the speed limit skips the frame: L drives 5 m/s = 18 km/h, so a 20 km/h limit drops F-L
+    app.run3_ttc_min_speed_var.set("20")
+    out_s, _ = run_scene(app, veh)
+    app.run3_ttc_min_speed_var.set(m.RUN3_DEFAULTS["ttc_min_speed_kmh"])
+    pairs_s = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]) for r in read_csv(os.path.join(out_s, "TTC.csv"))}
+    check("TTC: a frame where a vehicle is slower than the speed limit is skipped (20 km/h drops F-L, L = 18 km/h)", pairs_s == {("1", "3")}, str(sorted(pairs_s)))
+    # the miss-distance rule is adjustable: a 20 m margin lets P-L (12 m) count again
+    app.run3_ttc_miss_margin_var.set("20")
+    out_g, _ = run_scene(app, veh)
+    app.run3_ttc_miss_margin_var.set(m.RUN3_DEFAULTS["ttc_miss_margin_m"])
+    pairs_g = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]) for r in read_csv(os.path.join(out_g, "TTC.csv"))}
+    check("TTC: the miss-distance margin is adjustable (20 m margin brings P-L back)", ("1", "5") in pairs_g and len(pairs_g) == 3, str(sorted(pairs_g)))
 
 
 def stream_rows(tid, t_cross, x_line, y, jitter=0.0, t_appear=None):
