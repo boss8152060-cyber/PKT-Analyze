@@ -27,7 +27,7 @@ ID_COLUMNS = ("track_id", "Vehicle_ID", "Vehicle_ID_A", "Vehicle_ID_B", "Vehicle
               "Event_ID", "Decision_Event_ID")
 
 # kinds of CSV that are put together (the file of a clip is <clip>_<kind>.csv; older runs: Run_3_<kind>.csv)
-KINDS = ("Gap_Acceptance", "Critical_Gap", "LDP", "Lateral_Clearance", "Lateral_Clearance_Pairs", "TTC", "PET",
+KINDS = ("Gap_Acceptance", "Critical_Gap", "LDP", "Lateral_Clearance", "Lateral_Clearance_Pairs", "TTC", "TTC_Detail", "PET",
          "Speed", "Speed_Detail", "Duplicate_Tracks", "ID_Zone_Summary")
 
 # kind -> (indicator name, value column, group columns) for All_Statistics.csv

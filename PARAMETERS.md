@@ -22,6 +22,7 @@
 |---|---|---|---|---|
 | `speed_smoothing_samples` | 5 | Speed, (LDP ใช้ `ldp_smoothing_samples`) | ลด jitter; มากไปทำให้ความเร็วเรียบเกิน | 1, 3, 5, 9 |
 | `ldp_smoothing_samples` | 5 | LDP | ΔY ลดลงเมื่อเรียบขึ้น | 1, 3, 5, 9 |
+| `speed_frame_window_s` | 0.5 | ความเร็วต่อเฟรม | ความเร็วทุกเฟรมใน `Detection_Records_Topview.csv` (คอลัมน์ `speed_kmh`) ใช้ตำแหน่งในช่วง ± ครึ่งหนึ่งของค่านี้ (หลัง rolling median ตาม `speed_smoothing_samples`); น้อย = ไวแต่สั่น, มาก = นิ่งแต่เบลอการเปลี่ยนความเร็ว | 0.25, 0.5, 1.0 |
 | `speed_max_kmh` | 80 | Speed | ค่าที่เกินไม่นับในสถิติ | 40, 60, 80, 0 (ปิด) |
 | `waiting_speed_threshold` (km/h) | 5.0 | Gap (หยุดค้างกลางแยก) | มาก = นับว่าหยุดง่ายขึ้น → Access/Exit เปลี่ยน | 2, 5, 8 |
 | `gap_hold_min_duration_s` | 0.30 | Gap | | 0.2, 0.3, 0.5 |
@@ -135,6 +136,7 @@ py -3.12 tools/batch_run.py --settings "../Output/Test/R5/คลิป/Settings.
 | `Lateral_Clearance.csv`, `Lateral_Clearance_Pairs.csv` | Lateral Clearance (ทุกตัวอย่าง / ค่าต่ำสุดต่อคู่) |
 | `TTC.csv`, `PET.csv` | TTC, PET |
 | `Speed.csv`, `Speed_Detail.csv`, `Speed_Statistics.csv` | Speed (ต่อคัน / ต่อโซนและ Movement / สถิติ) |
+| `TTC_Detail.csv` | ค่าตรวจสอบของแต่ละเหตุการณ์ TTC (เวกเตอร์สัมพัทธ์, เวลาถึงจุดชน ฯลฯ) ต่อกับ `TTC.csv` ด้วย `Event_ID` — `TTC.csv` เหลือเฉพาะคอลัมน์หลัก |
 | `<ชื่อ>_ERROR.csv` (เช่น `PET_ERROR.csv`) | **มีเฉพาะเมื่อตัวชี้วัดนั้นคำนวณล้มเหลว** บอกข้อความผิดพลาด (ชื่อไฟล์ผลลัพธ์จริง เช่น `PET.csv` จะไม่ถูกเขียนทับด้วยข้อความ error อีก; ถ้ามี `PET.csv` อยู่ในโฟลเดอร์ แปลว่าเป็นของรอบเก่า) |
 | `Indicator_Summary.csv`, `Summary.json`, `Duplicate_Tracks.csv` | สรุปตัวชี้วัด, สรุปการรัน (รวมเหตุผลที่ตัวชี้วัดว่าง, การปรับเทียบ), แทร็กซ้ำที่ตัดออก |
 | `Detection_Records_Topview.csv`, `Tracking_Topview.mp4` | พิกัด Topview: ทุกจุดที่ตรวจพบแปลงเป็นเมตรบนพื้นถนน (`x_m,y_m` = จุดตัดสินโซน, `cx_m,cy_m` = กึ่งกลางกรอบ — ตัวเลขชุดเดียวกับที่ตัวชี้วัดใช้) และวิดีโอ Topview ที่วาดจากพิกัดนั้น (กรอบรถตามขนาดจริง หมุนตามทิศวิ่ง, เส้นทางย้อนหลัง 2 วินาที, โซน, ตารางเมตร; พื้นหลัง = ภาพถนนจริงที่ไม่มีรถ (median ของ 15 เฟรม) บิดด้วย calibration หลัก ถ้าไม่รู้ไฟล์วิดีโอใช้ตารางเปล่า) — ปิดวิดีโอได้ในแท็บ ② ทางแยก ("สร้างวิดีโอ Topview") |
@@ -263,3 +265,20 @@ py -3.12 tools/batch_run.py --settings "../Output/Test/R5/คลิป/Settings.
 | ตารางเมตร | — | `xy_show_grid` |
 
 ไฟล์ตั้งค่าที่บันทึกไว้ก่อนมีตารางนี้ (ไม่มีคีย์ `xy_…`): วิดีโอ X–Y ใช้ค่าของวิดีโอปกติที่บันทึกไว้ (เส้นทาง, โซน, ป้าย, ชื่อกำกับ, ความจาง) ส่วนจุด/ตารางเมตร/ข้อความเวลาเปิดเป็นค่าตั้งต้น
+
+## 7. ชื่อคอลัมน์ในไฟล์ตัวชี้วัด (v28(129)) — ชื่อเก่า → ชื่อใหม่
+
+หลักการ: คอลัมน์เวลาลงท้าย `_s`; คอลัมน์ความเร็วบอกว่า **ความเร็ว ณ ตอนไหน**; รถ A/B ใช้ `Vehicle_A_ID` / `Vehicle_A_Class` / `Movement_A` เหมือนกันทุกไฟล์ (ไฟล์ตรวจจับพื้นฐาน `Detection_Records*.csv`, `ID_Zone_Summary.csv` ยังใช้ชื่อเดิมเพราะโปรแกรมอ่านกลับ) — ผลรอบเก่าที่ใช้ชื่อเดิมยังเปิดอ่านได้ และ `tools/combine_clips.py` อ่านชื่อ Gap เดิมได้
+
+| ไฟล์ | ชื่อเดิม → ชื่อใหม่ |
+|---|---|
+| `LDP.csv` | `Start_Time`→`Start_Time_s`, `End_Time`→`End_Time_s`, `Mean_Speed_kmh`→`Mean_Speed_In_Zone_kmh` |
+| `Lateral_Clearance.csv` | `Timestamp`→`Time_s`, `LS_Meter`→`LS_m`; **เพิ่ม** `Movement_A`, `Movement_B`, `Calibration_Mode` |
+| `Lateral_Clearance_Pairs.csv` | `Start_Time`→`Start_Time_s`, `End_Time`→`End_Time_s`; **เพิ่ม** `Movement_A`, `Movement_B`, `Calibration_Mode` |
+| `Gap_Acceptance.csv` | `X32_Waiting_Time`→`Waiting_Time_s`, `X31_Available_Gap`→`Available_Gap_s`, `Gap_Evaluation_Time`/`Gap_Start_Time`/`Gap_End_Time`/`Decision_Time` + `_s`, `Subject_Speed_kmh`→`Subject_Speed_At_Decision_kmh`, `Conflict_Speed_A/B_kmh`→`Conflict_Speed_A/B_At_Decision_kmh` |
+| `TTC.csv` | `Event_Start`→`Start_Time_s`, `Event_End`→`End_Time_s`, `TTCmin_Time`→`TTCmin_Time_s`, `Speed_A/B_kmh`→`Speed_A/B_At_TTCmin_kmh`; **ย้ายไป `TTC_Detail.csv`:** `Rel_X_m`, `Rel_Y_m`, `RelV_X_mps`, `RelV_Y_mps`, `Rel_Speed_kmh`, `Collide_Frame_Time_s`, `Dist_A/B_to_Collide_m`, `Arrival_A/B_s`; **เพิ่ม** `Calibration_Mode` |
+| `PET.csv` | `Vehicle_ID_A/B`→`Vehicle_A/B_ID`, `Vehicle_Class_A/B`→`Vehicle_A/B_Class`, `Interaction_Start/End`→`Start_Time_s`/`End_Time_s`, `T1_Exit_Time`→`T1_Exit_Time_s`, `T2_Entry_Time`→`T2_Entry_Time_s`, `Speed_A/B_kmh`→`Speed_A/B_At_Crossing_kmh`; **เพิ่ม** `Calibration_Mode` |
+| `Speed_Detail.csv` | `Start_Time`→`Start_Time_s`, `End_Time`→`End_Time_s` |
+| `Detection_Records_Topview.csv` | **เพิ่ม** `speed_kmh` (ความเร็วของรถคันนั้นในเฟรมนั้น, ตั้งค่าที่ `speed_frame_window_s`) |
+
+ผล pivot/สูตร Excel ที่อ้างชื่อเดิมต้องแก้เป็นชื่อใหม่เมื่อเปิดผลรันใหม่
