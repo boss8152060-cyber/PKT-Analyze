@@ -284,6 +284,7 @@ def scene2(app):
         (4, "Car", make_rows(4, "Car", along_x(-12.0, 10.0), lambda x, y: 3, n, (4.5, 1.8))),
         (5, "Car", make_rows(5, "Car", along_x(-12.0, 5.0, x0=20.0), lambda x, y: 3, n, (4.5, 1.8))),
     ]
+    app.run3_ttc_method_var.set("box")                              # the rectangle method first (the checks below), the point method at the end of this scene
     out, summary = run_scene(app, veh)
     print("scene 2 output:", out)
     # the pair screening radius is adjustable: at 5 m only the P-R pair (about 1 m apart when they cross) is evaluated
@@ -325,7 +326,7 @@ def scene2(app):
     ttc = read_csv(os.path.join(out, "TTC.csv"))
     ev = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]): r for r in ttc}
     check("TTC columns: conflict angle, relative vectors, DTC",
-          {"Theta_deg", "Rel_X_m", "RelV_X_mps", "DTC_m", "TTC_Type"} <= set(ttc[0]) and "S_Conflict_Distance_m" not in ttc[0] and "Miss_Distance_m" not in ttc[0],
+          {"Theta_deg", "Rel_X_m", "RelV_X_mps", "DTC_m", "TTC_Type", "Collide_X_m", "Collide_Y_m", "Miss_Distance_m"} <= set(ttc[0]) and "S_Conflict_Distance_m" not in ttc[0],
           str(sorted(ttc[0])) if ttc else "no rows")
     check("TTC events = F-L and P-R (P-L runs 12 m beside each other: the rectangles never touch)", set(ev) == {("4", "5"), ("1", "3")}, str(sorted(ev)))
     fl = ev.get(("4", "5"))
@@ -393,6 +394,31 @@ def scene2(app):
     app.run3_ttc_max_record_var.set(m.RUN3_DEFAULTS["ttc_max_record_s"])
     pairs_b = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]) for r in read_csv(os.path.join(out_b, "TTC.csv"))}
     check("TTC record limit: 0.5 s keeps only P-R; blank = everything is recorded", pairs_c == {("1", "3")} and pairs_b == {("4", "5"), ("1", "3")}, f"{sorted(pairs_c)} | {sorted(pairs_b)}")
+
+    # ---- the POINT method (the default): one point per vehicle, vector TTC, the expected collision point is kept
+    app.run3_ttc_method_var.set("point")
+    out_p, _ = run_scene(app, veh)
+    tp = read_csv(os.path.join(out_p, "TTC.csv"))
+    evp = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]): r for r in tp}
+    check("point method: events = F-L and P-R (P-L passes 12 m beside: the points do not come within (1.8+1.8)/2 + 0.5 m)", set(evp) == {("4", "5"), ("1", "3")}, str(sorted(evp)))
+    flp = evp.get(("4", "5"))
+    if flp:
+        check("point method F-L: TTC = (20 - 5 t) / 5 -> ~ 2.0 s (the classic centre-to-centre time); Rear-end", abs(float(flp["TTC_s"]) - 2.0) < 0.05 and flp["TTC_Type"] == "Rear-end", f"{flp['TTC_s']} {flp['TTC_Type']}")
+        # F drives +x at 10 m/s, L at 5 m/s ahead in the same line (y = -12): they meet where the points coincide: both at y = -12, the miss is 0
+        check("point method F-L: the expected collision point is on their line (y = -12 m) and the two points meet (miss 0)",
+              abs(float(flp["Collide_Y_m"]) + 12.0) < 0.1 and float(flp["Miss_Distance_m"]) < 0.01, f"({flp['Collide_X_m']}, {flp['Collide_Y_m']}) miss {flp['Miss_Distance_m']}")
+        check("point method F-L: the collision point is where F will be after the TTC (x = x_F + 10 x TTC)", abs(float(flp["A_At_Collide_X_m"]) - float(flp["Collide_X_m"])) < 0.01)
+    prp = evp.get(("1", "3"))
+    if prp:
+        check("point method P-R: Crossing; TTC ~ 0; the expected collision point is the crossing (15, 0)", prp["TTC_Type"] == "Crossing" and float(prp["TTC_s"]) < 0.06
+              and abs(float(prp["Collide_X_m"]) - 15.0) < 0.8 and abs(float(prp["Collide_Y_m"])) < 0.8, f"{prp['TTC_s']} ({prp['Collide_X_m']}, {prp['Collide_Y_m']})")
+    frp = read_csv(os.path.join(out_p, "TTC_Frames.csv"))
+    plp = [r for r in frp if (r["Vehicle_A_ID"], r["Vehicle_B_ID"]) == ("1", "5")]
+    check("point method: P-L frames are listed as Miss_Too_Far with a 12 m miss and no counted frame", plp and all(r["Status"] == "Miss_Too_Far" for r in plp) and all(abs(float(r["Miss_Distance_m"]) - 12.0) < 0.3 for r in plp), str({r["Status"] for r in plp}))
+    app.run3_ttc_miss_margin_var.set("20")
+    out_pg, _ = run_scene(app, veh)
+    app.run3_ttc_miss_margin_var.set(m.RUN3_DEFAULTS["ttc_miss_margin_m"])
+    check("point method: the miss margin is adjustable (20 m brings P-L back)", ("1", "5") in {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]) for r in read_csv(os.path.join(out_pg, "TTC.csv"))})
 
 
 def stream_rows(tid, t_cross, x_line, y, jitter=0.0, t_appear=None):

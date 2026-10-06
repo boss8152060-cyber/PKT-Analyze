@@ -48,7 +48,7 @@ app.zones["Zone 3"] = [(20, 100), (1260, 100), (1260, 600), (20, 600)]
 c = {"perspective": None, "perspective_enabled": False, "ppm": PPM, "axis_deg": 0.0, "align": None, "site_id": 8,
      "ttc_enabled": True, "ttc_zones": [3], "ttc_velocity_window_s": 0.5, "ttc_min_speed_kmh": 5.0, "ttc_min_rel_speed_ms": 0.5, "ttc_pair_radius_m": 50.0,
      "ttc_max_record_s": None, "ttc_box_margin_m": 0.25, "ttc_angle_rear_end_deg": 30.0, "ttc_angle_crossing_deg": 85.0,
-     "widths": {"Car": 1.8}, "lengths": {"Car": 4.5}, "risk_limits": dict(m.RISK_DEFAULT_LIMITS), "ttc_show_boxes_xy": True, "ttc_show_boxes_video": True}
+     "widths": {"Car": 1.8}, "lengths": {"Car": 4.5}, "risk_limits": dict(m.RISK_DEFAULT_LIMITS), "ttc_show_boxes_xy": True, "ttc_show_boxes_video": True, "ttc_method": "box"}
 
 tracks = {1: [], 2: []}
 for k in range(21):
@@ -135,6 +135,25 @@ check("first recorded frame: no window = 1; a recording start of 1 s at 10 fps =
       f"{app._run3_record_first_frame({}, video)} {app._run3_record_first_frame({'record_start_s': '1'}, video)}")
 check("without a video or without shapes nothing is drawn", app._run3_overlay_ttc_boxes(tracks, c, os.path.join(out_dir, "nope.mp4"), 1) is None
       and (lambda: (setattr(app, "_run3_ttc_shapes", None), app._run3_overlay_ttc_boxes(tracks, c, res, 1))[1] is None)())
+
+
+# ---- the POINT method: the expected collision point is drawn (red cross + the TTC) on the X-Y video and on the normal video
+cp_ = dict(c, ttc_method="point", ttc_miss_margin_m=0.5)
+rows_p, diag_p, frames_p, shapes_p = app._run3_ttc(tracks, cp_, {})
+app._run3_ttc_shapes = shapes_p
+mk = shapes_p[11]["marks"]
+check("point method: one mark at t = 1.0 s, TTC 1.0 s (20 m apart closing at 20 m/s), the expected meeting point is the middle (x = 25 m, y = 15 m)",
+      len(mk) == 1 and abs(mk[0]["ttc"] - 1.0) < 0.03 and abs(mk[0]["mid"][0] - 25.0) < 0.5 and abs(mk[0]["mid"][1] - 15.0) < 0.01, str(mk[:1]))
+check("point method: no rectangles are built", all(not sh["rects"] for sh in shapes_p.values()))
+xp = frame_at(app._run3_write_topview_video(tracks, cp_, tempfile.mkdtemp(dir=tmp), video, display={"draw_trail": False}), 10)
+ys_, xs_ = np.where(red(xp))
+check("X-Y video (point method): the red cross is at the expected meeting point (x = 25 m, y = 15 m on the canvas)", len(ys_) > 30, str(len(ys_)))
+res_p = make_result("Tracking_Result.mp4", 21)
+app._run3_overlay_ttc_boxes(tracks, cp_, res_p, first_frame=1)
+fp_ = frame_at(res_p, 10)
+ys2, xs2 = np.where(red(fp_))
+check("normal video (point method): the cross is drawn at 25 m x 20 px/m = 500 px, y = 300 px", len(xs2) > 30 and abs(float(np.median(xs2)) - 500) < 25 and abs(float(np.median(ys2)) - 300) < 25,
+      f"{len(xs2)} px, median ({np.median(xs2) if len(xs2) else None}, {np.median(ys2) if len(ys2) else None})")
 
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
