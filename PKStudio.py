@@ -10027,7 +10027,7 @@ class Run1App:
         Stage 2 - Exit (only after such a stop): that gap becomes Rejected and the driver
           decides again after it resumes: only NEW gaps (starting after the resumption) count;
           the gap that contains the target-zone entry is Accepted, earlier new gaps Rejected.
-        The available gap X31 is the time left until the gap closes at the decision time."""
+        The available gap (Available_Gap_s) is the time left until the gap closes at the decision time."""
         selected = c["gap_movements"]
         site = c["site_id"]
         thr = c["waiting_threshold"]
@@ -10209,13 +10209,13 @@ class Run1App:
                     "Subject_ID": tid, "Subject_Class": subject_class, "Subject_Movement": movement,
                     "Decision_Stage": o["stage"], "Decision_Zone": o["decision_zone"],
                     "Gap_Evaluation_Time": f"{o['opportunity_time']:.6f}",
-                    "X32_Waiting_Time": f"{max(0.0, o['opportunity_time'] - wait_start):.6f}",
+                    "Waiting_Time_s": f"{max(0.0, o['opportunity_time'] - wait_start):.6f}",
                     "Conflicting_Movement": o["conflict_movement"],
                     "Conflicting_ID_A": o["id_a"], "Conflicting_Class_A": o["class_a"],
                     "Conflicting_ID_B": o["id_b"], "Conflicting_Class_B": o["class_b"],
                     "Reference_Line": o["reference"],
                     "Gap_Start_Time": f"{o['gap_start']:.6f}", "Gap_End_Time": f"{o['gap_end']:.6f}",
-                    "X31_Available_Gap": f"{o['gap']:.6f}",
+                    "Available_Gap_s": f"{o['gap']:.6f}",
                     "Subject_Speed_kmh": self._fmt(sp_subject, 3), "Conflict_Speed_A_kmh": self._fmt(sp_a, 3),
                     "Conflict_Speed_B_kmh": self._fmt(sp_b, 3),
                     "Gap_Role": "Accepted" if o["accepted"] == 1 else "Rejected", "Gap_Acceptance": int(o["accepted"]),
@@ -11012,8 +11012,10 @@ class Run1App:
             try:
                 func()
             except Exception as e:
-                outputs[key] = write_csv(filename, ["Error"], [{"Error": str(e)}])
-                summary["diagnostics"][key] = f"ERROR: {e}"
+                # The failure goes to its own <name>_ERROR.csv: the real output name is not reused, so a failed indicator can never be mistaken for an empty result
+                error_name = os.path.splitext(filename)[0] + "_ERROR.csv"
+                outputs[key + "_error"] = write_csv(error_name, ["Error"], [{"Error": str(e)}])
+                summary["diagnostics"][key] = f"ERROR: {e} (see {error_name}; any {filename} in this folder is from an earlier run)"
             timings[key] = round(time.time() - t0, 3)
 
         # ---------------- Lateral Clearance (distance) ----------------
@@ -11065,13 +11067,13 @@ class Run1App:
         def do_gap():
             status("Run 3 — Gap Acceptance...")
             gap_rows = self._run3_gap(tracks, c, mapping, movement_by_id)
-            fields = ["Site_ID","Decision_Event_ID","Opportunity_No","Subject_ID","Subject_Class","Subject_Movement","Decision_Stage","Decision_Zone","Gap_Evaluation_Time","X32_Waiting_Time","Conflicting_Movement","Conflicting_ID_A","Conflicting_Class_A","Conflicting_ID_B","Conflicting_Class_B","Reference_Line","Gap_Start_Time","Gap_End_Time","X31_Available_Gap","Subject_Speed_kmh","Conflict_Speed_A_kmh","Conflict_Speed_B_kmh","Gap_Role","Gap_Acceptance","Decision_Time","QC_Flag"]
+            fields = ["Site_ID","Decision_Event_ID","Opportunity_No","Subject_ID","Subject_Class","Subject_Movement","Decision_Stage","Decision_Zone","Gap_Evaluation_Time","Waiting_Time_s","Conflicting_Movement","Conflicting_ID_A","Conflicting_Class_A","Conflicting_ID_B","Conflicting_Class_B","Reference_Line","Gap_Start_Time","Gap_End_Time","Available_Gap_s","Subject_Speed_kmh","Conflict_Speed_A_kmh","Conflict_Speed_B_kmh","Gap_Role","Gap_Acceptance","Decision_Time","QC_Flag"]
             row_counts["gap"] = len(gap_rows)
             outputs["gap_acceptance"] = write_csv("Gap_Acceptance.csv", fields, gap_rows)
             rejected = defaultdict(list); accepted = defaultdict(list)
             for r in gap_rows:
                 key = (r["Subject_Class"], r["Subject_Movement"], r["Subject_ID"])
-                (accepted if r["Gap_Acceptance"] == 1 else rejected)[key].append(float(r["X31_Available_Gap"]))
+                (accepted if r["Gap_Acceptance"] == 1 else rejected)[key].append(float(r["Available_Gap_s"]))
             groups = defaultdict(lambda: {"accepted": [], "rejected": [], "intervals": []})
             for key in set(rejected) | set(accepted):
                 acc = accepted.get(key, []); rej = rejected.get(key, [])
@@ -11091,8 +11093,8 @@ class Run1App:
                 })
             if critical:
                 outputs["critical_gap"] = write_csv("Critical_Gap.csv", list(critical[0].keys()), critical)
-            acc_vals = [float(r["X31_Available_Gap"]) for r in gap_rows if r["Gap_Acceptance"] == 1]
-            rej_vals = [float(r["X31_Available_Gap"]) for r in gap_rows if r["Gap_Acceptance"] == 0]
+            acc_vals = [float(r["Available_Gap_s"]) for r in gap_rows if r["Gap_Acceptance"] == 1]
+            rej_vals = [float(r["Available_Gap_s"]) for r in gap_rows if r["Gap_Acceptance"] == 0]
             indicator("Gap Acceptance — accepted gaps", "Time", "s", "Accepted", acc_vals)
             indicator("Gap Acceptance — rejected gaps", "Time", "s", "Rejected", rej_vals)
             summary["indicators"]["Gap_Acceptance"] = {

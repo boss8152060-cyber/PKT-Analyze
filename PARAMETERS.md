@@ -135,6 +135,7 @@ py -3.12 tools/batch_run.py --settings "../Output/Test/R5/คลิป/Settings.
 | `Lateral_Clearance.csv`, `Lateral_Clearance_Pairs.csv` | Lateral Clearance (ทุกตัวอย่าง / ค่าต่ำสุดต่อคู่) |
 | `TTC.csv`, `PET.csv` | TTC, PET |
 | `Speed.csv`, `Speed_Detail.csv`, `Speed_Statistics.csv` | Speed (ต่อคัน / ต่อโซนและ Movement / สถิติ) |
+| `<ชื่อ>_ERROR.csv` (เช่น `PET_ERROR.csv`) | **มีเฉพาะเมื่อตัวชี้วัดนั้นคำนวณล้มเหลว** บอกข้อความผิดพลาด (ชื่อไฟล์ผลลัพธ์จริง เช่น `PET.csv` จะไม่ถูกเขียนทับด้วยข้อความ error อีก; ถ้ามี `PET.csv` อยู่ในโฟลเดอร์ แปลว่าเป็นของรอบเก่า) |
 | `Indicator_Summary.csv`, `Summary.json`, `Duplicate_Tracks.csv` | สรุปตัวชี้วัด, สรุปการรัน (รวมเหตุผลที่ตัวชี้วัดว่าง, การปรับเทียบ), แทร็กซ้ำที่ตัดออก |
 | `Detection_Records_Topview.csv`, `Tracking_Topview.mp4` | พิกัด Topview: ทุกจุดที่ตรวจพบแปลงเป็นเมตรบนพื้นถนน (`x_m,y_m` = จุดตัดสินโซน, `cx_m,cy_m` = กึ่งกลางกรอบ — ตัวเลขชุดเดียวกับที่ตัวชี้วัดใช้) และวิดีโอ Topview ที่วาดจากพิกัดนั้น (กรอบรถตามขนาดจริง หมุนตามทิศวิ่ง, เส้นทางย้อนหลัง 2 วินาที, โซน, ตารางเมตร; พื้นหลัง = ภาพถนนจริงที่ไม่มีรถ (median ของ 15 เฟรม) บิดด้วย calibration หลัก ถ้าไม่รู้ไฟล์วิดีโอใช้ตารางเปล่า) — ปิดวิดีโอได้ในแท็บ ② ทางแยก ("สร้างวิดีโอ Topview") |
 | `Tracking_Result.mp4` | วิดีโอผลลัพธ์ที่บันทึก (ถ้าเลือกบันทึก) |

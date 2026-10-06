@@ -238,6 +238,20 @@ class CombineClips(unittest.TestCase):
         with open(os.path.join(self.root, "Site", "All_Clips", "All_Speed_Detail.csv"), newline="", encoding="utf-8-sig") as f:
             self.assertEqual(sorted(r["Clip"] for r in csv.DictReader(f)), ["Site/d1/a", "Site/d1/b", "Site/d1/c"])
 
+    def test_gap_statistics_read_the_new_and_the_old_column_name(self):
+        import combine_clips
+        for rel, col in (("Site/d1/new", "Available_Gap_s"), ("Site/d1/old", "X31_Available_Gap")):    # old results keep their old column name
+            d = self._clip(rel, [30])
+            with open(os.path.join(d, "Gap_Acceptance.csv"), "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow(["Subject_ID", "Decision_Stage", "Gap_Role", col, "QC_Flag"])
+                w.writerow([1, "Access", "Accepted", 2.0, ""])
+        combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
+        with open(os.path.join(self.root, "Site", "All_Clips", "All_Statistics.csv"), newline="", encoding="utf-8-sig") as f:
+            rows = [r for r in csv.DictReader(f) if r["Indicator"].startswith("Gap Acceptance") and r["Group"] == "All"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["N"], "2")                                   # one value from each clip
+
     def test_a_later_clip_is_added_to_the_combined_files(self):
         import combine_clips
         self._clip("Site/d1/a", [30])
