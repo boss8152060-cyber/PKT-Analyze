@@ -450,6 +450,52 @@ class VectorTtc(unittest.TestCase):
             self.assertAlmostEqual(r["miss"], miss, places=9)
 
 
+class PathCrossing(unittest.TestCase):
+    def line(self, p0, v, n=21, dt=0.1):
+        t = np.arange(n) * dt
+        return t, np.array([(p0[0] + v[0] * x, p0[1] + v[1] * x) for x in t])
+
+    def test_perpendicular_paths(self):
+        ta, pa = self.line((0, 0), (10, 0))                    # along +x, at (10, 0) at t = 1.0
+        tb, pb = self.line((10, -12), (0, 10))                 # along +y, at (10, 0) at t = 1.2
+        c = CORE["path_crossing"](pa, ta, pb, tb)
+        self.assertAlmostEqual(c["x"][0], 10.0, places=9)
+        self.assertAlmostEqual(c["x"][1], 0.0, places=9)
+        self.assertAlmostEqual(c["t_a"], 1.0, places=9)
+        self.assertAlmostEqual(c["t_b"], 1.2, places=9)
+        self.assertAlmostEqual(c["arc_a"], 10.0, places=9)     # path length from the start of A to the crossing
+        self.assertAlmostEqual(c["arc_b"], 12.0, places=9)
+        self.assertAlmostEqual(c["arc_a_samples"][-1], 20.0, places=9)
+
+    def test_no_crossing_for_parallel_or_apart_paths(self):
+        ta, pa = self.line((0, 0), (10, 0))
+        tb, pb = self.line((0, 3), (10, 0))
+        self.assertIsNone(CORE["path_crossing"](pa, ta, pb, tb))                    # parallel
+        tc, pc = self.line((30, -5), (0, 10))                                      # would cross x = 30, beyond the end of A (x = 20)
+        self.assertIsNone(CORE["path_crossing"](pa, ta, pc, tc))
+        td, pd_ = self.line((0, 0), (10, 0))
+        self.assertIsNone(CORE["path_crossing"](pa, ta, pd_, td))                   # the same line (collinear)
+
+    def test_several_crossings_take_the_one_closest_in_time(self):
+        ta, pa = self.line((0, 0), (10, 0), n=41)              # +x for 4 s: at x = 5 at 0.5 s, at x = 30 (beyond its end at x = 40? no: 3.0 s)
+        pb = np.array([(5, -2), (5, 2), (30, 2), (30, -2)], dtype=float)
+        tb = np.array([0.4, 0.8, 4.9, 5.3])                   # B crosses y = 0 at x = 5 at 0.6 s and at x = 30 at 5.1 s
+        c = CORE["path_crossing"](pa, ta, pb, tb)
+        self.assertAlmostEqual(c["x"][0], 5.0, places=9)
+        self.assertAlmostEqual(abs(c["t_a"] - c["t_b"]), 0.1, places=6)
+
+    def test_too_few_samples(self):
+        self.assertIsNone(CORE["path_crossing"]([(0, 0)], [0.0], [(0, 0), (1, 1)], [0.0, 1.0]))
+
+    def test_chunking_does_not_change_the_result(self):
+        ta, pa = self.line((0, 0), (10, 0), n=400)
+        tb, pb = self.line((100, -50), (0, 5), n=400)
+        one = CORE["path_crossing"](pa, ta, pb, tb, chunk=100000)
+        many = CORE["path_crossing"](pa, ta, pb, tb, chunk=7)
+        self.assertEqual(one["x"], many["x"])
+        self.assertEqual(one["t_a"], many["t_a"])
+
+
 class TtcMissLimit(unittest.TestCase):
     def test_half_the_widths_plus_the_margin(self):
         f = CORE["ttc_miss_limit"]
