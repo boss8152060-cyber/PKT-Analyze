@@ -491,7 +491,7 @@ RUN3_DEFAULTS = {
     "ttc_velocity_window_s": "0.50",        # centred window of observed samples for velocity
     "ttc_min_speed_kmh": "5.0",             # a frame where either vehicle is slower than this is skipped (a parked vehicle whose box flickers has a false velocity)
     "ttc_show_boxes_xy": True,              # draw the vehicle rectangles that TTC uses in the X-Y video (red = in a counted TTC frame)
-    "ttc_show_boxes_video": False,          # also write Tracking_TTC_Boxes.mp4: the real video with those rectangles drawn on it
+    "ttc_show_boxes_video": False,          # draw them also on the normal roadside video (Tracking_Result.mp4) after Run 3
     "ttc_box_margin_m": "0.25",             # every vehicle rectangle (length x width by class) is enlarged by this on each side (m): room for the position error
     # Vector TTC (SPEC v28 section 7, formula of Yaibok et al. 2026):
     "ttc_min_rel_speed_ms": "0.5",          # pairs with a smaller relative speed (m/s) are skipped (unstable TTC)
@@ -3917,6 +3917,9 @@ class Run1App:
             cb.pack(side="left", padx=(0, 18))
             cb.bind("<<ComboboxSelected>>", lambda e, v=var, sv=shown: v.set(next((k for k, t in OUTSIDE.items() if t == sv.get()), "dot")))
             var.trace_add("write", lambda *_, v=var, sv=shown: sv.set(OUTSIDE.get(v.get(), OUTSIDE["dot"])))
+        fr = line("สี่เหลี่ยมรถของ TTC", [("ในวิดีโอปกติ (ข้างทาง)", self.run3_ttc_show_video_var), ("ในวิดีโอ X–Y", self.run3_ttc_show_xy_var)], 8)
+        ttk.Label(fr, text="รถ = สี่เหลี่ยมยาว×กว้างที่ TTC ใช้ (แดง = เฟรมที่ TTC นับ + ค่า TTC); วิดีโอปกติวาดเพิ่มหลังคำนวณ TTC เสร็จ (เปิดแล้วใช้เวลาเพิ่ม) ต้องเปิดตัวชี้วัด TTC",
+                  foreground=gray).pack(side="left", padx=(8, 0))
         line("ป้ายบนตัวรถ", [("ID", self.show_label_id_var), ("Class", self.show_label_class_var), ("Conf", self.show_label_conf_var),
                              ("Zone", self.show_label_zone_var), ("Speed", self.show_label_speed_var), ("กรอบวัตถุ", self.show_bbox_var)], 4)
         line("ใส่ชื่อกำกับหน้าค่า", [("ID", self.show_prefix_id_var), ("Class", self.show_prefix_class_var), ("Conf", self.show_prefix_conf_var),
@@ -4093,8 +4096,6 @@ class Run1App:
                                           ("มุมความขัดแย้ง: น้อยกว่านี้ = Rear-end (deg)", self.run3_ttc_angle_rear_var),
                                           ("มุมความขัดแย้ง: มากกว่านี้ = Crossing (deg), ระหว่างกลาง = Lane change", self.run3_ttc_angle_cross_var))):
             self._entry_row(box, 2 + i, label, var, span=7)
-        ttk.Checkbutton(box, text="แสดงสี่เหลี่ยมรถที่ใช้คำนวณ TTC ในวิดีโอ X–Y (แดง = เฟรมที่ TTC นับ)", variable=self.run3_ttc_show_xy_var).grid(row=10, column=0, columnspan=8, sticky="w", pady=(6, 0))
-        ttk.Checkbutton(box, text="สร้างวิดีโอข้างทางจริงที่วาดสี่เหลี่ยมนี้ (Tracking_TTC_Boxes.mp4 — อ่านวิดีโอซ้ำ ใช้เวลาเพิ่ม)", variable=self.run3_ttc_show_video_var).grid(row=11, column=0, columnspan=8, sticky="w", pady=(2, 0))
 
         box = self._indicator_box("PET", self.run3_pet_enabled_var, "PET คำนวณแยกในแต่ละ Conflict Zone (Zone 3 / Zone 6)")
         self._zone_checks(box, self.run3_pet_zone_vars, 1, "Conflict Zone")
@@ -9087,65 +9088,76 @@ class Run1App:
                 cv2.putText(img, f"{ttc:.2f}s", (int(mid[0]) + 4, int(mid[1]) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
         return img
 
-    def _run3_write_ttc_boxes_video(self, tracks, c, output_dir, video_path=None, display=None):
-        """Tracking_TTC_Boxes.mp4: the REAL (roadside) video with the vehicle rectangles that TTC used drawn on it (the rectangles lie on the road plane;
-        their 4 corners are mapped back into the picture with the calibration that is set). Zones in grey, ID of each vehicle."""
-        shapes = getattr(self, "_run3_ttc_shapes", None)
-        if not shapes or not video_path or not os.path.isfile(video_path):
-            return None
-        fwd = lambda q: self._run3_to_metric(q, c)
-        dsp = dict(display or {})
-        times = {}
-        for tid, rows in tracks.items():
-            for r in rows:
-                try:
-                    times[int(float(r.get("frame", "")))] = r["_timestamp"]
-                except (TypeError, ValueError, KeyError):
-                    continue
-        frames = sorted(f for f, sh in shapes.items() if sh["rects"] and f in times)
-        if not frames:
-            return None
-        cap = cv2.VideoCapture(video_path)
+    @staticmethod
+    def _run3_record_first_frame(settings, video_path):
+        """The number (1-based) of the first frame the normal video (Tracking_Result.mp4) holds: the start of the analysis window or of the
+        recording window, as the detection run decided it. 1 when there is no window or the video cannot be opened."""
+        settings = settings or {}
+        cap = cv2.VideoCapture(video_path) if video_path and os.path.isfile(str(video_path)) else None
+        if cap is None or not cap.isOpened():
+            return 1
         try:
-            W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            dts = np.diff(sorted({times[f] for f in frames}))
-            dts = dts[dts > 0]
-            fps_out = float(min(120.0, max(1.0, 1.0 / float(np.median(dts))))) if len(dts) else 30.0
-            out_path = os.path.join(output_dir, "Tracking_TTC_Boxes.mp4")
-            writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps_out, (W, H))
-            if not writer.isOpened():
-                raise RuntimeError("Unable to create Tracking_TTC_Boxes.mp4")
-            zone_px = [np.round(np.asarray(poly, dtype=float)).astype(np.int32).reshape(-1, 1, 2) for _n, poly in self._zone_polygons()]
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frames[0] - 1)
-            idx = frames[0]                                           # 1-based number of the next frame to read
-            try:
-                for fr in frames:
-                    while idx < fr:
-                        cap.grab()
-                        idx += 1
-                    ok, img = cap.read()
-                    idx += 1
-                    if not ok:
-                        break
-                    if zone_px:
-                        cv2.polylines(img, zone_px, True, (150, 150, 150), 1, cv2.LINE_AA)
-                    sh = shapes[fr]
-                    rects = [rc for rc in sh["rects"] if rc.get("px") is not None]
-                    if rects:
-                        dst = np.concatenate([rc["poly"] for rc in rects])
-                        init = np.concatenate([np.tile(np.asarray(rc["px"], dtype=float), (4, 1)) for rc in rects])
-                        pix = invert_map(fwd, dst, init).reshape(len(rects), 4, 2)
-                        proj = {rc["tid"]: pix[k] for k, rc in enumerate(rects)}
-                        sh2 = {"rects": [{"tid": rc["tid"], "poly": proj[rc["tid"]]} for rc in rects], "hot": sh["hot"], "pairs": sh["pairs"]}
-                        img = self._run3_draw_ttc_boxes(img, sh2, lambda q: q)
-                        for tid, quad in proj.items():
-                            cv2.putText(img, str(tid), (int(quad[:, 0].min()), max(14, int(quad[:, 1].min()) - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
-                    writer.write(img)
-            finally:
-                writer.release()
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         finally:
             cap.release()
-        return out_path
+        try:
+            first, _last = window_frames(parse_clock_time(settings.get("analysis_start_s", "")), parse_clock_time(settings.get("analysis_end_s", "")), fps, total)
+            r_start = parse_clock_time(settings.get("record_start_s", ""))
+            if r_start is not None:
+                first = max(first, window_frames(r_start, None, fps, 0)[0])
+            return first
+        except Exception:
+            return 1
+
+    def _run3_overlay_ttc_boxes(self, tracks, c, result_path, first_frame=1):
+        """Draws the vehicle rectangles that TTC used on the NORMAL roadside video (Tracking_Result.mp4) after Run 3, so there is no third video: the
+        picture i of that video is frame `first_frame + i`; the 4 corners of every rectangle (metres) are mapped back into the picture with the
+        calibration that is set. The video is read, drawn on and written to a temporary file that then takes the place of the original (if that file is
+        locked, e.g. open in a player, the result stays as Tracking_Result_TTC.mp4). Returns the path of the result or None."""
+        shapes = getattr(self, "_run3_ttc_shapes", None)
+        if not shapes or not result_path or not os.path.isfile(result_path):
+            return None
+        fwd = lambda q: self._run3_to_metric(q, c)
+        cap = cv2.VideoCapture(result_path)
+        if not cap.isOpened():
+            return None
+        W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        tmp_path = os.path.splitext(result_path)[0] + "._ttc_tmp.mp4"
+        writer = cv2.VideoWriter(tmp_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
+        if not writer.isOpened():
+            cap.release()
+            raise RuntimeError("Unable to write the video with the TTC rectangles")
+        try:
+            i = 0
+            while True:
+                ok, img = cap.read()
+                if not ok:
+                    break
+                sh = shapes.get(first_frame + i)
+                rects = [rc for rc in (sh["rects"] if sh else []) if rc.get("px") is not None]
+                if rects:
+                    dst = np.concatenate([rc["poly"] for rc in rects])
+                    init = np.concatenate([np.tile(np.asarray(rc["px"], dtype=float), (4, 1)) for rc in rects])
+                    pix = invert_map(fwd, dst, init).reshape(len(rects), 4, 2)
+                    sh2 = {"rects": [{"tid": rc["tid"], "poly": pix[k]} for k, rc in enumerate(rects)], "hot": sh["hot"], "pairs": sh["pairs"]}
+                    img = self._run3_draw_ttc_boxes(img, sh2, lambda q: q)
+                writer.write(img)
+                i += 1
+        finally:
+            writer.release()
+            cap.release()
+        try:
+            os.replace(tmp_path, result_path)
+            return result_path
+        except OSError:
+            alt = os.path.splitext(result_path)[0] + "_TTC.mp4"
+            try:
+                os.replace(tmp_path, alt)
+                return alt
+            except OSError:
+                return tmp_path
 
     TOPVIEW_PALETTE = [(255, 160, 40), (80, 200, 80), (60, 60, 255), (200, 120, 255), (0, 200, 255), (255, 255, 80), (180, 180, 255), (60, 220, 160)]
 
@@ -10772,10 +10784,13 @@ class Run1App:
                     outputs["topview_video"] = tv
                     summary["diagnostics"]["topview"]["video"] = tv
             if c.get("ttc_enabled") and c.get("ttc_show_boxes_video"):
-                status("Run 3 — drawing the TTC rectangles on the video...")
-                bv = self._run3_write_ttc_boxes_video(tracks, c, output_dir, (settings or {}).get("video"), display=settings)
+                status("Run 3 — drawing the TTC rectangles on the normal video...")
+                result_video = os.path.join(output_dir, "Tracking_Result.mp4")
+                bv = self._run3_overlay_ttc_boxes(tracks, c, result_video, self._run3_record_first_frame(settings, (settings or {}).get("video")))
                 if bv:
-                    outputs["ttc_boxes_video"] = bv
+                    outputs["tracking_result_with_ttc_boxes"] = bv
+                else:
+                    summary["diagnostics"]["ttc_boxes_video"] = "not drawn (no Tracking_Result.mp4 in the output folder, or no TTC rectangles)"
             plot = self._run3_write_xy_plot(tracks, c, output_dir, (settings or {}).get("video"), display=settings)
             if plot:
                 outputs["topview_plot"] = plot

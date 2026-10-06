@@ -1,4 +1,4 @@
-"""The vehicle rectangles that TTC uses, drawn on the X-Y video and on the real video (each with its own switch).
+"""The vehicle rectangles that TTC uses, drawn on the X-Y video and on the normal roadside video (Tracking_Result.mp4; each with its own switch, no extra video).
 
 Two cars drive towards each other (10 m/s each, 4.5 m x 1.8 m). The boxes (+ 0.25 m on each side) touch when the centres are 5.0 m apart: at t = 1.75 s.
 Before that the frames count (red, with the TTC written), after that they overlap.
@@ -99,20 +99,42 @@ check("X-Y video: after the boxes overlap they are drawn (green, not red): the p
       f"changed {changed} red {int(red(a2).sum())}")
 check("X-Y video with the switch off has no red rectangles", int(red(b).sum()) < 20 and int(red(b2).sum()) < 20, f"{int(red(b).sum())} {int(red(b2).sum())}")
 
-# ---- the real video
-bv = app._run3_write_ttc_boxes_video(tracks, c, out_dir, video)
-check("Tracking_TTC_Boxes.mp4 is written (also in a folder with Thai letters)", bv is not None and os.path.isfile(bv))
-cap = cv2.VideoCapture(bv)
+# ---- the normal roadside video (Tracking_Result.mp4): the rectangles are drawn on it after Run 3 and it keeps its name
+def make_result(name, n):
+    path = os.path.join(out_dir, name)
+    w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 10, (CW, CH))
+    for _ in range(n):
+        w.write(np.full((CH, CW, 3), 80, np.uint8))
+    w.release()
+    return path
+
+
+res = make_result("Tracking_Result.mp4", 21)
+before = os.path.getsize(res)
+bv = app._run3_overlay_ttc_boxes(tracks, c, res, first_frame=1)
+check("the rectangles are drawn on Tracking_Result.mp4 itself (same file name, no third video)", bv == res and os.path.isfile(res) and not os.path.exists(os.path.splitext(res)[0] + "._ttc_tmp.mp4"), str(bv))
+check("no other video file is left in the folder", sorted(f for f in os.listdir(out_dir) if f.endswith(".mp4")) == ["Tracking_Result.mp4", "Tracking_Topview.mp4"], str(sorted(os.listdir(out_dir))))
+cap = cv2.VideoCapture(res)
 nf = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
 cap.release()
-check("it has the size of the real video and one picture per frame with rectangles", size == (CW, CH) and nf >= 19, f"{size} {nf}")
-f = frame_at(bv, 10)
+check("it keeps the size and the number of pictures of the normal video", size == (CW, CH) and nf == 21, f"{size} {nf}")
+f = frame_at(res, 10)
 ys, xs = np.where(red(f))
-check("the red rectangles are where the cars are (y = 15 m x 20 px = 300 px, x between car 1 and car 2)", len(ys) > 200 and abs(float(np.median(ys)) - 300) < 40, f"{len(ys)} px, median y {np.median(ys) if len(ys) else None}")
+check("the red rectangles are where the cars are (y = 15 m x 20 px = 300 px)", len(ys) > 200 and abs(float(np.median(ys)) - 300) < 40, f"{len(ys)} px, median y {np.median(ys) if len(ys) else None}")
 # car 1 at t = 1.0 s is at x = 15 m = 300 px; its box is 5.0 m = 100 px long: the red pixels reach x = 250..350
 check("the box of car 1 is 100 px long (5.0 m x 20 px/m)", len(xs) > 0 and (xs.min() <= 252) and np.any((xs >= 340) & (xs <= 352)), f"x {xs.min() if len(xs) else None}..{xs.max() if len(xs) else None}")
-check("without the shapes nothing is written", (lambda: (setattr(app, "_run3_ttc_shapes", None), app._run3_write_ttc_boxes_video(tracks, c, out_dir, video))[1] is None)())
+# a recording that starts later: picture i is frame first_frame + i
+res2 = make_result("Tracking_Result.mp4", 11)
+app._run3_overlay_ttc_boxes(tracks, c, res2, first_frame=11)                    # picture 0 is frame 11 (t = 1.0 s)
+g0, g_last = frame_at(res2, 0), frame_at(res2, 10)
+check("with a later first frame the pictures line up (picture 0 = frame 11 is red, picture 10 = frame 21 is not)", int(red(g0).sum()) > 200 and int(red(g_last).sum()) < 20,
+      f"{int(red(g0).sum())} {int(red(g_last).sum())}")
+check("first recorded frame: no window = 1; a recording start of 1 s at 10 fps = frame 11",
+      app._run3_record_first_frame({}, video) == 1 and app._run3_record_first_frame({"record_start_s": "1"}, video) == 11,
+      f"{app._run3_record_first_frame({}, video)} {app._run3_record_first_frame({'record_start_s': '1'}, video)}")
+check("without a video or without shapes nothing is drawn", app._run3_overlay_ttc_boxes(tracks, c, os.path.join(out_dir, "nope.mp4"), 1) is None
+      and (lambda: (setattr(app, "_run3_ttc_shapes", None), app._run3_overlay_ttc_boxes(tracks, c, res, 1))[1] is None)())
 
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
