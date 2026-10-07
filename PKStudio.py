@@ -516,6 +516,9 @@ RUN3_DEFAULTS = {
     "pet_show_point_xy": True,              # draw the PET crossing point (magenta X + PET) in the X-Y video
     "pet_show_point_video": False,         # draw it also on the normal roadside video (Tracking_Result.mp4) after Run 3
     "write_detail_files": False,           # also write the checking files: Lateral_Clearance.csv (every sample), TTC_Detail.csv, TTC_Frames.csv
+    "ttc_include_rear_end": True,          # TTC counts events of TTC_Type Rear-end / Lane change / Crossing (the angle limits below); each can be switched off
+    "ttc_include_lane_change": True,
+    "ttc_include_crossing": True,
     "pet_include_rear_end": False,          # PET counts pairs of conflict type Rear-end (same direction at the crossing; followers - off by default, see Headway)
     "pet_include_lane_change": True,       # PET counts pairs of conflict type Lane change
     "pet_include_crossing": True,          # PET counts pairs of conflict type Crossing   (the angle limits are TTC's: ttc_angle_rear_end_deg / ttc_angle_crossing_deg)
@@ -1008,12 +1011,21 @@ def ttc_conflict_type(theta_deg, rear_end_deg=TTC_ANGLE_REAR_END_DEG, crossing_d
     return "Crossing"
 
 
+def type_included(ctype, c, prefix, rear_default):
+    """Is a pair / event of this conflict type counted? `prefix` = "pet" or "ttc": the switches <prefix>_include_rear_end / _lane_change / _crossing
+    follow the angle rule of TTC (Rear-end / Lane change / Crossing). Unclassified (no angle: a vehicle standing still) is always counted."""
+    key = {"Rear-end": ("_include_rear_end", rear_default), "Lane change": ("_include_lane_change", True), "Crossing": ("_include_crossing", True)}.get(ctype)
+    return True if key is None else bool(c.get(prefix + key[0], key[1]))
+
+
 def pet_type_included(ctype, c):
-    """Does PET count a pair of this conflict type? The three switches follow the angle rule of TTC (Rear-end / Lane change / Crossing);
-    Unclassified (a vehicle standing still at the crossing: no angle) is always counted."""
-    key = {"Rear-end": ("pet_include_rear_end", False), "Lane change": ("pet_include_lane_change", True),
-           "Crossing": ("pet_include_crossing", True)}.get(ctype)
-    return True if key is None else bool(c.get(key[0], key[1]))
+    """PET: Rear-end off by default (followers), Lane change and Crossing on."""
+    return type_included(ctype, c, "pet", False)
+
+
+def ttc_type_included(ctype, c):
+    """TTC: all three types on by default."""
+    return type_included(ctype, c, "ttc", True)
 
 
 def canvas_to_video(cx, cy, scale, width, height):
@@ -3883,6 +3895,9 @@ class Run1App:
         self.run3_pet_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["pet_min_speed_kmh"])
         self.run3_write_detail_var = tk.BooleanVar(value=RUN3_DEFAULTS["write_detail_files"])
         self.run3_pet_use_area_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_use_area"])
+        self.run3_ttc_include_rear_var = tk.BooleanVar(value=RUN3_DEFAULTS["ttc_include_rear_end"])
+        self.run3_ttc_include_lane_var = tk.BooleanVar(value=RUN3_DEFAULTS["ttc_include_lane_change"])
+        self.run3_ttc_include_cross_var = tk.BooleanVar(value=RUN3_DEFAULTS["ttc_include_crossing"])
         self.run3_pet_include_rear_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_include_rear_end"])
         self.run3_pet_include_lane_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_include_lane_change"])
         self.run3_pet_include_cross_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_include_crossing"])
@@ -4385,6 +4400,13 @@ class Run1App:
                                           ("มุมความขัดแย้ง: น้อยกว่านี้ = Rear-end (deg)", self.run3_ttc_angle_rear_var),
                                           ("มุมความขัดแย้ง: มากกว่านี้ = Crossing (deg), ระหว่างกลาง = Lane change", self.run3_ttc_angle_cross_var))):
             self._entry_row(box, 2 + i, label, var, span=7)
+
+        type_row = ttk.Frame(box)
+        type_row.grid(row=20, column=0, columnspan=8, sticky="w", pady=2)
+        ttk.Label(type_row, text="ชนิดความขัดแย้งที่นับใน TTC (TTC_Type ตามมุมด้านบน):").pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(type_row, text="Rear-end (ทิศเดียวกัน)", variable=self.run3_ttc_include_rear_var).pack(side="left", padx=4)
+        ttk.Checkbutton(type_row, text="Lane change", variable=self.run3_ttc_include_lane_var).pack(side="left", padx=4)
+        ttk.Checkbutton(type_row, text="Crossing (ตัดขวาง)", variable=self.run3_ttc_include_cross_var).pack(side="left", padx=4)
 
         box = self._indicator_box("PET", self.run3_pet_enabled_var, "PET คำนวณแยกในแต่ละโซนที่ติ๊ก (ค่าเริ่มต้น Zone 3 / Zone 6)")
         self._zone_checks(box, self.run3_pet_zone_vars, 1)
@@ -5853,6 +5875,9 @@ class Run1App:
                 "pet_min_speed_kmh": self.run3_pet_min_speed_var.get(),
                 "write_detail_files": self.run3_write_detail_var.get(),
                 "pet_use_area": self.run3_pet_use_area_var.get(),
+                "ttc_include_rear_end": self.run3_ttc_include_rear_var.get(),
+                "ttc_include_lane_change": self.run3_ttc_include_lane_var.get(),
+                "ttc_include_crossing": self.run3_ttc_include_cross_var.get(),
                 "pet_include_rear_end": self.run3_pet_include_rear_var.get(),
                 "pet_include_lane_change": self.run3_pet_include_lane_var.get(),
                 "pet_include_crossing": self.run3_pet_include_cross_var.get(),
@@ -6019,6 +6044,9 @@ class Run1App:
                 ("pet_min_speed_kmh", self.run3_pet_min_speed_var),
                 ("write_detail_files", self.run3_write_detail_var),
                 ("pet_use_area", self.run3_pet_use_area_var),
+                ("ttc_include_rear_end", self.run3_ttc_include_rear_var),
+                ("ttc_include_lane_change", self.run3_ttc_include_lane_var),
+                ("ttc_include_crossing", self.run3_ttc_include_cross_var),
                 ("pet_include_rear_end", self.run3_pet_include_rear_var),
                 ("pet_include_lane_change", self.run3_pet_include_lane_var),
                 ("pet_include_crossing", self.run3_pet_include_cross_var),
@@ -9299,6 +9327,9 @@ class Run1App:
             "pet_max_s": pet_max if (pet_max is not None and pet_max > 0) else None,
             "write_detail_files": bool(self.run3_write_detail_var.get()),
             "pet_use_area": bool(self.run3_pet_use_area_var.get()),
+            "ttc_include_rear_end": bool(self.run3_ttc_include_rear_var.get()),
+            "ttc_include_lane_change": bool(self.run3_ttc_include_lane_var.get()),
+            "ttc_include_crossing": bool(self.run3_ttc_include_cross_var.get()),
             "pet_include_rear_end": bool(self.run3_pet_include_rear_var.get()),
             "pet_include_lane_change": bool(self.run3_pet_include_lane_var.get()),
             "pet_include_crossing": bool(self.run3_pet_include_cross_var.get()),
@@ -10698,7 +10729,7 @@ class Run1App:
             return None
 
         visits_of = {}                                        # tid -> flicker-cleaned zone visits (the Zone Sequence with its times)
-        diag = {"zone_geometry": bool(geom), "frames_zone_not_on_path": 0, "frames_collision_point_outside_zone": 0, "frames_with_pairs": 0, "pairs_evaluated": 0, "pairs_outside_radius": 0, "pairs_slow_vehicle": 0, "pairs_slow_relative": 0,
+        diag = {"zone_geometry": bool(geom), "events_type_excluded": 0, "frames_zone_not_on_path": 0, "frames_collision_point_outside_zone": 0, "frames_with_pairs": 0, "pairs_evaluated": 0, "pairs_outside_radius": 0, "pairs_slow_vehicle": 0, "pairs_slow_relative": 0,
                 "frames_boxes_never_touch": 0, "frames_already_overlapping": 0, "frames_above_ttc_max": 0, "candidates": 0}
 
         def size_of(cls):
@@ -10828,6 +10859,7 @@ class Run1App:
                     frame_rows.append(entry)
 
         out = []
+        removed = []                  # (frame, id A, id B) of the frames of events whose type is switched off
         event_gap = 1.0
         for (id_a, id_b), lst in cand.items():
             lst.sort(key=lambda x: x["t"])
@@ -10842,6 +10874,14 @@ class Run1App:
                 a_, b_, res = best["a"], best["b"], best["res"]
                 sp_a, sp_b = best["sp_a"], best["sp_b"]
                 theta = best["theta"]
+                ev_type = ttc_conflict_type(theta, a_rear, a_cross)
+                if not ttc_type_included(ev_type, c):
+                    # a type that is switched off: no event row, no mark in the videos; its frames stay in TTC_Frames.csv with this status
+                    diag["events_type_excluded"] += 1
+                    for e_ in ev:
+                        e_["status"] = "Type_Excluded"
+                        removed.append((e_["fr"], a_["tid"], b_["tid"]))
+                    continue
                 event_id = f"TTC_{a_['tid']}_{b_['tid']}_{ev[0]['t']:.6f}"
                 for e_ in ev:
                     e_["event_id"] = event_id
@@ -10856,7 +10896,7 @@ class Run1App:
                 out.append({
                     "Site_ID": c["site_id"],
                     "Event_ID": event_id,
-                    "TTC_Type": ttc_conflict_type(theta, a_rear, a_cross),
+                    "TTC_Type": ev_type,
                     "Vehicle_A_ID": a_["tid"], "Vehicle_A_Class": a_["cls"], "Movement_A": movement_by_id.get(str(a_["tid"]), ""),
                     "Vehicle_B_ID": b_["tid"], "Vehicle_B_Class": b_["cls"], "Movement_B": movement_by_id.get(str(b_["tid"]), ""),
                     "Zone": f"Zone {best['zone_hit'] if best.get('zone_hit') is not None else a_['zone']}", "Event_Start": f"{ev[0]['t']:.6f}", "Event_End": f"{ev[-1]['t']:.6f}",
@@ -10880,6 +10920,12 @@ class Run1App:
                         self._run3_qc_calibration(c),
                     ] if x),
                 })
+        for fr_, ta_, tb_ in removed:
+            if fr_ in shapes:
+                sh_ = shapes[fr_]
+                sh_["pairs"] = [q for q in sh_["pairs"] if not (q[0] == ta_ and q[1] == tb_)]
+                sh_["marks"] = [q for q in sh_["marks"] if not (q["a"] == ta_ and q["b"] == tb_)]
+                sh_["hot"] = {t_ for q in sh_["pairs"] for t_ in q[:2]}
         out.sort(key=lambda r: float(r["TTCmin_Time"]))
         frames_out = []
         for e_ in sorted(frame_rows, key=lambda x: (str(x["a"]["tid"]), str(x["b"]["tid"]), x["t"])):

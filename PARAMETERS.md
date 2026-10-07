@@ -42,6 +42,9 @@
 | `ttc_min_speed_kmh` | 5.0 | TTC | **คันใดช้ากว่านี้ ข้ามเฟรมนั้น** (รถจอดที่กรอบกระพริบมีความเร็วปลอม; ตั้ง 0 = ปิด) — ผลข้างเคียง: รถที่จอดจริง (เช่น คิว) กับรถที่วิ่งเข้าหาจะถูกข้ามด้วย; ค่า 5 เป็นค่าที่เราเลือก ไม่มีที่มา | 2, 5, 10 |
 | `ttc_min_rel_speed_ms` | 0.5 | TTC | ข้ามคู่ที่ความเร็วสัมพัทธ์ต่ำกว่านี้ (m/s) กันค่า TTC ไม่นิ่ง | 0.25, 0.5, 1.0 |
 | `ttc_zones` | 3, 6 | TTC | **โซนที่จุดชนต้องอยู่** (ไม่ใช่โซนที่รถต้องอยู่; เดิมคัดเฟรมที่รถอยู่ในโซน) | |
+| `ttc_include_rear_end` | เปิด | TTC | นับเหตุการณ์ TTC_Type = Rear-end (ทิศเดียวกัน, มุมน้อยกว่า `ttc_angle_rear_end_deg`) | เปิด / ปิด |
+| `ttc_include_lane_change` | เปิด | TTC | นับเหตุการณ์ Lane change | เปิด / ปิด |
+| `ttc_include_crossing` | เปิด | TTC | นับเหตุการณ์ Crossing — ชนิดที่ปิดไม่ออกแถวใน TTC.csv (เฟรมอยู่ใน TTC_Frames.csv สถานะ Type_Excluded) | เปิด / ปิด |
 | `pet_include_rear_end` | ปิด | PET | นับคู่ชนิด Rear-end (มุมที่จุดตัดน้อยกว่า `ttc_angle_rear_end_deg` = 30°) ใน PET หรือไม่ — ปิดเพราะ PET ใช้กับรถที่เส้นทางตัดกัน รถตามกันดู TTC และ Headway (ที่มา: นิยาม PET ในงานทั่วไป) | เปิด / ปิด |
 | `pet_include_lane_change` | เปิด | PET | นับคู่ชนิด Lane change (30°–85° ตามเกณฑ์ TTC) | เปิด / ปิด |
 | `pet_include_crossing` | เปิด | PET | นับคู่ชนิด Crossing (มากกว่า `ttc_angle_crossing_deg` = 85°) | เปิด / ปิด |

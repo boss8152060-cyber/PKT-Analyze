@@ -308,6 +308,14 @@ def scene2(app):
     app.run3_ttc_angle_cross_var.set("85")
     types_a = {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]): r["TTC_Type"] for r in read_csv(os.path.join(out_a, "TTC.csv"))}
     check("TTC conflict-angle limit is adjustable (90 deg is Lane change below a 95 deg limit)", types_a.get(("1", "3")) == "Lane change", str(types_a))
+    # each TTC_Type can be switched off: with Crossing off the 90 deg pair P-R (1-3) has no TTC row, the other types stay
+    app.run3_ttc_include_cross_var.set(False)
+    out_t, summary_t = run_scene(app, veh)
+    app.run3_ttc_include_cross_var.set(True)
+    rows_t = read_csv(os.path.join(out_t, "TTC.csv"))
+    check("TTC type switch: Crossing off -> no Crossing event, P-R (1-3) gone", rows_t and not any(r["TTC_Type"] == "Crossing" for r in rows_t)
+          and ("1", "3") not in {(r["Vehicle_A_ID"], r["Vehicle_B_ID"]) for r in rows_t}, str([(r["Vehicle_A_ID"], r["Vehicle_B_ID"], r["TTC_Type"]) for r in rows_t]))
+    check("TTC type switch is counted in the diagnostics", summary_t["diagnostics"].get("ttc", {}).get("events_type_excluded", 0) >= 1, str(summary_t["diagnostics"].get("ttc")))
 
     reasons = summary["diagnostics"].get("empty_outputs", [])
     check("empty Gap Acceptance output is explained (no Line drawn yet)", any("Gap Acceptance" in r and "Line" in r for r in reasons), str(reasons))
