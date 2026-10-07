@@ -523,6 +523,9 @@ RUN3_DEFAULTS = {
     "pet_include_lane_change": True,       # PET counts pairs of conflict type Lane change
     "pet_include_crossing": True,          # PET counts pairs of conflict type Crossing   (the angle limits are TTC's: ttc_angle_rear_end_deg / ttc_angle_crossing_deg)
     "headway_enabled": True,               # Headway.csv: time headway / time gap of consecutive vehicles of each Movement (extra file, no risk level)
+    "headway_movements": ["1-3-4", "2-3-1", "1-3-6-7", "5-6-3-1", "2-3-4", "5-6-7"],   # Movements analysed by Headway
+    "headway_max_s": "",                   # blank = no limit: a follower is paired with the nearest leader in its path, however long ago the leader passed
+    "headway_line_mapping": "",            # Site_ID|Movement|Line N for Headway only; a Movement left out uses the Reference Line Mapping of Gap Acceptance, then the origin zone
     "pet_use_area": True,                  # conflict AREA = circle around the crossing point, radius (W_A + W_B) / 2; off = the crossing point only
     "pet_min_speed_kmh": "",                # a vehicle slower than this while passing the crossing point skips the pair; blank = no limit
     "pet_max_s": "10.0",                    # pairs/events above this are not PET conflicts; blank = no limit
@@ -1216,6 +1219,55 @@ def build_gap_intervals(events):
             out.append({"gap_start": float(a[0]), "gap_end": float(b[0]),
                         "id_a": str(a[1]), "class_a": a[2], "id_b": str(b[1]), "class_b": b[2],
                         "reference": a[3], "qc": ";".join(dict.fromkeys(x for x in (a[4], b[4]) if x))})
+    return out
+
+
+def point_polyline_distance(p, pts):
+    """Shortest distance (same unit as the input) from the point p = (x, y) to the polyline `pts` (N x 2); None when pts has no point."""
+    P = np.asarray(pts, dtype=float).reshape(-1, 2)
+    if len(P) == 0:
+        return None
+    q = np.asarray(p, dtype=float)
+    if len(P) == 1:
+        return float(np.hypot(*(P[0] - q)))
+    a, b = P[:-1], P[1:]
+    ab = b - a
+    denom = np.einsum("ij,ij->i", ab, ab)
+    t = np.where(denom > 0, np.einsum("ij,ij->i", q - a, ab) / np.where(denom > 0, denom, 1.0), 0.0)
+    proj = a + np.clip(t, 0.0, 1.0)[:, None] * ab
+    return float(np.min(np.hypot(*(proj - q).T)))
+
+
+def headway_pairs(events, ref_position, path_of, half_width_sum, max_headway_s=None):
+    """Pairs of vehicles that FOLLOW each other (SPEC 9.1). events = [(time, vehicle_id, class_name, reference_label, qc_flag), ...] of ONE Movement.
+
+    Every vehicle (its earliest event) is the follower of the nearest earlier vehicle that drove in the same path: the follower's position at its
+    reference time (`ref_position(id, time)`) is at most (W_lead + W_follower) / 2 (`half_width_sum(class_lead, class_follower)`) from the lead's
+    trajectory (`path_of(id)` = N x 2 metres). A vehicle driving beside the follower is skipped over, so the pairs are lead -> next in the same path.
+    A pair with a missing position/path cannot be checked: it is kept and flagged No_Path_Check. max_headway_s (None = no limit) stops the search
+    for a lead that passed longer ago. Returns dicts like build_gap_intervals plus "lateral_m"."""
+    first = {}
+    for ev in events:
+        vid = str(ev[1])
+        if vid not in first or ev[0] < first[vid][0]:
+            first[vid] = ev
+    ordered = sorted(first.values(), key=lambda e: e[0])
+    out = []
+    for k, b in enumerate(ordered):
+        for j in range(k - 1, -1, -1):
+            a = ordered[j]
+            if not b[0] > a[0]:
+                continue
+            if max_headway_s is not None and b[0] - a[0] > max_headway_s:
+                break
+            pos, path = ref_position(str(b[1]), b[0]), path_of(str(a[1]))
+            lateral = None if pos is None or path is None else point_polyline_distance(pos, path)
+            if lateral is not None and lateral > half_width_sum(a[2], b[2]):
+                continue                                              # beside the lead's path (parallel / another lane): not following
+            qc = [a[4], b[4]] + (["No_Path_Check"] if lateral is None else [])
+            out.append({"gap_start": float(a[0]), "gap_end": float(b[0]), "id_a": str(a[1]), "class_a": a[2], "id_b": str(b[1]), "class_b": b[2],
+                        "reference": a[3], "lateral_m": lateral, "qc": ";".join(dict.fromkeys(x for x in qc if x))})
+            break
     return out
 
 
@@ -3902,6 +3954,9 @@ class Run1App:
         self.run3_pet_include_lane_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_include_lane_change"])
         self.run3_pet_include_cross_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_include_crossing"])
         self.run3_headway_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["headway_enabled"])
+        self.run3_headway_movement_vars = {mv: tk.BooleanVar(value=(mv in RUN3_DEFAULTS["headway_movements"])) for mv in RUN3_DEFAULTS["headway_movements"]}
+        self.run3_headway_max_var = tk.StringVar(value=RUN3_DEFAULTS["headway_max_s"])
+        self.run3_headway_mapping_text = RUN3_DEFAULTS["headway_line_mapping"]
         self.run3_pet_show_xy_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_show_point_xy"])
         self.run3_pet_show_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_show_point_video"])
         self.run3_ttc_max_record_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_max_record_s"])
@@ -4376,8 +4431,19 @@ class Run1App:
         self.run3_reference_text = tk.Text(box, height=5, width=80, wrap="none")
         self.run3_reference_text.grid(row=6, column=0, columnspan=8, sticky="ew", pady=(0, 2))
         self.run3_reference_text.insert("1.0", self.run3_reference_mapping_text)
-        ttk.Checkbutton(box, text="เขียนไฟล์ Headway.csv (เวลาระหว่างรถติดกันในแต่ละ Movement — Time Headway และ Time Gap; ใช้เส้น Line/โซนต้นทางชุดเดียวกับช่องว่าง)",
-                        variable=self.run3_headway_enabled_var).grid(row=7, column=0, columnspan=8, sticky="w", pady=2)
+
+        box = self._indicator_box("Headway (รถที่ตามกัน)", self.run3_headway_enabled_var,
+                                  "เวลาระหว่างรถสองคันที่ตามกันใน Movement เดียวกัน (Time Headway = หน้ารถถึงหน้ารถ, Time Gap = ท้ายรถหน้าถึงหน้ารถหลัง) — "
+                                  "จับเฉพาะคันที่อยู่ในแนวทางวิ่งของคันหน้า (รถที่วิ่งขนานไม่นับ) — เขียนไฟล์ Headway.csv, ไม่มีระดับความเสี่ยง")
+        ttk.Label(box, text="Movement ที่วิเคราะห์").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=2)
+        for i, (mv, var) in enumerate(self.run3_headway_movement_vars.items()):
+            ttk.Checkbutton(box, text=mv, variable=var).grid(row=1, column=1 + i, sticky="w")
+        self._entry_row(box, 2, "Headway สูงสุด (s) — ว่าง = ไม่จำกัด (ไม่จับคู่คันที่ห่างกันเกินนี้)", self.run3_headway_max_var, span=7)
+        ttk.Label(box, text="Line ของ Headway (Site_ID|Movement|Line N) — Movement ที่ไม่ใส่ จะใช้ Line ของ Gap Acceptance แล้วใช้โซนต้นทาง").grid(
+            row=3, column=0, columnspan=8, sticky="w", pady=(6, 2))
+        self.run3_headway_text = tk.Text(box, height=3, width=80, wrap="none")
+        self.run3_headway_text.grid(row=4, column=0, columnspan=8, sticky="ew", pady=(0, 2))
+        self.run3_headway_text.insert("1.0", self.run3_headway_mapping_text)
 
         box = self._indicator_box("TTC", self.run3_ttc_enabled_var,
                                   "รถแต่ละคัน = สี่เหลี่ยม ยาว×กว้างตามชนิดรถ (หันตามทิศความเร็ว) — TTC = เวลาที่สี่เหลี่ยมสองอันจะแตะกัน ถ้าทั้งคู่วิ่งตรงด้วยเวกเตอร์ความเร็วของเฟรมนั้น (ไม่แตะ = ไม่มี TTC)   |   เลือกค่าต่ำสุดต่อเหตุการณ์   |   ชนิดแยกด้วยมุมระหว่างทิศวิ่ง (Yaibok et al. 2026)")
@@ -5882,6 +5948,9 @@ class Run1App:
                 "pet_include_lane_change": self.run3_pet_include_lane_var.get(),
                 "pet_include_crossing": self.run3_pet_include_cross_var.get(),
                 "headway_enabled": self.run3_headway_enabled_var.get(),
+                "headway_movements": [mv for mv, v in self.run3_headway_movement_vars.items() if v.get()],
+                "headway_max_s": self.run3_headway_max_var.get(),
+                "headway_line_mapping": self.run3_headway_text.get("1.0", "end-1c") if hasattr(self, "run3_headway_text") else self.run3_headway_mapping_text,
                 "pet_show_point_xy": self.run3_pet_show_xy_var.get(),
                 "pet_show_point_video": self.run3_pet_show_video_var.get(),
                 "ttc_max_record_s": self.run3_ttc_max_record_var.get(),
@@ -6051,6 +6120,7 @@ class Run1App:
                 ("pet_include_lane_change", self.run3_pet_include_lane_var),
                 ("pet_include_crossing", self.run3_pet_include_cross_var),
                 ("headway_enabled", self.run3_headway_enabled_var),
+                ("headway_max_s", self.run3_headway_max_var),
                 ("pet_show_point_xy", self.run3_pet_show_xy_var),
                 ("pet_show_point_video", self.run3_pet_show_video_var),
                 ("ttc_max_record_s", self.run3_ttc_max_record_var),
@@ -6112,6 +6182,13 @@ class Run1App:
                 self.run3_speed_zone_vars[z].set(z in set(speed_zone_values or []))
                 if "lc_zones" in run3:
                     self.run3_lc_zone_vars[z].set(z in set(run3.get("lc_zones", [])))
+            if "headway_movements" in run3:
+                for mv, var in self.run3_headway_movement_vars.items():
+                    var.set(mv in set(run3.get("headway_movements") or []))
+            self.run3_headway_mapping_text = str(run3.get("headway_line_mapping", "") or "")
+            if hasattr(self, "run3_headway_text"):
+                self.run3_headway_text.delete("1.0", "end")
+                self.run3_headway_text.insert("1.0", self.run3_headway_mapping_text)
             self.run3_reference_mapping_text = str(run3.get("reference_line_mapping", "") or "")
             if hasattr(self, "run3_reference_text"):
                 self.run3_reference_text.delete("1.0", "end")
@@ -9334,6 +9411,9 @@ class Run1App:
             "pet_include_lane_change": bool(self.run3_pet_include_lane_var.get()),
             "pet_include_crossing": bool(self.run3_pet_include_cross_var.get()),
             "headway_enabled": bool(self.run3_headway_enabled_var.get()),
+            "headway_movements": [mv for mv, v in self.run3_headway_movement_vars.items() if v.get()],
+            "headway_max_s": num(self.run3_headway_max_var, None),
+            "headway_mapping_text": (self.run3_headway_text.get("1.0", "end-1c") if hasattr(self, "run3_headway_text") else self.run3_headway_mapping_text),
             "pet_show_point_xy": bool(self.run3_pet_show_xy_var.get()),
             "pet_show_point_video": bool(self.run3_pet_show_video_var.get()),
             "pet_min_speed_kmh": pet_min_speed if (pet_min_speed is not None and pet_min_speed > 0) else None,
@@ -10100,16 +10180,48 @@ class Run1App:
         return events, basis
 
     def _run3_headway(self, tracks, c, mapping, movement_by_id):
-        """Headway.csv rows (SPEC 9.1): for every Movement, the vehicles sorted by their reference time (see _run3_stream_events);
-        Time_Headway_s = the next vehicle's time - this vehicle's time; Time_Gap_s = Time_Headway_s - lead length / lead speed
+        """Headway.csv rows (SPEC 9.1): for every selected Movement, each vehicle is paired with the vehicle it follows (headway_pairs: the nearest earlier
+        vehicle whose path the follower is in; vehicles beside it are skipped). Reference time = the first crossing of the Line mapped to the Movement
+        (Headway's own Line mapping first, then Gap Acceptance's; else the origin zone, see _run3_stream_events).
+        Time_Headway_s = the follower's time - the lead's time; Time_Gap_s = Time_Headway_s - lead length / lead speed
         (blank when the lead is slower than ttc_min_speed_kmh; negative = the two bodies overlap in time)."""
         site = c["site_id"]
         lengths = c.get("lengths") or {}
+        widths = c.get("widths") or {}
         min_speed = c.get("ttc_min_speed_kmh", 5.0)
+        max_s = c.get("headway_max_s")
+        wanted = c.get("headway_movements")
+        wanted = list(MOVEMENT_IDS) if wanted is None else list(wanted)
+        arrays = {}
+
+        def arr(tid):
+            if tid not in arrays:
+                rows = [r for r in tracks.get(tid, []) if r.get("_m") is not None and r.get("_timestamp") is not None]
+                rows.sort(key=lambda r: r["_timestamp"])
+                arrays[tid] = (np.array([r["_timestamp"] for r in rows], dtype=float), np.array([r["_m"] for r in rows], dtype=float).reshape(-1, 2))
+            return arrays[tid]
+
+        def ref_position(tid, t):
+            ts, ps = arr(tid)
+            if len(ts) == 0:
+                return None
+            return (float(np.interp(t, ts, ps[:, 0])), float(np.interp(t, ts, ps[:, 1])))
+
+        def path_of(tid):
+            ts, ps = arr(tid)
+            return ps if len(ts) else None
+
+        def half_sum(ca, cb):
+            wa = widths.get(self._run3_canonical_class(ca)) or 1.8
+            wb = widths.get(self._run3_canonical_class(cb)) or 1.8
+            return (wa + wb) / 2.0
+
         rows_out = []
         for cm in MOVEMENT_IDS:
+            if cm not in wanted:
+                continue
             events, basis = self._run3_stream_events(tracks, movement_by_id, cm, mapping, site)
-            for g in build_gap_intervals(events):
+            for g in headway_pairs(events, ref_position, path_of, half_sum, max_s):
                 lead_speed = self._run3_speed_at(tracks.get(g["id_a"], []), g["gap_start"])
                 length = lengths.get(self._run3_canonical_class(g["class_a"]))
                 headway = g["gap_end"] - g["gap_start"]
@@ -10128,7 +10240,8 @@ class Run1App:
                     "Lead_Time_s": f"{g['gap_start']:.3f}", "Lag_Time_s": f"{g['gap_end']:.3f}",
                     "Time_Headway_s": f"{headway:.3f}",
                     "Lead_Speed_kmh": self._fmt(lead_speed, 3), "Lead_Length_m": "" if not length else f"{length:.2f}",
-                    "Time_Gap_s": self._fmt(time_gap, 3), "QC_Flag": ";".join(dict.fromkeys(x for x in qc if x)),
+                    "Time_Gap_s": self._fmt(time_gap, 3), "Lateral_To_Lead_Path_m": self._fmt(g["lateral_m"], 3),
+                    "QC_Flag": ";".join(dict.fromkeys(x for x in qc if x)),
                 })
         return rows_out
 
@@ -11220,9 +11333,13 @@ class Run1App:
         # ---------------- Headway (extra file: followers; no risk level) ----------------
         def do_headway():
             status("Run 3 — Headway...")
-            hw_rows = self._run3_headway(tracks, c, mapping, movement_by_id)
+            hw_text = (c.get("headway_mapping_text") or "").strip()
+            hw_mapping = dict(mapping or {})
+            if hw_text:
+                hw_mapping.update(self._run3_parse_reference_mapping(hw_text))          # Headway's own Lines first, a Movement left out keeps Gap Acceptance's
+            hw_rows = self._run3_headway(tracks, c, hw_mapping, movement_by_id)
             fields = ["Site_ID", "Movement", "Reference_Line", "Lead_Vehicle_ID", "Lead_Vehicle_Class", "Lag_Vehicle_ID", "Lag_Vehicle_Class",
-                      "Lead_Time_s", "Lag_Time_s", "Time_Headway_s", "Time_Gap_s", "Lead_Speed_kmh", "Lead_Length_m", "QC_Flag"]
+                      "Lead_Time_s", "Lag_Time_s", "Time_Headway_s", "Time_Gap_s", "Lead_Speed_kmh", "Lead_Length_m", "Lateral_To_Lead_Path_m", "QC_Flag"]
             row_counts["headway"] = len(hw_rows)
             outputs["headway"] = write_csv("Headway.csv", fields, hw_rows)
             summary["indicators"]["Headway"] = {"rows": len(hw_rows), "movements": sorted({r["Movement"] for r in hw_rows}),

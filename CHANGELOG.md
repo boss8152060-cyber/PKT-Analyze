@@ -13,7 +13,7 @@
 
 - commit ใหม่ตั้งชื่อ `PKT x.y.z: คำอธิบายสั้น ๆ` (ต่อ `(PASS)` เมื่อผู้ใช้ยืนยัน) และติด tag `PKT-x.y.z` ที่ commit นั้น
 - `Merge pull request ...` ที่ GitHub สร้างให้ไม่ให้เลขเวอร์ชัน (ไม่ใช่งาน)
-- เวอร์ชันถัดไป: งานต่อเรื่องเดิม = `1.30.4`; เรื่องใหม่ = `1.31.0` (เลขเรียงตามหัวข้อ ไม่ใช่เวลาเสมอไป — หัวข้อ 1.25 ทำหลังหัวข้อ 1.26–1.28 ของเซสชัน cloud)
+- เวอร์ชันถัดไป: งานต่อเรื่องเดิม = `1.30.5`; เรื่องใหม่ = `1.31.0` (เลขเรียงตามหัวข้อ ไม่ใช่เวลาเสมอไป — หัวข้อ 1.25 ทำหลังหัวข้อ 1.26–1.28 ของเซสชัน cloud)
 
 
 ## 0.1.z — เอกสารโปรเจ็คและกติกา git (ก่อนชุด v27)
@@ -368,4 +368,5 @@
 | **PKT 1.30.0** | `0ccbc2a` | PKT 1.30.0: PetExcludeRearEnd_HeadwayCsv | PET ตัดคู่ชนิด Rear-end (สวิตช์ `pet_exclude_rear_end`); ไฟล์ใหม่ `Headway.csv` (Time Headway, Time Gap ต่อ Movement); แยกฟังก์ชันหาเวลาข้ามเส้นของกระแสใช้ร่วมกับ Gap Acceptance |
 | **PKT 1.30.1** | `cd8bb9a` | PKT 1.30.1: HeadwayFromPetRearEnd_DropConsecutivePairs | **ยกเลิกใน 1.30.2** — เคยเปลี่ยน Headway.csv เป็นแถว PET ชนิด Rear-end |
 | **PKT 1.30.2** | `a740a06` | PKT 1.30.2: HeadwayBackToLineGaps_PetConflictTypeSwitches | Headway.csv กลับเป็นแบบเส้น Line/โซนต้นทางของแต่ละ Movement (เหมือน 1.30.0); PET มีสวิตช์เลือกนับต่อชนิด Rear-end / Lane change / Crossing (มุมเดียวกับ TTC) แทน `pet_exclude_rear_end` |
-| **PKT 1.30.3** | (commit นี้) | PKT 1.30.3: TtcConflictTypeSwitches | TTC มีสวิตช์เลือกนับต่อชนิด TTC_Type (Rear-end / Lane change / Crossing, ค่าตั้งต้นเปิดทั้งสาม) เหมือน PET; ชนิดที่ปิดไม่ออกแถวและไม่วาดในวิดีโอ |
+| **PKT 1.30.3** | `02573f1` | PKT 1.30.3: TtcConflictTypeSwitches | TTC มีสวิตช์เลือกนับต่อชนิด TTC_Type (Rear-end / Lane change / Crossing, ค่าตั้งต้นเปิดทั้งสาม) เหมือน PET; ชนิดที่ปิดไม่ออกแถวและไม่วาดในวิดีโอ |
+| **PKT 1.30.4** | (commit นี้) | PKT 1.30.4: HeadwayOwnBox_FollowersOnly_LinePerMovement | Headway มีกรอบ/สวิตช์ของตัวเองในแท็บ ③; เลือก Movement และ Line ต่อ Movement ได้; จับเฉพาะรถที่ตามกัน (อยู่ในแนวทางวิ่งของคันหน้า ข้ามรถขนาน); Headway สูงสุดตั้งได้; คอลัมน์ `Lateral_To_Lead_Path_m` |
