@@ -1857,6 +1857,12 @@ RUN3_GAP_CONFLICT_MAP = {
     "1-3-6-7": ["2-3-4", "5-6-7", "5-6-3-1"],
     "5-6-3-1": ["2-3-4", "1-3-6-7"],
 }
+# Streams met at each decision stage (= the middle zone the subject is about to enter), SPEC 6.1.
+GAP_STAGE_CONFLICTS = {
+    "1-3-4":   {3: ["2-3-4"]},
+    "1-3-6-7": {3: ["2-3-4", "5-6-3-1"], 6: ["5-6-7", "5-6-3-1"]},
+    "5-6-3-1": {6: ["1-3-6-7"], 3: ["2-3-4", "1-3-6-7"]},
+}
 LINE_NAMES = [f"Line {i}" for i in range(1, 7)]
 
 
@@ -9988,25 +9994,27 @@ class Run1App:
         """Binary Gap Acceptance decisions (accepted / rejected gaps) of waiting drivers.
 
         Subjects: movements 1-3-4, 1-3-6-7, 5-6-3-1 (GAP_PATHS: wait zone -> conflict
-        ("middle") zones -> target zone). Conflicting streams: RUN3_GAP_CONFLICT_MAP; several
-        streams may apply at once. A stream's reference time per vehicle = its first crossing
-        of the mapped Line, or (no usable Line) its first observation in the stream's origin
-        zone. Gap = time between consecutive vehicles of one stream.
+        ("middle") zones -> target zone). Conflicting streams of each stage: GAP_STAGE_CONFLICTS
+        (several streams may apply at once). A stream's reference time per vehicle = its first
+        crossing of the mapped Line, or (no usable Line) its first observation in the stream's
+        origin zone. Gap = time between consecutive vehicles of one stream.
 
-        Stage 1 - Access: the driver's waiting starts when it is first seen in the waiting
-          zone. Gaps that close before it enters the conflict zones are Rejected; the gap
-          still open when it enters is Accepted (the smallest remaining gap controls when
-          several streams apply) - unless the driver then stops inside the conflict zones.
-        Stage 2 - Exit (only after such a stop): that gap becomes Rejected and the driver
-          decides again after it resumes: only NEW gaps (starting after the resumption) count;
-          the gap that contains the target-zone entry is Accepted, earlier new gaps Rejected.
-        The available gap (Available_Gap_s) is the time left until the gap closes at the decision time."""
+        Staged decisions (SPEC 6.1): every middle zone is one decision stage = "enter this zone now?".
+          Stage 1 starts when the driver is first seen in the wait zone (1/5); stage k > 1 starts
+          when it entered the previous middle zone. Stage k ends when it enters middle zone k.
+          Gaps that close before that entry = Rejected; the gap still open at the entry = Accepted
+          (the smallest remaining gap controls when several streams apply). An accepted stage is
+          never reversed. A driver that never stops simply gets one accepted row per stage.
+        Waiting_Time_s = stage end - stage start (raw, no queue correction); Was_Stopped = the driver
+        was slower than the threshold for at least the minimum duration inside that stage;
+        Stopped_In_Conflict_Zone (last stage only) = it stopped inside the last middle zone (a flag,
+        it does not change the decision). Available_Gap_s = time left until the gap closes."""
         selected = c["gap_movements"]
         site = c["site_id"]
         thr = c["waiting_threshold"]
         hold_min = c["hold_min_duration_s"]
-        diag = {"subjects": 0, "subjects_without_conflict_zone_entry": 0, "access_events": 0, "exit_events": 0,
-                "holds_resumed": 0, "holds_censored": 0, "streams": {}}
+        diag = {"subjects": 0, "subjects_without_conflict_zone_entry": 0, "stage_events": 0,
+                "stopped_stages": 0, "stopped_in_conflict_zone": 0, "streams": {}}
 
         # ---- 1) reference events and gap intervals of every stream that is needed ----
         streams = sorted({cm for mv in selected for cm in RUN3_GAP_CONFLICT_MAP.get(mv, [])})
@@ -10048,141 +10056,111 @@ class Run1App:
 
         # ---- 2) every subject ----
         rows_out = []
+        eps = 1e-12
+
+        def pick(cands):
+            return min(cands, key=lambda o: (o["gap"], o["conflict_movement"], o["id_a"], o["id_b"])) if cands else None
+
         for tid, raw_rows in tracks.items():
             tid = str(tid)
             movement = movement_by_id.get(tid, "")
             if movement not in selected or movement not in GAP_PATHS:
                 continue
             path = GAP_PATHS[movement]
-            wait_zones, middle_zones, target_zone = set(path["wait"]), set(path["middle"]), path["target"]
+            wait_zones, middle_zones = set(path["wait"]), set(path["middle"])
             rows = sorted((r for r in raw_rows if r.get("_timestamp") is not None), key=lambda r: r["_timestamp"])
             decision_rows = [r for r in rows if r.get("_zone_num") in wait_zones | middle_zones]
             if not decision_rows:
                 continue
             diag["subjects"] += 1
             wait_rows = [r for r in decision_rows if r.get("_zone_num") in wait_zones]
-            if wait_rows:
-                wait_start = float(wait_rows[0]["_timestamp"])
-            else:                                   # the track starts inside the conflict zones
-                wait_start = float(decision_rows[0]["_timestamp"])
-            middle_after = [r for r in rows if r["_timestamp"] >= wait_start and r.get("_zone_num") in middle_zones]
-            if not middle_after:
+            wait_start = float((wait_rows[0] if wait_rows else decision_rows[0])["_timestamp"])   # no wait row: track starts inside
+            # entry time of every middle zone, in order
+            entries = []
+            t_from = wait_start
+            for mz in path["middle"]:
+                cand = [r for r in rows if r["_timestamp"] >= t_from and r.get("_zone_num") == mz]
+                if not cand:
+                    break
+                t_from = float(cand[0]["_timestamp"])
+                entries.append((mz, t_from))
+            if not entries:
                 diag["subjects_without_conflict_zone_entry"] += 1
                 continue
-            entry_t = float(middle_after[0]["_timestamp"])
-            conflict_movements = RUN3_GAP_CONFLICT_MAP.get(movement, [])
+            stage_conf = GAP_STAGE_CONFLICTS.get(movement, {})
 
-            # -- Stage 1: Access --
             stage_rows = []
-            for cm in conflict_movements:
-                for gap in intervals.get(cm, []):
-                    gs, ge = gap["gap_start"], gap["gap_end"]
-                    if ge <= wait_start or gs > entry_t:
-                        continue
-                    overlap = [r for r in decision_rows
-                               if max(gs, wait_start) <= r["_timestamp"] < min(ge, entry_t + 1e-12)]
-                    if not overlap:
-                        continue
-                    contains = gs <= entry_t < ge
-                    eval_t = entry_t if contains else float(overlap[0]["_timestamp"])
-                    avail = ge - eval_t
-                    if avail <= 0:
-                        continue
-                    stage_rows.append({**gap, "conflict_movement": cm, "stage": "Access", "gap": avail,
-                                       "opportunity_time": eval_t,
-                                       "decision_zone": int((middle_after[0] if contains else overlap[0]).get("_zone_num") or 0),
-                                       "contains_anchor": contains})
+            start = wait_start
+            for no, (mz, et) in enumerate(entries, 1):
+                staging = (wait_zones if no == 1 else {entries[no - 2][0]}) | {mz}
+                window = [r for r in rows if r.get("_zone_num") in staging and start <= r["_timestamp"] <= et + eps]
+                samples = [(float(r["_timestamp"]), r["_m"][0], r["_m"][1], True) for r in window if r.get("_m") is not None]
+                stopped = int(bool(samples) and find_hold(samples, thr, hold_min)["stop_start"] is not None)
+                diag["stopped_stages"] += stopped
+                cur = []
+                for cm in stage_conf.get(mz, []):
+                    for gap in intervals.get(cm, []):
+                        gs, ge = gap["gap_start"], gap["gap_end"]
+                        if ge <= start or gs > et:
+                            continue
+                        overlap = [r for r in window if max(gs, start) <= r["_timestamp"] < min(ge, et + eps)]
+                        if not overlap:
+                            continue
+                        contains = gs <= et < ge
+                        eval_t = et if contains else float(overlap[0]["_timestamp"])
+                        avail = ge - eval_t
+                        if avail <= 0:
+                            continue
+                        cur.append({**gap, "conflict_movement": cm, "stage_no": no, "stage_zone": mz, "gap": avail,
+                                    "opportunity_time": eval_t, "start": start, "anchor": et, "was_stopped": stopped,
+                                    "decision_zone": int(mz if contains else (overlap[0].get("_zone_num") or 0)),
+                                    "contains_anchor": contains})
+                controlling = pick([o for o in cur if o["contains_anchor"]])
+                for o in cur:
+                    if o is controlling:
+                        o["accepted"], o["basis"] = 1, "Zone_Entry_Gap_Open"
+                    elif o["gap_end"] <= et:
+                        o["accepted"], o["basis"] = 0, "Gap_Closed_Before_Zone_Entry"
+                    else:
+                        o["accepted"], o["basis"] = None, "Simultaneous_Alternative_Omitted"
+                cur = [o for o in cur if o["accepted"] is not None]
+                diag["stage_events"] += int(bool(cur))
+                stage_rows.extend(cur)
+                start = et
 
-            # did the driver stop inside the conflict zones after entering them?
-            samples = [(float(r["_timestamp"]), r["_m"][0], r["_m"][1], r.get("_zone_num") in middle_zones)
-                       for r in rows if r["_timestamp"] >= entry_t and r.get("_m") is not None]
-            hold = find_hold(samples, thr, hold_min) if samples else {"state": "Continued", "stop_start": None, "resume_time": None}
-            confirmed_hold = hold["state"] in ("Stopped_then_Resumed", "Stopped_Censored")
-
-            def pick(cands):
-                return min(cands, key=lambda o: (o["gap"], o["conflict_movement"], o["id_a"], o["id_b"])) if cands else None
-
-            controlling = pick([o for o in stage_rows if o["contains_anchor"]])
-            for o in stage_rows:
-                if o is controlling:
-                    o["accepted"] = 0 if confirmed_hold else 1
-                    o["basis"] = "Conflict_Zone_Entry_Followed_By_Stop" if confirmed_hold else "Conflict_Zone_Entry_No_Stop"
-                elif o["gap_end"] <= entry_t:
-                    o["accepted"], o["basis"] = 0, "Gap_Closed_Before_Conflict_Zone_Entry"
-                else:
-                    o["accepted"], o["basis"] = None, "Simultaneous_Alternative_Omitted"
-            stage_rows = [o for o in stage_rows if o["accepted"] is not None]
-            diag["access_events"] += int(bool(stage_rows))
-            target_entry_t = None
-
-            # -- Stage 2: Exit (only after a stop inside the conflict zones) --
-            if confirmed_hold:
-                if hold["resume_time"] is None:
-                    diag["holds_censored"] += 1
-                else:
-                    diag["holds_resumed"] += 1
-                    resume_t = float(hold["resume_time"])
-                    tgt = [r for r in rows if r["_timestamp"] > resume_t and r.get("_zone_num") == target_zone]
-                    target_entry_t = float(tgt[0]["_timestamp"]) if tgt else None
-                    end_t = target_entry_t if target_entry_t is not None else float(rows[-1]["_timestamp"])
-                    exit_rows = []
-                    for cm in conflict_movements:
-                        for gap in intervals.get(cm, []):
-                            gs, ge = gap["gap_start"], gap["gap_end"]
-                            if gs < resume_t or (target_entry_t is not None and gs > target_entry_t):
-                                continue
-                            overlap = [r for r in rows if r.get("_zone_num") in (wait_zones | middle_zones)
-                                       and gs <= r["_timestamp"] < min(ge, end_t + 1e-12)]
-                            target_overlap = target_entry_t is not None and gs <= target_entry_t < ge
-                            if not overlap and not target_overlap:
-                                continue
-                            eval_t = target_entry_t if target_overlap else float(overlap[0]["_timestamp"])
-                            avail = ge - eval_t
-                            if avail <= 0:
-                                continue
-                            exit_rows.append({**gap, "conflict_movement": cm, "stage": "Exit", "gap": avail,
-                                              "opportunity_time": eval_t,
-                                              "decision_zone": int(target_zone if target_overlap else (overlap[0].get("_zone_num") or 0)),
-                                              "contains_anchor": target_overlap})
-                    controlling_exit = pick([o for o in exit_rows if o["contains_anchor"]])
-                    for o in exit_rows:
-                        if o is controlling_exit:
-                            o["accepted"], o["basis"] = 1, "Target_Zone_Entry_After_Stop"
-                        elif target_entry_t is None:
-                            o["accepted"], o["basis"] = 0, "No_Observed_Target_Zone_Entry"
-                        elif o["gap_end"] <= target_entry_t:
-                            o["accepted"], o["basis"] = 0, "New_Gap_Closed_Before_Target_Zone"
-                        else:
-                            o["accepted"], o["basis"] = None, "Post_Target_Not_A_Decision"
-                    exit_rows = [o for o in exit_rows if o["accepted"] is not None]
-                    diag["exit_events"] += int(bool(exit_rows))
-                    stage_rows.extend(exit_rows)
+            # did the driver stop inside the LAST middle zone? (flag only)
+            last_zone, last_et = entries[-1]
+            tail = [(float(r["_timestamp"]), r["_m"][0], r["_m"][1], r.get("_zone_num") == last_zone)
+                    for r in rows if r["_timestamp"] >= last_et and r.get("_m") is not None]
+            in_zone_stop = int(bool(tail) and find_hold(tail, thr, hold_min)["stop_start"] is not None)
+            diag["stopped_in_conflict_zone"] += in_zone_stop
 
             # -- rows --
             subject_class = rows[0].get("class_name", "") if rows else ""
-            ordered = sorted(stage_rows, key=lambda o: (o["stage"], o["opportunity_time"], -int(o["accepted"]),
+            ordered = sorted(stage_rows, key=lambda o: (o["stage_no"], o["opportunity_time"], -int(o["accepted"]),
                                                         o["conflict_movement"], o["id_a"], o["id_b"]))
             seen = set()
             number = 0
             for o in ordered:
-                key = (o["stage"], o["conflict_movement"], o["id_a"], o["id_b"], round(o["gap_start"], 6), round(o["gap_end"], 6))
+                key = (o["stage_no"], o["conflict_movement"], o["id_a"], o["id_b"], round(o["gap_start"], 6), round(o["gap_end"], 6))
                 if key in seen:
                     continue
                 seen.add(key)
                 number += 1
-                anchor = entry_t if o["stage"] == "Access" else (target_entry_t if target_entry_t is not None else o["opportunity_time"])
                 qc = [o.get("qc", ""), o.get("basis", "")]
-                if confirmed_hold:
-                    qc.append(f"Stop_{thr:.1f}kmh_{hold_min:.2f}s")
                 sp_subject = self._run3_speed_at(rows, o["opportunity_time"])
                 sp_a = self._run3_speed_at(tracks.get(o["id_a"], []), o["gap_start"])
                 sp_b = self._run3_speed_at(tracks.get(o["id_b"], []), o["gap_end"])
+                last = o["stage_no"] == len(entries)
                 rows_out.append({
-                    "Site_ID": site, "Decision_Event_ID": f"{tid}_{o['stage']}_{anchor:.6f}", "Opportunity_No": number,
+                    "Site_ID": site, "Decision_Event_ID": f"{tid}_S{o['stage_no']}_{o['anchor']:.6f}", "Opportunity_No": number,
                     "Subject_ID": tid, "Subject_Class": subject_class, "Subject_Movement": movement,
-                    "Decision_Stage": o["stage"], "Decision_Zone": o["decision_zone"],
+                    "Decision_Stage": f"Enter_Zone_{o['stage_zone']}", "Stage_No": o["stage_no"],
+                    "Decision_Zone": o["decision_zone"],
                     "Gap_Evaluation_Time": f"{o['opportunity_time']:.6f}",
-                    "Waiting_Time_s": f"{max(0.0, o['opportunity_time'] - wait_start):.6f}",
+                    "Waiting_Time_s": f"{max(0.0, o['opportunity_time'] - o['start']):.6f}",
+                    "Was_Stopped": o["was_stopped"],
+                    "Stopped_In_Conflict_Zone": in_zone_stop if last else 0,
                     "Conflicting_Movement": o["conflict_movement"],
                     "Conflicting_ID_A": o["id_a"], "Conflicting_Class_A": o["class_a"],
                     "Conflicting_ID_B": o["id_b"], "Conflicting_Class_B": o["class_b"],
@@ -11053,26 +11031,26 @@ class Run1App:
         def do_gap():
             status("Run 3 — Gap Acceptance...")
             gap_rows = self._run3_gap(tracks, c, mapping, movement_by_id)
-            fields = ["Site_ID","Decision_Event_ID","Opportunity_No","Subject_ID","Subject_Class","Subject_Movement","Decision_Stage","Decision_Zone","Gap_Evaluation_Time","Waiting_Time_s","Conflicting_Movement","Conflicting_ID_A","Conflicting_Class_A","Conflicting_ID_B","Conflicting_Class_B","Reference_Line","Gap_Start_Time","Gap_End_Time","Available_Gap_s","Subject_Speed_kmh","Conflict_Speed_A_kmh","Conflict_Speed_B_kmh","Gap_Role","Gap_Acceptance","Decision_Time","QC_Flag"]
+            fields = ["Site_ID","Decision_Event_ID","Opportunity_No","Subject_ID","Subject_Class","Subject_Movement","Decision_Stage","Stage_No","Decision_Zone","Gap_Evaluation_Time","Waiting_Time_s","Was_Stopped","Stopped_In_Conflict_Zone","Conflicting_Movement","Conflicting_ID_A","Conflicting_Class_A","Conflicting_ID_B","Conflicting_Class_B","Reference_Line","Gap_Start_Time","Gap_End_Time","Available_Gap_s","Subject_Speed_kmh","Conflict_Speed_A_kmh","Conflict_Speed_B_kmh","Gap_Role","Gap_Acceptance","Decision_Time","QC_Flag"]
             row_counts["gap"] = len(gap_rows)
             outputs["gap_acceptance"] = write_csv("Gap_Acceptance.csv", fields, gap_rows)
             rejected = defaultdict(list); accepted = defaultdict(list)
             for r in gap_rows:
-                key = (r["Subject_Class"], r["Subject_Movement"], r["Subject_ID"])
+                key = (r["Subject_Class"], r["Subject_Movement"], r["Stage_No"], r["Subject_ID"])
                 (accepted if r["Gap_Acceptance"] == 1 else rejected)[key].append(float(r["Available_Gap_s"]))
             groups = defaultdict(lambda: {"accepted": [], "rejected": [], "intervals": []})
             for key in set(rejected) | set(accepted):
                 acc = accepted.get(key, []); rej = rejected.get(key, [])
                 if acc and rej:
-                    g = groups[(key[0], key[1])]
+                    g = groups[(key[0], key[1], key[2])]
                     g["accepted"].append(acc[-1]); g["rejected"].append(max(rej))
                     g["intervals"].append((max(rej), acc[-1]))
             critical = []
-            for (cls, movement), g in sorted(groups.items()):
+            for (cls, movement, stage_no), g in sorted(groups.items()):
                 cr = self._run3_raff(g["accepted"], g["rejected"]) if c["use_raff"] else None
                 mle = self._run3_mle_driver_intervals(g["intervals"]) if c["use_mle"] else None
                 critical.append({
-                    "Site_ID": c["site_id"], "Vehicle_Class": cls, "Movement": movement,
+                    "Site_ID": c["site_id"], "Vehicle_Class": cls, "Movement": movement, "Stage_No": stage_no,
                     "Drivers_With_Pairs": len(g["intervals"]),
                     "Raff_Critical_Gap_s": self._fmt(cr), "MLE_Critical_Gap_Median_s": self._fmt(mle["critical_gap_median"] if mle else None),
                     "MLE_mu": self._fmt(mle["mu"] if mle else None), "MLE_sigma": self._fmt(mle["sigma"] if mle else None),
@@ -11090,7 +11068,7 @@ class Run1App:
                 "critical_gap": critical, "reference_mapping_rows": len(mapping),
             }
             summary["diagnostics"]["gap"] = dict(getattr(self, "_run3_gap_diag", {}), rows=len(gap_rows),
-                                                 rule="two-stage Access/Exit (v26 5.14.11); Line optional (origin-zone entry fallback)")
+                                                 rule="staged decision per middle zone (SPEC 6.1); Line optional (origin-zone entry fallback)")
         run_step("gap", "Gap_Acceptance.csv", do_gap)
 
         # ---------------- TTC (time) ----------------
