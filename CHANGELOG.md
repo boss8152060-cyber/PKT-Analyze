@@ -348,3 +348,4 @@
 |---|---|---|---|
 | **PKT 1.28.0** | `b4ab76c` | Run3 v28(133): GapAcceptance_StagedPerMiddleZone | Gap Acceptance: ตัดสินแยกขั้นต่อโซนกลาง |
 | **PKT 1.28.1** | `5d2d33d` | Docs: SpecTTC_CurrentMethodSummary_CleanOutdated | เอกสาร: สรุปวิธี TTC ปัจจุบัน ล้างข้อความที่ล้าสมัย |
+| **PKT 1.28.2** | (commit นี้) | Docs_PlanStatusUpdate_AfterPR4Merge | เอกสาร: อัปเดตสถานะใน plan.md หลังรวม PR #4 (งานค้าง: รอผลเทสต์จากเครื่องผู้ใช้) |
