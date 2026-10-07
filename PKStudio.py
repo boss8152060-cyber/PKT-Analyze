@@ -1782,7 +1782,11 @@ CSV_COLUMN_RENAMES = {
     "Lateral_Clearance_Pairs.csv": {"Start_Time": "Start_Time_s", "End_Time": "End_Time_s"},
     "Gap_Acceptance.csv": {"Gap_Start_Time": "Gap_Start_Time_s", "Gap_End_Time": "Gap_End_Time_s",
                            "Decision_Time": "Decision_Time_s", "Subject_Speed_kmh": "Subject_Speed_At_Decision_kmh",
-                           "Conflict_Speed_A_kmh": "Conflict_Speed_A_At_Decision_kmh", "Conflict_Speed_B_kmh": "Conflict_Speed_B_At_Decision_kmh"},
+                           "Decision_Zone": "Subject_Zone_At_Decision",       # the zone the subject is in when the gap is evaluated (Decision_Stage says which zone it wants to enter)
+                           # A = the vehicle that crosses first (gap start) = Lead, B = the next one (gap end) = Lag
+                           "Conflicting_ID_A": "Lead_Vehicle_ID", "Conflicting_Class_A": "Lead_Vehicle_Class",
+                           "Conflicting_ID_B": "Lag_Vehicle_ID", "Conflicting_Class_B": "Lag_Vehicle_Class",
+                           "Conflict_Speed_A_kmh": "Lead_Speed_At_Gap_Start_kmh", "Conflict_Speed_B_kmh": "Lag_Speed_At_Gap_End_kmh"},
     "TTC.csv": {"Event_Start": "Start_Time_s", "Event_End": "End_Time_s", "TTCmin_Time": "TTCmin_Time_s",
                 "Speed_A_kmh": "Speed_A_At_TTCmin_kmh", "Speed_B_kmh": "Speed_B_At_TTCmin_kmh"},
     "PET.csv": {"Vehicle_ID_A": "Vehicle_A_ID", "Vehicle_Class_A": "Vehicle_A_Class", "Vehicle_ID_B": "Vehicle_B_ID", "Vehicle_Class_B": "Vehicle_B_Class",
