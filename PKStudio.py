@@ -526,6 +526,8 @@ RUN3_DEFAULTS = {
     "headway_movements": ["1-3-4", "2-3-1", "1-3-6-7", "5-6-3-1", "2-3-4", "5-6-7"],   # Movements analysed by Headway
     "headway_max_s": "",                   # blank = no limit: a follower is paired with the nearest leader in its path, however long ago the leader passed
     "headway_line_mapping": "",            # Site_ID|Movement|Line N for Headway only; a Movement left out uses the Reference Line Mapping of Gap Acceptance, then the origin zone
+    "reference_line_source": "zone_edge",   # reference line of a Movement: "zone_edge" = the edge two zones share (ZONE_EDGE_DEFAULT) / "drawn" = the Line of the Reference Line Mapping
+    "zone_edge_tol_px": "6",                # two zone corners count as one shared node when closer than this (pixels) - our choice, no source
     "pet_use_area": True,                  # conflict AREA = circle around the crossing point, radius (W_A + W_B) / 2; off = the crossing point only
     "pet_min_speed_kmh": "",                # a vehicle slower than this while passing the crossing point skips the pair; blank = no limit
     "pet_max_s": "10.0",                    # pairs/events above this are not PET conflicts; blank = no limit
@@ -1236,6 +1238,35 @@ def point_polyline_distance(p, pts):
     t = np.where(denom > 0, np.einsum("ij,ij->i", q - a, ab) / np.where(denom > 0, denom, 1.0), 0.0)
     proj = a + np.clip(t, 0.0, 1.0)[:, None] * ab
     return float(np.min(np.hypot(*(proj - q).T)))
+
+
+# The edge two zones share is the reference line of a Movement (user's choice, 2026-10-07): the Movement -> the two zones of its entry edge.
+ZONE_EDGE_DEFAULT = {"1-3-4": (1, 3), "1-3-6-7": (1, 3), "2-3-1": (2, 3), "2-3-4": (2, 3), "5-6-7": (5, 6), "5-6-3-1": (3, 6)}
+
+
+def shared_edge(poly_a, poly_b, tol=6.0):
+    """The edge two zone polygons share, as ((x1, y1), (x2, y2)) or None. The shared nodes = the corners of one polygon that lie within `tol` of the
+    boundary of the other (a corner touching the other zone's side counts too); corners closer than `tol` to each other are one node. With two or
+    more nodes the two that are farthest apart give the edge (a straight edge: the ends of the common side)."""
+    A = np.asarray(poly_a, dtype=float).reshape(-1, 2)
+    B = np.asarray(poly_b, dtype=float).reshape(-1, 2)
+    if len(A) < 3 or len(B) < 3:
+        return None
+    closed_a, closed_b = np.vstack([A, A[:1]]), np.vstack([B, B[:1]])
+    nodes = [v for v in A if point_polyline_distance(v, closed_b) <= tol] + [v for v in B if point_polyline_distance(v, closed_a) <= tol]
+    merged = []
+    for v in nodes:
+        for k, (mean, n) in enumerate(merged):
+            if np.hypot(*(mean - v)) <= tol:
+                merged[k] = ((mean * n + v) / (n + 1), n + 1)
+                break
+        else:
+            merged.append((np.asarray(v, dtype=float), 1))
+    pts = [m for m, _ in merged]
+    if len(pts) < 2:
+        return None
+    best = max(((a, b) for ia, a in enumerate(pts) for b in pts[ia + 1:]), key=lambda ab: float(np.hypot(*(ab[0] - ab[1]))))
+    return ((float(best[0][0]), float(best[0][1])), (float(best[1][0]), float(best[1][1])))
 
 
 def headway_pairs(events, ref_position, path_of, half_width_sum, max_headway_s=None):
@@ -3957,6 +3988,8 @@ class Run1App:
         self.run3_headway_movement_vars = {mv: tk.BooleanVar(value=(mv in RUN3_DEFAULTS["headway_movements"])) for mv in RUN3_DEFAULTS["headway_movements"]}
         self.run3_headway_max_var = tk.StringVar(value=RUN3_DEFAULTS["headway_max_s"])
         self.run3_headway_mapping_text = RUN3_DEFAULTS["headway_line_mapping"]
+        self.run3_ref_line_source_var = tk.StringVar(value=RUN3_DEFAULTS["reference_line_source"])
+        self.run3_zone_edge_tol_var = tk.StringVar(value=RUN3_DEFAULTS["zone_edge_tol_px"])
         self.run3_pet_show_xy_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_show_point_xy"])
         self.run3_pet_show_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_show_point_video"])
         self.run3_ttc_max_record_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_max_record_s"])
@@ -4431,6 +4464,14 @@ class Run1App:
         self.run3_reference_text = tk.Text(box, height=5, width=80, wrap="none")
         self.run3_reference_text.grid(row=6, column=0, columnspan=8, sticky="ew", pady=(0, 2))
         self.run3_reference_text.insert("1.0", self.run3_reference_mapping_text)
+        ttk.Label(box, text="เส้นอ้างอิงของแต่ละกระแส (Gap Acceptance / Headway)").grid(row=7, column=0, sticky="w", pady=(6, 2))
+        SOURCES = {"zone_edge": "ขอบโซนที่ติดกัน (เส้นเชื่อมโหนดร่วม เช่น 1-3-6-7 = โซน 1|3)", "drawn": "Line ที่วาดไว้ (Reference Line Mapping)"}
+        shown_src = tk.StringVar(value=SOURCES.get(self.run3_ref_line_source_var.get(), SOURCES["zone_edge"]))
+        cbs = ttk.Combobox(box, textvariable=shown_src, values=list(SOURCES.values()), state="readonly", width=60)
+        cbs.grid(row=7, column=1, columnspan=7, sticky="w", pady=(6, 2))
+        cbs.bind("<<ComboboxSelected>>", lambda e: self.run3_ref_line_source_var.set(next((k for k, t in SOURCES.items() if t == shown_src.get()), "zone_edge")))
+        self.run3_ref_line_source_var.trace_add("write", lambda *_: shown_src.set(SOURCES.get(self.run3_ref_line_source_var.get(), SOURCES["zone_edge"])))
+        self._entry_row(box, 8, "ระยะที่โหนดโซนสองโซนนับเป็นจุดเดียวกัน (พิกเซล)", self.run3_zone_edge_tol_var, span=7)
 
         box = self._indicator_box("Headway (รถที่ตามกัน)", self.run3_headway_enabled_var,
                                   "เวลาระหว่างรถสองคันที่ตามกันใน Movement เดียวกัน (Time Headway = หน้ารถถึงหน้ารถ, Time Gap = ท้ายรถหน้าถึงหน้ารถหลัง) — "
@@ -4439,7 +4480,7 @@ class Run1App:
         for i, (mv, var) in enumerate(self.run3_headway_movement_vars.items()):
             ttk.Checkbutton(box, text=mv, variable=var).grid(row=1, column=1 + i, sticky="w")
         self._entry_row(box, 2, "Headway สูงสุด (s) — ว่าง = ไม่จำกัด (ไม่จับคู่คันที่ห่างกันเกินนี้)", self.run3_headway_max_var, span=7)
-        ttk.Label(box, text="Line ของ Headway (Site_ID|Movement|Line N) — Movement ที่ไม่ใส่ จะใช้ Line ของ Gap Acceptance แล้วใช้โซนต้นทาง").grid(
+        ttk.Label(box, text="Line ของ Headway เอง (Site_ID|Movement|Line N หรือ Edge 1-3) — Movement ที่ไม่ใส่ จะใช้เส้นอ้างอิงตามที่ตั้งในกรอบ Gap Acceptance แล้วใช้โซนต้นทาง").grid(
             row=3, column=0, columnspan=8, sticky="w", pady=(6, 2))
         self.run3_headway_text = tk.Text(box, height=3, width=80, wrap="none")
         self.run3_headway_text.grid(row=4, column=0, columnspan=8, sticky="ew", pady=(0, 2))
@@ -5950,6 +5991,8 @@ class Run1App:
                 "headway_enabled": self.run3_headway_enabled_var.get(),
                 "headway_movements": [mv for mv, v in self.run3_headway_movement_vars.items() if v.get()],
                 "headway_max_s": self.run3_headway_max_var.get(),
+                "reference_line_source": self.run3_ref_line_source_var.get(),
+                "zone_edge_tol_px": self.run3_zone_edge_tol_var.get(),
                 "headway_line_mapping": self.run3_headway_text.get("1.0", "end-1c") if hasattr(self, "run3_headway_text") else self.run3_headway_mapping_text,
                 "pet_show_point_xy": self.run3_pet_show_xy_var.get(),
                 "pet_show_point_video": self.run3_pet_show_video_var.get(),
@@ -6121,6 +6164,8 @@ class Run1App:
                 ("pet_include_crossing", self.run3_pet_include_cross_var),
                 ("headway_enabled", self.run3_headway_enabled_var),
                 ("headway_max_s", self.run3_headway_max_var),
+                ("reference_line_source", self.run3_ref_line_source_var),
+                ("zone_edge_tol_px", self.run3_zone_edge_tol_var),
                 ("pet_show_point_xy", self.run3_pet_show_xy_var),
                 ("pet_show_point_video", self.run3_pet_show_video_var),
                 ("ttc_max_record_s", self.run3_ttc_max_record_var),
@@ -7225,9 +7270,27 @@ class Run1App:
                 site = self.run3_site_id_var.get().strip()
                 site_map = {mv: ln for (st, mv), ln in mapping.items() if str(st).strip() == site}
                 needed = sorted({c for m in subjects for c in RUN3_GAP_CONFLICT_MAP[m]})
+                source = self.run3_ref_line_source_var.get() if hasattr(self, "run3_ref_line_source_var") else "zone_edge"
+                tol = 6.0
+                try:
+                    tol = float(self.run3_zone_edge_tol_var.get() or 6.0)
+                except Exception:
+                    pass
+                if source == "zone_edge":
+                    # the shared edge of each stream's zones is the reference line: only a stream whose zones share no edge needs a drawn Line
+                    no_edge = [c for c in needed if c in ZONE_EDGE_DEFAULT
+                               and len(self._run3_named_line("Edge %d-%d" % ZONE_EDGE_DEFAULT[c], tol)) != 2]
+                    site_map = {c: site_map[c] for c in no_edge if c in site_map}
+                    needed = no_edge
+                    if no_edge:
+                        warnings.append("Gap Acceptance: the zones of stream(s) " + ", ".join(
+                            f"{c} (Zone {ZONE_EDGE_DEFAULT[c][0]}|{ZONE_EDGE_DEFAULT[c][1]})" for c in no_edge)
+                            + " share no edge (draw the zones so that they touch, or choose 'Line ที่วาดไว้')." + fallback)
                 missing = [c for c in needed if c not in site_map]
                 undrawn = sorted({f"{ln} ({c})" for c, ln in site_map.items()
-                                  if c in needed and len(self.lines.get(ln, [])) != 2})
+                                  if c in needed and len(self._run3_named_line(ln, tol)) != 2})
+                if source == "zone_edge":
+                    missing = []                       # the stream already got its edge warning above
                 parts = []
                 if missing:
                     parts.append("no Line mapped for stream(s) " + ", ".join(missing) + f" (Site_ID '{site}')")
@@ -9413,6 +9476,8 @@ class Run1App:
             "headway_enabled": bool(self.run3_headway_enabled_var.get()),
             "headway_movements": [mv for mv, v in self.run3_headway_movement_vars.items() if v.get()],
             "headway_max_s": num(self.run3_headway_max_var, None),
+            "reference_line_source": ("drawn" if self.run3_ref_line_source_var.get() == "drawn" else "zone_edge"),
+            "zone_edge_tol_px": num(self.run3_zone_edge_tol_var, 6.0) or 6.0,
             "headway_mapping_text": (self.run3_headway_text.get("1.0", "end-1c") if hasattr(self, "run3_headway_text") else self.run3_headway_mapping_text),
             "pet_show_point_xy": bool(self.run3_pet_show_xy_var.get()),
             "pet_show_point_video": bool(self.run3_pet_show_video_var.get()),
@@ -10109,8 +10174,8 @@ class Run1App:
             site, movement, lname = parts
             if movement not in RUN3_ALL_MOVEMENTS:
                 raise ValueError(f"Invalid movement in Reference Line Mapping: {movement}")
-            if lname not in LINE_NAMES:
-                raise ValueError(f"Invalid line name in Reference Line Mapping: {lname}")
+            if lname not in LINE_NAMES and not re.fullmatch(r"Edge [1-7]-[1-7]", lname):
+                raise ValueError(f"Invalid line name in Reference Line Mapping: {lname} (Line 1-6, or Edge 1-3 = the edge Zone 1 and Zone 3 share)")
             mapping[(site, movement)] = lname
         return mapping
 
@@ -10141,13 +10206,42 @@ class Run1App:
             return self._run3_step_speed_kmh(valid[0], valid[1])
         return self._run3_step_speed_kmh(valid[i - 1], valid[i])
 
-    def _run3_stream_events(self, tracks, movement_by_id, cm, mapping, site):
+    def _run3_named_line(self, name, tol=6.0):
+        """The 2 points of a reference line: a drawn Line ("Line 3") or a zone edge ("Edge 1-3" = the edge Zone 1 and Zone 3 share); [] when unusable."""
+        if not name:
+            return []
+        m = re.fullmatch(r"Edge ([1-7])-([1-7])", str(name))
+        if m:
+            zones = getattr(self, "zones", {}) or {}
+            edge = shared_edge(zones.get(f"Zone {m.group(1)}", []), zones.get(f"Zone {m.group(2)}", []), tol)
+            return [] if edge is None else [edge[0], edge[1]]
+        return self.lines.get(name, [])
+
+    def _run3_reference_line(self, cm, mapping, site, c=None, explicit=None):
+        """(line, label) of the reference line of Movement `cm`. Order: an entry of `explicit` (Headway's own Line / Edge) -> the shared zone edge of the
+        Movement (ZONE_EDGE_DEFAULT; only while reference_line_source is "zone_edge") -> the Reference Line Mapping entry of Gap Acceptance.
+        The first one that gives 2 points wins; none -> ([], first name tried) and the caller falls back to the origin zone."""
+        c = c or {}
+        tol = float(c.get("zone_edge_tol_px") or 6.0)
+        names = []
+        if explicit and (site, cm) in explicit:
+            names.append(explicit[(site, cm)])
+        if c.get("reference_line_source", "zone_edge") == "zone_edge" and cm in ZONE_EDGE_DEFAULT:
+            names.append("Edge %d-%d" % ZONE_EDGE_DEFAULT[cm])
+        if mapping and (site, cm) in mapping:
+            names.append(mapping[(site, cm)])
+        for name in names:
+            line = self._run3_named_line(name, tol)
+            if len(line) == 2:
+                return line, name
+        return [], (names[0] if names else None)
+
+    def _run3_stream_events(self, tracks, movement_by_id, cm, mapping, site, c=None, explicit=None):
         """The reference event of every vehicle of stream `cm` (a Movement): (time, id, class, reference label, qc flag).
         = its first crossing of the Line mapped to (site, cm); with no usable Line (fewer than 2 vehicles crossing it) its first
         observation in the stream's origin zone (GAP_REFERENCE_ZONE). Returns (events, basis) with basis "Line" / "Origin_Zone_Entry".
         Used by Gap Acceptance (gaps) and Headway."""
-        lname = mapping.get((site, cm)) if mapping else None
-        line = self.lines.get(lname, []) if lname else []
+        line, lname = self._run3_reference_line(cm, mapping, site, c, explicit)
         events = []
         if len(line) == 2:
             for tid, rows in tracks.items():
@@ -10179,10 +10273,10 @@ class Run1App:
                                    "Reference_Time_From_Origin_Zone_Entry" + ("" if not lname else "_Line_Unusable")))
         return events, basis
 
-    def _run3_headway(self, tracks, c, mapping, movement_by_id):
+    def _run3_headway(self, tracks, c, mapping, movement_by_id, explicit=None):
         """Headway.csv rows (SPEC 9.1): for every selected Movement, each vehicle is paired with the vehicle it follows (headway_pairs: the nearest earlier
         vehicle whose path the follower is in; vehicles beside it are skipped). Reference time = the first crossing of the Line mapped to the Movement
-        (Headway's own Line mapping first, then Gap Acceptance's; else the origin zone, see _run3_stream_events).
+        (Headway's own Line / Edge entry first, then the shared zone edge or Gap Acceptance's Line per reference_line_source; else the origin zone, see _run3_reference_line).
         Time_Headway_s = the follower's time - the lead's time; Time_Gap_s = Time_Headway_s - lead length / lead speed
         (blank when the lead is slower than ttc_min_speed_kmh; negative = the two bodies overlap in time)."""
         site = c["site_id"]
@@ -10220,7 +10314,7 @@ class Run1App:
         for cm in MOVEMENT_IDS:
             if cm not in wanted:
                 continue
-            events, basis = self._run3_stream_events(tracks, movement_by_id, cm, mapping, site)
+            events, basis = self._run3_stream_events(tracks, movement_by_id, cm, mapping, site, c, explicit)
             for g in headway_pairs(events, ref_position, path_of, half_sum, max_s):
                 lead_speed = self._run3_speed_at(tracks.get(g["id_a"], []), g["gap_start"])
                 length = lengths.get(self._run3_canonical_class(g["class_a"]))
@@ -10275,7 +10369,7 @@ class Run1App:
         streams = sorted({cm for mv in selected for cm in RUN3_GAP_CONFLICT_MAP.get(mv, [])})
         intervals = {}
         for cm in streams:
-            events, basis = self._run3_stream_events(tracks, movement_by_id, cm, mapping, site)
+            events, basis = self._run3_stream_events(tracks, movement_by_id, cm, mapping, site, c)
             intervals[cm] = build_gap_intervals(events)
             diag["streams"][cm] = {"basis": basis, "vehicles": len({e[1] for e in events}), "gaps": len(intervals[cm])}
 
@@ -11334,10 +11428,8 @@ class Run1App:
         def do_headway():
             status("Run 3 — Headway...")
             hw_text = (c.get("headway_mapping_text") or "").strip()
-            hw_mapping = dict(mapping or {})
-            if hw_text:
-                hw_mapping.update(self._run3_parse_reference_mapping(hw_text))          # Headway's own Lines first, a Movement left out keeps Gap Acceptance's
-            hw_rows = self._run3_headway(tracks, c, hw_mapping, movement_by_id)
+            hw_explicit = self._run3_parse_reference_mapping(hw_text) if hw_text else {}      # Headway's own Line / Edge per Movement wins; the rest follows reference_line_source
+            hw_rows = self._run3_headway(tracks, c, mapping, movement_by_id, hw_explicit)
             fields = ["Site_ID", "Movement", "Reference_Line", "Lead_Vehicle_ID", "Lead_Vehicle_Class", "Lag_Vehicle_ID", "Lag_Vehicle_Class",
                       "Lead_Time_s", "Lag_Time_s", "Time_Headway_s", "Time_Gap_s", "Lead_Speed_kmh", "Lead_Length_m", "Lateral_To_Lead_Path_m", "QC_Flag"]
             row_counts["headway"] = len(hw_rows)

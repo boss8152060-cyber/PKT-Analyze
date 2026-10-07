@@ -10,14 +10,15 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = open(os.path.join(os.path.dirname(HERE), "PKStudio.py"), encoding="utf-8").read()
 TREE = ast.parse(SRC)
-NS = {"math": math}
+import re
+NS = {"math": math, "re": re}
 exec(SRC[SRC.index("# ==== CORE-BEGIN"):SRC.index("# ==== CORE-END")], NS)
 for node in TREE.body:
     if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id in (
-            "GAP_STAGE_CONFLICTS", "RUN3_GAP_CONFLICT_MAP"):
+            "GAP_STAGE_CONFLICTS", "RUN3_GAP_CONFLICT_MAP", "ZONE_EDGE_DEFAULT"):
         exec(compile(ast.Module([node], []), "x", "exec"), NS)
 for node in ast.walk(TREE):
-    if isinstance(node, ast.FunctionDef) and node.name in ("_run3_gap", "_run3_stream_events", "_run3_headway", "_run3_canonical_class"):
+    if isinstance(node, ast.FunctionDef) and node.name in ("_run3_gap", "_run3_stream_events", "_run3_headway", "_run3_canonical_class", "_run3_reference_line", "_run3_named_line"):
         exec(compile(ast.Module([node], []), node.name, "exec"), NS)
 for node in TREE.body:
     if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "GAP_REFERENCE_ZONE":
@@ -27,6 +28,9 @@ for node in TREE.body:
 class Fake:
     lines = {}
     _run3_stream_events = NS["_run3_stream_events"]
+    _run3_reference_line = NS["_run3_reference_line"]
+    _run3_named_line = NS["_run3_named_line"]
+    zones = {}
     _run3_canonical_class = staticmethod(NS["_run3_canonical_class"])
     _fmt = staticmethod(lambda v, d=3: "" if v is None else f"{v:.{d}f}")
     _run3_speed_at = staticmethod(lambda rows, t: 0.0)
@@ -131,6 +135,37 @@ class StagedGap(unittest.TestCase):
         for mv, per_zone in NS["GAP_STAGE_CONFLICTS"].items():
             union = sorted({s for streams in per_zone.values() for s in streams})
             self.assertEqual(union, sorted(NS["RUN3_GAP_CONFLICT_MAP"][mv]))
+
+
+class ReferenceLine(unittest.TestCase):
+    def fake(self, with_zones=True):
+        f = Fake()
+        f.lines = {"Line 4": [(1.0, 1.0), (2.0, 2.0)]}
+        f.zones = {"Zone 1": [(0, 0), (10, 0), (10, 10), (0, 10)], "Zone 3": [(10, 0), (20, 0), (20, 10), (10, 10)]} if with_zones else {}
+        return f
+
+    def test_zone_edge_is_the_default_source(self):
+        line, label = self.fake()._run3_reference_line("1-3-6-7", {(8, "1-3-6-7"): "Line 4"}, 8, {"reference_line_source": "zone_edge"})
+        self.assertEqual(label, "Edge 1-3")
+        self.assertEqual(sorted(line), [(10.0, 0.0), (10.0, 10.0)])
+
+    def test_drawn_source_uses_the_mapped_line(self):
+        line, label = self.fake()._run3_reference_line("1-3-6-7", {(8, "1-3-6-7"): "Line 4"}, 8, {"reference_line_source": "drawn"})
+        self.assertEqual((label, line), ("Line 4", [(1.0, 1.0), (2.0, 2.0)]))
+
+    def test_an_explicit_entry_wins_over_the_zone_edge(self):
+        line, label = self.fake()._run3_reference_line("1-3-6-7", {}, 8, {"reference_line_source": "zone_edge"}, {(8, "1-3-6-7"): "Line 4"})
+        self.assertEqual(label, "Line 4")
+
+    def test_no_shared_edge_falls_back_to_the_mapped_line(self):
+        line, label = self.fake(with_zones=False)._run3_reference_line("1-3-6-7", {(8, "1-3-6-7"): "Line 4"}, 8, {})
+        self.assertEqual(label, "Line 4")
+        none_line, none_label = self.fake(with_zones=False)._run3_reference_line("1-3-6-7", {}, 8, {})
+        self.assertEqual(none_line, [])                                                           # nothing usable -> the caller uses the origin zone
+
+    def test_edge_name_can_be_written_in_the_mapping(self):
+        line, label = self.fake()._run3_reference_line("2-3-4", {(8, "2-3-4"): "Edge 1-3"}, 8, {"reference_line_source": "drawn"})
+        self.assertEqual(label, "Edge 1-3")
 
 
 if __name__ == "__main__":
