@@ -13,7 +13,7 @@
 
 - commit ใหม่ตั้งชื่อ `PKT x.y.z: คำอธิบายสั้น ๆ` (ต่อ `(PASS)` เมื่อผู้ใช้ยืนยัน) และติด tag `PKT-x.y.z` ที่ commit นั้น
 - `Merge pull request ...` ที่ GitHub สร้างให้ไม่ให้เลขเวอร์ชัน (ไม่ใช่งาน)
-- เวอร์ชันถัดไป: งานต่อเรื่องเดิม = `1.30.4`; เรื่องใหม่ = `1.31.0` (เลขเรียงตามหัวข้อ ไม่ใช่เวลาเสมอไป — หัวข้อ 1.25 ทำหลังหัวข้อ 1.26–1.28 ของเซสชัน cloud)
+- เวอร์ชันถัดไป: งานต่อเรื่องเดิม = `1.30.5`; เรื่องใหม่ = `1.31.0` (เลขเรียงตามหัวข้อ ไม่ใช่เวลาเสมอไป — หัวข้อ 1.25 ทำหลังหัวข้อ 1.26–1.28 ของเซสชัน cloud)
 
 
 ## 0.1.z — เอกสารโปรเจ็คและกติกา git (ก่อนชุด v27)
@@ -310,23 +310,23 @@
 
 | PKT | commit | ชื่อเดิม | ทำอะไร |
 |---|---|---|---|
-| **PKT 1.23.0** | `bb4dd86` | Run3 v28(129): CSV_ErrorFileSeparate_GapColumnsRenamed | ตัวชี้วัดที่ล้มเขียนไฟล์ _ERROR.csv แยก + เปลี่ยนชื่อคอลัมน์ Gap |
-| **PKT 1.23.1** | `b3ec381` | Run3 v28(130): CSV_ConsistentColumnNames_TTCDetail_FrameSpeed_MovementCalibration | ชื่อคอลัมน์ CSV สม่ำเสมอ, TTC แบบละเอียด, ความเร็วต่อเฟรม, การปรับเทียบของ Movement |
-| **PKT 1.23.2** | `b417013` | Run3 v28(131): CSV_Cleanup_SpeedPerFrame_DropRedundantColumns_DetailFilesSwitch | ล้าง CSV: Speed ต่อเฟรม ตัดคอลัมน์ซ้ำ สวิตช์ไฟล์รายละเอียด |
+| **PKT 1.23.0** | `aa423b6` | Run3 v28(129): CSV_ErrorFileSeparate_GapColumnsRenamed | ตัวชี้วัดที่ล้มเขียนไฟล์ _ERROR.csv แยก + เปลี่ยนชื่อคอลัมน์ Gap |
+| **PKT 1.23.1** | `8f56886` | Run3 v28(130): CSV_ConsistentColumnNames_TTCDetail_FrameSpeed_MovementCalibration | ชื่อคอลัมน์ CSV สม่ำเสมอ, TTC แบบละเอียด, ความเร็วต่อเฟรม, การปรับเทียบของ Movement |
+| **PKT 1.23.2** | `9581308` | Run3 v28(131): CSV_Cleanup_SpeedPerFrame_DropRedundantColumns_DetailFilesSwitch | ล้าง CSV: Speed ต่อเฟรม ตัดคอลัมน์ซ้ำ สวิตช์ไฟล์รายละเอียด |
 
 ## 1.24.z — PET: ชนิดความขัดแย้งตามกติกา TTC
 
 | PKT | commit | ชื่อเดิม | ทำอะไร |
 |---|---|---|---|
-| **PKT 1.24.0** | `a297f02` | Run3 v28(132): PET_ConflictType_ByTtcAngleRule | PET กำหนด Conflict_Type ด้วยมุมระหว่างความเร็วสองคัน ณ จุดตัด (เหมือน TTC) |
-| **PKT 1.24.1** | `4d27a66` | Chore: e2e_run3 follows v28(131) (speed per frame in Speed.csv, no Speed rows in Indicator_Summary) | แก้เทสต์ e2e ให้ตรง v28(131) (ความเร็วต่อเฟรมใน Speed.csv) |
+| **PKT 1.24.0** | `39627f5` | Run3 v28(132): PET_ConflictType_ByTtcAngleRule | PET กำหนด Conflict_Type ด้วยมุมระหว่างความเร็วสองคัน ณ จุดตัด (เหมือน TTC) |
+| **PKT 1.24.1** | `a20f50d` | Chore: e2e_run3 follows v28(131) (speed per frame in Speed.csv, no Speed rows in Indicator_Summary) | แก้เทสต์ e2e ให้ตรง v28(131) (ความเร็วต่อเฟรมใน Speed.csv) |
 
 ## 1.25.z — เลขเวอร์ชัน PKT และ CHANGELOG
 
 | PKT | commit | ชื่อเดิม | ทำอะไร |
 |---|---|---|---|
 | **PKT 1.25.0** | (commit นี้) | PKT 1.25.0: Changelog_PKT_VersionNumbers_Tags | ตั้งกติกาเลขเวอร์ชัน PKT x.y.z, ทำตารางนี้, ติด tag `PKT-x.y.z` ให้ทุก commit ในตาราง |
-| **PKT 1.25.1** | (commit รวม main) | PKT 1.25.1: Changelog_IncludesCloudSessionCommits_MergeMain | รวมงานของเซสชัน cloud (หัวข้อ 1.26–1.28) เข้าตาราง, ผู้ใช้ยืนยันใช้ PKT ตามของตน ทับการยกเลิก `PKT 1.78.0` |
+| **PKT 1.25.1** | (ตัวรวม main ถูกเอาออกแล้ว tag ชี้ที่ 1.25.2) | PKT 1.25.1: Changelog_IncludesCloudSessionCommits_MergeMain | รวมงานของเซสชัน cloud (หัวข้อ 1.26–1.28) เข้าตาราง, ผู้ใช้ยืนยันใช้ PKT ตามของตน ทับการยกเลิก `PKT 1.78.0` |
 
 | **PKT 1.25.2** | (commit นี้) | PKT 1.25.2: Changelog_HashesUpdatedAfterRename | เปลี่ยนชื่อ commit เก่าทั้งหมดเป็น `PKT x.y.z: ...` (เขียนประวัติ main ใหม่เฉพาะข้อความ เนื้อไฟล์เท่าเดิมทุกไบต์) และแก้ hash ในตารางให้ตรงของใหม่; ประวัติเดิมสำรองไว้ใน `_git_backup/` |
 
@@ -334,38 +334,39 @@
 
 | PKT | commit | ชื่อเดิม | ทำอะไร |
 |---|---|---|---|
-| **PKT 1.26.0** | `12b8907` | PKT 1.78.0: VersionNaming_PKT_HistoryMap | ตาราง VERSION_HISTORY.md เลขแบบ 1.x.y (ถูกยกเลิก) |
-| **PKT 1.26.1** | `95ad025` | Docs: RevertPKTNaming_BackToRun3Names | ย้อนการตั้งชื่อ PKT ของเซสชัน cloud กลับเป็นชื่อ Run3 |
+| **PKT 1.26.0** | `37223fd` | PKT 1.78.0: VersionNaming_PKT_HistoryMap | ตาราง VERSION_HISTORY.md เลขแบบ 1.x.y (ถูกยกเลิก) |
+| **PKT 1.26.1** | `d9003d2` | Docs: RevertPKTNaming_BackToRun3Names | ย้อนการตั้งชื่อ PKT ของเซสชัน cloud กลับเป็นชื่อ Run3 |
 
 ## 1.27.z — เอกสารที่มาของเกณฑ์ความเสี่ยง (สไลด์สัมมนา)
 
 | PKT | commit | ชื่อเดิม | ทำอะไร |
 |---|---|---|---|
-| **PKT 1.27.0** | `4683158` | Docs: LdpRiskTableSource_CROW2009_SeminarSlide42 | เอกสาร: ที่มาตารางเกณฑ์ LDP (CROW 2009 สไลด์ 42) |
-| **PKT 1.27.1** | `ed31708` | Docs: SeminarSlides_TTC_PET_LDP_SourcesVerified | เอกสาร: ตรวจที่มาเกณฑ์ TTC/PET/LDP จากสไลด์สัมมนาแล้ว |
+| **PKT 1.27.0** | `19ee2ce` | Docs: LdpRiskTableSource_CROW2009_SeminarSlide42 | เอกสาร: ที่มาตารางเกณฑ์ LDP (CROW 2009 สไลด์ 42) |
+| **PKT 1.27.1** | `2c4751b` | Docs: SeminarSlides_TTC_PET_LDP_SourcesVerified | เอกสาร: ตรวจที่มาเกณฑ์ TTC/PET/LDP จากสไลด์สัมมนาแล้ว |
 
 ## 1.28.z — Gap Acceptance แบบแยกขั้นตามโซนกลาง + สรุปวิธี TTC ปัจจุบัน
 
 | PKT | commit | ชื่อเดิม | ทำอะไร |
 |---|---|---|---|
-| **PKT 1.28.0** | `840ce41` | Run3 v28(133): GapAcceptance_StagedPerMiddleZone | Gap Acceptance: ตัดสินแยกขั้นต่อโซนกลาง |
-| **PKT 1.28.1** | `c3bae1e` | Docs: SpecTTC_CurrentMethodSummary_CleanOutdated | เอกสาร: สรุปวิธี TTC ปัจจุบัน ล้างข้อความที่ล้าสมัย |
-| **PKT 1.28.2** | `42dd769` | Docs_PlanStatusUpdate_AfterPR4Merge | เอกสาร: อัปเดตสถานะใน plan.md หลังรวม PR #4 (งานค้าง: รอผลเทสต์จากเครื่องผู้ใช้) |
-| **PKT 1.28.3** | `b785242` | Run3 v28(134): GapCsv_ReadablePrecision_CriticalGapQC | Gap CSV: เวลา/ช่องว่างทศนิยม 3 ตำแหน่ง; Critical_Gap เพิ่มจำนวนคนขับที่ถูกตัดออกและ QC_Flag |
-| **PKT 1.28.4** | `7ac5772` | Run3 v28(135): GapCsv_LeadLagNames_SpeedColumnTimeFix | Gap CSV: ชื่อคอลัมน์ Lead/Lag และแก้ชื่อความเร็วที่บอกเวลาผิด; Decision_Zone → Subject_Zone_At_Decision |
+| **PKT 1.28.0** | `9d0c306` | Run3 v28(133): GapAcceptance_StagedPerMiddleZone | Gap Acceptance: ตัดสินแยกขั้นต่อโซนกลาง |
+| **PKT 1.28.1** | `c93fc5d` | Docs: SpecTTC_CurrentMethodSummary_CleanOutdated | เอกสาร: สรุปวิธี TTC ปัจจุบัน ล้างข้อความที่ล้าสมัย |
+| **PKT 1.28.2** | `aae79fa` | Docs_PlanStatusUpdate_AfterPR4Merge | เอกสาร: อัปเดตสถานะใน plan.md หลังรวม PR #4 (งานค้าง: รอผลเทสต์จากเครื่องผู้ใช้) |
+| **PKT 1.28.3** | `b84d0a6` | Run3 v28(134): GapCsv_ReadablePrecision_CriticalGapQC | Gap CSV: เวลา/ช่องว่างทศนิยม 3 ตำแหน่ง; Critical_Gap เพิ่มจำนวนคนขับที่ถูกตัดออกและ QC_Flag |
+| **PKT 1.28.4** | `5f1993e` | Run3 v28(135): GapCsv_LeadLagNames_SpeedColumnTimeFix | Gap CSV: ชื่อคอลัมน์ Lead/Lag และแก้ชื่อความเร็วที่บอกเวลาผิด; Decision_Zone → Subject_Zone_At_Decision |
 
 ## 1.29.z — เรียงคอลัมน์ CSV ให้ผลหลักอยู่หน้า
 
 | PKT | commit | ชื่อเดิม | ทำอะไร |
 |---|---|---|---|
-| **PKT 1.29.0** | `29321fe` | Run3 v28(136): CsvColumnOrder_ResultsFirst | TTC/PET/LDP: ตัวระบุ → ผลหลักและระดับความเสี่ยง → รายละเอียด → QC_Flag (ชื่อคอลัมน์ไม่เปลี่ยน) |
+| **PKT 1.29.0** | `eec9e97` | Run3 v28(136): CsvColumnOrder_ResultsFirst | TTC/PET/LDP: ตัวระบุ → ผลหลักและระดับความเสี่ยง → รายละเอียด → QC_Flag (ชื่อคอลัมน์ไม่เปลี่ยน) |
 | **PKT 1.29.1** | (commit นี้) | PKT 1.29.1: Changelog_CloudCommits134to136 | เพิ่มงานเซสชัน cloud (v28(134)–(136)) เข้าตาราง ตั้งชื่อ commit แบบ PKT ต่อจากนี้ |
 
 ## 1.30.z — PET เลือกนับตามชนิดความขัดแย้ง + ไฟล์ Headway
 
 | PKT | commit | ชื่อเดิม | ทำอะไร |
 |---|---|---|---|
-| **PKT 1.30.0** | `0ccbc2a` | PKT 1.30.0: PetExcludeRearEnd_HeadwayCsv | PET ตัดคู่ชนิด Rear-end (สวิตช์ `pet_exclude_rear_end`); ไฟล์ใหม่ `Headway.csv` (Time Headway, Time Gap ต่อ Movement); แยกฟังก์ชันหาเวลาข้ามเส้นของกระแสใช้ร่วมกับ Gap Acceptance |
-| **PKT 1.30.1** | `cd8bb9a` | PKT 1.30.1: HeadwayFromPetRearEnd_DropConsecutivePairs | **ยกเลิกใน 1.30.2** — เคยเปลี่ยน Headway.csv เป็นแถว PET ชนิด Rear-end |
-| **PKT 1.30.2** | `a740a06` | PKT 1.30.2: HeadwayBackToLineGaps_PetConflictTypeSwitches | Headway.csv กลับเป็นแบบเส้น Line/โซนต้นทางของแต่ละ Movement (เหมือน 1.30.0); PET มีสวิตช์เลือกนับต่อชนิด Rear-end / Lane change / Crossing (มุมเดียวกับ TTC) แทน `pet_exclude_rear_end` |
+| **PKT 1.30.0** | `bf00923` | PKT 1.30.0: PetExcludeRearEnd_HeadwayCsv | PET ตัดคู่ชนิด Rear-end (สวิตช์ `pet_exclude_rear_end`); ไฟล์ใหม่ `Headway.csv` (Time Headway, Time Gap ต่อ Movement); แยกฟังก์ชันหาเวลาข้ามเส้นของกระแสใช้ร่วมกับ Gap Acceptance |
+| **PKT 1.30.1** | `866c541` | PKT 1.30.1: HeadwayFromPetRearEnd_DropConsecutivePairs | **ยกเลิกใน 1.30.2** — เคยเปลี่ยน Headway.csv เป็นแถว PET ชนิด Rear-end |
+| **PKT 1.30.2** | `bb25b78` | PKT 1.30.2: HeadwayBackToLineGaps_PetConflictTypeSwitches | Headway.csv กลับเป็นแบบเส้น Line/โซนต้นทางของแต่ละ Movement (เหมือน 1.30.0); PET มีสวิตช์เลือกนับต่อชนิด Rear-end / Lane change / Crossing (มุมเดียวกับ TTC) แทน `pet_exclude_rear_end` |
 | **PKT 1.30.3** | (commit นี้) | PKT 1.30.3: TtcConflictTypeSwitches | TTC มีสวิตช์เลือกนับต่อชนิด TTC_Type (Rear-end / Lane change / Crossing, ค่าตั้งต้นเปิดทั้งสาม) เหมือน PET; ชนิดที่ปิดไม่ออกแถวและไม่วาดในวิดีโอ |
+| **PKT 1.30.4** | (commit นี้) | PKT 1.30.4: Changelog_LinearHistory_MergeCommitsRemoved | เอา Merge pull request (#1–#6) ออกจากประวัติ main ให้เป็นเส้นตรง (งานจริงทุก commit อยู่ครบ เนื้อไฟล์ล่าสุดเท่าเดิม) แก้ hash ในตารางและ tag ให้ตรงของใหม่; ประวัติก่อนแก้สำรองไว้ใน `_git_backup/` |
