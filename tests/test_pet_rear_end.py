@@ -80,6 +80,14 @@ class PetRearEnd(unittest.TestCase):
         self.assertTrue(inc("Rear-end", {"pet_include_rear_end": True}))
         self.assertFalse(inc("Lane change", {"pet_include_lane_change": False}))
 
+    def test_ttc_type_switch_helper(self):
+        inc = NS["ttc_type_included"]
+        self.assertTrue(all(inc(t, {}) for t in ("Rear-end", "Lane change", "Crossing", "Unclassified")))     # TTC: every type on by default
+        self.assertFalse(inc("Crossing", {"ttc_include_crossing": False}))
+        self.assertFalse(inc("Rear-end", {"ttc_include_rear_end": False}))
+        self.assertTrue(inc("Lane change", {"ttc_include_crossing": False, "ttc_include_rear_end": False}))
+        self.assertTrue(inc("Unclassified", {"ttc_include_crossing": False}))
+
 
 if __name__ == "__main__":
     unittest.main()
