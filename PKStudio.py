@@ -11015,7 +11015,7 @@ class Run1App:
         def do_ldp():
             status("Run 3 — LDP...")
             rows = self._run3_ldp(tracks, c, movement_by_id, movement_source_by_id)
-            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","LDP_percent","LDP_Level","Mean_Speed_kmh","Speed_Level","LDP_Risk_Level","Calibration_Mode","QC_Flag"]
+            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","LDP_percent","LDP_Level","Speed_Level","LDP_Risk_Level","Delta_Y_m","Mean_Speed_kmh","Start_Time","End_Time","Samples","Side","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Lane_Width_W_m","Calibration_Mode","QC_Flag"]
             row_counts["ldp"] = len(rows)
             outputs["ldp"] = write_csv("LDP.csv", fields, rows)
             vals = [float(r["LDP_percent"]) for r in rows]
@@ -11094,7 +11094,7 @@ class Run1App:
         def do_ttc():
             status("Run 3 — TTC...")
             rows, diag, ttc_frames, self._run3_ttc_shapes = self._run3_ttc(tracks, c, movement_by_id)
-            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","DTC_m","Collide_X_m","Collide_Y_m","Miss_Distance_m","Speed_A_kmh","Speed_B_kmh","TTC_s","TTC_Level","Speed_Level","TTC_Risk_Level","Calibration_Mode","QC_Flag"]
+            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","TTC_s","TTC_Level","Speed_Level","TTC_Risk_Level","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","DTC_m","Collide_X_m","Collide_Y_m","Miss_Distance_m","Speed_A_kmh","Speed_B_kmh","Calibration_Mode","QC_Flag"]
             detail_fields = ["Site_ID","Event_ID","Rel_X_m","Rel_Y_m","RelV_X_mps","RelV_Y_mps","Rel_Speed_kmh","Collide_Frame_Time_s","Dist_A_to_Collide_m","Dist_B_to_Collide_m","Arrival_A_s","Arrival_B_s"]
             row_counts["ttc"] = len(rows)
             mode_ = self._run3_calibration_mode(c)
@@ -11128,7 +11128,7 @@ class Run1App:
         def do_pet():
             status("Run 3 — PET...")
             rows, diag = self._run3_pet(tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
-            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Theta_deg","Conflict_Zone","Interaction_Start","Interaction_End","Cross_X_m","Cross_Y_m","Area_Radius_m","T1_Exit_Time","T2_Entry_Time","PET_s","Speed_A_kmh","Speed_B_kmh","PET_Level","Speed_Level","PET_Risk_Level","Calibration_Mode","QC_Flag"]
+            fields = ["Site_ID","Interaction_ID","Conflict_Type","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Zone","PET_s","PET_Level","Speed_Level","PET_Risk_Level","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Theta_deg","Cross_X_m","Cross_Y_m","Area_Radius_m","Speed_A_kmh","Speed_B_kmh","Calibration_Mode","QC_Flag"]
             row_counts["pet"] = len(rows)
             mode_ = self._run3_calibration_mode(c)
             for r in rows:
