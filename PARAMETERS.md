@@ -48,6 +48,9 @@
 | `pet_include_rear_end` | ปิด | PET | นับคู่ชนิด Rear-end (มุมที่จุดตัดน้อยกว่า `ttc_angle_rear_end_deg` = 30°) ใน PET หรือไม่ — ปิดเพราะ PET ใช้กับรถที่เส้นทางตัดกัน รถตามกันดู TTC และ Headway (ที่มา: นิยาม PET ในงานทั่วไป) | เปิด / ปิด |
 | `pet_include_lane_change` | เปิด | PET | นับคู่ชนิด Lane change (30°–85° ตามเกณฑ์ TTC) | เปิด / ปิด |
 | `pet_include_crossing` | เปิด | PET | นับคู่ชนิด Crossing (มากกว่า `ttc_angle_crossing_deg` = 85°) | เปิด / ปิด |
+| `critical_gap_by_subject_class` | เปิด | Gap | Critical Gap แยกตามชนิดรถของคนที่รอ (ปิด = รวมทุกชนิด `All`) | เปิด / ปิด |
+| `critical_gap_by_lag_class` | ปิด | Gap | Critical Gap แยกตามชนิดรถของคันหลังที่กำลังมา (Lag) ของช่องที่ยอมรับ | เปิด / ปิด |
+| `critical_gap_min_drivers` | 30 | Gap | `Critical_Gap.csv` ติดธง `Few_Drivers_Below_N` เมื่อกลุ่มมีคนขับที่มีทั้งช่องปฏิเสธและยอมรับน้อยกว่านี้; ว่าง = ไม่ติดธง — 30 เป็นค่ากะประมาณ ไม่มีที่มา | 10, 20, 30 |
 | `reference_line_source` | `zone_edge` | Gap / Headway | เส้นอ้างอิงของแต่ละกระแส: `zone_edge` = ขอบโซนที่ติดกัน (1-3-4 และ 1-3-6-7 = โซน 1\|3, 2-3-1 และ 2-3-4 = 2\|3, 5-6-7 = 5\|6, 5-6-3-1 = 3\|6); `drawn` = Line ที่วาดไว้ใน Reference Line Mapping | zone_edge / drawn |
 | `zone_edge_tol_px` | 6 | Gap / Headway | โหนดของสองโซนที่ห่างกันไม่เกินค่านี้ (พิกเซล) นับเป็นโหนดร่วมเดียวกัน — เราเลือก ไม่มีที่มา | 3, 6, 10 |
 | `headway_enabled` | เปิด | Headway | เขียน `Headway.csv` (กรอบ Headway ในแท็บ ③): Time_Headway_s (หน้ารถถึงหน้ารถ), Time_Gap_s (ท้ายรถหน้าถึงหน้ารถหลัง); เฉพาะรถที่ตามกัน (อยู่ในแนวทางวิ่งของคันหน้า ระยะ ≤ (W_หน้า+W_หลัง)/2 จากตารางความกว้างรถ) ไม่มีระดับความเสี่ยง | เปิด / ปิด |

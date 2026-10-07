@@ -528,6 +528,9 @@ RUN3_DEFAULTS = {
     "headway_line_mapping": "",            # Site_ID|Movement|Line N for Headway only; a Movement left out uses the Reference Line Mapping of Gap Acceptance, then the origin zone
     "reference_line_source": "zone_edge",   # reference line of a Movement: "zone_edge" = the edge two zones share (ZONE_EDGE_DEFAULT) / "drawn" = the Line of the Reference Line Mapping
     "zone_edge_tol_px": "6",                # two zone corners count as one shared node when closer than this (pixels) - our choice, no source
+    "critical_gap_by_subject_class": True,   # Critical Gap: one estimate per class of the WAITING driver (off = all classes together)
+    "critical_gap_by_lag_class": False,      # ... and per class of the vehicle BEHIND the gap (the one that arrives; the Lag vehicle). Off = not split by it
+    "critical_gap_min_drivers": "30",        # Critical_Gap.csv flags a group with fewer drivers having both a rejected and an accepted gap; blank = no flag (30 = a rule of thumb, no source)
     "pet_use_area": True,                  # conflict AREA = circle around the crossing point, radius (W_A + W_B) / 2; off = the crossing point only
     "pet_min_speed_kmh": "",                # a vehicle slower than this while passing the crossing point skips the pair; blank = no limit
     "pet_max_s": "10.0",                    # pairs/events above this are not PET conflicts; blank = no limit
@@ -1267,6 +1270,34 @@ def shared_edge(poly_a, poly_b, tol=6.0):
         return None
     best = max(((a, b) for ia, a in enumerate(pts) for b in pts[ia + 1:]), key=lambda ab: float(np.hypot(*(ab[0] - ab[1]))))
     return ((float(best[0][0]), float(best[0][1])), (float(best[1][0]), float(best[1][1])))
+
+
+def critical_gap_groups(gap_rows, by_subject=True, by_lag=False):
+    """Gap Acceptance rows -> the data of each Critical Gap estimate.
+
+    Every waiting driver (Subject_ID + Movement + Stage_No) with BOTH a rejected and an accepted gap gives one interval (its largest rejected gap,
+    its last accepted gap) to the group of its class: `by_subject` = the class of the waiting driver (False: "All"), `by_lag` = the class of the
+    vehicle behind the accepted gap (Conflicting_Class_B, the one that arrives; False: "All"). A driver with only one kind is counted as
+    accepted-only / rejected-only (left out of the estimate). Returns {(subject_class, lag_class, movement, stage): {"accepted": [...],
+    "rejected": [...], "intervals": [(max_rejected, accepted), ...], "accepted_only": n, "rejected_only": n}}."""
+    drivers = {}
+    for r in gap_rows:
+        key = (r["Subject_Class"], r["Subject_Movement"], r["Stage_No"], r["Subject_ID"])
+        d = drivers.setdefault(key, {"acc": [], "rej": []})
+        d["acc" if r["Gap_Acceptance"] == 1 else "rej"].append((float(r["Available_Gap_s"]), r.get("Conflicting_Class_B", "")))
+    groups = {}
+    for (cls, movement, stage, _sid), d in drivers.items():
+        lead = d["acc"][-1] if d["acc"] else max(d["rej"], key=lambda x: x[0])         # the gap that names the lag class: the accepted one, else the largest rejected
+        gkey = (cls if by_subject else "All", lead[1] if by_lag else "All", movement, stage)
+        g = groups.setdefault(gkey, {"accepted": [], "rejected": [], "intervals": [], "accepted_only": 0, "rejected_only": 0})
+        if d["acc"] and d["rej"]:
+            rej = max(v for v, _ in d["rej"])
+            g["accepted"].append(d["acc"][-1][0]); g["rejected"].append(rej); g["intervals"].append((rej, d["acc"][-1][0]))
+        elif d["acc"]:
+            g["accepted_only"] += 1
+        else:
+            g["rejected_only"] += 1
+    return groups
 
 
 def headway_pairs(events, ref_position, path_of, half_width_sum, max_headway_s=None):
@@ -3990,6 +4021,9 @@ class Run1App:
         self.run3_headway_mapping_text = RUN3_DEFAULTS["headway_line_mapping"]
         self.run3_ref_line_source_var = tk.StringVar(value=RUN3_DEFAULTS["reference_line_source"])
         self.run3_zone_edge_tol_var = tk.StringVar(value=RUN3_DEFAULTS["zone_edge_tol_px"])
+        self.run3_cg_by_subject_var = tk.BooleanVar(value=RUN3_DEFAULTS["critical_gap_by_subject_class"])
+        self.run3_cg_by_lag_var = tk.BooleanVar(value=RUN3_DEFAULTS["critical_gap_by_lag_class"])
+        self.run3_cg_min_drivers_var = tk.StringVar(value=RUN3_DEFAULTS["critical_gap_min_drivers"])
         self.run3_pet_show_xy_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_show_point_xy"])
         self.run3_pet_show_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_show_point_video"])
         self.run3_ttc_max_record_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_max_record_s"])
@@ -4472,6 +4506,10 @@ class Run1App:
         cbs.bind("<<ComboboxSelected>>", lambda e: self.run3_ref_line_source_var.set(next((k for k, t in SOURCES.items() if t == shown_src.get()), "zone_edge")))
         self.run3_ref_line_source_var.trace_add("write", lambda *_: shown_src.set(SOURCES.get(self.run3_ref_line_source_var.get(), SOURCES["zone_edge"])))
         self._entry_row(box, 8, "ระยะที่โหนดโซนสองโซนนับเป็นจุดเดียวกัน (พิกเซล)", self.run3_zone_edge_tol_var, span=7)
+        ttk.Label(box, text="Critical Gap แยกตาม").grid(row=9, column=0, sticky="w", pady=(6, 2))
+        ttk.Checkbutton(box, text="ชนิดรถของคนที่รอ", variable=self.run3_cg_by_subject_var).grid(row=9, column=1, columnspan=2, sticky="w", pady=(6, 2))
+        ttk.Checkbutton(box, text="ชนิดรถของคันหลังที่กำลังมา (Lag)", variable=self.run3_cg_by_lag_var).grid(row=9, column=3, columnspan=4, sticky="w", pady=(6, 2))
+        self._entry_row(box, 10, "ธงเตือนเมื่อคนขับที่มีทั้งช่องว่างที่ปฏิเสธและยอมรับน้อยกว่า (คน) — ว่าง = ไม่เตือน", self.run3_cg_min_drivers_var, span=7)
 
         box = self._indicator_box("Headway (รถที่ตามกัน)", self.run3_headway_enabled_var,
                                   "เวลาระหว่างรถสองคันที่ตามกันใน Movement เดียวกัน (Time Headway = หน้ารถถึงหน้ารถ, Time Gap = ท้ายรถหน้าถึงหน้ารถหลัง) — "
@@ -5993,6 +6031,9 @@ class Run1App:
                 "headway_max_s": self.run3_headway_max_var.get(),
                 "reference_line_source": self.run3_ref_line_source_var.get(),
                 "zone_edge_tol_px": self.run3_zone_edge_tol_var.get(),
+                "critical_gap_by_subject_class": self.run3_cg_by_subject_var.get(),
+                "critical_gap_by_lag_class": self.run3_cg_by_lag_var.get(),
+                "critical_gap_min_drivers": self.run3_cg_min_drivers_var.get(),
                 "headway_line_mapping": self.run3_headway_text.get("1.0", "end-1c") if hasattr(self, "run3_headway_text") else self.run3_headway_mapping_text,
                 "pet_show_point_xy": self.run3_pet_show_xy_var.get(),
                 "pet_show_point_video": self.run3_pet_show_video_var.get(),
@@ -6166,6 +6207,9 @@ class Run1App:
                 ("headway_max_s", self.run3_headway_max_var),
                 ("reference_line_source", self.run3_ref_line_source_var),
                 ("zone_edge_tol_px", self.run3_zone_edge_tol_var),
+                ("critical_gap_by_subject_class", self.run3_cg_by_subject_var),
+                ("critical_gap_by_lag_class", self.run3_cg_by_lag_var),
+                ("critical_gap_min_drivers", self.run3_cg_min_drivers_var),
                 ("pet_show_point_xy", self.run3_pet_show_xy_var),
                 ("pet_show_point_video", self.run3_pet_show_video_var),
                 ("ttc_max_record_s", self.run3_ttc_max_record_var),
@@ -9478,6 +9522,9 @@ class Run1App:
             "headway_max_s": num(self.run3_headway_max_var, None),
             "reference_line_source": ("drawn" if self.run3_ref_line_source_var.get() == "drawn" else "zone_edge"),
             "zone_edge_tol_px": num(self.run3_zone_edge_tol_var, 6.0) or 6.0,
+            "critical_gap_by_subject_class": bool(self.run3_cg_by_subject_var.get()),
+            "critical_gap_by_lag_class": bool(self.run3_cg_by_lag_var.get()),
+            "critical_gap_min_drivers": num(self.run3_cg_min_drivers_var, None),
             "headway_mapping_text": (self.run3_headway_text.get("1.0", "end-1c") if hasattr(self, "run3_headway_text") else self.run3_headway_mapping_text),
             "pet_show_point_xy": bool(self.run3_pet_show_xy_var.get()),
             "pet_show_point_video": bool(self.run3_pet_show_video_var.get()),
@@ -11372,27 +11419,12 @@ class Run1App:
             fields = ["Site_ID","Decision_Event_ID","Opportunity_No","Subject_ID","Subject_Class","Subject_Movement","Decision_Stage","Stage_No","Decision_Zone","Gap_Evaluation_Time","Waiting_Time_s","Was_Stopped","Stopped_In_Conflict_Zone","Conflicting_Movement","Conflicting_ID_A","Conflicting_Class_A","Conflicting_ID_B","Conflicting_Class_B","Reference_Line","Gap_Start_Time","Gap_End_Time","Available_Gap_s","Subject_Speed_kmh","Conflict_Speed_A_kmh","Conflict_Speed_B_kmh","Gap_Role","Gap_Acceptance","Decision_Time","QC_Flag"]
             row_counts["gap"] = len(gap_rows)
             outputs["gap_acceptance"] = write_csv("Gap_Acceptance.csv", fields, gap_rows)
-            rejected = defaultdict(list); accepted = defaultdict(list)
-            for r in gap_rows:
-                key = (r["Subject_Class"], r["Subject_Movement"], r["Stage_No"], r["Subject_ID"])
-                (accepted if r["Gap_Acceptance"] == 1 else rejected)[key].append(float(r["Available_Gap_s"]))
-            groups = defaultdict(lambda: {"accepted": [], "rejected": [], "intervals": []})
-            for key in set(rejected) | set(accepted):
-                acc = accepted.get(key, []); rej = rejected.get(key, [])
-                if acc and rej:
-                    g = groups[(key[0], key[1], key[2])]
-                    g["accepted"].append(acc[-1]); g["rejected"].append(max(rej))
-                    g["intervals"].append((max(rej), acc[-1]))
+            groups = critical_gap_groups(gap_rows, c.get("critical_gap_by_subject_class", True), c.get("critical_gap_by_lag_class", False))
+            min_drivers = c.get("critical_gap_min_drivers")
             critical = []
-            only_acc, only_rej = defaultdict(int), defaultdict(int)       # drivers left out of the pairs (only accepted / only rejected gaps)
-            for key in set(rejected) | set(accepted):
-                if key in accepted and key not in rejected:
-                    only_acc[(key[0], key[1], key[2])] += 1
-                elif key in rejected and key not in accepted:
-                    only_rej[(key[0], key[1], key[2])] += 1
-            for gkey in sorted(set(groups) | set(only_acc) | set(only_rej)):
-                cls, movement, stage_no = gkey
-                g = groups.get(gkey, {"accepted": [], "rejected": [], "intervals": []})
+            for gkey in sorted(groups, key=lambda k: tuple(str(x) for x in k)):
+                cls, lag_cls, movement, stage_no = gkey
+                g = groups[gkey]
                 cr = self._run3_raff(g["accepted"], g["rejected"]) if c["use_raff"] and g["intervals"] else None
                 mle = self._run3_mle_driver_intervals(g["intervals"]) if c["use_mle"] and g["intervals"] else None
                 qc = []
@@ -11400,10 +11432,12 @@ class Run1App:
                     qc.append("No_Driver_With_Both_Rejected_And_Accepted_Gap")
                 elif (c["use_raff"] and cr is None) or (c["use_mle"] and mle is None):
                     qc.append("Estimate_Not_Available")
+                if min_drivers and len(g["intervals"]) < min_drivers:
+                    qc.append(f"Few_Drivers_Below_{min_drivers:g}")
                 critical.append({
-                    "Site_ID": c["site_id"], "Vehicle_Class": cls, "Movement": movement, "Stage_No": stage_no,
+                    "Site_ID": c["site_id"], "Vehicle_Class": cls, "Lag_Vehicle_Class": lag_cls, "Movement": movement, "Stage_No": stage_no,
                     "Drivers_With_Pairs": len(g["intervals"]),
-                    "Drivers_Accepted_Only": only_acc.get(gkey, 0), "Drivers_Rejected_Only": only_rej.get(gkey, 0),
+                    "Drivers_Accepted_Only": g["accepted_only"], "Drivers_Rejected_Only": g["rejected_only"],
                     "Raff_Critical_Gap_s": self._fmt(cr), "MLE_Critical_Gap_Median_s": self._fmt(mle["critical_gap_median"] if mle else None),
                     "MLE_mu": self._fmt(mle["mu"] if mle else None), "MLE_sigma": self._fmt(mle["sigma"] if mle else None),
                     "QC_Flag": ";".join(qc),
