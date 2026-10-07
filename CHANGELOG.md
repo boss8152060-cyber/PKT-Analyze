@@ -13,7 +13,7 @@
 
 - commit ใหม่ตั้งชื่อ `PKT x.y.z: คำอธิบายสั้น ๆ` (ต่อ `(PASS)` เมื่อผู้ใช้ยืนยัน) และติด tag `PKT-x.y.z` ที่ commit นั้น
 - `Merge pull request ...` ที่ GitHub สร้างให้ไม่ให้เลขเวอร์ชัน (ไม่ใช่งาน)
-- เวอร์ชันถัดไป: งานต่อเรื่องเดิม = `1.30.1`; เรื่องใหม่ = `1.31.0` (เลขเรียงตามหัวข้อ ไม่ใช่เวลาเสมอไป — หัวข้อ 1.25 ทำหลังหัวข้อ 1.26–1.28 ของเซสชัน cloud)
+- เวอร์ชันถัดไป: งานต่อเรื่องเดิม = `1.30.2`; เรื่องใหม่ = `1.31.0` (เลขเรียงตามหัวข้อ ไม่ใช่เวลาเสมอไป — หัวข้อ 1.25 ทำหลังหัวข้อ 1.26–1.28 ของเซสชัน cloud)
 
 
 ## 0.1.z — เอกสารโปรเจ็คและกติกา git (ก่อนชุด v27)
@@ -365,4 +365,5 @@
 
 | PKT | commit | ชื่อเดิม | ทำอะไร |
 |---|---|---|---|
-| **PKT 1.30.0** | (commit นี้) | PKT 1.30.0: PetExcludeRearEnd_HeadwayCsv | PET ตัดคู่ชนิด Rear-end (สวิตช์ `pet_exclude_rear_end`); ไฟล์ใหม่ `Headway.csv` (Time Headway, Time Gap ต่อ Movement); แยกฟังก์ชันหาเวลาข้ามเส้นของกระแสใช้ร่วมกับ Gap Acceptance |
+| **PKT 1.30.0** | `0ccbc2a` | PKT 1.30.0: PetExcludeRearEnd_HeadwayCsv | PET ตัดคู่ชนิด Rear-end (สวิตช์ `pet_exclude_rear_end`); ไฟล์ใหม่ `Headway.csv` (Time Headway, Time Gap ต่อ Movement); แยกฟังก์ชันหาเวลาข้ามเส้นของกระแสใช้ร่วมกับ Gap Acceptance |
+| **PKT 1.30.1** | (commit นี้) | PKT 1.30.1: HeadwayFromPetRearEnd_DropConsecutivePairs | `Headway.csv` = แถว PET ชนิด Rear-end ที่แยกออกจาก `PET.csv` (`Headway_s`, ไม่มีระดับความเสี่ยง); ตัดโหมดหาคู่รถติดกัน A–B–C ของ 1.30.0 และสวิตช์ `headway_enabled` |
