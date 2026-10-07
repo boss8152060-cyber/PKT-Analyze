@@ -1851,6 +1851,31 @@ def parse_risk_limits(text, ascending):
     return vals
 
 
+def ensure_python_package(module, pip_spec=None, runner=None, finder=None, timeout_s=1800):
+    """True when `module` can be imported; when it is missing it is installed with pip into THIS Python (the one running PK Studio)
+    and checked again. runner / finder are only replaced in tests. Returns (ok, message)."""
+    import importlib
+    import importlib.util
+    import subprocess
+    import sys
+    finder = finder or importlib.util.find_spec
+    if finder(module) is not None:
+        return True, f"{module} is installed"
+    runner = runner or subprocess.run
+    cmd = [sys.executable, "-m", "pip", "install", pip_spec or module]
+    try:
+        res = runner(cmd, capture_output=True, text=True, timeout=timeout_s)
+    except Exception as exc:
+        return False, f"pip install {pip_spec or module} failed: {exc}"
+    if getattr(res, "returncode", 1) != 0:
+        tail = (getattr(res, "stderr", "") or getattr(res, "stdout", "") or "").strip().splitlines()[-3:]
+        return False, f"pip install {pip_spec or module} failed: " + " | ".join(tail)
+    importlib.invalidate_caches()
+    if finder(module) is None:
+        return False, f"{module} was installed but cannot be imported yet (restart PK Studio)"
+    return True, f"{module} installed with pip"
+
+
 def scaled_video_size(width, height, max_width):
     """(w, h) of the result video: the input size, scaled down (keeping the shape, even numbers for the encoder) when it is wider than max_width;
     max_width 0 / blank / invalid = the input size."""
@@ -3557,11 +3582,17 @@ def open_video_capture(path, hw_decode=False):
 
 def load_yolo_model(model_path, use_tensorrt=False, imgsz=640, device=None):
     """(YOLO model, path used). With use_tensorrt a TensorRT engine is used: <model>_<imgsz>.engine next to the .pt, built (once, several minutes)
-    when it is missing or older than the .pt. Anything that fails (no tensorrt package, CPU device, export error) falls back to the .pt model."""
+    when it is missing or older than the .pt; the tensorrt and onnx packages are pip-installed into this Python first when missing. Anything that fails (no tensorrt package, CPU device, export error) falls back to the .pt model."""
     if use_tensorrt and str(model_path).lower().endswith(".pt") and str(device).lower() not in ("cpu", "none", ""):
         engine = os.path.splitext(model_path)[0] + f"_{int(imgsz)}.engine"
         try:
             if not os.path.isfile(engine) or os.path.getmtime(engine) < os.path.getmtime(model_path):
+                # the engine has to be built: TensorRT (and ONNX for the export) are installed here when they are missing
+                for module, spec in (("tensorrt", "tensorrt"), ("onnx", "onnx")):
+                    ok, msg = ensure_python_package(module, spec)
+                    print("TensorRT    :", msg)
+                    if not ok:
+                        raise RuntimeError(msg)
                 print("TensorRT    : building", engine, "(first time only, this takes a few minutes)")
                 built = YOLO(model_path).export(format="engine", imgsz=int(imgsz), device=device, half=False, verbose=False)
                 if built and os.path.abspath(str(built)) != os.path.abspath(engine):
@@ -5695,7 +5726,7 @@ class Run1App:
         )
 
         # speed options (PKT 1.33.0)
-        ttk.Checkbutton(frame, text="เร่ง YOLO ด้วย TensorRT (ต้องติดตั้ง tensorrt; ครั้งแรกสร้างไฟล์ .engine ใช้เวลาหลายนาที; ใช้ไม่ได้จะกลับไปใช้ .pt เอง)",
+        ttk.Checkbutton(frame, text="เร่ง YOLO ด้วย TensorRT (ไม่มี tensorrt จะติดตั้งให้เองด้วย pip; ครั้งแรกสร้างไฟล์ .engine ใช้เวลาหลายนาที; ใช้ไม่ได้จะกลับไปใช้ .pt เอง)",
                         variable=self.use_tensorrt_var).grid(row=4, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Checkbutton(frame, text="ถอดรหัสวิดีโอด้วยการ์ดจอ (ถ้า OpenCV รองรับ; ไม่รองรับจะใช้วิธีปกติเอง)",
                         variable=self.hw_decode_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=2)

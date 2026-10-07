@@ -62,5 +62,39 @@ class ScaledVideoSize(unittest.TestCase):
         self.assertEqual(w, 1920)
 
 
+
+class EnsurePackage(unittest.TestCase):
+    def test_installed_package_is_not_reinstalled(self):
+        calls = []
+        ok, msg = NS["ensure_python_package"]("x", runner=lambda *a, **k: calls.append(a), finder=lambda m: object())
+        self.assertTrue(ok)
+        self.assertEqual(calls, [])
+
+    def test_missing_package_is_installed_with_this_python(self):
+        state = {"installed": False}
+        seen = []
+
+        class R:
+            returncode = 0
+            stdout = stderr = ""
+
+        def runner(cmd, **k):
+            seen.append(cmd)
+            state["installed"] = True
+            return R()
+        ok, msg = NS["ensure_python_package"]("tensorrt", "tensorrt", runner=runner, finder=lambda m: object() if state["installed"] else None)
+        self.assertTrue(ok)
+        self.assertEqual(seen[0][1:], ["-m", "pip", "install", "tensorrt"])
+
+    def test_failed_install_is_reported(self):
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "ERROR: no matching distribution"
+        ok, msg = NS["ensure_python_package"]("tensorrt", runner=lambda *a, **k: R(), finder=lambda m: None)
+        self.assertFalse(ok)
+        self.assertIn("no matching distribution", msg)
+
+
 if __name__ == "__main__":
     unittest.main()
