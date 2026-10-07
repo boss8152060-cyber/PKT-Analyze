@@ -383,5 +383,5 @@
 
 | PKT | commit | ชื่อเดิม | ทำอะไร |
 |---|---|---|---|
-| **PKT 1.32.0** | (commit นี้) | PKT 1.32.0: CriticalGapByVehicleClass_LowSampleFlag | Critical Gap แยกตามชนิดรถของคนที่รอ (เปิด/ปิด) และชนิดรถของคันหลังที่กำลังมา (เปิด/ปิด); คอลัมน์ `Lag_Vehicle_Class`; ธง `Few_Drivers_Below_N` เมื่อตัวอย่างน้อย (ตั้งค่า N ได้) |
+| **PKT 1.32.0** | `a4029aa` | PKT 1.32.0: CriticalGapByVehicleClass_LowSampleFlag | Critical Gap แยกตามชนิดรถของคนที่รอ (เปิด/ปิด) และชนิดรถของคันหลังที่กำลังมา (เปิด/ปิด); คอลัมน์ `Lag_Vehicle_Class`; ธง `Few_Drivers_Below_N` เมื่อตัวอย่างน้อย (ตั้งค่า N ได้) |
 | **PKT 1.32.1** | (commit นี้) | PKT 1.32.1: TrackingVideo_NoLeftoverTmpFile | วิดีโอ Tracking_Result ที่วาดกรอบ TTC/PET: ถ้าไฟล์ถูกเปิดค้างในเครื่องเล่น ลองแทนที่ซ้ำหลายครั้งก่อน, ลบไฟล์ชั่วคราว `Tracking_Result._ttc_tmp.mp4` ทิ้งเสมอ (รวมกรณีวาดผิดพลาด), บอกผลใน Summary.json (`ttc_boxes_video`) |
