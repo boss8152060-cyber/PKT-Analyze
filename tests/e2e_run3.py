@@ -512,14 +512,14 @@ def scene3(app):
               acc["Available_Gap_s"])
         check("Gap Acceptance waiting time = entry 4.0 s - first seen 0.017 s ~ 3.98 s", abs(float(acc["Waiting_Time_s"]) - 3.98) < 0.1,
               acc["Waiting_Time_s"])
-        check("Gap Acceptance stage 1 (enter zone 3), decided in zone 3", acc["Decision_Stage"] == "Enter_Zone_3" and acc["Stage_No"] == "1" and acc["Decision_Zone"] == "3",
+        check("Gap Acceptance stage 1 (enter zone 3), decided in zone 3", acc["Decision_Stage"] == "Enter_Zone_3" and acc["Stage_No"] == "1" and acc["Subject_Zone_At_Decision"] == "3",
               f"{acc['Decision_Stage']} zone {acc['Decision_Zone']}")
         check("Gap Acceptance subject 4 (1-3-4) vs stream 2-3-4 on Line 1",
               acc["Subject_ID"] == "4" and acc["Subject_Movement"] == "1-3-4" and acc["Conflicting_Movement"] == "2-3-4"
               and acc["Reference_Line"] == "Line 1")
         check("Gap Acceptance Accepted / Rejected (no duplicate 1 / 0 column)", acc["Gap_Role"] == "Accepted" and rej["Gap_Role"] == "Rejected" and "Gap_Acceptance" not in acc)
         check("Gap Acceptance speeds of the subject and stream vehicles are reported",
-              acc["Subject_Speed_At_Decision_kmh"] != "" and acc["Conflict_Speed_A_At_Decision_kmh"] != "")
+              acc["Subject_Speed_At_Decision_kmh"] != "" and acc["Lead_Speed_At_Gap_Start_kmh"] != "")
 
 
 def scene4(app):
