@@ -37,7 +37,7 @@ STATISTICS = {
     "TTC": ("TTC", "TTC_s", ("TTC_Type",)),
     "PET": ("PET", "PET_s", ("Conflict_Type", "Conflict_Zone")),
     "Gap_Acceptance": ("Gap Acceptance (available gap)", "Available_Gap_s", ("Decision_Stage", "Gap_Role")),
-    "Headway": ("Headway (time at the crossing)", "Headway_s", ("Conflict_Zone",)),
+    "Headway": ("Headway (time headway)", "Time_Headway_s", ("Movement",)),
 }
 
 

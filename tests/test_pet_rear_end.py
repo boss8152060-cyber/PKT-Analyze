@@ -1,4 +1,4 @@
-"""Rear-end pairs (same direction at the crossing) leave PET.csv for Headway.csv when `pet_exclude_rear_end` is on (SPEC 8, 9).
+"""PET counts a pair only if its conflict type (the TTC angle rule) is switched on: pet_include_rear_end / _lane_change / _crossing (SPEC 8).
 `_run3_pet` is a method of the GUI class: it is pulled out of PKStudio.py with `ast` (no tkinter / cv2 needed)."""
 import ast
 import math
@@ -35,9 +35,9 @@ def track(points):
             for t, x, y in points]
 
 
-def config(exclude):
+def config(rear=False, lane=True, cross=True):
     return {"pet_max_s": 10.0, "pet_threshold": 1.0, "pet_min_speed_kmh": None, "pet_zones": [3], "site_id": 8, "widths": {"Car": 1.8},
-            "pet_use_area": False, "pet_exclude_rear_end": exclude, "risk_limits": {"pet_s": (1.0, 2.0, 3.0), "speed_kmh": (60, 40, 20)}}
+            "pet_use_area": False, "pet_include_rear_end": rear, "pet_include_lane_change": lane, "pet_include_crossing": cross, "risk_limits": {"pet_s": (1.0, 2.0, 3.0), "speed_kmh": (60, 40, 20)}}
 
 
 class PetRearEnd(unittest.TestCase):
@@ -48,33 +48,37 @@ class PetRearEnd(unittest.TestCase):
         r_cross = track([(t, 25.0, 10 * (t - 3.0)) for t in ta])                           # perpendicular to P
         return {"1": p, "2": q_same, "3": r_cross}, {"1": "2-3-4", "2": "2-3-4", "3": "1-3-6-7"}
 
-    def test_rear_end_pair_is_found_but_has_no_crossing_mark_when_the_switch_is_on(self):
+    def test_each_conflict_type_has_its_own_switch(self):
         tracks, mv = self.scene()
-        t_on, t_off = make(), make()
-        out_on, diag_on = t_on._run3_pet(tracks, config(True), mv, {}, {})
-        out_off, diag_off = t_off._run3_pet(tracks, config(False), mv, {}, {})
-        n_rear = [r["Conflict_Type"] for r in out_off].count("Rear-end")
-        self.assertGreaterEqual(n_rear, 1)
-        self.assertEqual(len(out_on), len(out_off))                                    # `_run3_pet` returns every pair; the split is made when the files are written
-        self.assertEqual(diag_on["excluded_rear_end"], n_rear)
-        self.assertEqual(diag_off["excluded_rear_end"], 0)
-        marks_on = sum(len(v) for v in t_on._run3_pet_shapes.values())
-        marks_off = sum(len(v) for v in t_off._run3_pet_shapes.values())
-        self.assertLess(marks_on, marks_off)                                           # no PET crossing mark for the followers
+        every, d_all = make()._run3_pet(tracks, config(rear=True), mv, {}, {})          # all three types on
+        types = [r["Conflict_Type"] for r in every]
+        self.assertIn("Rear-end", types)
+        self.assertIn("Crossing", types)
+        self.assertEqual(d_all["excluded_by_type"], 0)
+        default, d_def = make()._run3_pet(tracks, config(), mv, {}, {})                  # defaults: Rear-end off
+        self.assertNotIn("Rear-end", [r["Conflict_Type"] for r in default])
+        self.assertEqual(d_def["excluded_rear_end"], types.count("Rear-end"))
+        self.assertEqual(len(default), len(every) - types.count("Rear-end"))             # nothing else is lost
+        no_cross, d_nc = make()._run3_pet(tracks, config(rear=True, cross=False), mv, {}, {})
+        self.assertNotIn("Crossing", [r["Conflict_Type"] for r in no_cross])
+        self.assertEqual(d_nc["excluded_crossing"], types.count("Crossing"))
+        self.assertIn("Rear-end", [r["Conflict_Type"] for r in no_cross])
 
-    def test_split_moves_rear_end_rows_to_headway_with_the_same_numbers(self):
-        fields = ["Interaction_ID", "Conflict_Type", "PET_s", "PET_Level", "Speed_Level", "PET_Risk_Level", "QC_Flag"]
-        rows = [{"Interaction_ID": "a", "Conflict_Type": "Rear-end", "PET_s": "1.5", "PET_Level": "Low", "Speed_Level": "x", "PET_Risk_Level": "Low",
-                 "QC_Flag": "Threshold_At_or_Below;Interpolated_Across_Gap"},
-                {"Interaction_ID": "b", "Conflict_Type": "Crossing", "PET_s": "0.8", "PET_Level": "High", "Speed_Level": "x", "PET_Risk_Level": "High", "QC_Flag": ""},
-                {"Interaction_ID": "c", "Conflict_Type": "Unclassified", "PET_s": "2.5", "PET_Level": "Interaction", "Speed_Level": "", "PET_Risk_Level": "", "QC_Flag": ""}]
-        pet, hw, hw_fields = NS["split_rear_end_rows"](rows, fields)
-        self.assertEqual([r["Interaction_ID"] for r in pet], ["b", "c"])                # Lane change / Crossing / Unclassified stay in PET
-        self.assertEqual(len(hw), 1)
-        self.assertEqual(hw[0]["Headway_s"], "1.5")                                    # the same number, new name
-        self.assertEqual(hw_fields, ["Interaction_ID", "Headway_s", "QC_Flag"])         # no Conflict_Type, no PET risk levels
-        self.assertNotIn("PET_s", hw[0])
-        self.assertEqual(hw[0]["QC_Flag"], "Interpolated_Across_Gap")                  # the PET threshold flag does not apply to headway
+    def test_excluded_pairs_get_no_crossing_mark_in_the_videos(self):
+        tracks, mv = self.scene()
+        t_all, t_def = make(), make()
+        t_all._run3_pet(tracks, config(rear=True), mv, {}, {})
+        t_def._run3_pet(tracks, config(), mv, {}, {})
+        self.assertLess(sum(len(v) for v in t_def._run3_pet_shapes.values()), sum(len(v) for v in t_all._run3_pet_shapes.values()))
+
+    def test_type_switch_helper(self):
+        inc = NS["pet_type_included"]
+        self.assertFalse(inc("Rear-end", {}))                      # default off
+        self.assertTrue(inc("Lane change", {}))
+        self.assertTrue(inc("Crossing", {}))
+        self.assertTrue(inc("Unclassified", {"pet_include_crossing": False}))     # no angle: always counted
+        self.assertTrue(inc("Rear-end", {"pet_include_rear_end": True}))
+        self.assertFalse(inc("Lane change", {"pet_include_lane_change": False}))
 
 
 if __name__ == "__main__":
