@@ -1227,6 +1227,23 @@ def build_gap_intervals(events):
     return out
 
 
+def replace_with_retry(src, dst, tries=6, delay_s=0.5, replace=None, sleep=None):
+    """Move `src` over `dst` (os.replace). A video that a player (or an antivirus scan) still holds cannot be replaced for a moment:
+    try `tries` times, `delay_s` apart. True = done, False = still locked after the last try."""
+    import os
+    import time
+    replace = replace or os.replace
+    sleep = sleep or time.sleep
+    for k in range(max(1, int(tries))):
+        try:
+            replace(src, dst)
+            return True
+        except OSError:
+            if k + 1 < tries:
+                sleep(delay_s)
+    return False
+
+
 def point_polyline_distance(p, pts):
     """Shortest distance (same unit as the input) from the point p = (x, y) to the polyline `pts` (N x 2); None when pts has no point."""
     P = np.asarray(pts, dtype=float).reshape(-1, 2)
@@ -9708,7 +9725,7 @@ class Run1App:
         """Draws the vehicle rectangles that TTC used on the NORMAL roadside video (Tracking_Result.mp4) after Run 3, so there is no third video: the
         picture i of that video is frame `first_frame + i`; the 4 corners of every rectangle (metres) are mapped back into the picture with the
         calibration that is set. The video is read, drawn on and written to a temporary file that then takes the place of the original (if that file is
-        locked, e.g. open in a player, the result stays as Tracking_Result_TTC.mp4). Returns the path of the result or None."""
+        locked, e.g. open in a player, it is tried again for a few seconds; then the result is saved as Tracking_Result_TTC.mp4; no temporary file is left). Returns the path of the result or None."""
         shapes = getattr(self, "_run3_ttc_shapes", None) if draw_ttc else None
         pet_shapes = getattr(self, "_run3_pet_shapes", None) if draw_pet else None      # also the PET crossing marks (magenta X)
         if not (shapes or pet_shapes) or not result_path or not os.path.isfile(result_path):
@@ -9720,10 +9737,17 @@ class Run1App:
         W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         tmp_path = os.path.splitext(result_path)[0] + "._ttc_tmp.mp4"
+        self._run3_overlay_note = ""
+        try:
+            if os.path.isfile(tmp_path):
+                os.remove(tmp_path)                                  # a leftover of an earlier run
+        except OSError:
+            pass
         writer = cv2.VideoWriter(tmp_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
         if not writer.isOpened():
             cap.release()
             raise RuntimeError("Unable to write the video with the TTC rectangles")
+        drawn_ok = False
         try:
             i = 0
             while True:
@@ -9757,19 +9781,29 @@ class Run1App:
                     img = self._run3_draw_pet_marks(img, marks_px, lambda q: q)
                 writer.write(img)
                 i += 1
+            drawn_ok = True
         finally:
             writer.release()
             cap.release()
-        try:
-            os.replace(tmp_path, result_path)
+            if not drawn_ok:
+                try:
+                    os.remove(tmp_path)                              # an error while drawing: no half-written third video is left behind
+                except OSError:
+                    pass
+        if replace_with_retry(tmp_path, result_path):
+            self._run3_overlay_note = "marks drawn into Tracking_Result.mp4"
             return result_path
+        alt = os.path.splitext(result_path)[0] + "_TTC.mp4"
+        if replace_with_retry(tmp_path, alt, tries=1):
+            self._run3_overlay_note = ("Tracking_Result.mp4 is in use (close the player and run again): the marks were saved in "
+                                       + os.path.basename(alt) + " instead")
+            return alt
+        try:
+            os.remove(tmp_path)
         except OSError:
-            alt = os.path.splitext(result_path)[0] + "_TTC.mp4"
-            try:
-                os.replace(tmp_path, alt)
-                return alt
-            except OSError:
-                return tmp_path
+            pass
+        self._run3_overlay_note = "Tracking_Result.mp4 and Tracking_Result_TTC.mp4 are in use: the marks were not drawn (close the player and run again)"
+        return None
 
     TOPVIEW_PALETTE = [(255, 160, 40), (80, 200, 80), (60, 60, 255), (200, 120, 255), (0, 200, 255), (255, 255, 80), (180, 180, 255), (60, 220, 160)]
 
@@ -11566,8 +11600,10 @@ class Run1App:
                                                   draw_ttc=draw_ttc, draw_pet=draw_pet)
                 if bv:
                     outputs["tracking_result_with_ttc_boxes"] = bv
+                    summary["diagnostics"]["ttc_boxes_video"] = getattr(self, "_run3_overlay_note", "")
                 else:
-                    summary["diagnostics"]["ttc_boxes_video"] = "not drawn (no Tracking_Result.mp4 in the output folder, or no TTC rectangles)"
+                    summary["diagnostics"]["ttc_boxes_video"] = (getattr(self, "_run3_overlay_note", "")
+                                                                 or "not drawn (no Tracking_Result.mp4 in the output folder, or no TTC rectangles)")
             plot = self._run3_write_xy_plot(tracks, c, output_dir, (settings or {}).get("video"), display=settings)
             if plot:
                 outputs["topview_plot"] = plot
