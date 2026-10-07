@@ -13,7 +13,7 @@
 
 - commit ใหม่ตั้งชื่อ `PKT x.y.z: คำอธิบายสั้น ๆ` (ต่อ `(PASS)` เมื่อผู้ใช้ยืนยัน) และติด tag `PKT-x.y.z` ที่ commit นั้น
 - `Merge pull request ...` ที่ GitHub สร้างให้ไม่ให้เลขเวอร์ชัน (ไม่ใช่งาน)
-- เวอร์ชันถัดไป: งานต่อเรื่องเดิม = `1.25.1`; เรื่องใหม่ = `1.26.0`
+- เวอร์ชันถัดไป: งานต่อเรื่องเดิม = `1.28.2`; เรื่องใหม่ = `1.29.0` (เลขเรียงตามหัวข้อ ไม่ใช่เวลาเสมอไป — หัวข้อ 1.25 ทำหลังหัวข้อ 1.26–1.28 ของเซสชัน cloud)
 
 
 ## 0.1.z — เอกสารโปรเจ็คและกติกา git (ก่อนชุด v27)
@@ -325,4 +325,26 @@
 
 | PKT | commit | ชื่อเดิม | ทำอะไร |
 |---|---|---|---|
-| **PKT 1.25.0** | (commit นี้) | PKT 1.25.0: Changelog_PKT_VersionNumbers_Tags | ตั้งกติกาเลขเวอร์ชัน PKT x.y.z, ทำตารางนี้, ติด tag `PKT-x.y.z` ให้ทุก commit ข้างบน |
+| **PKT 1.25.0** | (commit นี้) | PKT 1.25.0: Changelog_PKT_VersionNumbers_Tags | ตั้งกติกาเลขเวอร์ชัน PKT x.y.z, ทำตารางนี้, ติด tag `PKT-x.y.z` ให้ทุก commit ในตาราง |
+| **PKT 1.25.1** | (commit รวม main) | PKT 1.25.1: Changelog_IncludesCloudSessionCommits_MergeMain | รวมงานของเซสชัน cloud (หัวข้อ 1.26–1.28) เข้าตาราง, ผู้ใช้ยืนยันใช้ PKT ตามของตน ทับการยกเลิก `PKT 1.78.0` |
+
+## 1.26.z — ลองตั้งชื่อ PKT 1.x.y ในเซสชัน cloud (ยกเลิกแล้ว — เลข 1.78.0 ไม่ใช้)
+
+| PKT | commit | ชื่อเดิม | ทำอะไร |
+|---|---|---|---|
+| **PKT 1.26.0** | `7fa078f` | PKT 1.78.0: VersionNaming_PKT_HistoryMap | ตาราง VERSION_HISTORY.md เลขแบบ 1.x.y (ถูกยกเลิก) |
+| **PKT 1.26.1** | `a95aef6` | Docs: RevertPKTNaming_BackToRun3Names | ย้อนการตั้งชื่อ PKT ของเซสชัน cloud กลับเป็นชื่อ Run3 |
+
+## 1.27.z — เอกสารที่มาของเกณฑ์ความเสี่ยง (สไลด์สัมมนา)
+
+| PKT | commit | ชื่อเดิม | ทำอะไร |
+|---|---|---|---|
+| **PKT 1.27.0** | `1e58849` | Docs: LdpRiskTableSource_CROW2009_SeminarSlide42 | เอกสาร: ที่มาตารางเกณฑ์ LDP (CROW 2009 สไลด์ 42) |
+| **PKT 1.27.1** | `4c91601` | Docs: SeminarSlides_TTC_PET_LDP_SourcesVerified | เอกสาร: ตรวจที่มาเกณฑ์ TTC/PET/LDP จากสไลด์สัมมนาแล้ว |
+
+## 1.28.z — Gap Acceptance แบบแยกขั้นตามโซนกลาง + สรุปวิธี TTC ปัจจุบัน
+
+| PKT | commit | ชื่อเดิม | ทำอะไร |
+|---|---|---|---|
+| **PKT 1.28.0** | `b4ab76c` | Run3 v28(133): GapAcceptance_StagedPerMiddleZone | Gap Acceptance: ตัดสินแยกขั้นต่อโซนกลาง |
+| **PKT 1.28.1** | `5d2d33d` | Docs: SpecTTC_CurrentMethodSummary_CleanOutdated | เอกสาร: สรุปวิธี TTC ปัจจุบัน ล้างข้อความที่ล้าสมัย |

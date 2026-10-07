@@ -1,0 +1,104 @@
+"""Unit tests of the staged Gap Acceptance (SPEC 6.1) on synthetic scenes with known answers.
+
+`_run3_gap` is a method of the GUI class, so it is pulled out of PKStudio.py with `ast` and run on a
+tiny stand-in object (no tkinter / cv2 needed)."""
+import ast
+import math
+import os
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = open(os.path.join(os.path.dirname(HERE), "PKStudio.py"), encoding="utf-8").read()
+TREE = ast.parse(SRC)
+NS = {"math": math}
+exec(SRC[SRC.index("# ==== CORE-BEGIN"):SRC.index("# ==== CORE-END")], NS)
+for node in TREE.body:
+    if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id in (
+            "GAP_STAGE_CONFLICTS", "RUN3_GAP_CONFLICT_MAP"):
+        exec(compile(ast.Module([node], []), "x", "exec"), NS)
+for node in ast.walk(TREE):
+    if isinstance(node, ast.FunctionDef) and node.name == "_run3_gap":
+        exec(compile(ast.Module([node], []), "gap", "exec"), NS)
+
+
+class Fake:
+    lines = {}
+    _fmt = staticmethod(lambda v, d=3: "" if v is None else f"{v:.{d}f}")
+    _run3_speed_at = staticmethod(lambda rows, t: 0.0)
+    _run3_line_crossing_time = staticmethod(lambda *a: None)
+
+
+def track(zones, stop=None, end=12.0, dt=0.05):
+    """zones = [(from_time, zone)]; moves 0.5 m per sample except while stopped (stop = (t0, t1))."""
+    rows, t, x = [], 0.0, 0.0
+    while t <= end:
+        z = None
+        for tf, zz in zones:
+            if t >= tf:
+                z = zz
+        if not (stop and stop[0] <= t < stop[1]):
+            x += 0.5
+        rows.append({"_timestamp": t, "_zone_num": z, "_m": (x, 0.0), "class_name": "Car"})
+        t += dt
+    return rows
+
+
+def scene(extra):
+    tracks, mv = {}, {}
+    for i, t in enumerate((2, 3, 6, 8), 1):          # stream 2-3-4 (reference = first time in zone 2)
+        tracks[str(i)], mv[str(i)] = track([(t, 2)]), "2-3-4"
+    for i, t in enumerate((5, 9), 11):               # stream 5-6-7 (reference = first time in zone 5)
+        tracks[str(i)], mv[str(i)] = track([(t, 5)]), "5-6-7"
+    for tid, (movement, rows) in extra.items():
+        tracks[tid], mv[tid] = rows, movement
+    return tracks, mv
+
+
+def run(tracks, mv, selected):
+    c = {"gap_movements": selected, "site_id": 8, "waiting_threshold": 5.0, "hold_min_duration_s": 0.3}
+    return NS["_run3_gap"](Fake(), tracks, c, {}, mv)
+
+
+class StagedGap(unittest.TestCase):
+    def test_one_middle_zone(self):
+        tracks, mv = scene({"20": ("1-3-4", track([(0, 1), (4.0, 3), (7, 4)]))})
+        rows = run(tracks, mv, ["1-3-4"])
+        self.assertEqual([r["Gap_Role"] for r in rows], ["Rejected", "Accepted"])
+        self.assertTrue(all(r["Decision_Stage"] == "Enter_Zone_3" and r["Stage_No"] == 1 for r in rows))
+        self.assertAlmostEqual(float(rows[0]["Available_Gap_s"]), 1.05, places=2)   # gap 2->3 closed at the first wait sample
+        self.assertAlmostEqual(float(rows[1]["Available_Gap_s"]), 2.0, places=2)    # gap 3->6 open at entry (4.0 s)
+
+    def test_two_middle_zones_no_stop_gives_two_accepted_stages(self):
+        tracks, mv = scene({"21": ("1-3-6-7", track([(0, 1), (4.0, 3), (6.5, 6), (9, 7)]))})
+        rows = run(tracks, mv, ["1-3-6-7"])
+        st2 = [r for r in rows if r["Stage_No"] == 2]
+        self.assertEqual(len(st2), 1)
+        self.assertEqual(st2[0]["Decision_Stage"], "Enter_Zone_6")
+        self.assertEqual(st2[0]["Conflicting_Movement"], "5-6-7")                   # zone 6 meets 5-6-7 (not 2-3-4)
+        self.assertEqual(st2[0]["Gap_Role"], "Accepted")
+        self.assertAlmostEqual(float(st2[0]["Available_Gap_s"]), 2.5, places=2)     # gap 5->9 s, entry 6.5 s
+        self.assertAlmostEqual(float(st2[0]["Waiting_Time_s"]), 2.5, places=2)      # stage 2 starts when zone 3 is entered
+        self.assertTrue(all(r["Was_Stopped"] == 0 and r["Stopped_In_Conflict_Zone"] == 0 for r in rows))
+
+    def test_stop_inside_first_middle_zone_is_waiting_of_stage_2(self):
+        tracks, mv = scene({"22": ("1-3-6-7", track([(0, 1), (4.0, 3), (6.5, 6), (9, 7)], stop=(4.5, 6.0)))})
+        rows = run(tracks, mv, ["1-3-6-7"])
+        self.assertTrue(all(r["Was_Stopped"] == 0 for r in rows if r["Stage_No"] == 1))
+        self.assertTrue(all(r["Was_Stopped"] == 1 for r in rows if r["Stage_No"] == 2))
+        self.assertTrue(all(r["Stopped_In_Conflict_Zone"] == 0 for r in rows))
+
+    def test_stop_in_last_zone_is_only_a_flag(self):
+        tracks, mv = scene({"23": ("1-3-6-7", track([(0, 1), (4.0, 3), (6.5, 6), (9, 7)], stop=(7.0, 8.0)))})
+        rows = run(tracks, mv, ["1-3-6-7"])
+        last = [r for r in rows if r["Stage_No"] == 2]
+        self.assertTrue(last and all(r["Stopped_In_Conflict_Zone"] == 1 for r in last))
+        self.assertEqual([r["Gap_Role"] for r in last], ["Accepted"])               # the decision is not reversed
+
+    def test_stage_streams_match_union_map(self):
+        for mv, per_zone in NS["GAP_STAGE_CONFLICTS"].items():
+            union = sorted({s for streams in per_zone.values() for s in streams})
+            self.assertEqual(union, sorted(NS["RUN3_GAP_CONFLICT_MAP"][mv]))
+
+
+if __name__ == "__main__":
+    unittest.main()
