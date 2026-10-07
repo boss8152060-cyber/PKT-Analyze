@@ -8,7 +8,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = open(os.path.join(os.path.dirname(HERE), "PKStudio.py"), encoding="utf-8").read()
 NS = {"np": np}
 exec(SRC[SRC.index("# ==== CORE-BEGIN"):SRC.index("# ==== CORE-END")], NS)
-pairs, dist = NS["headway_pairs"], NS["point_polyline_distance"]
+pairs, dist, edge = NS["headway_pairs"], NS["point_polyline_distance"], NS["shared_edge"]
 
 # every vehicle drives along +x (y = its lane offset); positions at the reference time = (x at that time, y)
 LANE_Y = {"A": 0.0, "B": 1.8, "C": 0.0, "D": 0.1}                    # B drives beside A / C (1.8 m to the side), D almost in A's path
@@ -75,6 +75,29 @@ class Headway(unittest.TestCase):
     def test_one_event_per_vehicle(self):
         out = pairs([ev(3.0, "C"), ev(1.0, "A"), ev(1.2, "A")], ref_position, path_of, half_sum)    # A's earliest event (1.0 s) counts
         self.assertEqual([(g["id_a"], g["id_b"], g["gap_start"]) for g in out], [("A", "C", 1.0)])
+
+
+class SharedEdge(unittest.TestCase):
+    A = [(0, 0), (10, 0), (10, 10), (0, 10)]
+
+    def test_two_squares_sharing_a_side(self):
+        e = edge(self.A, [(10, 0), (20, 0), (20, 10), (10, 10)])
+        self.assertEqual(sorted(e), [(10.0, 0.0), (10.0, 10.0)])
+
+    def test_corners_touching_the_side_of_the_other_zone(self):
+        e = edge(self.A, [(10, -20), (20, -20), (20, 30), (10, 30)])            # the other zone is much longer: A's corners lie on its side
+        self.assertEqual(sorted(e), [(10.0, 0.0), (10.0, 10.0)])
+
+    def test_nodes_within_the_tolerance_are_one_node(self):
+        e = edge(self.A, [(12, 1), (20, 0), (20, 10), (12, 9)], tol=3.0)         # almost touching (2 px apart)
+        self.assertIsNotNone(e)
+        self.assertEqual(edge(self.A, [(12, 1), (20, 0), (20, 10), (12, 9)], tol=1.0), None)
+
+    def test_zones_that_do_not_touch(self):
+        self.assertIsNone(edge(self.A, [(30, 0), (40, 0), (40, 10), (30, 10)]))
+
+    def test_the_user_s_edge_table(self):
+        self.assertEqual(NS["ZONE_EDGE_DEFAULT"], {"1-3-4": (1, 3), "1-3-6-7": (1, 3), "2-3-1": (2, 3), "2-3-4": (2, 3), "5-6-7": (5, 6), "5-6-3-1": (3, 6)})
 
 
 if __name__ == "__main__":

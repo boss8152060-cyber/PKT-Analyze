@@ -672,6 +672,7 @@ def main():
     app.run3_write_detail_var.set(True)           # Lateral_Clearance.csv (every sample), TTC_Detail.csv, TTC_Frames.csv are checked below (off by default)
     app.run3_lc_max_lateral_var.set("0")          # the scene's D-E pair is 4.1 m apart sideways; the default limit (3.5 m) is tested below
     app.run3_site_id_var.set("8")
+    app.run3_ref_line_source_var.set("drawn")        # the scenes draw their own Lines; the zone-edge source (default) is unit-tested (tests/test_gap_stages.py, test_headway.py)
     app.run3_ppm_var.set(str(PPM))
     app.run3_perspective_enabled_var.set(False)
     g = app.run3_geometry_vars
