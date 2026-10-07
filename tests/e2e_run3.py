@@ -478,7 +478,7 @@ def scene3(app):
     """Gap Acceptance with a Line + mapping (first crossing only, jitter robust).
     Subject S (1-3-4) waits in zone 1 until t = 3.0 s, reaches the conflict zone 3 at t = 4.0 s and drives on
     without stopping. Stream 2-3-4 crosses Line 1 (x = 15 m) at 1, ~1.92 (jitters across the line 3 times) and 5 s.
-    Access stage: gap 1.0->1.92 closed before entry = Rejected (0.92 s); gap 1.92->5.0 is open at entry = Accepted,
+    Stage 1 (Enter_Zone_3): gap 1.0->1.92 closed before entry = Rejected (0.92 s); gap 1.92->5.0 is open at entry = Accepted,
     available gap = time left = 5.0 - 4.0 = 1.0 s."""
     n = 480
     zone_x = lambda x, y: 2 if x < 10 else (3 if x < 20 else 4)
@@ -512,7 +512,7 @@ def scene3(app):
               acc["Available_Gap_s"])
         check("Gap Acceptance waiting time = entry 4.0 s - first seen 0.017 s ~ 3.98 s", abs(float(acc["Waiting_Time_s"]) - 3.98) < 0.1,
               acc["Waiting_Time_s"])
-        check("Gap Acceptance Access stage, decided in zone 3", acc["Decision_Stage"] == "Access" and acc["Decision_Zone"] == "3",
+        check("Gap Acceptance stage 1 (enter zone 3), decided in zone 3", acc["Decision_Stage"] == "Enter_Zone_3" and acc["Stage_No"] == "1" and acc["Decision_Zone"] == "3",
               f"{acc['Decision_Stage']} zone {acc['Decision_Zone']}")
         check("Gap Acceptance subject 4 (1-3-4) vs stream 2-3-4 on Line 1",
               acc["Subject_ID"] == "4" and acc["Subject_Movement"] == "1-3-4" and acc["Conflicting_Movement"] == "2-3-4"
@@ -605,11 +605,11 @@ def scene6(app):
 
 
 def scene7(app):
-    """Gap Acceptance, STOP inside the conflict zone -> Access rejected, then Exit stage.
+    """Gap Acceptance, STOP inside the conflict zone -> only a flag (SPEC 6.1: no Exit stage any more).
     Subject 1-3-4 enters zone 3 at t = 4.0 s (gap 3->6 s is open), stops at (15, -1) from 4.25 to 5.75 s, then drives
     on to zone 4 (target) at ~6.6 s. Stream 2-3-4 crosses Line 1 at 2, 3, 6, 8 s.
-    Access: gap 2->3 closed before entry = Rejected (1.0 s); gap 3->6 open at entry but the driver stopped = Rejected (2.0 s).
-    Exit: only NEW gaps after the resumption (5.77 s): gap 6->8 contains the target-zone entry = Accepted (~1.4 s left)."""
+    One stage (Enter_Zone_3): gap 2->3 closed before entry = Rejected (1.0 s); gap 3->6 open at entry = Accepted (2.0 s)
+    and the stop does NOT change that; Stopped_In_Conflict_Zone = 1 on those rows."""
     n = 720
     zone_x = lambda x, y: 2 if x < 10 else (3 if x < 20 else 4)
     zone_s = lambda x, y: 1 if y < -2 else (3 if x < 20 else 4)
@@ -630,18 +630,13 @@ def scene7(app):
     gap = read_csv(os.path.join(out, "Gap_Acceptance.csv"))
     rows = [(r["Decision_Stage"], r["Gap_Role"], round(float(r["Available_Gap_s"]), 2)) for r in gap]
     print("   rows:", rows)
-    access = [r for r in gap if r["Decision_Stage"] == "Access"]
-    exit_ = [r for r in gap if r["Decision_Stage"] == "Exit"]
-    check("stop in the conflict zone: Access has 2 rejected gaps, no accepted one",
-          len(access) == 2 and all(r["Gap_Role"] == "Rejected" for r in access), str(rows))
-    check("Access rejected gaps are ~1.0 s (2->3) and ~2.0 s (3->6, open at entry)",
-          sorted(round(float(r["Available_Gap_s"]), 1) for r in access) == [1.0, 2.0], str(rows))
-    check("Exit stage: exactly one accepted gap (6->8 contains the target-zone entry)",
-          len(exit_) == 1 and exit_[0]["Gap_Role"] == "Accepted" and abs(float(exit_[0]["Available_Gap_s"]) - 1.4) < 0.1, str(rows))
-    check("Exit stage is decided in the target zone 4", bool(exit_) and exit_[0]["Decision_Zone"] == "4")
-    check("the gap 3->6 of the Access stage is NOT reused in Exit",
-          not any(abs(float(r["Gap_Start_Time_s"]) - 3.0) < 0.05 for r in exit_))
-    check("QC tells about the stop", all("Stop_" in r["QC_Flag"] for r in gap), str([r["QC_Flag"] for r in gap][:2]))
+    check("stop in the conflict zone: still one stage (Enter_Zone_3), no Exit rows",
+          len(gap) == 2 and all(r["Decision_Stage"] == "Enter_Zone_3" for r in gap), str(rows))
+    check("rejected ~1.0 s (2->3) and accepted ~2.0 s (3->6, open at entry; the stop does not reverse it)",
+          sorted((r["Gap_Role"], round(float(r["Available_Gap_s"]), 1)) for r in gap) == [("Accepted", 2.0), ("Rejected", 1.0)], str(rows))
+    check("Stopped_In_Conflict_Zone = 1 and Was_Stopped = 0 (it did not wait before entering)",
+          all(r["Stopped_In_Conflict_Zone"] == "1" and r["Was_Stopped"] == "0" for r in gap),
+          str([(r["Stopped_In_Conflict_Zone"], r["Was_Stopped"]) for r in gap]))
     app.run3_gap_subject_1367_var.set(True)
     app.run3_gap_subject_5631_var.set(True)
 
