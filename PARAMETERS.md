@@ -42,6 +42,13 @@
 | `ttc_min_speed_kmh` | 5.0 | TTC | **คันใดช้ากว่านี้ ข้ามเฟรมนั้น** (รถจอดที่กรอบกระพริบมีความเร็วปลอม; ตั้ง 0 = ปิด) — ผลข้างเคียง: รถที่จอดจริง (เช่น คิว) กับรถที่วิ่งเข้าหาจะถูกข้ามด้วย; ค่า 5 เป็นค่าที่เราเลือก ไม่มีที่มา | 2, 5, 10 |
 | `ttc_min_rel_speed_ms` | 0.5 | TTC | ข้ามคู่ที่ความเร็วสัมพัทธ์ต่ำกว่านี้ (m/s) กันค่า TTC ไม่นิ่ง | 0.25, 0.5, 1.0 |
 | `ttc_zones` | 3, 6 | TTC | **โซนที่จุดชนต้องอยู่** (ไม่ใช่โซนที่รถต้องอยู่; เดิมคัดเฟรมที่รถอยู่ในโซน) | |
+| `ttc_include_rear_end` | เปิด | TTC | นับเหตุการณ์ TTC_Type = Rear-end (ทิศเดียวกัน, มุมน้อยกว่า `ttc_angle_rear_end_deg`) | เปิด / ปิด |
+| `ttc_include_lane_change` | เปิด | TTC | นับเหตุการณ์ Lane change | เปิด / ปิด |
+| `ttc_include_crossing` | เปิด | TTC | นับเหตุการณ์ Crossing — ชนิดที่ปิดไม่ออกแถวใน TTC.csv (เฟรมอยู่ใน TTC_Frames.csv สถานะ Type_Excluded) | เปิด / ปิด |
+| `pet_include_rear_end` | ปิด | PET | นับคู่ชนิด Rear-end (มุมที่จุดตัดน้อยกว่า `ttc_angle_rear_end_deg` = 30°) ใน PET หรือไม่ — ปิดเพราะ PET ใช้กับรถที่เส้นทางตัดกัน รถตามกันดู TTC และ Headway (ที่มา: นิยาม PET ในงานทั่วไป) | เปิด / ปิด |
+| `pet_include_lane_change` | เปิด | PET | นับคู่ชนิด Lane change (30°–85° ตามเกณฑ์ TTC) | เปิด / ปิด |
+| `pet_include_crossing` | เปิด | PET | นับคู่ชนิด Crossing (มากกว่า `ttc_angle_crossing_deg` = 85°) | เปิด / ปิด |
+| `headway_enabled` | เปิด | Headway | เขียน `Headway.csv` (Time_Headway_s = เวลาข้ามของรถติดกันใน Movement เดียวกัน, Time_Gap_s = Time_Headway_s − ความยาวรถคันหน้า ÷ ความเร็ว); ไม่มีระดับความเสี่ยง (ยังไม่มีที่มาของเกณฑ์) | เปิด / ปิด |
 | `ttc_method` | point | TTC | **point = จุดเดียวต่อรถ (ค่าตั้งต้น)**: TTC = −(r·v)/(v·v) (r = ตำแหน่งสัมพัทธ์, v = ความเร็วสัมพัทธ์, r·v < 0) นับเมื่อสองจุดเข้าใกล้กันไม่เกิน (W_A+W_B)/2 + `ttc_miss_margin_m`; **box = สี่เหลี่ยมรถ** (เวลาที่กรอบแตะกัน) | point / box |
 | `ttc_miss_margin_m` | 0.5 | TTC (แบบจุดเดียว) | ค่าเผื่อบวกกับครึ่งความกว้างรวม (m) — จำเป็น เพราะ TTC บอกแค่ "เมื่อไรใกล้กันที่สุด" รถที่แค่ผ่านกันห่าง ๆ ก็มี TTC ลดเหลือ ~0 ตรงจุดนั้น (R37); ใหญ่มาก = ปิดกฎ; 0.5 เราเลือก ไม่มีที่มา | 0, 0.5, 1.0 |
 | `ttc_meet_in_zone` | เปิด | TTC | **จุดที่รถสองคันมาเจอกัน (กึ่งกลางระหว่างสองคันเมื่อครบเวลา TTC) ต้องอยู่ในโซนที่เลือก** (โซน TTC หน้า ③) ไม่งั้นเฟรมนั้นไม่นับ (สถานะ `Outside_Zone` ใน TTC_Frames.csv); ปิด = เหมือนเดิม (ตรวจแค่ว่ารถอยู่ในโซนตอนนั้น) | เปิด/ปิด |
@@ -132,6 +139,7 @@ py -3.12 tools/batch_run.py --settings "../Output/Test/R5/คลิป/Settings.
 |---|---|
 | `Detection_Records.csv`, `ID_Zone_Summary.csv`, `Zone_Summary.csv` | กรอบรถต่อเฟรม, เส้นทางโซนต่อ ID, สรุปต่อโซน |
 | `Gap_Acceptance.csv`, `Critical_Gap.csv` | Gap Acceptance |
+| `Headway.csv` | Headway (ไฟล์เสริม SPEC 9.1) |
 | `LDP.csv` | LDP |
 | `Lateral_Clearance_Pairs.csv` | Lateral Clearance (ค่าต่ำสุดต่อคู่) |
 | `Lateral_Clearance.csv`, `TTC_Detail.csv`, `TTC_Frames.csv` | **ไฟล์ตรวจสอบ — เขียนเฉพาะเมื่อติ๊ก "เขียนไฟล์ตรวจสอบเพิ่ม"** (แท็บ ③ ด้านบน; ค่าตั้งต้นปิด): ทุกตัวอย่างของ Lateral Clearance, ค่าตรวจสอบต่อเหตุการณ์ TTC (ต่อกับ `TTC.csv` ด้วย `Event_ID`), ทุกเฟรมของทุกคู่ TTC |

@@ -516,6 +516,13 @@ RUN3_DEFAULTS = {
     "pet_show_point_xy": True,              # draw the PET crossing point (magenta X + PET) in the X-Y video
     "pet_show_point_video": False,         # draw it also on the normal roadside video (Tracking_Result.mp4) after Run 3
     "write_detail_files": False,           # also write the checking files: Lateral_Clearance.csv (every sample), TTC_Detail.csv, TTC_Frames.csv
+    "ttc_include_rear_end": True,          # TTC counts events of TTC_Type Rear-end / Lane change / Crossing (the angle limits below); each can be switched off
+    "ttc_include_lane_change": True,
+    "ttc_include_crossing": True,
+    "pet_include_rear_end": False,          # PET counts pairs of conflict type Rear-end (same direction at the crossing; followers - off by default, see Headway)
+    "pet_include_lane_change": True,       # PET counts pairs of conflict type Lane change
+    "pet_include_crossing": True,          # PET counts pairs of conflict type Crossing   (the angle limits are TTC's: ttc_angle_rear_end_deg / ttc_angle_crossing_deg)
+    "headway_enabled": True,               # Headway.csv: time headway / time gap of consecutive vehicles of each Movement (extra file, no risk level)
     "pet_use_area": True,                  # conflict AREA = circle around the crossing point, radius (W_A + W_B) / 2; off = the crossing point only
     "pet_min_speed_kmh": "",                # a vehicle slower than this while passing the crossing point skips the pair; blank = no limit
     "pet_max_s": "10.0",                    # pairs/events above this are not PET conflicts; blank = no limit
@@ -1004,6 +1011,23 @@ def ttc_conflict_type(theta_deg, rear_end_deg=TTC_ANGLE_REAR_END_DEG, crossing_d
     return "Crossing"
 
 
+def type_included(ctype, c, prefix, rear_default):
+    """Is a pair / event of this conflict type counted? `prefix` = "pet" or "ttc": the switches <prefix>_include_rear_end / _lane_change / _crossing
+    follow the angle rule of TTC (Rear-end / Lane change / Crossing). Unclassified (no angle: a vehicle standing still) is always counted."""
+    key = {"Rear-end": ("_include_rear_end", rear_default), "Lane change": ("_include_lane_change", True), "Crossing": ("_include_crossing", True)}.get(ctype)
+    return True if key is None else bool(c.get(prefix + key[0], key[1]))
+
+
+def pet_type_included(ctype, c):
+    """PET: Rear-end off by default (followers), Lane change and Crossing on."""
+    return type_included(ctype, c, "pet", False)
+
+
+def ttc_type_included(ctype, c):
+    """TTC: all three types on by default."""
+    return type_included(ctype, c, "ttc", True)
+
+
 def canvas_to_video(cx, cy, scale, width, height):
     """Canvas (screen) coordinates -> video pixel coordinates, clamped to the frame."""
     x = int(round(cx / scale))
@@ -1129,7 +1153,7 @@ GAP_PATHS = {
 }
 # Fallback reference time of a conflicting stream when no Line is usable: the first time
 # a vehicle of that stream is seen in the stream's origin zone.
-GAP_REFERENCE_ZONE = {"2-3-4": 2, "5-6-7": 5, "5-6-3-1": 5, "1-3-6-7": 1}
+GAP_REFERENCE_ZONE = {"2-3-4": 2, "5-6-7": 5, "5-6-3-1": 5, "1-3-6-7": 1, "1-3-4": 1, "2-3-1": 2}   # the last two are only used by Headway
 GAP_HOLD_SPEED_KMH = 5.0      # default: "stopped" = speed <= this ...
 GAP_HOLD_MIN_S = 0.30         # ... for at least this long (inside the conflict zones)
 
@@ -3871,6 +3895,13 @@ class Run1App:
         self.run3_pet_min_speed_var = tk.StringVar(value=RUN3_DEFAULTS["pet_min_speed_kmh"])
         self.run3_write_detail_var = tk.BooleanVar(value=RUN3_DEFAULTS["write_detail_files"])
         self.run3_pet_use_area_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_use_area"])
+        self.run3_ttc_include_rear_var = tk.BooleanVar(value=RUN3_DEFAULTS["ttc_include_rear_end"])
+        self.run3_ttc_include_lane_var = tk.BooleanVar(value=RUN3_DEFAULTS["ttc_include_lane_change"])
+        self.run3_ttc_include_cross_var = tk.BooleanVar(value=RUN3_DEFAULTS["ttc_include_crossing"])
+        self.run3_pet_include_rear_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_include_rear_end"])
+        self.run3_pet_include_lane_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_include_lane_change"])
+        self.run3_pet_include_cross_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_include_crossing"])
+        self.run3_headway_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["headway_enabled"])
         self.run3_pet_show_xy_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_show_point_xy"])
         self.run3_pet_show_video_var = tk.BooleanVar(value=RUN3_DEFAULTS["pet_show_point_video"])
         self.run3_ttc_max_record_var = tk.StringVar(value=RUN3_DEFAULTS["ttc_max_record_s"])
@@ -4345,6 +4376,8 @@ class Run1App:
         self.run3_reference_text = tk.Text(box, height=5, width=80, wrap="none")
         self.run3_reference_text.grid(row=6, column=0, columnspan=8, sticky="ew", pady=(0, 2))
         self.run3_reference_text.insert("1.0", self.run3_reference_mapping_text)
+        ttk.Checkbutton(box, text="เขียนไฟล์ Headway.csv (เวลาระหว่างรถติดกันในแต่ละ Movement — Time Headway และ Time Gap; ใช้เส้น Line/โซนต้นทางชุดเดียวกับช่องว่าง)",
+                        variable=self.run3_headway_enabled_var).grid(row=7, column=0, columnspan=8, sticky="w", pady=2)
 
         box = self._indicator_box("TTC", self.run3_ttc_enabled_var,
                                   "รถแต่ละคัน = สี่เหลี่ยม ยาว×กว้างตามชนิดรถ (หันตามทิศความเร็ว) — TTC = เวลาที่สี่เหลี่ยมสองอันจะแตะกัน ถ้าทั้งคู่วิ่งตรงด้วยเวกเตอร์ความเร็วของเฟรมนั้น (ไม่แตะ = ไม่มี TTC)   |   เลือกค่าต่ำสุดต่อเหตุการณ์   |   ชนิดแยกด้วยมุมระหว่างทิศวิ่ง (Yaibok et al. 2026)")
@@ -4368,6 +4401,13 @@ class Run1App:
                                           ("มุมความขัดแย้ง: มากกว่านี้ = Crossing (deg), ระหว่างกลาง = Lane change", self.run3_ttc_angle_cross_var))):
             self._entry_row(box, 2 + i, label, var, span=7)
 
+        type_row = ttk.Frame(box)
+        type_row.grid(row=20, column=0, columnspan=8, sticky="w", pady=2)
+        ttk.Label(type_row, text="ชนิดความขัดแย้งที่นับใน TTC (TTC_Type ตามมุมด้านบน):").pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(type_row, text="Rear-end (ทิศเดียวกัน)", variable=self.run3_ttc_include_rear_var).pack(side="left", padx=4)
+        ttk.Checkbutton(type_row, text="Lane change", variable=self.run3_ttc_include_lane_var).pack(side="left", padx=4)
+        ttk.Checkbutton(type_row, text="Crossing (ตัดขวาง)", variable=self.run3_ttc_include_cross_var).pack(side="left", padx=4)
+
         box = self._indicator_box("PET", self.run3_pet_enabled_var, "PET คำนวณแยกในแต่ละโซนที่ติ๊ก (ค่าเริ่มต้น Zone 3 / Zone 6)")
         self._zone_checks(box, self.run3_pet_zone_vars, 1)
         for i, (label, var) in enumerate((("PET threshold (s)", self.run3_pet_threshold_var),
@@ -4376,6 +4416,12 @@ class Run1App:
             self._entry_row(box, 2 + i, label, var)
         ttk.Checkbutton(box, text="ใช้พื้นที่ขัดแย้ง: วงกลมรอบจุดตัด รัศมี = (W_A + W_B) / 2 ของรถสองคัน  (ไม่ติ๊ก = ใช้แค่จุดตัด)",
                         variable=self.run3_pet_use_area_var).grid(row=5, column=0, columnspan=8, sticky="w", pady=2)
+        type_row = ttk.Frame(box)
+        type_row.grid(row=6, column=0, columnspan=8, sticky="w", pady=2)
+        ttk.Label(type_row, text="ชนิดความขัดแย้งที่นับใน PET (แบ่งด้วยมุมเดียวกับ TTC — ตั้งมุมในกรอบ TTC):").pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(type_row, text="Rear-end (ทิศเดียวกัน)", variable=self.run3_pet_include_rear_var).pack(side="left", padx=4)
+        ttk.Checkbutton(type_row, text="Lane change", variable=self.run3_pet_include_lane_var).pack(side="left", padx=4)
+        ttk.Checkbutton(type_row, text="Crossing (ตัดขวาง)", variable=self.run3_pet_include_cross_var).pack(side="left", padx=4)
 
         box = self._indicator_box("Speed (ทุกเฟรม)", self.run3_speed_enabled_var,
                                   "ความเร็วต่อโซน + ความเร็วภาพรวมตาม Movement (เช่น 2-3-4) — ความยาวเส้นทางเมตร ÷ เวลา")
@@ -5829,6 +5875,13 @@ class Run1App:
                 "pet_min_speed_kmh": self.run3_pet_min_speed_var.get(),
                 "write_detail_files": self.run3_write_detail_var.get(),
                 "pet_use_area": self.run3_pet_use_area_var.get(),
+                "ttc_include_rear_end": self.run3_ttc_include_rear_var.get(),
+                "ttc_include_lane_change": self.run3_ttc_include_lane_var.get(),
+                "ttc_include_crossing": self.run3_ttc_include_cross_var.get(),
+                "pet_include_rear_end": self.run3_pet_include_rear_var.get(),
+                "pet_include_lane_change": self.run3_pet_include_lane_var.get(),
+                "pet_include_crossing": self.run3_pet_include_cross_var.get(),
+                "headway_enabled": self.run3_headway_enabled_var.get(),
                 "pet_show_point_xy": self.run3_pet_show_xy_var.get(),
                 "pet_show_point_video": self.run3_pet_show_video_var.get(),
                 "ttc_max_record_s": self.run3_ttc_max_record_var.get(),
@@ -5991,6 +6044,13 @@ class Run1App:
                 ("pet_min_speed_kmh", self.run3_pet_min_speed_var),
                 ("write_detail_files", self.run3_write_detail_var),
                 ("pet_use_area", self.run3_pet_use_area_var),
+                ("ttc_include_rear_end", self.run3_ttc_include_rear_var),
+                ("ttc_include_lane_change", self.run3_ttc_include_lane_var),
+                ("ttc_include_crossing", self.run3_ttc_include_cross_var),
+                ("pet_include_rear_end", self.run3_pet_include_rear_var),
+                ("pet_include_lane_change", self.run3_pet_include_lane_var),
+                ("pet_include_crossing", self.run3_pet_include_cross_var),
+                ("headway_enabled", self.run3_headway_enabled_var),
                 ("pet_show_point_xy", self.run3_pet_show_xy_var),
                 ("pet_show_point_video", self.run3_pet_show_video_var),
                 ("ttc_max_record_s", self.run3_ttc_max_record_var),
@@ -9267,6 +9327,13 @@ class Run1App:
             "pet_max_s": pet_max if (pet_max is not None and pet_max > 0) else None,
             "write_detail_files": bool(self.run3_write_detail_var.get()),
             "pet_use_area": bool(self.run3_pet_use_area_var.get()),
+            "ttc_include_rear_end": bool(self.run3_ttc_include_rear_var.get()),
+            "ttc_include_lane_change": bool(self.run3_ttc_include_lane_var.get()),
+            "ttc_include_crossing": bool(self.run3_ttc_include_cross_var.get()),
+            "pet_include_rear_end": bool(self.run3_pet_include_rear_var.get()),
+            "pet_include_lane_change": bool(self.run3_pet_include_lane_var.get()),
+            "pet_include_crossing": bool(self.run3_pet_include_cross_var.get()),
+            "headway_enabled": bool(self.run3_headway_enabled_var.get()),
             "pet_show_point_xy": bool(self.run3_pet_show_xy_var.get()),
             "pet_show_point_video": bool(self.run3_pet_show_video_var.get()),
             "pet_min_speed_kmh": pet_min_speed if (pet_min_speed is not None and pet_min_speed > 0) else None,
@@ -9994,6 +10061,77 @@ class Run1App:
             return self._run3_step_speed_kmh(valid[0], valid[1])
         return self._run3_step_speed_kmh(valid[i - 1], valid[i])
 
+    def _run3_stream_events(self, tracks, movement_by_id, cm, mapping, site):
+        """The reference event of every vehicle of stream `cm` (a Movement): (time, id, class, reference label, qc flag).
+        = its first crossing of the Line mapped to (site, cm); with no usable Line (fewer than 2 vehicles crossing it) its first
+        observation in the stream's origin zone (GAP_REFERENCE_ZONE). Returns (events, basis) with basis "Line" / "Origin_Zone_Entry".
+        Used by Gap Acceptance (gaps) and Headway."""
+        lname = mapping.get((site, cm)) if mapping else None
+        line = self.lines.get(lname, []) if lname else []
+        events = []
+        if len(line) == 2:
+            for tid, rows in tracks.items():
+                if movement_by_id.get(str(tid), "") != cm:
+                    continue
+                prev = prev_t = None
+                for r in rows:
+                    pnt, t = r.get("_point"), r.get("_timestamp")
+                    if pnt is None or t is None:
+                        continue
+                    if prev is not None:
+                        cross_t = self._run3_line_crossing_time(prev, prev_t, pnt, t, line)
+                        if cross_t is not None:
+                            events.append((float(cross_t), str(tid), r.get("class_name", ""), lname, ""))
+                            break      # a vehicle crosses its reference line ONCE (first crossing)
+                    prev, prev_t = pnt, t
+        basis = "Line"
+        if len(events) < 2:
+            events, basis = [], "Origin_Zone_Entry"
+            ref_zone = GAP_REFERENCE_ZONE.get(cm)
+            for tid, rows in tracks.items():
+                if movement_by_id.get(str(tid), "") != cm or ref_zone is None:
+                    continue
+                cand = [r for r in rows if r.get("_zone_num") == ref_zone and r.get("_timestamp") is not None]
+                if cand:
+                    first = min(cand, key=lambda r: r["_timestamp"])
+                    events.append((float(first["_timestamp"]), str(tid), first.get("class_name", ""),
+                                   f"Observed Zone {ref_zone}",
+                                   "Reference_Time_From_Origin_Zone_Entry" + ("" if not lname else "_Line_Unusable")))
+        return events, basis
+
+    def _run3_headway(self, tracks, c, mapping, movement_by_id):
+        """Headway.csv rows (SPEC 9.1): for every Movement, the vehicles sorted by their reference time (see _run3_stream_events);
+        Time_Headway_s = the next vehicle's time - this vehicle's time; Time_Gap_s = Time_Headway_s - lead length / lead speed
+        (blank when the lead is slower than ttc_min_speed_kmh; negative = the two bodies overlap in time)."""
+        site = c["site_id"]
+        lengths = c.get("lengths") or {}
+        min_speed = c.get("ttc_min_speed_kmh", 5.0)
+        rows_out = []
+        for cm in MOVEMENT_IDS:
+            events, basis = self._run3_stream_events(tracks, movement_by_id, cm, mapping, site)
+            for g in build_gap_intervals(events):
+                lead_speed = self._run3_speed_at(tracks.get(g["id_a"], []), g["gap_start"])
+                length = lengths.get(self._run3_canonical_class(g["class_a"]))
+                headway = g["gap_end"] - g["gap_start"]
+                time_gap = None
+                qc = [g["qc"]]
+                if lead_speed is not None and lead_speed > min_speed and length:
+                    time_gap = headway - length / (lead_speed / 3.6)
+                    if time_gap < 0:
+                        qc.append("Negative_Time_Gap")
+                elif length:
+                    qc.append("Lead_Too_Slow_For_Time_Gap")
+                rows_out.append({
+                    "Site_ID": site, "Movement": cm, "Reference_Line": g["reference"],
+                    "Lead_Vehicle_ID": g["id_a"], "Lead_Vehicle_Class": g["class_a"],
+                    "Lag_Vehicle_ID": g["id_b"], "Lag_Vehicle_Class": g["class_b"],
+                    "Lead_Time_s": f"{g['gap_start']:.3f}", "Lag_Time_s": f"{g['gap_end']:.3f}",
+                    "Time_Headway_s": f"{headway:.3f}",
+                    "Lead_Speed_kmh": self._fmt(lead_speed, 3), "Lead_Length_m": "" if not length else f"{length:.2f}",
+                    "Time_Gap_s": self._fmt(time_gap, 3), "QC_Flag": ";".join(dict.fromkeys(x for x in qc if x)),
+                })
+        return rows_out
+
     def _run3_gap(self, tracks, c, mapping, movement_by_id):
         """Binary Gap Acceptance decisions (accepted / rejected gaps) of waiting drivers.
 
@@ -10024,37 +10162,7 @@ class Run1App:
         streams = sorted({cm for mv in selected for cm in RUN3_GAP_CONFLICT_MAP.get(mv, [])})
         intervals = {}
         for cm in streams:
-            lname = mapping.get((site, cm)) if mapping else None
-            line = self.lines.get(lname, []) if lname else []
-            events = []
-            if len(line) == 2:
-                for tid, rows in tracks.items():
-                    if movement_by_id.get(str(tid), "") != cm:
-                        continue
-                    prev = prev_t = None
-                    for r in rows:
-                        pnt, t = r.get("_point"), r.get("_timestamp")
-                        if pnt is None or t is None:
-                            continue
-                        if prev is not None:
-                            cross_t = self._run3_line_crossing_time(prev, prev_t, pnt, t, line)
-                            if cross_t is not None:
-                                events.append((float(cross_t), str(tid), r.get("class_name", ""), lname, ""))
-                                break      # a vehicle crosses its reference line ONCE (first crossing)
-                        prev, prev_t = pnt, t
-            basis = "Line"
-            if len(events) < 2:
-                events, basis = [], "Origin_Zone_Entry"
-                ref_zone = GAP_REFERENCE_ZONE.get(cm)
-                for tid, rows in tracks.items():
-                    if movement_by_id.get(str(tid), "") != cm or ref_zone is None:
-                        continue
-                    cand = [r for r in rows if r.get("_zone_num") == ref_zone and r.get("_timestamp") is not None]
-                    if cand:
-                        first = min(cand, key=lambda r: r["_timestamp"])
-                        events.append((float(first["_timestamp"]), str(tid), first.get("class_name", ""),
-                                       f"Observed Zone {ref_zone}",
-                                       "Reference_Time_From_Origin_Zone_Entry" + ("" if not lname else "_Line_Unusable")))
+            events, basis = self._run3_stream_events(tracks, movement_by_id, cm, mapping, site)
             intervals[cm] = build_gap_intervals(events)
             diag["streams"][cm] = {"basis": basis, "vehicles": len({e[1] for e in events}), "gaps": len(intervals[cm])}
 
@@ -10437,7 +10545,7 @@ class Run1App:
         ids = list(tracks)
         diag = {"zone_tracks": {}, "pairs_with_both_in_zone": 0, "pairs_skipped_time_window": 0,
                 "no_crossing": 0, "no_movement_both": 0, "interaction_candidates": 0,
-                "overlap_intervals": 0, "no_area_pass": 0, "above_pet_max": 0, "slow_vehicle": 0, "interpolated_gap": 0,
+                "overlap_intervals": 0, "no_area_pass": 0, "excluded_by_type": 0, "excluded_rear_end": 0, "excluded_lane_change": 0, "excluded_crossing": 0, "above_pet_max": 0, "slow_vehicle": 0, "interpolated_gap": 0,
                 "tracks_with_movement": sum(1 for t in ids if movement_by_id.get(t))}
         out = []
         for zone in sorted(c["pet_zones"]):
@@ -10480,6 +10588,10 @@ class Run1App:
                     theta = conflict_angle_deg(path_velocity_at(A, At, t_a, PET_SPEED_WINDOW_S, cr["seg_a"]), path_velocity_at(B, Bt, t_b, PET_SPEED_WINDOW_S, cr["seg_b"]),
                                                c.get("ttc_min_speed_kmh", 5.0) / 3.6)
                     ctype = ttc_conflict_type(theta, c.get("ttc_angle_rear_end_deg", TTC_ANGLE_REAR_END_DEG), c.get("ttc_angle_crossing_deg", TTC_ANGLE_CROSSING_DEG))
+                    if not pet_type_included(ctype, c):
+                        diag["excluded_by_type"] += 1
+                        diag["excluded_" + ctype.lower().replace("-", "_").replace(" ", "_")] += 1      # excluded_rear_end / excluded_lane_change / excluded_crossing
+                        continue
                     gap_flag = max(At[ia_ + 1] - At[ia_], Bt[ib_ + 1] - Bt[ib_]) > PET_GAP_FLAG_S
                     if gap_flag:
                         diag["interpolated_gap"] += 1
@@ -10617,7 +10729,7 @@ class Run1App:
             return None
 
         visits_of = {}                                        # tid -> flicker-cleaned zone visits (the Zone Sequence with its times)
-        diag = {"zone_geometry": bool(geom), "frames_zone_not_on_path": 0, "frames_collision_point_outside_zone": 0, "frames_with_pairs": 0, "pairs_evaluated": 0, "pairs_outside_radius": 0, "pairs_slow_vehicle": 0, "pairs_slow_relative": 0,
+        diag = {"zone_geometry": bool(geom), "events_type_excluded": 0, "frames_zone_not_on_path": 0, "frames_collision_point_outside_zone": 0, "frames_with_pairs": 0, "pairs_evaluated": 0, "pairs_outside_radius": 0, "pairs_slow_vehicle": 0, "pairs_slow_relative": 0,
                 "frames_boxes_never_touch": 0, "frames_already_overlapping": 0, "frames_above_ttc_max": 0, "candidates": 0}
 
         def size_of(cls):
@@ -10747,6 +10859,7 @@ class Run1App:
                     frame_rows.append(entry)
 
         out = []
+        removed = []                  # (frame, id A, id B) of the frames of events whose type is switched off
         event_gap = 1.0
         for (id_a, id_b), lst in cand.items():
             lst.sort(key=lambda x: x["t"])
@@ -10761,6 +10874,14 @@ class Run1App:
                 a_, b_, res = best["a"], best["b"], best["res"]
                 sp_a, sp_b = best["sp_a"], best["sp_b"]
                 theta = best["theta"]
+                ev_type = ttc_conflict_type(theta, a_rear, a_cross)
+                if not ttc_type_included(ev_type, c):
+                    # a type that is switched off: no event row, no mark in the videos; its frames stay in TTC_Frames.csv with this status
+                    diag["events_type_excluded"] += 1
+                    for e_ in ev:
+                        e_["status"] = "Type_Excluded"
+                        removed.append((e_["fr"], a_["tid"], b_["tid"]))
+                    continue
                 event_id = f"TTC_{a_['tid']}_{b_['tid']}_{ev[0]['t']:.6f}"
                 for e_ in ev:
                     e_["event_id"] = event_id
@@ -10775,7 +10896,7 @@ class Run1App:
                 out.append({
                     "Site_ID": c["site_id"],
                     "Event_ID": event_id,
-                    "TTC_Type": ttc_conflict_type(theta, a_rear, a_cross),
+                    "TTC_Type": ev_type,
                     "Vehicle_A_ID": a_["tid"], "Vehicle_A_Class": a_["cls"], "Movement_A": movement_by_id.get(str(a_["tid"]), ""),
                     "Vehicle_B_ID": b_["tid"], "Vehicle_B_Class": b_["cls"], "Movement_B": movement_by_id.get(str(b_["tid"]), ""),
                     "Zone": f"Zone {best['zone_hit'] if best.get('zone_hit') is not None else a_['zone']}", "Event_Start": f"{ev[0]['t']:.6f}", "Event_End": f"{ev[-1]['t']:.6f}",
@@ -10799,6 +10920,12 @@ class Run1App:
                         self._run3_qc_calibration(c),
                     ] if x),
                 })
+        for fr_, ta_, tb_ in removed:
+            if fr_ in shapes:
+                sh_ = shapes[fr_]
+                sh_["pairs"] = [q for q in sh_["pairs"] if not (q[0] == ta_ and q[1] == tb_)]
+                sh_["marks"] = [q for q in sh_["marks"] if not (q["a"] == ta_ and q["b"] == tb_)]
+                sh_["hot"] = {t_ for q in sh_["pairs"] for t_ in q[:2]}
         out.sort(key=lambda r: float(r["TTCmin_Time"]))
         frames_out = []
         for e_ in sorted(frame_rows, key=lambda x: (str(x["a"]["tid"]), str(x["b"]["tid"]), x["t"])):
@@ -11089,6 +11216,18 @@ class Run1App:
             summary["diagnostics"]["gap"] = dict(getattr(self, "_run3_gap_diag", {}), rows=len(gap_rows),
                                                  rule="staged decision per middle zone (SPEC 6.1); Line optional (origin-zone entry fallback)")
         run_step("gap", "Gap_Acceptance.csv", do_gap)
+
+        # ---------------- Headway (extra file: followers; no risk level) ----------------
+        def do_headway():
+            status("Run 3 — Headway...")
+            hw_rows = self._run3_headway(tracks, c, mapping, movement_by_id)
+            fields = ["Site_ID", "Movement", "Reference_Line", "Lead_Vehicle_ID", "Lead_Vehicle_Class", "Lag_Vehicle_ID", "Lag_Vehicle_Class",
+                      "Lead_Time_s", "Lag_Time_s", "Time_Headway_s", "Time_Gap_s", "Lead_Speed_kmh", "Lead_Length_m", "QC_Flag"]
+            row_counts["headway"] = len(hw_rows)
+            outputs["headway"] = write_csv("Headway.csv", fields, hw_rows)
+            summary["indicators"]["Headway"] = {"rows": len(hw_rows), "movements": sorted({r["Movement"] for r in hw_rows}),
+                                                "negative_time_gap": sum(1 for r in hw_rows if "Negative_Time_Gap" in r["QC_Flag"])}
+        run_step("headway", "Headway.csv", do_headway)
 
         # ---------------- TTC (time) ----------------
         def do_ttc():
