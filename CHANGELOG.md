@@ -1,7 +1,7 @@
 # CHANGELOG — เลขเวอร์ชัน PKT x.y.z
 
 ประวัติการเปลี่ยนแปลงของโปรแกรม PK Studio เรียงตามเวลา แต่ละบรรทัดมีเลขเวอร์ชัน PKT, รหัส commit (hash), ชื่อเดิม และคำอธิบายสั้น ๆ ว่าทำอะไร
-ชื่อ commit ทั้งหมดถูกเปลี่ยนเป็น `PKT x.y.z: ...` แล้ว (PKT 1.25.2); คอลัมน์ "ชื่อเดิม" คือชื่อก่อนเปลี่ยน; hash ในตารางเป็นของประวัติใหม่ (61 commit แรกก่อน v27(1) hash ไม่เปลี่ยน)
+ชื่อ commit ทั้งหมดถูกเปลี่ยนเป็น `PKT x.y.z: ...` แล้ว (PKT 1.29.2); คอลัมน์ "ชื่อเดิม" คือชื่อก่อนเปลี่ยน; hash ในตารางเป็นของประวัติใหม่ (61 commit แรกก่อน v27(1) hash ไม่เปลี่ยน)
 
 ## กติกาเลขเวอร์ชัน
 
@@ -13,7 +13,7 @@
 
 - commit ใหม่ตั้งชื่อ `PKT x.y.z: คำอธิบายสั้น ๆ` (ต่อ `(PASS)` เมื่อผู้ใช้ยืนยัน) และติด tag `PKT-x.y.z` ที่ commit นั้น
 - `Merge pull request ...` ที่ GitHub สร้างให้ไม่ให้เลขเวอร์ชัน (ไม่ใช่งาน)
-- เวอร์ชันถัดไป: งานต่อเรื่องเดิม = `1.30.5`; เรื่องใหม่ = `1.31.0` (เลขเรียงตามหัวข้อ ไม่ใช่เวลาเสมอไป — หัวข้อ 1.25 ทำหลังหัวข้อ 1.26–1.28 ของเซสชัน cloud)
+- เวอร์ชันถัดไป: งานต่อเรื่องเดิม = `1.30.6`; เรื่องใหม่ = `1.31.0` (เลขเรียงตามหัวข้อ ไม่ใช่เวลาเสมอไป — หัวข้อ 1.25 ทำหลังหัวข้อ 1.26–1.28 ของเซสชัน cloud)
 
 
 ## 0.1.z — เอกสารโปรเจ็คและกติกา git (ก่อนชุด v27)
@@ -326,9 +326,9 @@
 | PKT | commit | ชื่อเดิม | ทำอะไร |
 |---|---|---|---|
 | **PKT 1.25.0** | (commit นี้) | PKT 1.25.0: Changelog_PKT_VersionNumbers_Tags | ตั้งกติกาเลขเวอร์ชัน PKT x.y.z, ทำตารางนี้, ติด tag `PKT-x.y.z` ให้ทุก commit ในตาราง |
-| **PKT 1.25.1** | (ตัวรวม main ถูกเอาออกแล้ว tag ชี้ที่ 1.25.2) | PKT 1.25.1: Changelog_IncludesCloudSessionCommits_MergeMain | รวมงานของเซสชัน cloud (หัวข้อ 1.26–1.28) เข้าตาราง, ผู้ใช้ยืนยันใช้ PKT ตามของตน ทับการยกเลิก `PKT 1.78.0` |
+| **PKT 1.25.1** | (ตัวรวม main ถูกเอาออกแล้ว tag ชี้ที่ 1.29.2) | PKT 1.25.1: Changelog_IncludesCloudSessionCommits_MergeMain | รวมงานของเซสชัน cloud (หัวข้อ 1.26–1.28) เข้าตาราง, ผู้ใช้ยืนยันใช้ PKT ตามของตน ทับการยกเลิก `PKT 1.78.0` |
 
-| **PKT 1.25.2** | (commit นี้) | PKT 1.25.2: Changelog_HashesUpdatedAfterRename | เปลี่ยนชื่อ commit เก่าทั้งหมดเป็น `PKT x.y.z: ...` (เขียนประวัติ main ใหม่เฉพาะข้อความ เนื้อไฟล์เท่าเดิมทุกไบต์) และแก้ hash ในตารางให้ตรงของใหม่; ประวัติเดิมสำรองไว้ใน `_git_backup/` |
+| **PKT 1.29.2** | `f6e0451` | PKT 1.29.2: Changelog_HashesUpdatedAfterRename | เปลี่ยนชื่อ commit เก่าทั้งหมดเป็น `PKT x.y.z: ...` (เขียนประวัติ main ใหม่เฉพาะข้อความ เนื้อไฟล์เท่าเดิมทุกไบต์) และแก้ hash ในตารางให้ตรงของใหม่; ประวัติเดิมสำรองไว้ใน `_git_backup/` |
 
 ## 1.26.z — ลองตั้งชื่อ PKT 1.x.y ในเซสชัน cloud (ยกเลิกแล้ว — เลข 1.78.0 ไม่ใช้)
 
@@ -365,8 +365,9 @@
 
 | PKT | commit | ชื่อเดิม | ทำอะไร |
 |---|---|---|---|
-| **PKT 1.30.0** | `bf00923` | PKT 1.30.0: PetExcludeRearEnd_HeadwayCsv | PET ตัดคู่ชนิด Rear-end (สวิตช์ `pet_exclude_rear_end`); ไฟล์ใหม่ `Headway.csv` (Time Headway, Time Gap ต่อ Movement); แยกฟังก์ชันหาเวลาข้ามเส้นของกระแสใช้ร่วมกับ Gap Acceptance |
-| **PKT 1.30.1** | `866c541` | PKT 1.30.1: HeadwayFromPetRearEnd_DropConsecutivePairs | **ยกเลิกใน 1.30.2** — เคยเปลี่ยน Headway.csv เป็นแถว PET ชนิด Rear-end |
-| **PKT 1.30.2** | `bb25b78` | PKT 1.30.2: HeadwayBackToLineGaps_PetConflictTypeSwitches | Headway.csv กลับเป็นแบบเส้น Line/โซนต้นทางของแต่ละ Movement (เหมือน 1.30.0); PET มีสวิตช์เลือกนับต่อชนิด Rear-end / Lane change / Crossing (มุมเดียวกับ TTC) แทน `pet_exclude_rear_end` |
+| **PKT 1.30.0** | `781393a` | PKT 1.30.0: PetExcludeRearEnd_HeadwayCsv | PET ตัดคู่ชนิด Rear-end (สวิตช์ `pet_exclude_rear_end`); ไฟล์ใหม่ `Headway.csv` (Time Headway, Time Gap ต่อ Movement); แยกฟังก์ชันหาเวลาข้ามเส้นของกระแสใช้ร่วมกับ Gap Acceptance |
+| **PKT 1.30.1** | `6be0b0d` | PKT 1.30.1: HeadwayFromPetRearEnd_DropConsecutivePairs | **ยกเลิกใน 1.30.2** — เคยเปลี่ยน Headway.csv เป็นแถว PET ชนิด Rear-end |
+| **PKT 1.30.2** | `1a60530` | PKT 1.30.2: HeadwayBackToLineGaps_PetConflictTypeSwitches | Headway.csv กลับเป็นแบบเส้น Line/โซนต้นทางของแต่ละ Movement (เหมือน 1.30.0); PET มีสวิตช์เลือกนับต่อชนิด Rear-end / Lane change / Crossing (มุมเดียวกับ TTC) แทน `pet_exclude_rear_end` |
 | **PKT 1.30.3** | (commit นี้) | PKT 1.30.3: TtcConflictTypeSwitches | TTC มีสวิตช์เลือกนับต่อชนิด TTC_Type (Rear-end / Lane change / Crossing, ค่าตั้งต้นเปิดทั้งสาม) เหมือน PET; ชนิดที่ปิดไม่ออกแถวและไม่วาดในวิดีโอ |
 | **PKT 1.30.4** | (commit นี้) | PKT 1.30.4: Changelog_LinearHistory_MergeCommitsRemoved | เอา Merge pull request (#1–#6) ออกจากประวัติ main ให้เป็นเส้นตรง (งานจริงทุก commit อยู่ครบ เนื้อไฟล์ล่าสุดเท่าเดิม) แก้ hash ในตารางและ tag ให้ตรงของใหม่; ประวัติก่อนแก้สำรองไว้ใน `_git_backup/` |
+| **PKT 1.30.5** | (commit นี้) | PKT 1.30.5: Changelog_Renumber_1.25.2_to_1.29.2 | เปลี่ยนเลข 1.25.2 เป็น 1.29.2 ให้เรียงตามลำดับ commit (แก้ชื่อ commit + tag, แก้ hash ในตาราง) |
