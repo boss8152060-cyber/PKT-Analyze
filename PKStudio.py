@@ -10153,24 +10153,24 @@ class Run1App:
                 sp_b = self._run3_speed_at(tracks.get(o["id_b"], []), o["gap_end"])
                 last = o["stage_no"] == len(entries)
                 rows_out.append({
-                    "Site_ID": site, "Decision_Event_ID": f"{tid}_S{o['stage_no']}_{o['anchor']:.6f}", "Opportunity_No": number,
+                    "Site_ID": site, "Decision_Event_ID": f"{tid}_S{o['stage_no']}_{o['anchor']:.3f}", "Opportunity_No": number,
                     "Subject_ID": tid, "Subject_Class": subject_class, "Subject_Movement": movement,
                     "Decision_Stage": f"Enter_Zone_{o['stage_zone']}", "Stage_No": o["stage_no"],
                     "Decision_Zone": o["decision_zone"],
-                    "Gap_Evaluation_Time": f"{o['opportunity_time']:.6f}",
-                    "Waiting_Time_s": f"{max(0.0, o['opportunity_time'] - o['start']):.6f}",
+                    "Gap_Evaluation_Time": f"{o['opportunity_time']:.3f}",
+                    "Waiting_Time_s": f"{max(0.0, o['opportunity_time'] - o['start']):.3f}",
                     "Was_Stopped": o["was_stopped"],
                     "Stopped_In_Conflict_Zone": in_zone_stop if last else 0,
                     "Conflicting_Movement": o["conflict_movement"],
                     "Conflicting_ID_A": o["id_a"], "Conflicting_Class_A": o["class_a"],
                     "Conflicting_ID_B": o["id_b"], "Conflicting_Class_B": o["class_b"],
                     "Reference_Line": o["reference"],
-                    "Gap_Start_Time": f"{o['gap_start']:.6f}", "Gap_End_Time": f"{o['gap_end']:.6f}",
-                    "Available_Gap_s": f"{o['gap']:.6f}",
+                    "Gap_Start_Time": f"{o['gap_start']:.3f}", "Gap_End_Time": f"{o['gap_end']:.3f}",
+                    "Available_Gap_s": f"{o['gap']:.3f}",
                     "Subject_Speed_kmh": self._fmt(sp_subject, 3), "Conflict_Speed_A_kmh": self._fmt(sp_a, 3),
                     "Conflict_Speed_B_kmh": self._fmt(sp_b, 3),
                     "Gap_Role": "Accepted" if o["accepted"] == 1 else "Rejected", "Gap_Acceptance": int(o["accepted"]),
-                    "Decision_Time": f"{o['opportunity_time']:.6f}",
+                    "Decision_Time": f"{o['opportunity_time']:.3f}",
                     "QC_Flag": ";".join(dict.fromkeys(x for x in qc if x)),
                 })
         self._run3_gap_diag = diag
@@ -11046,14 +11046,29 @@ class Run1App:
                     g["accepted"].append(acc[-1]); g["rejected"].append(max(rej))
                     g["intervals"].append((max(rej), acc[-1]))
             critical = []
-            for (cls, movement, stage_no), g in sorted(groups.items()):
-                cr = self._run3_raff(g["accepted"], g["rejected"]) if c["use_raff"] else None
-                mle = self._run3_mle_driver_intervals(g["intervals"]) if c["use_mle"] else None
+            only_acc, only_rej = defaultdict(int), defaultdict(int)       # drivers left out of the pairs (only accepted / only rejected gaps)
+            for key in set(rejected) | set(accepted):
+                if key in accepted and key not in rejected:
+                    only_acc[(key[0], key[1], key[2])] += 1
+                elif key in rejected and key not in accepted:
+                    only_rej[(key[0], key[1], key[2])] += 1
+            for gkey in sorted(set(groups) | set(only_acc) | set(only_rej)):
+                cls, movement, stage_no = gkey
+                g = groups.get(gkey, {"accepted": [], "rejected": [], "intervals": []})
+                cr = self._run3_raff(g["accepted"], g["rejected"]) if c["use_raff"] and g["intervals"] else None
+                mle = self._run3_mle_driver_intervals(g["intervals"]) if c["use_mle"] and g["intervals"] else None
+                qc = []
+                if not g["intervals"]:
+                    qc.append("No_Driver_With_Both_Rejected_And_Accepted_Gap")
+                elif (c["use_raff"] and cr is None) or (c["use_mle"] and mle is None):
+                    qc.append("Estimate_Not_Available")
                 critical.append({
                     "Site_ID": c["site_id"], "Vehicle_Class": cls, "Movement": movement, "Stage_No": stage_no,
                     "Drivers_With_Pairs": len(g["intervals"]),
+                    "Drivers_Accepted_Only": only_acc.get(gkey, 0), "Drivers_Rejected_Only": only_rej.get(gkey, 0),
                     "Raff_Critical_Gap_s": self._fmt(cr), "MLE_Critical_Gap_Median_s": self._fmt(mle["critical_gap_median"] if mle else None),
                     "MLE_mu": self._fmt(mle["mu"] if mle else None), "MLE_sigma": self._fmt(mle["sigma"] if mle else None),
+                    "QC_Flag": ";".join(qc),
                 })
             if critical:
                 outputs["critical_gap"] = write_csv("Critical_Gap.csv", list(critical[0].keys()), critical)
