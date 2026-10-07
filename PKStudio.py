@@ -388,7 +388,10 @@ DEFAULT_SETTINGS = {
     "track_buffer": "30",
     "match_threshold": "0.80",
 
-    "show_preview": True,
+    "show_preview": False,              # off by default: drawing + showing every frame slows the run (PKT 1.33.0)
+    "video_max_width": "1920",          # Tracking_Result.mp4 is scaled down to at most this width (0 = original size); detection uses the full frame
+    "hw_decode": False,                 # decode the input video on the graphics card when OpenCV supports it (falls back to normal decoding)
+    "use_tensorrt": False,              # run YOLO through a TensorRT engine (best.engine next to best.pt, built on first use; needs the tensorrt package)
     "draw_center": False,  # draw the point that decides the zone (Trajectory Position) on the preview / result video
     "draw_trail": False,
     "trail_length": "30",
@@ -1846,6 +1849,47 @@ def parse_risk_limits(text, ascending):
     if not ok:
         raise ValueError("the three numbers must be " + ("increasing" if ascending else "decreasing"))
     return vals
+
+
+def scaled_video_size(width, height, max_width):
+    """(w, h) of the result video: the input size, scaled down (keeping the shape, even numbers for the encoder) when it is wider than max_width;
+    max_width 0 / blank / invalid = the input size."""
+    try:
+        mw = int(float(str(max_width).strip() or 0))
+    except ValueError:
+        mw = 0
+    if mw <= 0 or width <= mw:
+        return (int(width), int(height))
+    w = mw - (mw % 2)
+    h = int(round(height * w / float(width)))
+    return (w, h - (h % 2))
+
+
+def pairs_within_radius(points, radius):
+    """(pairs, n_far) for the points of one frame: pairs = [(i, j), ...] with i < j in the order of a plain double loop whose distance is
+    <= radius (with a hair of tolerance: the caller checks the exact distance again), n_far = the number of the other pairs.
+    radius None = every pair."""
+    P = np.asarray(points, dtype=float).reshape(-1, 2)
+    n = len(P)
+    if n < 2:
+        return [], 0
+    iu, ju = np.triu_indices(n, 1)
+    if radius is None:
+        return list(zip(iu.tolist(), ju.tolist())), 0
+    d = np.hypot(P[ju, 0] - P[iu, 0], P[ju, 1] - P[iu, 1])
+    keep = d <= float(radius) * (1.0 + 1e-9) + 1e-9
+    return list(zip(iu[keep].tolist(), ju[keep].tolist())), int((~keep).sum())
+
+
+def boxes_overlap(A, B):
+    """Do the bounding boxes of two paths (N x 2) touch? Two paths whose boxes do not touch can never cross."""
+    A = np.asarray(A, dtype=float).reshape(-1, 2)
+    B = np.asarray(B, dtype=float).reshape(-1, 2)
+    if len(A) == 0 or len(B) == 0:
+        return False
+    amin, amax = A.min(axis=0), A.max(axis=0)
+    bmin, bmax = B.min(axis=0), B.max(axis=0)
+    return bool(np.all(amin <= bmax) and np.all(bmin <= amax))
 
 
 def path_crossing(A, B):
@@ -3493,6 +3537,41 @@ class ZoneAlignEditor:
             pass
 
 
+def open_video_capture(path, hw_decode=False):
+    """cv2.VideoCapture of the input video; with hw_decode the graphics card decodes it when this OpenCV build supports it
+    (CAP_PROP_HW_ACCELERATION, OpenCV >= 4.5.2 with FFMPEG); a capture that does not open or cannot read a frame falls back to normal decoding."""
+    if hw_decode and hasattr(cv2, "CAP_PROP_HW_ACCELERATION") and hasattr(cv2, "VIDEO_ACCELERATION_ANY"):
+        try:
+            cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG, [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY])
+            if cap.isOpened():
+                ok, _ = cap.read()
+                if ok:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    log.info("Video decoding on the graphics card (hardware acceleration %s)", cap.get(cv2.CAP_PROP_HW_ACCELERATION))
+                    return cap
+            cap.release()
+        except Exception:
+            log.exception("Hardware video decoding is not available; normal decoding is used")
+    return cv2.VideoCapture(path)
+
+
+def load_yolo_model(model_path, use_tensorrt=False, imgsz=640, device=None):
+    """(YOLO model, path used). With use_tensorrt a TensorRT engine is used: <model>_<imgsz>.engine next to the .pt, built (once, several minutes)
+    when it is missing or older than the .pt. Anything that fails (no tensorrt package, CPU device, export error) falls back to the .pt model."""
+    if use_tensorrt and str(model_path).lower().endswith(".pt") and str(device).lower() not in ("cpu", "none", ""):
+        engine = os.path.splitext(model_path)[0] + f"_{int(imgsz)}.engine"
+        try:
+            if not os.path.isfile(engine) or os.path.getmtime(engine) < os.path.getmtime(model_path):
+                print("TensorRT    : building", engine, "(first time only, this takes a few minutes)")
+                built = YOLO(model_path).export(format="engine", imgsz=int(imgsz), device=device, half=False, verbose=False)
+                if built and os.path.abspath(str(built)) != os.path.abspath(engine):
+                    os.replace(str(built), engine)
+            return YOLO(engine, task="detect"), engine
+        except Exception:
+            log.exception("TensorRT engine could not be used; the .pt model is used instead")
+    return YOLO(model_path), model_path
+
+
 class BackgroundFrameReader:
     """Reads the next frames of a cv2.VideoCapture in a background thread while the main loop runs detection on the GPU
     (decoding a 1080p frame takes ~9 ms of CPU). The frames come out in exactly the same order and are exactly the same
@@ -3565,8 +3644,9 @@ class BackgroundVideoWriter:
 
     _END = object()
 
-    def __init__(self, writer, maxsize=8):
+    def __init__(self, writer, maxsize=8, size=None):
         self.writer = writer
+        self.size = size                     # (w, h): every frame is scaled to it before encoding (None = as it is)
         self.error = None
         self.q = queue.Queue(maxsize=maxsize)
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -3579,6 +3659,8 @@ class BackgroundVideoWriter:
             if frame is self._END:
                 break
             try:
+                if self.size is not None and (frame.shape[1], frame.shape[0]) != tuple(self.size):
+                    frame = cv2.resize(frame, tuple(self.size), interpolation=cv2.INTER_AREA)
                 self.writer.write(frame)
             except Exception as exc:
                 self.error = exc
@@ -3916,6 +3998,9 @@ class Run1App:
         self.show_preview_var = tk.BooleanVar(
             value=DEFAULT_SETTINGS["show_preview"]
         )
+        self.video_max_width_var = tk.StringVar(value=DEFAULT_SETTINGS["video_max_width"])
+        self.hw_decode_var = tk.BooleanVar(value=DEFAULT_SETTINGS["hw_decode"])
+        self.use_tensorrt_var = tk.BooleanVar(value=DEFAULT_SETTINGS["use_tensorrt"])
 
         self.draw_center_var = tk.BooleanVar(
             value=DEFAULT_SETTINGS["draw_center"]
@@ -5609,6 +5694,13 @@ class Run1App:
             sticky="w"
         )
 
+        # speed options (PKT 1.33.0)
+        ttk.Checkbutton(frame, text="เร่ง YOLO ด้วย TensorRT (ต้องติดตั้ง tensorrt; ครั้งแรกสร้างไฟล์ .engine ใช้เวลาหลายนาที; ใช้ไม่ได้จะกลับไปใช้ .pt เอง)",
+                        variable=self.use_tensorrt_var).grid(row=4, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Checkbutton(frame, text="ถอดรหัสวิดีโอด้วยการ์ดจอ (ถ้า OpenCV รองรับ; ไม่รองรับจะใช้วิธีปกติเอง)",
+                        variable=self.hw_decode_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=2)
+        self.add_entry(frame, 6, "วิดีโอผลลัพธ์กว้างไม่เกิน (px, 0 = เท่าต้นฉบับ)", self.video_max_width_var)
+
     # ========================================================
     # PROCESSING
     # ========================================================
@@ -5960,6 +6052,9 @@ class Run1App:
             "track_buffer": self.track_buffer_var.get(),
             "match_threshold": self.match_threshold_var.get(),
             "show_preview": self.show_preview_var.get(),
+            "video_max_width": self.video_max_width_var.get(),
+            "hw_decode": self.hw_decode_var.get(),
+            "use_tensorrt": self.use_tensorrt_var.get(),
             "draw_center": self.draw_center_var.get(),
             "draw_trail": self.draw_trail_var.get(),
             "trail_length": self.trail_length_var.get(),
@@ -6140,6 +6235,9 @@ class Run1App:
             ("track_buffer", self.track_buffer_var),
             ("match_threshold", self.match_threshold_var),
             ("show_preview", self.show_preview_var),
+            ("video_max_width", self.video_max_width_var),
+            ("hw_decode", self.hw_decode_var),
+            ("use_tensorrt", self.use_tensorrt_var),
             ("draw_center", self.draw_center_var),
             ("draw_trail", self.draw_trail_var),
             ("trail_length", self.trail_length_var),
@@ -7778,13 +7876,16 @@ class Run1App:
             )
             print()
 
-            model = carry["model"] if carry else YOLO(
-                model_path
-            )
+            model_is_engine = False
+            if carry:
+                model = carry["model"]
+                model_is_engine = bool(carry.get("model_is_engine"))
+            else:
+                model, used = load_yolo_model(model_path, bool(settings.get("use_tensorrt")), int(settings.get("img_size") or 640), device)
+                model_is_engine = str(used).lower().endswith(".engine")
+                print("Model file  :", used)
 
-            cap = cv2.VideoCapture(
-                video_path
-            )
+            cap = open_video_capture(video_path, bool(settings.get("hw_decode")))
 
             if not cap.isOpened():
 
@@ -7841,11 +7942,12 @@ class Run1App:
                     *"mp4v"
                 )
 
+                out_size = scaled_video_size(width, height, settings.get("video_max_width", "0"))
                 writer = cv2.VideoWriter(
                     output_video,
                     fourcc,
                     fps,
-                    (width, height)
+                    out_size
                 )
 
                 if not writer.isOpened():
@@ -7854,7 +7956,7 @@ class Run1App:
                         "Unable to create output video"
                     )
 
-                writer = BackgroundVideoWriter(writer)      # encoding runs beside the detection
+                writer = BackgroundVideoWriter(writer, size=(None if out_size == (width, height) else out_size))      # encoding (and the scaling) runs beside the detection
 
             tracker_name = settings["tracker"]
 
@@ -8143,7 +8245,7 @@ class Run1App:
                         "verbose": False,
                     }
 
-                    if use_fp16:
+                    if use_fp16 and not model_is_engine:
 
                         # Ultralytics >= 8.4 renamed half -> quantize (half is deprecated);
                         # older versions only know half.
@@ -8895,7 +8997,7 @@ class Run1App:
                     status,
                 ])
 
-            self._carry = {"model": model, "id_offset": id_offset, "sig": tracker_sig}     # the next clip may continue this tracker
+            self._carry = {"model": model, "model_is_engine": model_is_engine, "id_offset": id_offset, "sig": tracker_sig}     # the next clip may continue this tracker
 
             # Finalize a compact per-ID route summary before closing any files.
             if measurement_enabled:
@@ -9700,6 +9802,18 @@ class Run1App:
         return img
 
     @staticmethod
+    def _run3_video_size(video_path):
+        """(width, height) of the input video, or None."""
+        if not video_path or not os.path.isfile(str(video_path)):
+            return None
+        cap = cv2.VideoCapture(str(video_path))
+        try:
+            w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            return (w, h) if w > 0 and h > 0 else None
+        finally:
+            cap.release()
+
+    @staticmethod
     def _run3_record_first_frame(settings, video_path):
         """The number (1-based) of the first frame the normal video (Tracking_Result.mp4) holds: the start of the analysis window or of the
         recording window, as the detection run decided it. 1 when there is no window or the video cannot be opened."""
@@ -9721,7 +9835,7 @@ class Run1App:
         except Exception:
             return 1
 
-    def _run3_overlay_ttc_boxes(self, tracks, c, result_path, first_frame=1, draw_ttc=True, draw_pet=False):
+    def _run3_overlay_ttc_boxes(self, tracks, c, result_path, first_frame=1, draw_ttc=True, draw_pet=False, src_size=None):
         """Draws the vehicle rectangles that TTC used on the NORMAL roadside video (Tracking_Result.mp4) after Run 3, so there is no third video: the
         picture i of that video is frame `first_frame + i`; the 4 corners of every rectangle (metres) are mapped back into the picture with the
         calibration that is set. The video is read, drawn on and written to a temporary file that then takes the place of the original (if that file is
@@ -9736,6 +9850,10 @@ class Run1App:
             return None
         W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        # the result video can be smaller than the input video (video_max_width): the marks are in input-video pixels -> scale them
+        sx = W / float(src_size[0]) if src_size and src_size[0] else 1.0
+        sy = H / float(src_size[1]) if src_size and src_size[1] else 1.0
+        scale_px = (lambda a: a) if (abs(sx - 1.0) < 1e-9 and abs(sy - 1.0) < 1e-9) else (lambda a: np.asarray(a, dtype=float) * np.array([sx, sy]))
         tmp_path = os.path.splitext(result_path)[0] + "._ttc_tmp.mp4"
         self._run3_overlay_note = ""
         try:
@@ -9761,7 +9879,7 @@ class Run1App:
                     dst = np.concatenate([rc["poly"] for rc in rects] + [np.array([mk["pa"], mk["pb"], mk["label"]], dtype=float) for mk in marks])
                     init = np.concatenate([np.tile(np.asarray(rc["px"], dtype=float), (4, 1)) for rc in rects]
                                           + [np.tile(np.asarray(mk["px"], dtype=float), (3, 1)) for mk in marks])
-                    pix = invert_map(fwd, dst, init)
+                    pix = scale_px(invert_map(fwd, dst, init))
                     k0 = 4 * len(rects)
                     sh2 = {"rects": [{"tid": rc["tid"], "poly": pix[4 * k:4 * k + 4]} for k, rc in enumerate(rects)], "hot": sh["hot"], "pairs": sh["pairs"],
                            "marks": [dict(mk, pa=pix[k0 + 3 * k], pb=pix[k0 + 3 * k + 1], label=pix[k0 + 3 * k + 2], cross=(pix[k0 + 3 * k + 2] if mk.get("cross") is not None else None))
@@ -9772,7 +9890,7 @@ class Run1App:
                     nr = PET_RING_POINTS
                     dst = np.concatenate([np.vstack([[mk["cross"]], mk["ring"] if mk.get("ring") is not None else np.empty((0, 2))]) for mk in pm])
                     init = np.concatenate([np.tile(np.asarray(mk["px"], dtype=float), (1 + (nr if mk.get("ring") is not None else 0), 1)) for mk in pm])
-                    ppix = invert_map(fwd, dst, init)
+                    ppix = scale_px(invert_map(fwd, dst, init))
                     marks_px, k0 = [], 0
                     for mk in pm:
                         has_ring = mk.get("ring") is not None
@@ -10863,7 +10981,7 @@ class Run1App:
                     # "closest approach" substitute and no radius: the conflict point is the crossing itself. t_A / t_B = the time each vehicle is AT that
                     # point (linear between its two samples); PET = the later minus the earlier (the point-only form of "the second one arrives after the
                     # first one has left"; the vehicle size is not subtracted). Two vehicles at the point at the same time give PET 0.
-                    cr = path_crossing(A, B)
+                    cr = path_crossing(A, B) if boxes_overlap(A, B) else None      # paths whose bounding boxes do not touch cannot cross (PKT 1.33.0)
                     if cr is None:
                         diag["no_crossing"] += 1
                         continue
@@ -11062,89 +11180,91 @@ class Run1App:
             if n < 2:
                 continue
             diag["frames_with_pairs"] += 1
-            for i in range(n):
-                for j in range(i + 1, n):
-                    A, B = items[i], items[j]
-                    if str(B["tid"]) < str(A["tid"]):
-                        A, B = B, A                                   # A = the smaller ID (stable, one row per pair)
-                    diag["pairs_evaluated"] += 1
-                    dist = math.hypot(B["p"][0] - A["p"][0], B["p"][1] - A["p"][1])
-                    if dist > radius:
-                        diag["pairs_outside_radius"] += 1
+            # the pairs closer than the screening radius, found with numpy first (same pairs, same order as the plain double loop; PKT 1.33.0)
+            near, n_far = pairs_within_radius([it["p"] for it in items], radius)
+            diag["pairs_evaluated"] += n * (n - 1) // 2
+            diag["pairs_outside_radius"] += n_far
+            for i, j in near:
+                A, B = items[i], items[j]
+                if str(B["tid"]) < str(A["tid"]):
+                    A, B = B, A                                   # A = the smaller ID (stable, one row per pair)
+                dist = math.hypot(B["p"][0] - A["p"][0], B["p"][1] - A["p"][1])
+                if dist > radius:
+                    diag["pairs_outside_radius"] += 1
+                    continue
+                sp_a, sp_b = math.hypot(*A["v"]), math.hypot(*B["v"])
+                if sp_a < vmin or sp_b < vmin:
+                    diag["pairs_slow_vehicle"] += 1
+                    continue
+                theta = conflict_angle_deg(A["v"], B["v"], vmin)
+                entry = {"t": A["t"], "fr": fr, "a": A, "b": B, "theta": theta, "dist": dist, "sp_a": sp_a, "sp_b": sp_b}
+                if method == "box":
+                    res = moving_rect_ttc(A["p"], A["v"], size_of(A["cls"]), B["p"], B["v"], size_of(B["cls"]), margin, rel_min)
+                    if res["status"] == "slow":
+                        diag["pairs_slow_relative"] += 1
                         continue
-                    sp_a, sp_b = math.hypot(*A["v"]), math.hypot(*B["v"])
-                    if sp_a < vmin or sp_b < vmin:
-                        diag["pairs_slow_vehicle"] += 1
+                    if res["status"] == "none":
+                        diag["frames_boxes_never_touch"] += 1
                         continue
-                    theta = conflict_angle_deg(A["v"], B["v"], vmin)
-                    entry = {"t": A["t"], "fr": fr, "a": A, "b": B, "theta": theta, "dist": dist, "sp_a": sp_a, "sp_b": sp_b}
-                    if method == "box":
-                        res = moving_rect_ttc(A["p"], A["v"], size_of(A["cls"]), B["p"], B["v"], size_of(B["cls"]), margin, rel_min)
-                        if res["status"] == "slow":
-                            diag["pairs_slow_relative"] += 1
-                            continue
-                        if res["status"] == "none":
-                            diag["frames_boxes_never_touch"] += 1
-                            continue
-                        entry["res"] = res
-                        if res["status"] == "overlap":
-                            diag["frames_already_overlapping"] += 1
-                            entry.update({"ttc": None, "status": "Already_Overlapping"})
-                        elif ttc_max is not None and res["TTC"] > ttc_max:
-                            diag["frames_above_ttc_max"] += 1
-                            entry.update({"ttc": res["TTC"], "status": "Above_TTC_Max"})
-                        else:
-                            diag["candidates"] += 1
-                            entry.update({"ttc": res["TTC"], "status": "Counted"})
+                    entry["res"] = res
+                    if res["status"] == "overlap":
+                        diag["frames_already_overlapping"] += 1
+                        entry.update({"ttc": None, "status": "Already_Overlapping"})
+                    elif ttc_max is not None and res["TTC"] > ttc_max:
+                        diag["frames_above_ttc_max"] += 1
+                        entry.update({"ttc": res["TTC"], "status": "Above_TTC_Max"})
                     else:
-                        vr = vector_ttc(A["p"], A["v"], B["p"], B["v"], rel_min)
-                        if vr is None:
-                            diag["pairs_slow_relative"] += 1             # separating (r . v >= 0) or a relative speed that is too small
-                            continue
-                        res = dict(vr, status="collision", DTC=vr["TTC"] * vr["rel_speed"])
-                        entry["res"] = res
-                        if vr["miss"] > ttc_miss_limit(widths.get(A["cls"]) or 1.8, widths.get(B["cls"]) or 1.8, miss_margin):
-                            diag["frames_boxes_never_touch"] += 1       # (counted under this name for both methods: the vehicles do not come close enough)
-                            entry.update({"ttc": vr["TTC"], "status": "Miss_Too_Far"})
-                        elif ttc_max is not None and vr["TTC"] > ttc_max:
-                            diag["frames_above_ttc_max"] += 1
-                            entry.update({"ttc": vr["TTC"], "status": "Above_TTC_Max"})
-                        else:
-                            diag["candidates"] += 1
-                            entry.update({"ttc": vr["TTC"], "status": "Counted"})
-                    if entry["ttc"] is not None:
-                        # the expected collision point: where the two straight paths (along each velocity) cross ahead of both; none when they are parallel
-                        pa2 = (A["p"][0] + A["v"][0] * entry["ttc"], A["p"][1] + A["v"][1] * entry["ttc"])
-                        pb2 = (B["p"][0] + B["v"][0] * entry["ttc"], B["p"][1] + B["v"][1] * entry["ttc"])
-                        entry["cp"] = {"cross": ray_intersection(A["p"], A["v"], B["p"], B["v"]), "gap": math.hypot(pb2[0] - pa2[0], pb2[1] - pa2[1])}
-                    if entry["status"] == "Counted" and geom is not None:
-                        # where the pair is expected to meet: the crossing of the two straight paths; for paths that do not cross (following in one lane)
-                        # the middle between the two vehicles when the TTC has run out
-                        cr0 = entry["cp"]["cross"]
-                        tt = entry["ttc"]
-                        pt0 = cr0["x"] if cr0 else ((A["p"][0] + A["v"][0] * tt + B["p"][0] + B["v"][0] * tt) / 2.0, (A["p"][1] + A["v"][1] * tt + B["p"][1] + B["v"][1] * tt) / 2.0)
-                        entry["zone_hit"] = zone_of_point(pt0)
-                        if entry["zone_hit"] is None:
-                            entry["status"] = "Outside_Zone"
-                            diag["frames_collision_point_outside_zone"] += 1
+                        diag["candidates"] += 1
+                        entry.update({"ttc": res["TTC"], "status": "Counted"})
+                else:
+                    vr = vector_ttc(A["p"], A["v"], B["p"], B["v"], rel_min)
+                    if vr is None:
+                        diag["pairs_slow_relative"] += 1             # separating (r . v >= 0) or a relative speed that is too small
+                        continue
+                    res = dict(vr, status="collision", DTC=vr["TTC"] * vr["rel_speed"])
+                    entry["res"] = res
+                    if vr["miss"] > ttc_miss_limit(widths.get(A["cls"]) or 1.8, widths.get(B["cls"]) or 1.8, miss_margin):
+                        diag["frames_boxes_never_touch"] += 1       # (counted under this name for both methods: the vehicles do not come close enough)
+                        entry.update({"ttc": vr["TTC"], "status": "Miss_Too_Far"})
+                    elif ttc_max is not None and vr["TTC"] > ttc_max:
+                        diag["frames_above_ttc_max"] += 1
+                        entry.update({"ttc": vr["TTC"], "status": "Above_TTC_Max"})
+                    else:
+                        diag["candidates"] += 1
+                        entry.update({"ttc": vr["TTC"], "status": "Counted"})
+                if entry["ttc"] is not None:
+                    # the expected collision point: where the two straight paths (along each velocity) cross ahead of both; none when they are parallel
+                    pa2 = (A["p"][0] + A["v"][0] * entry["ttc"], A["p"][1] + A["v"][1] * entry["ttc"])
+                    pb2 = (B["p"][0] + B["v"][0] * entry["ttc"], B["p"][1] + B["v"][1] * entry["ttc"])
+                    entry["cp"] = {"cross": ray_intersection(A["p"], A["v"], B["p"], B["v"]), "gap": math.hypot(pb2[0] - pa2[0], pb2[1] - pa2[1])}
+                if entry["status"] == "Counted" and geom is not None:
+                    # where the pair is expected to meet: the crossing of the two straight paths; for paths that do not cross (following in one lane)
+                    # the middle between the two vehicles when the TTC has run out
+                    cr0 = entry["cp"]["cross"]
+                    tt = entry["ttc"]
+                    pt0 = cr0["x"] if cr0 else ((A["p"][0] + A["v"][0] * tt + B["p"][0] + B["v"][0] * tt) / 2.0, (A["p"][1] + A["v"][1] * tt + B["p"][1] + B["v"][1] * tt) / 2.0)
+                    entry["zone_hit"] = zone_of_point(pt0)
+                    if entry["zone_hit"] is None:
+                        entry["status"] = "Outside_Zone"
+                        diag["frames_collision_point_outside_zone"] += 1
+                        diag["candidates"] -= 1
+                    else:
+                        # both vehicles must be in that zone now or enter it later (Zone Sequence); a vehicle that was never seen in any zone has no
+                        # sequence to test: the rule is skipped for it and the event is flagged
+                        va, vb = visits_of.get(A["tid"], []), visits_of.get(B["tid"], [])
+                        entry["seq_incomplete"] = (not va) or (not vb)
+                        if (va and not zone_on_path(va, entry["zone_hit"], A["t"], 0.1)) or (vb and not zone_on_path(vb, entry["zone_hit"], A["t"], 0.1)):
+                            entry["status"] = "Zone_Not_On_Path"
+                            diag["frames_zone_not_on_path"] += 1
                             diag["candidates"] -= 1
-                        else:
-                            # both vehicles must be in that zone now or enter it later (Zone Sequence); a vehicle that was never seen in any zone has no
-                            # sequence to test: the rule is skipped for it and the event is flagged
-                            va, vb = visits_of.get(A["tid"], []), visits_of.get(B["tid"], [])
-                            entry["seq_incomplete"] = (not va) or (not vb)
-                            if (va and not zone_on_path(va, entry["zone_hit"], A["t"], 0.1)) or (vb and not zone_on_path(vb, entry["zone_hit"], A["t"], 0.1)):
-                                entry["status"] = "Zone_Not_On_Path"
-                                diag["frames_zone_not_on_path"] += 1
-                                diag["candidates"] -= 1
-                    if entry["status"] == "Counted":
-                        cand[(A["tid"], B["tid"])].append(entry)
-                        shapes[fr]["hot"].update((A["tid"], B["tid"]))
-                        shapes[fr]["pairs"].append((A["tid"], B["tid"], entry["ttc"]))
-                        cr = entry["cp"]["cross"]
-                        shapes[fr]["marks"].append({"a": A["tid"], "b": B["tid"], "ttc": entry["ttc"], "pa": A["p"], "pb": B["p"], "cross": None if cr is None else cr["x"],
-                                                    "label": cr["x"] if cr else ((A["p"][0] + B["p"][0]) / 2.0, (A["p"][1] + B["p"][1]) / 2.0), "px": A["px"]})
-                    frame_rows.append(entry)
+                if entry["status"] == "Counted":
+                    cand[(A["tid"], B["tid"])].append(entry)
+                    shapes[fr]["hot"].update((A["tid"], B["tid"]))
+                    shapes[fr]["pairs"].append((A["tid"], B["tid"], entry["ttc"]))
+                    cr = entry["cp"]["cross"]
+                    shapes[fr]["marks"].append({"a": A["tid"], "b": B["tid"], "ttc": entry["ttc"], "pa": A["p"], "pb": B["p"], "cross": None if cr is None else cr["x"],
+                                                "label": cr["x"] if cr else ((A["p"][0] + B["p"][0]) / 2.0, (A["p"][1] + B["p"][1]) / 2.0), "px": A["px"]})
+                frame_rows.append(entry)
 
         out = []
         removed = []                  # (frame, id A, id B) of the frames of events whose type is switched off
@@ -11597,6 +11717,7 @@ class Run1App:
                 status("Run 3 — drawing the TTC / PET marks on the normal video...")
                 result_video = os.path.join(output_dir, "Tracking_Result.mp4")
                 bv = self._run3_overlay_ttc_boxes(tracks, c, result_video, self._run3_record_first_frame(settings, (settings or {}).get("video")),
+                                                  src_size=self._run3_video_size((settings or {}).get("video")),
                                                   draw_ttc=draw_ttc, draw_pet=draw_pet)
                 if bv:
                     outputs["tracking_result_with_ttc_boxes"] = bv
