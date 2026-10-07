@@ -1,4 +1,4 @@
-"""Unit tests of the staged Gap Acceptance (SPEC 6.1) on synthetic scenes with known answers.
+"""Unit tests of the staged Gap Acceptance (SPEC 6.1) and of Headway (SPEC 9.1) on synthetic scenes with known answers.
 
 `_run3_gap` is a method of the GUI class, so it is pulled out of PKStudio.py with `ast` and run on a
 tiny stand-in object (no tkinter / cv2 needed)."""
@@ -17,7 +17,7 @@ for node in TREE.body:
             "GAP_STAGE_CONFLICTS", "RUN3_GAP_CONFLICT_MAP"):
         exec(compile(ast.Module([node], []), "x", "exec"), NS)
 for node in ast.walk(TREE):
-    if isinstance(node, ast.FunctionDef) and node.name in ("_run3_gap", "_run3_stream_events", "_run3_canonical_class"):
+    if isinstance(node, ast.FunctionDef) and node.name in ("_run3_gap", "_run3_stream_events", "_run3_headway", "_run3_canonical_class"):
         exec(compile(ast.Module([node], []), node.name, "exec"), NS)
 for node in TREE.body:
     if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "GAP_REFERENCE_ZONE":
@@ -59,6 +59,13 @@ def scene(extra):
     return tracks, mv
 
 
+def headway(tracks, mv, lengths=None, speed=36.0):
+    class F(Fake):
+        _run3_speed_at = staticmethod(lambda rows, t: speed)
+    c = {"site_id": 8, "lengths": lengths or {"Car": 4.5}, "ttc_min_speed_kmh": 5.0}
+    return NS["_run3_headway"](F(), tracks, c, {}, mv)
+
+
 def run(tracks, mv, selected):
     c = {"gap_movements": selected, "site_id": 8, "waiting_threshold": 5.0, "hold_min_duration_s": 0.3}
     return NS["_run3_gap"](Fake(), tracks, c, {}, mv)
@@ -98,6 +105,27 @@ class StagedGap(unittest.TestCase):
         last = [r for r in rows if r["Stage_No"] == 2]
         self.assertTrue(last and all(r["Stopped_In_Conflict_Zone"] == 1 for r in last))
         self.assertEqual([r["Gap_Role"] for r in last], ["Accepted"])               # the decision is not reversed
+
+    def test_headway_of_a_stream(self):
+        tracks, mv = scene({})                              # stream 2-3-4 enters zone 2 at 2, 3, 6, 8 s; 5-6-7 enters zone 5 at 5, 9 s
+        rows = headway(tracks, mv)                          # every lead drives 36 km/h = 10 m/s, Car length 4.5 m
+        by = {(r["Movement"], r["Lead_Vehicle_ID"]): r for r in rows}
+        self.assertEqual([r["Time_Headway_s"] for r in rows if r["Movement"] == "2-3-4"], ["1.050", "3.000", "2.000"])       # vehicle 1 is first seen in zone 2 at its first sample after 2.0 s (2.05 s)
+        self.assertEqual([r["Time_Headway_s"] for r in rows if r["Movement"] == "5-6-7"], ["4.000"])
+        self.assertEqual(by[("2-3-4", "1")]["Time_Gap_s"], "0.600")                   # 1.05 - 4.5 / 10
+        self.assertEqual(by[("2-3-4", "1")]["Reference_Line"], "Observed Zone 2")
+        self.assertEqual(by[("2-3-4", "1")]["Lead_Length_m"], "4.50")
+        self.assertNotIn("Negative_Time_Gap", by[("2-3-4", "1")]["QC_Flag"])
+
+    def test_headway_negative_time_gap_and_slow_lead(self):
+        tracks, mv = scene({})
+        rows = headway(tracks, mv, {"Car": 14.0})            # a 14 m long lead: the 1.05 s headway is shorter than its length / speed
+        first = [r for r in rows if r["Movement"] == "2-3-4"][0]
+        self.assertEqual(first["Time_Gap_s"], "-0.350")
+        self.assertIn("Negative_Time_Gap", first["QC_Flag"])
+        slow = headway(tracks, mv, speed=2.0)
+        self.assertEqual(slow[0]["Time_Gap_s"], "")
+        self.assertIn("Lead_Too_Slow_For_Time_Gap", slow[0]["QC_Flag"])
 
     def test_stage_streams_match_union_map(self):
         for mv, per_zone in NS["GAP_STAGE_CONFLICTS"].items():
