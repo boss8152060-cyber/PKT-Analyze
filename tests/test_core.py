@@ -692,7 +692,7 @@ class GapHoldAndIntervals(unittest.TestCase):
             self.assertEqual(info["wait"], (seq[0],))
             self.assertEqual(info["target"], seq[-1])
             self.assertEqual(set(info["middle"]), set(seq[1:-1]))
-        self.assertEqual(set(CORE["GAP_REFERENCE_ZONE"]), {"2-3-4", "5-6-7", "5-6-3-1", "1-3-6-7", "1-3-4", "2-3-1"})      # the last two: Headway only
+        self.assertEqual(set(CORE["GAP_REFERENCE_ZONE"]), {"2-3-4", "5-6-7", "5-6-3-1", "1-3-6-7"})      # the last two: Headway only
 
 
 class ExcelSafe(unittest.TestCase):
