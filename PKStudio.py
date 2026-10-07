@@ -1782,7 +1782,11 @@ CSV_COLUMN_RENAMES = {
     "Lateral_Clearance_Pairs.csv": {"Start_Time": "Start_Time_s", "End_Time": "End_Time_s"},
     "Gap_Acceptance.csv": {"Gap_Start_Time": "Gap_Start_Time_s", "Gap_End_Time": "Gap_End_Time_s",
                            "Decision_Time": "Decision_Time_s", "Subject_Speed_kmh": "Subject_Speed_At_Decision_kmh",
-                           "Conflict_Speed_A_kmh": "Conflict_Speed_A_At_Decision_kmh", "Conflict_Speed_B_kmh": "Conflict_Speed_B_At_Decision_kmh"},
+                           "Decision_Zone": "Subject_Zone_At_Decision",       # the zone the subject is in when the gap is evaluated (Decision_Stage says which zone it wants to enter)
+                           # A = the vehicle that crosses first (gap start) = Lead, B = the next one (gap end) = Lag
+                           "Conflicting_ID_A": "Lead_Vehicle_ID", "Conflicting_Class_A": "Lead_Vehicle_Class",
+                           "Conflicting_ID_B": "Lag_Vehicle_ID", "Conflicting_Class_B": "Lag_Vehicle_Class",
+                           "Conflict_Speed_A_kmh": "Lead_Speed_At_Gap_Start_kmh", "Conflict_Speed_B_kmh": "Lag_Speed_At_Gap_End_kmh"},
     "TTC.csv": {"Event_Start": "Start_Time_s", "Event_End": "End_Time_s", "TTCmin_Time": "TTCmin_Time_s",
                 "Speed_A_kmh": "Speed_A_At_TTCmin_kmh", "Speed_B_kmh": "Speed_B_At_TTCmin_kmh"},
     "PET.csv": {"Vehicle_ID_A": "Vehicle_A_ID", "Vehicle_Class_A": "Vehicle_A_Class", "Vehicle_ID_B": "Vehicle_B_ID", "Vehicle_Class_B": "Vehicle_B_Class",
@@ -10153,24 +10157,24 @@ class Run1App:
                 sp_b = self._run3_speed_at(tracks.get(o["id_b"], []), o["gap_end"])
                 last = o["stage_no"] == len(entries)
                 rows_out.append({
-                    "Site_ID": site, "Decision_Event_ID": f"{tid}_S{o['stage_no']}_{o['anchor']:.6f}", "Opportunity_No": number,
+                    "Site_ID": site, "Decision_Event_ID": f"{tid}_S{o['stage_no']}_{o['anchor']:.3f}", "Opportunity_No": number,
                     "Subject_ID": tid, "Subject_Class": subject_class, "Subject_Movement": movement,
                     "Decision_Stage": f"Enter_Zone_{o['stage_zone']}", "Stage_No": o["stage_no"],
                     "Decision_Zone": o["decision_zone"],
-                    "Gap_Evaluation_Time": f"{o['opportunity_time']:.6f}",
-                    "Waiting_Time_s": f"{max(0.0, o['opportunity_time'] - o['start']):.6f}",
+                    "Gap_Evaluation_Time": f"{o['opportunity_time']:.3f}",
+                    "Waiting_Time_s": f"{max(0.0, o['opportunity_time'] - o['start']):.3f}",
                     "Was_Stopped": o["was_stopped"],
                     "Stopped_In_Conflict_Zone": in_zone_stop if last else 0,
                     "Conflicting_Movement": o["conflict_movement"],
                     "Conflicting_ID_A": o["id_a"], "Conflicting_Class_A": o["class_a"],
                     "Conflicting_ID_B": o["id_b"], "Conflicting_Class_B": o["class_b"],
                     "Reference_Line": o["reference"],
-                    "Gap_Start_Time": f"{o['gap_start']:.6f}", "Gap_End_Time": f"{o['gap_end']:.6f}",
-                    "Available_Gap_s": f"{o['gap']:.6f}",
+                    "Gap_Start_Time": f"{o['gap_start']:.3f}", "Gap_End_Time": f"{o['gap_end']:.3f}",
+                    "Available_Gap_s": f"{o['gap']:.3f}",
                     "Subject_Speed_kmh": self._fmt(sp_subject, 3), "Conflict_Speed_A_kmh": self._fmt(sp_a, 3),
                     "Conflict_Speed_B_kmh": self._fmt(sp_b, 3),
                     "Gap_Role": "Accepted" if o["accepted"] == 1 else "Rejected", "Gap_Acceptance": int(o["accepted"]),
-                    "Decision_Time": f"{o['opportunity_time']:.6f}",
+                    "Decision_Time": f"{o['opportunity_time']:.3f}",
                     "QC_Flag": ";".join(dict.fromkeys(x for x in qc if x)),
                 })
         self._run3_gap_diag = diag
@@ -11011,7 +11015,7 @@ class Run1App:
         def do_ldp():
             status("Run 3 — LDP...")
             rows = self._run3_ldp(tracks, c, movement_by_id, movement_source_by_id)
-            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","Side","Start_Time","End_Time","Samples","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Delta_Y_m","Lane_Width_W_m","LDP_percent","LDP_Level","Mean_Speed_kmh","Speed_Level","LDP_Risk_Level","Calibration_Mode","QC_Flag"]
+            fields = ["Site_ID","Vehicle_ID","Vehicle_Class","Movement","Zone","LDP_percent","LDP_Level","Speed_Level","LDP_Risk_Level","Delta_Y_m","Mean_Speed_kmh","Start_Time","End_Time","Samples","Side","P_in_x_m","P_in_y_m","P_out_x_m","P_out_y_m","Chord_Length_m","Lane_Width_W_m","Calibration_Mode","QC_Flag"]
             row_counts["ldp"] = len(rows)
             outputs["ldp"] = write_csv("LDP.csv", fields, rows)
             vals = [float(r["LDP_percent"]) for r in rows]
@@ -11046,14 +11050,29 @@ class Run1App:
                     g["accepted"].append(acc[-1]); g["rejected"].append(max(rej))
                     g["intervals"].append((max(rej), acc[-1]))
             critical = []
-            for (cls, movement, stage_no), g in sorted(groups.items()):
-                cr = self._run3_raff(g["accepted"], g["rejected"]) if c["use_raff"] else None
-                mle = self._run3_mle_driver_intervals(g["intervals"]) if c["use_mle"] else None
+            only_acc, only_rej = defaultdict(int), defaultdict(int)       # drivers left out of the pairs (only accepted / only rejected gaps)
+            for key in set(rejected) | set(accepted):
+                if key in accepted and key not in rejected:
+                    only_acc[(key[0], key[1], key[2])] += 1
+                elif key in rejected and key not in accepted:
+                    only_rej[(key[0], key[1], key[2])] += 1
+            for gkey in sorted(set(groups) | set(only_acc) | set(only_rej)):
+                cls, movement, stage_no = gkey
+                g = groups.get(gkey, {"accepted": [], "rejected": [], "intervals": []})
+                cr = self._run3_raff(g["accepted"], g["rejected"]) if c["use_raff"] and g["intervals"] else None
+                mle = self._run3_mle_driver_intervals(g["intervals"]) if c["use_mle"] and g["intervals"] else None
+                qc = []
+                if not g["intervals"]:
+                    qc.append("No_Driver_With_Both_Rejected_And_Accepted_Gap")
+                elif (c["use_raff"] and cr is None) or (c["use_mle"] and mle is None):
+                    qc.append("Estimate_Not_Available")
                 critical.append({
                     "Site_ID": c["site_id"], "Vehicle_Class": cls, "Movement": movement, "Stage_No": stage_no,
                     "Drivers_With_Pairs": len(g["intervals"]),
+                    "Drivers_Accepted_Only": only_acc.get(gkey, 0), "Drivers_Rejected_Only": only_rej.get(gkey, 0),
                     "Raff_Critical_Gap_s": self._fmt(cr), "MLE_Critical_Gap_Median_s": self._fmt(mle["critical_gap_median"] if mle else None),
                     "MLE_mu": self._fmt(mle["mu"] if mle else None), "MLE_sigma": self._fmt(mle["sigma"] if mle else None),
+                    "QC_Flag": ";".join(qc),
                 })
             if critical:
                 outputs["critical_gap"] = write_csv("Critical_Gap.csv", list(critical[0].keys()), critical)
@@ -11075,7 +11094,7 @@ class Run1App:
         def do_ttc():
             status("Run 3 — TTC...")
             rows, diag, ttc_frames, self._run3_ttc_shapes = self._run3_ttc(tracks, c, movement_by_id)
-            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","DTC_m","Collide_X_m","Collide_Y_m","Miss_Distance_m","Speed_A_kmh","Speed_B_kmh","TTC_s","TTC_Level","Speed_Level","TTC_Risk_Level","Calibration_Mode","QC_Flag"]
+            fields = ["Site_ID","Event_ID","TTC_Type","Vehicle_A_ID","Vehicle_A_Class","Movement_A","Vehicle_B_ID","Vehicle_B_Class","Movement_B","Zone","TTC_s","TTC_Level","Speed_Level","TTC_Risk_Level","Event_Start","Event_End","Event_Frames","TTCmin_Time","TTCmin_Frame","Theta_deg","DTC_m","Collide_X_m","Collide_Y_m","Miss_Distance_m","Speed_A_kmh","Speed_B_kmh","Calibration_Mode","QC_Flag"]
             detail_fields = ["Site_ID","Event_ID","Rel_X_m","Rel_Y_m","RelV_X_mps","RelV_Y_mps","Rel_Speed_kmh","Collide_Frame_Time_s","Dist_A_to_Collide_m","Dist_B_to_Collide_m","Arrival_A_s","Arrival_B_s"]
             row_counts["ttc"] = len(rows)
             mode_ = self._run3_calibration_mode(c)
@@ -11109,7 +11128,7 @@ class Run1App:
         def do_pet():
             status("Run 3 — PET...")
             rows, diag = self._run3_pet(tracks, c, movement_by_id, movement_source_by_id, sequence_by_id)
-            fields = ["Site_ID","Interaction_ID","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Type","Theta_deg","Conflict_Zone","Interaction_Start","Interaction_End","Cross_X_m","Cross_Y_m","Area_Radius_m","T1_Exit_Time","T2_Entry_Time","PET_s","Speed_A_kmh","Speed_B_kmh","PET_Level","Speed_Level","PET_Risk_Level","Calibration_Mode","QC_Flag"]
+            fields = ["Site_ID","Interaction_ID","Conflict_Type","Vehicle_ID_A","Vehicle_Class_A","Movement_A","Vehicle_ID_B","Vehicle_Class_B","Movement_B","Conflict_Zone","PET_s","PET_Level","Speed_Level","PET_Risk_Level","Interaction_Start","Interaction_End","T1_Exit_Time","T2_Entry_Time","Theta_deg","Cross_X_m","Cross_Y_m","Area_Radius_m","Speed_A_kmh","Speed_B_kmh","Calibration_Mode","QC_Flag"]
             row_counts["pet"] = len(rows)
             mode_ = self._run3_calibration_mode(c)
             for r in rows:

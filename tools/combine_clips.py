@@ -23,7 +23,7 @@ COMBINED_DIR = "All_Clips"
 # Vehicle IDs (and event / pair numbers) restart from 1 in every clip, so in the combined files each of these columns
 # gets a companion <column>_Unique = "<Clip>#<value>" that is unique over all clips.
 ID_COLUMNS = ("track_id", "Vehicle_ID", "Vehicle_ID_A", "Vehicle_ID_B", "Vehicle_A_ID", "Vehicle_B_ID", "Subject_ID",
-              "Conflicting_ID_A", "Conflicting_ID_B", "Duplicate_ID", "Kept_ID", "Pair_ID", "Interaction_ID",
+              "Conflicting_ID_A", "Conflicting_ID_B", "Lead_Vehicle_ID", "Lag_Vehicle_ID", "Duplicate_ID", "Kept_ID", "Pair_ID", "Interaction_ID",
               "Event_ID", "Decision_Event_ID")
 
 # kinds of CSV that are put together (the file of a clip is <clip>_<kind>.csv; older runs: Run_3_<kind>.csv)
