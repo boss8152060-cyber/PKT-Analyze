@@ -613,7 +613,7 @@ ZONE_IDS = list(range(1, 8))
 CONFLICT_ZONE_IDS = (3, 6)              # V28: conflict zones (default zones of PET / TTC; every zone 1-7 can be ticked)
 ZONE_NAMES = [f"Zone {i}" for i in ZONE_IDS]
 PET_SPEED_WINDOW_S = 0.5                # PET: speed at the crossing = samples within +-this/2 s of the time the vehicle passes it
-PET_SHOW_LEAD_S, PET_SHOW_TAIL_S = 1.0, 0.5   # PET picture: the crossing mark is drawn from t1 - lead to t2 + tail
+PET_SHOW_LEAD_S, PET_SHOW_TAIL_S = 0.0, 1.0   # PET picture: the crossing mark appears when the second vehicle reaches the crossing (t2) and stays 1 s (user, 2026-10-08)
 PET_RING_POINTS = 24                    # PET picture: the conflict-area circle is drawn as this many points
 PET_GAP_FLAG_S = 0.5                    # PET: a crossing interpolated across a sample gap longer than this is flagged
 LDP_LOCKED_ZONES = (1,)                 # LDP only measures main-road movements (2-3-4, 5-6-7): Zone 1 can never have a value
@@ -11093,7 +11093,8 @@ class Run1App:
                         ] if x),
                     })
                     events.append({"a": a_id, "b": b_id, "t1": t1, "t2": t2, "pet": pet, "ip": ip, "radius": rad})
-        # per picture frame: the crossing marks to draw (from PET_SHOW_LEAD_S before the first vehicle passes to PET_SHOW_TAIL_S after the second)
+        # per picture frame: the crossing marks to draw - only once the result exists: from the moment the second vehicle reaches the crossing (t2)
+        # for PET_SHOW_TAIL_S, then the mark disappears (before PKT 1.33.2 it was on from 1 s before the first vehicle, which cluttered the picture)
         shapes, cache = defaultdict(list), {}
 
         def frames_of(tid):
@@ -11108,7 +11109,7 @@ class Run1App:
                 cache[tid] = lst
             return cache[tid]
         for ev in events:
-            lo, hi = ev["t1"] - PET_SHOW_LEAD_S, ev["t2"] + PET_SHOW_TAIL_S
+            lo, hi = ev["t2"] - PET_SHOW_LEAD_S, ev["t2"] + PET_SHOW_TAIL_S
             seen = {}
             for tid in (ev["a"], ev["b"]):
                 for t_, fr, px in frames_of(tid):
