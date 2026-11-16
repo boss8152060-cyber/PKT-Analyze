@@ -335,7 +335,8 @@ class _NullCSVWriter:
 
 
 # Default paths are relative to this file: <PKT-Analyze>\Run\PKStudio.py -> <PKT-Analyze>\Input, \Output
-_PK_STUDIO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# PK Transport sets PKT_USER_DATA (a folder outside the module, kept when the module is updated); alone the folders sit next to this file
+_PK_STUDIO_DIR = os.environ.get("PKT_USER_DATA") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _first_video(folder):

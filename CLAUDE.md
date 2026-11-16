@@ -5,10 +5,25 @@
 
 ## โครงสร้างที่สำคัญ
 
-- **git repository อยู่ที่นี่:** `F:\motorcycle group project\PSU Transport Project 2026\PK-Transport\PKT-Analyze\Run` (branch `main`, remote `origin` = https://github.com/boss8152060-cyber/PKT-Analyze.git; โมดูลหนึ่งของ **PK Transport**: PKT-Analyze / PKT-Data / PKT-Train อยู่ใน `PK-Transport\`)
+- **git repository:** repo อิสระ https://github.com/boss8152060-cyber/PKT-Analyze (branch `main`; tag `PKT-x.y.z`) — **โมดูลของ PK Transport** (ดูหัวข้อ "โมดูลของ PK Transport" ด้านล่าง); แอปหลักติดตั้งไว้ใน `modules/analyze/`
 - **โค้ดโปรแกรมมีไฟล์เดียว: `PKStudio.py`** — ทุกเวอร์ชันเก่าอยู่ในประวัติ git (commit ละหนึ่งเวอร์ชัน ตั้งแต่ Run0 ถึง Run3 v27) **ห้ามสร้างไฟล์ `_v28.py` ใหม่** ให้แก้ `PKStudio.py` แล้ว commit
 - ไฟล์เวอร์ชันเก่าเดิมสำรองไว้นอก repo ที่ `PKT-Analyze\_Run_backup_before_git\` (Run0–Run3) ไม่ต้องแตะ ผู้ใช้ลบเองได้เมื่อมั่นใจ
 - โฟลเดอร์ข้างเคียงนอก repo: `PKT-Analyze\Input\` (Model, Video, Zone), `PKT-Analyze\Output\`, `PKT-Analyze\Other\` (โฟลเดอร์แม่ของ `Run`); ระดับบนของโครงการ (`PSU Transport Project 2026\`): `Dataset\`, `Picture\`, `Video\`, `Drone\`
+
+
+## โมดูลของ PK Transport (ปลั๊กอิน)
+
+repo นี้เป็น **โมดูลที่ติดตั้งแยก** ใน **PK Transport** (https://github.com/boss8152060-cyber/PK-Transport): แอปหลักโหลดเวอร์ชันที่เลือก (ตาม git tag) จาก GitHub มาไว้ใน `modules/analyze/` ของแอป ไฟล์ที่เกี่ยวข้อง:
+
+| ไฟล์ | หน้าที่ |
+|---|---|
+| `pkt_module.json` | บอกแอปหลักว่าโมดูลคืออะไร: `id`, `version`, `min_shell` (PK Transport รุ่นต่ำสุดที่ใช้ได้), ไลบรารีที่ต้องลง (`requirements.txt`), `needs_torch` |
+| `pkt_plugin.py` | วิธีที่โมดูลปรากฏในหน้าต่างของแอปหลัก (API เวอร์ชัน 1: `create`, `summary`, `recent`, `texts`, `catalogs`) — **ส่วนบนสุดของไฟล์ต้องเบา** (ห้าม import torch/ไลบรารีหนัก ที่ระดับบน) |
+| `pkt_analyze_lang.py` | คำแปลไทย→อังกฤษของทุกข้อความใน `PKStudio.py` (`EXACT` + `TEMPLATES` + ชิ้นส่วนข้อความที่โปรแกรมต่อสด) — **ข้อความไทยใหม่ต้องเพิ่มที่นี่** (เทสต์ `test_lang_coverage` ใน PK-Transport เตือน) |
+
+**กฎการปล่อยเวอร์ชัน:** (1) แก้ `version` ใน `pkt_module.json` ให้ตรงกับเลขใน CHANGELOG (มีเทสต์ตรวจ) (2) commit ชื่อ `PKT-Analyze x.y.z: <คำอธิบาย_แบบ_CamelCase>` (3) ติด tag `PKT-<x.y.z>` แล้ว push พร้อม tag — แอปหลักเห็นเวอร์ชันใหม่จาก tag และให้ผู้ใช้อัปเดต/ย้อนเวอร์ชันได้ (4) ถ้าเปลี่ยนวิธีที่ใช้ API ของแอปหลัก ให้ปรับ `min_shell`
+**ข้อมูลของผู้ใช้ห้ามเขียนในโฟลเดอร์ของโมดูล** (โฟลเดอร์นี้ถูกแทนที่ทั้งก้อนเมื่ออัปเดต/ย้อนเวอร์ชัน): ใช้โฟลเดอร์จากตัวแปร `PKT_USER_DATA` (แอปหลักตั้งให้) หรือ `app.user_data_dir(...)`
+ทดสอบกับแอปหลัก: ตั้งโฟลเดอร์นี้เป็น "โฟลเดอร์ที่เชื่อมไว้" ในหน้าตั้งค่าของ PK Transport (หรือรัน `tests/gui_real_modules.py` / `gui_train_module.py` ใน PK-Transport ด้วย `PKT_MODULES_SRC`)
 
 ## ไฟล์หลักที่ต้องอ่านก่อนเริ่มงานทุกครั้ง
 

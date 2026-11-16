@@ -238,3 +238,8 @@
 | 2026-09-30 | ข้อ 1.2: เพิ่ม `collect_zone_visits`/`clean_zone_visits` — ตัดการกะพริบ A→B→A (B ≤ 0.10 s) และรวมการหลุดโซนสั้น ๆ (≤ 0.10 s); `ID_Zone_Summary` (zone_sequence, transitions, total time) และ `Zone_Summary` ใช้ visit ที่ทำความสะอาดแล้ว; ลบ `id_zone_history`; บันทึก `summary_flicker_merge_s` ใน JSON. ตรวจ: unit case 5 แบบผ่าน + จำลองจากข้อมูลจริง visits 159 → 139 (เช่น ID 49 จาก 4↔3 สลับ 8 รอบ เหลือ 2 รอบ; 1→6→5 ไม่ถูกแตะ) | `PKStudio.py` | ยังไม่ได้รันโปรแกรมจริง; Run 3 ยังใช้ zone ดิบรายเฟรม (ไม่กระทบ); ID 49 ยังสลับ 4↔3 เหลือ 2 รอบ (ช่วงนานกว่า 0.1 s) |
 | 2026-09-30 | ข้อ 1.1: เก็บ `visits` (start,end) ต่อโซนต่อ ID + `last_inside_time`; Zone_Summary นับทุกการเข้าโซน (รวมที่ยังอยู่ตอนจบ), `total_zone_time_seconds` = ผลรวมทุก visit; เวลาออก = ตัวอย่างสุดท้ายที่อยู่ในโซน. ตรวจ: py_compile ผ่าน + จำลองซ้ำจาก `Output/Run3/Run_3_Detection_Records.csv` ได้ Zone 2 = 26 IDs (เดิม 1), Zone 6 = 41 IDs (เดิม 6), ID 1 ใช้เวลาในโซน 15.4 s (เดิม 0) | `PKStudio.py` | ยังไม่ได้รันโปรแกรมจริง; entries มากกว่า IDs เพราะ zone flicker (ข้อ 1.2) |
 | 2026-09-29 | ตรวจ v27, เขียน overview, CLAUDE.md, plan.md, GIT_GUIDE.md; git init + import 61 commits (`Run0` … `Run3 v27`) + .gitignore + tag v27 | `PROJECT_OVERVIEW.md`, `CLAUDE.md`, `plan.md`, `GIT_GUIDE.md` | ยังไม่แก้โค้ด, push ขึ้น GitHub แล้ว |
+
+## 2026-11-16 — เป็นโมดูลของ PK Transport (1.47.0)
+
+- เพิ่ม `pkt_module.json`, `pkt_plugin.py`, `pkt_analyze_lang.py`, `requirements.txt`; `PKStudio.py`: `_PK_STUDIO_DIR` ตาม `PKT_USER_DATA`; เทสต์ `tests/test_pkt_module.py`
+- แยกกลับเป็น repo อิสระ (เดิมรวมอยู่ใน PK-Transport 1.0.0–1.2.0 ชั่วคราว) — ประวัติเดิมครบ
