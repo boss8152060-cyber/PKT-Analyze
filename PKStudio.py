@@ -1959,6 +1959,18 @@ def tensorrt_engine_name(model_path, imgsz, half, capability, trt_version):
     return f"{base}_{int(imgsz)}_{'fp16' if half else 'fp32'}_{cc}_trt{major}.engine"
 
 
+def installed_tensorrt_version(metadata=None):
+    """The version of the TensorRT package that is installed ("" when there is none)."""
+    if metadata is None:
+        import importlib.metadata as metadata
+    for dist_name in ("tensorrt", "tensorrt_cu12", "tensorrt_cu13"):
+        try:
+            return metadata.version(dist_name)
+        except Exception:
+            continue
+    return ""
+
+
 def directml_onnx_name(model_path, imgsz):
     """File name of the ONNX model used by the DirectML backend (fixed input size = imgsz)."""
     return os.path.splitext(str(model_path))[0] + f"_{int(imgsz)}_dml.onnx"
@@ -4189,14 +4201,7 @@ def load_yolo_model(model_path, use_tensorrt=False, imgsz=640, device=None):
             except ValueError:
                 index = 0
             capability = torch.cuda.get_device_capability(index)
-            import importlib.metadata as _md
-            trt_version = ""
-            for dist_name in ("tensorrt", "tensorrt_cu12", "tensorrt_cu13"):
-                try:
-                    trt_version = _md.version(dist_name)
-                    break
-                except Exception:
-                    continue
+            trt_version = installed_tensorrt_version()
             names = {half: tensorrt_engine_name(model_path, imgsz, half, capability, trt_version) for half in (True, False)}
             for half in (True, False):                                 # an engine that is already there wins (FP16 first)
                 eng = names[half]
@@ -4206,6 +4211,9 @@ def load_yolo_model(model_path, use_tensorrt=False, imgsz=640, device=None):
             ok, msg = prepare_tensorrt_packages(getattr(torch.version, "cuda", None))
             if not ok:
                 raise RuntimeError(msg)
+            if not trt_version:                                        # TensorRT was just installed: the name must carry its version (else the next run does not find the engine and builds it again)
+                trt_version = installed_tensorrt_version()
+                names = {half: tensorrt_engine_name(model_path, imgsz, half, capability, trt_version) for half in (True, False)}
             last = None
             for half in (True, False):
                 print("TensorRT    : building", names[half], "(first time only, this takes a few minutes; done in its own process)")

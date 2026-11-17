@@ -129,6 +129,22 @@ class GpuBackends(unittest.TestCase):
         self.assertEqual(v("Microsoft Basic Display Adapter"), "other")
         self.assertEqual(v(None), "other")
 
+    def test_the_installed_tensorrt_version_is_found_under_any_package_name(self):
+        class Fake:
+            def __init__(self, have):
+                self.have = have
+
+            def version(self, name):
+                if name in self.have:
+                    return self.have[name]
+                raise LookupError(name)
+        f = NS["installed_tensorrt_version"]
+        self.assertEqual(f(Fake({})), "")                                              # nothing installed: no version (engine name ..._trtx)
+        self.assertEqual(f(Fake({"tensorrt_cu12": "10.16.1.11"})), "10.16.1.11")
+        self.assertEqual(f(Fake({"tensorrt": "10.3.0", "tensorrt_cu12": "10.16.1.11"})), "10.3.0")
+        name = NS["tensorrt_engine_name"]("m/best.pt", 640, True, (7, 5), f(Fake({"tensorrt_cu12": "10.16.1.11"})))
+        self.assertTrue(name.endswith("_sm75_trt10.engine"))                           # the name after the install carries the version
+
     def test_engine_name_tells_the_gpu_generation_and_precision(self):
         n = NS["tensorrt_engine_name"]
         base = os.path.join("x", "best.pt")
