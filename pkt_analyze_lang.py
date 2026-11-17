@@ -2048,3 +2048,7 @@ EXACT.update({'ถือว่ารถจอด/หยุดรอ เมื่
 
 # 1.51.0: older results brought to the new layout
 EXACT.update({'จัดผลรุ่นเก่าเป็นรูปแบบใหม่': 'Results of older versions brought to the new layout'})
+
+# 1.52.0: progress window of a batch
+EXACT.update({'ความคืบหน้าการวิเคราะห์': 'Analysis progress', 'คลิป': 'Clip', 'สถานะ': 'Status', 'เวลาที่ใช้': 'Time taken', 'รอ': 'Waiting', 'กำลังวิเคราะห์': 'Analysing', 'เสร็จ': 'Done', 'ข้าม (เสร็จแล้ว)': 'Skipped (already done)', 'ผิดพลาด': 'Error', 'หยุด': 'Stopped', 'ตัวชี้วัดว่างบางตัว': 'some indicators empty', 'หยุดก่อนครบ': 'Stopped before the end', 'วิเคราะห์ครบแล้ว': 'All clips analysed', 'ปิดหน้าต่างนี้ (งานยังรันต่อ)': 'Close this window (the work keeps running)', 'ดูความคืบหน้าทีละคลิป': 'Progress clip by clip', 'ความคืบหน้า': 'Progress', 'ยังไม่มีงานที่รันอยู่ (ตารางนี้ขึ้นเมื่อกดเริ่มวิเคราะห์)': 'Nothing is running (this table appears when you start the analysis)'})
+TEMPLATES.update({'คลิปที่ {0} จาก {1}: {2}': 'Clip {0} of {1}: {2}', 'กำลังเตรียมคลิปถัดไป ({0} จาก {1})': 'Preparing the next clip ({0} of {1})', 'เสร็จ {0} · ข้าม {1} · ผิดพลาด {2} · เหลือ {3} จาก {4} คลิป': 'Done {0} · skipped {1} · errors {2} · left {3} of {4} clips', '{0}   | เวลารวม {1}': '{0}   | total time {1}'})

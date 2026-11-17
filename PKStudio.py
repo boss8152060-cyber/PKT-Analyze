@@ -4684,6 +4684,149 @@ class ClipListPanel(ttk.Frame):
         self.refresh()
 
 
+class BatchProgressWindow(tk.Toplevel):
+    """The window that shows a batch while it runs: which clip is being analysed and what it is doing now, how many clips are done,
+    and one row per clip (waiting / analysing / done / skipped / error / stopped) with the time it took."""
+    WAIT, RUN, DONE, SKIP, ERR, STOP = "รอ", "กำลังวิเคราะห์", "เสร็จ", "ข้าม (เสร็จแล้ว)", "ผิดพลาด", "หยุด"
+
+    def __init__(self, app, clips):
+        super().__init__(app.root)
+        self.app = app
+        self.T = app.tr_text                                  # the text in the language chosen in PK Transport (as is when the program runs alone)
+        self.title(self.T("ความคืบหน้าการวิเคราะห์"))
+        self.geometry("820x540")
+        self.minsize(560, 320)
+        self.names = []
+        for c in clips:
+            rel = str(c.get("rel_dir", "") or "").replace("\\", "/").strip("/")
+            base = os.path.splitext(os.path.basename(c["video"]))[0]
+            self.names.append(f"{rel}/{base}" if rel else base)
+        self.state = [self.WAIT] * len(clips)
+        self.secs = [None] * len(clips)
+        self.notes = [""] * len(clips)
+        self.current = None
+        self.started = None                                 # when the clip being analysed started
+        self.t_start = time.time()
+        self.finished = False
+        self.head = tk.StringVar(value="")
+        self.count = tk.StringVar(value="")
+        self.stage = tk.StringVar(value="")
+        self.speed = tk.StringVar(value="")
+        top = ttk.Frame(self, padding=(14, 12, 14, 4))
+        top.pack(fill="x")
+        ttk.Label(top, textvariable=self.head, font=("TkDefaultFont", 12, "bold"), anchor="w").pack(fill="x")
+        ttk.Label(top, textvariable=self.stage, anchor="w").pack(fill="x", pady=(4, 0))
+        ttk.Label(top, textvariable=self.speed, anchor="w", foreground="#666666").pack(fill="x")
+        self.bar = ttk.Progressbar(top, maximum=max(1, len(clips)), mode="determinate")
+        self.bar.pack(fill="x", pady=(8, 2))
+        ttk.Label(top, textvariable=self.count, anchor="w").pack(fill="x")
+        body = ttk.Frame(self, padding=(14, 6, 14, 4))
+        body.pack(fill="both", expand=True)
+        cols = ("no", "clip", "state", "time")
+        self.tree = ttk.Treeview(body, columns=cols, show="headings", selectmode="browse")
+        for col, text, width, anchor in (("no", "#", 44, "e"), ("clip", "คลิป", 430, "w"), ("state", "สถานะ", 140, "w"), ("time", "เวลาที่ใช้", 90, "e")):
+            self.tree.heading(col, text=self.T(text))
+            self.tree.column(col, width=width, anchor=anchor, stretch=(col == "clip"))
+        sb = ttk.Scrollbar(body, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.tree.tag_configure("wait", foreground="#888888")
+        self.tree.tag_configure("run", background="#e6eef7")
+        self.tree.tag_configure("err", foreground="#b00020")
+        self.tree.tag_configure("skip", foreground="#666666")
+        for i in range(len(clips)):
+            self.tree.insert("", "end", iid=str(i), values=self._values(i), tags=("wait",))
+        foot = ttk.Frame(self, padding=(14, 4, 14, 12))
+        foot.pack(fill="x")
+        ttk.Button(foot, text="ปิดหน้าต่างนี้ (งานยังรันต่อ)", command=self.withdraw).pack(side="right")
+        self.protocol("WM_DELETE_WINDOW", self.withdraw)
+        self._refresh()
+        self._tick()
+
+    @staticmethod
+    def _clock(seconds):
+        if seconds is None:
+            return ""
+        seconds = int(seconds)
+        h, rest = divmod(seconds, 3600)
+        m, s = divmod(rest, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    def _values(self, i):
+        secs = self.secs[i]
+        if self.state[i] == self.RUN and self.started is not None:
+            secs = time.time() - self.started
+        label = self.T(self.state[i]) + (f" — {self.T(self.notes[i])}" if self.notes[i] else "")
+        return (i + 1, self.names[i], label, self._clock(secs))
+
+    def set_state(self, i, state, seconds=None, note=""):
+        """Called from the Tk thread (through post_ui)."""
+        self.state[i] = state
+        self.notes[i] = note
+        if state == self.RUN:
+            self.current = i
+            self.started = time.time()
+            self.secs[i] = None
+        else:
+            self.secs[i] = seconds
+            if self.current == i:
+                self.current = None
+        self._refresh()
+        if state == self.RUN:
+            try:
+                self.tree.see(str(i))
+            except tk.TclError:
+                pass
+
+    def finish(self, stopped=False, fatal=""):
+        self.finished = True
+        self.current = None
+        for i, s in enumerate(self.state):                 # clips not reached (batch stopped or failed)
+            if s == self.WAIT and (stopped or fatal):
+                self.state[i] = self.STOP
+        self._refresh()
+
+    def _refresh(self):
+        n = len(self.names)
+        done = sum(1 for s in self.state if s == self.DONE)
+        skipped = sum(1 for s in self.state if s == self.SKIP)
+        errors = sum(1 for s in self.state if s == self.ERR)
+        waiting = sum(1 for s in self.state if s == self.WAIT)
+        finished_n = done + skipped + errors
+        for i in range(n):
+            s = self.state[i]
+            tag = {self.WAIT: "wait", self.RUN: "run", self.ERR: "err", self.SKIP: "skip", self.STOP: "wait"}.get(s, "")
+            try:
+                self.tree.item(str(i), values=self._values(i), tags=(tag,))
+            except tk.TclError:
+                return
+        self.bar["value"] = finished_n
+        if self.finished:
+            self.head.set(self.T("หยุดก่อนครบ" if any(s == self.STOP for s in self.state) else "วิเคราะห์ครบแล้ว"))
+        elif self.current is not None:
+            self.head.set(self.T("คลิปที่ {0} จาก {1}: {2}".format(self.current + 1, n, self.names[self.current])))
+        else:
+            self.head.set(self.T("กำลังเตรียมคลิปถัดไป ({0} จาก {1})".format(finished_n, n)))
+        left = waiting + (1 if self.current is not None else 0)
+        self.count.set(self.T(f"เสร็จ {done} · ข้าม {skipped} · ผิดพลาด {errors} · เหลือ {left} จาก {n} คลิป"))
+
+    def _tick(self):
+        """Twice a second: what the program is doing now (the line under the buttons of the main window) and the clock of the running clip."""
+        try:
+            if not self.winfo_exists():
+                return
+            if not self.finished:
+                self.stage.set(str(self.app.status_var.get()))
+                self.speed.set(self.T("   ".join(x for x in (str(self.app.progress_var.get()), str(self.app.time_var.get())) if x)
+                                      + f"   | เวลารวม {self._clock(time.time() - self.t_start)}"))
+                if self.current is not None:
+                    self.tree.item(str(self.current), values=self._values(self.current))
+            self.after(500, self._tick)
+        except tk.TclError:
+            pass
+
+
 class Run1App:
 
     def __init__(self, root):
@@ -5093,6 +5236,8 @@ class Run1App:
         ttk.Label(info, textvariable=self.progress_var).pack(side="left", padx=(0, 12))
         ttk.Label(info, textvariable=self.time_var).pack(side="left", padx=(0, 12))
         ttk.Label(info, textvariable=self.hardware_var, foreground="#666666").pack(side="left")
+        self.batch_win = None
+        ttk.Button(info, text="ดูความคืบหน้าทีละคลิป", command=self.show_batch_progress).pack(side="left", padx=(14, 0))
         self.pause_button = ttk.Button(bottom, text="Ⅱ PAUSE", command=self.toggle_pause, state="disabled")
         self.pause_button.grid(row=1, column=1, rowspan=2, padx=5, ipadx=10, ipady=6)
         self.start_button = ttk.Button(bottom, text="▶ เริ่มวิเคราะห์", command=self.start_analysis)
@@ -6065,10 +6210,36 @@ class Run1App:
         self.status_var.set(f"Starting Batch ({len(clips)} clips) | Device = {selected_device}")
         self.progress_var.set("")
         self.time_var.set("")
+        try:
+            if self.batch_win is not None and self.batch_win.winfo_exists():
+                self.batch_win.destroy()
+            self.batch_win = BatchProgressWindow(self, clips)
+        except Exception:
+            log.exception("Could not open the progress window")
+            self.batch_win = None
         self.worker_thread = threading.Thread(
             target=self._batch_worker, args=(settings, [dict(c) for c in clips], out_root, skip_done), daemon=True)
         self.worker_thread.start()
         return True
+
+    def tr_text(self, text):
+        """The text in the language chosen in PK Transport (pkt_plugin.py replaces this); the program on its own shows it as written."""
+        return text
+
+    def show_batch_progress(self):
+        """Opens (again) the window with the clips of the batch that runs or ran last."""
+        win = self.batch_win
+        if win is None or not win.winfo_exists():
+            messagebox.showinfo("ความคืบหน้า", "ยังไม่มีงานที่รันอยู่ (ตารางนี้ขึ้นเมื่อกดเริ่มวิเคราะห์)")
+            return
+        win.deiconify()
+        win.lift()
+
+    def _batch_mark(self, i, state, seconds=None, note=""):
+        """Tell the progress window (Tk thread) what happened to clip i (0-based)."""
+        win = self.batch_win
+        if win is not None:
+            self.post_ui(lambda: win.winfo_exists() and win.set_state(i, state, seconds, note))
 
     def _batch_worker(self, base_settings, clips, out_root, skip_done):
         bt = _tools_module("batch_run")
@@ -6085,6 +6256,7 @@ class Run1App:
                 if self.stop_event.is_set():
                     stopped = True
                     break
+                self._batch_mark(i - 1, BatchProgressWindow.RUN)
                 st, name, run_dir = bt.clip_settings(base_settings, c["video"], rel, {}, out_root, c, c.get("save_video", False),
                                                      show_preview=bool(base_settings.get("show_preview")))
                 st["continue_tracker"] = bool(c.get("continues_previous")) and i > 1
@@ -6093,6 +6265,7 @@ class Run1App:
                     self._carry = None          # nothing was run, so there is no tracker to continue
                     rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, "", 0.0))
                     self.update_ui(status=f"Batch {i}/{n}: {name} — already done, skipped")
+                    self._batch_mark(i - 1, BatchProgressWindow.SKIP, 0.0)
                     continue
                 self.update_ui(status=f"Batch {i}/{n}: {name}")
                 self._last_run_error = ""
@@ -6103,6 +6276,10 @@ class Run1App:
                 if reasons:
                     empties.append((name, list(reasons)))
                 rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, self._last_run_error, time.time() - t0))
+                status = str(rows[-1].get("Status", ""))
+                self._batch_mark(i - 1, BatchProgressWindow.ERR if (status.startswith("ERROR") or status == "no summary") else
+                                 (BatchProgressWindow.STOP if status.startswith("stopped") else BatchProgressWindow.DONE),
+                                 time.time() - t0, "ตัวชี้วัดว่างบางตัว" if reasons else "")
                 if self.stop_event.is_set():
                     stopped = True
                     break
@@ -6110,6 +6287,9 @@ class Run1App:
         except Exception as exc:
             log.exception("Batch failed")
             fatal = str(exc)
+        win = self.batch_win
+        if win is not None:
+            self.post_ui(lambda: win.winfo_exists() and win.finish(stopped, fatal))
         self.post_ui(lambda: self.finish_batch_ui(rows, n, out_root, stopped, fatal, empties))
 
     def finish_batch_ui(self, rows, total, out_root, stopped, fatal, empties=()):

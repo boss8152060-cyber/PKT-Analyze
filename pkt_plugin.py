@@ -150,6 +150,9 @@ class AnalyzePage(ttk.Frame):
             self.message.pack(anchor="nw", padx=30, pady=30)
             self.message.configure(text=self.app.t("analyze_load_failed", err=self.error))
             return
+        xl = getattr(self.app, "xl", None)
+        if xl is not None and hasattr(xl, "tr"):
+            self.studio.tr_text = xl.tr                       # the progress window of a batch writes its own texts in the chosen language
         self.applied_model = self.studio.model_var.get()
         self._apply_model()
 

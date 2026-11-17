@@ -261,3 +261,4 @@
 - ค้าง: ผลรุ่นเก่ายังเป็นแบบเดิม (ไม่ย้ายอัตโนมัติ) และไม่มี `2_Speed.csv` จนกว่าจะวิเคราะห์ใหม่
 - 1.50.1: ผู้ใช้ขอไม่นับรถจอดใน Speed → `speed_zone_summary(stop_kmh)` ตัดเฟรม < `speed_stop_kmh` (5 = ค่าเดียวกับ Gap `waiting_speed_threshold` / TTC `ttc_min_speed_kmh`), คอลัมน์ Moving/Stopped_Frames, Stopped_Time_s; เทสต์ unit + e2e_run3 ผ่าน
 - 1.51.0: `upgrade_results` (ปุ่มรวมผล) จัดผลรุ่นเก่า + สร้าง 2_Speed จาก Speed รายเฟรม; ผู้ใช้สั่งจัดผล R1–R6 (`D:/PK Program/Test/Output/Test`) — จัดแล้ว ไม่ได้สร้าง All_Clips เพราะเป็นการรันคลิปเดียวกันต่างค่า
+- 1.52.0: ผู้ใช้ขอให้เห็นระหว่างรัน 25 คลิปว่าทำอะไรอยู่/เสร็จคลิปไหนแล้ว → `BatchProgressWindow` (Toplevel เปิดตอน `start_batch`, `_batch_mark` จาก `_batch_worker`, `finish`), ปุ่มที่แถบล่าง, `Run1App.tr_text` ← `app.xl.tr` ใน pkt_plugin; เทสต์ใน e2e_batch_gui; ติดตั้งลงเครื่องหลังรันของผู้ใช้จบ (ไม่แทนโมดูลระหว่างรัน)

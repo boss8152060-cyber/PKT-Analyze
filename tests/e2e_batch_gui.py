@@ -118,6 +118,9 @@ wait_in_mainloop(lambda: not app.running, 600)
 wait_in_mainloop(lambda: False, 1)
 check("batch finished and the window is usable again", not app.running and str(app.start_button.cget("state")) == "normal")
 check("final report shown once, no error box", [k for k, _ in shown] == ["info"], str([k for k, _ in shown]))
+check("progress window: one row per clip, both clips marked done, nothing running, finished",
+      app.batch_win is not None and app.batch_win.names == ["Site/day1/a", "Site/day1/b"] and app.batch_win.state == [app.batch_win.DONE, app.batch_win.DONE]
+      and app.batch_win.current is None and app.batch_win.finished and all(x is not None and x > 0 for x in app.batch_win.secs), str(app.batch_win.state))
 
 o = os.path.join(tmp, "out")
 a_dir, b_dir = os.path.join(o, "Site", "day1", "a"), os.path.join(o, "Site", "day1", "b")
