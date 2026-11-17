@@ -243,3 +243,7 @@
 
 - เพิ่ม `pkt_module.json`, `pkt_plugin.py`, `pkt_analyze_lang.py`, `requirements.txt`; `PKStudio.py`: `_PK_STUDIO_DIR` ตาม `PKT_USER_DATA`; เทสต์ `tests/test_pkt_module.py`
 - แยกกลับเป็น repo อิสระ (เดิมรวมอยู่ใน PK-Transport 1.0.0–1.2.0 ชั่วคราว) — ประวัติเดิมครบ
+
+## 2026-11-17 — Run 1 เร็วขึ้น (1.48.0)
+
+- letterbox ในเธรดอ่านวิดีโอ (`BackgroundFrameReader.prepare`) + วาดชั้นโซนหลังตรวจจับ; วัด 131.9→123.4 s ผลเหมือนเดิมทุกบรรทัด; คอขวดที่เหลือคือ GPU (TensorRT ~23 ms/เฟรมบน GTX 1650) — ถ้าจะเร็วกว่านี้ต้องทำ pipeline ภายใน Ultralytics หรือลดโมเดล/ขนาดภาพ (ผลเปลี่ยน)

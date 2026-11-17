@@ -4160,6 +4160,11 @@ class BackgroundFrameReader:
         self.n = frames_read
         self.last_frame = last_frame
         self.error = None
+        # prepare(frame) -> anything: set by the main loop once the detector exists (the YOLO letterbox: scaling a 1080p frame
+        # to the model size takes ~4 ms of CPU). It runs here, beside the GPU, on the frame exactly as decoded;
+        # `prepared` is the result for the frame that next() returned last (None when there is none: the main loop then does it itself)
+        self.prepare = None
+        self.prepared = None
         self.q = queue.Queue(maxsize=maxsize)
         self._stop = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -4186,7 +4191,14 @@ class BackgroundFrameReader:
                 self.n += 1
                 if not ok:
                     break
-                if not self._put(frame):
+                prep = None
+                prepare = self.prepare
+                if prepare is not None and frame is not None:
+                    try:
+                        prep = prepare(frame)
+                    except Exception:                    # the main loop prepares it itself
+                        prep = None
+                if not self._put((frame, prep)):
                     return
         except Exception as exc:          # reported to the main loop
             self.error = exc
@@ -4199,8 +4211,10 @@ class BackgroundFrameReader:
             if self.error is not None:
                 raise self.error
             self.q.put(self._END)         # keep answering 'end'
+            self.prepared = None
             return False, None
-        return True, item
+        frame, self.prepared = item
+        return True, frame
 
     def close(self):
         self._stop.set()
@@ -9150,7 +9164,9 @@ class Run1App:
             total_detections = 0
             untracked_detections = 0
 
-            # decoding runs beside the detection; a frame is only skipped (not decoded) when nothing uses it
+            # decoding (and the YOLO letterbox, once the detector exists) runs beside the detection; a frame is only skipped
+            # (not decoded) when nothing uses it
+            lb_state = {"frame": None, "lb": None}
             reader = BackgroundFrameReader(
                 cap,
                 lambda n: not (frame_skip > 1 and not render_needed and (n % frame_skip) != 0),
@@ -9219,19 +9235,20 @@ class Run1App:
 
                 frame_index += 1
 
-                # Draw Zone overlay BEFORE detections/tracks so bounding boxes and
-                # trajectory lines are rendered on top of the translucent Zone.
-                if measurement_enabled and render_needed:
-                    self.draw_measurement_overlay(
-                        frame, frame_index, fps, zone_track_state, line_track_state,
-                        zone_entry_count, line_cross_count
-                    )
-
                 should_process = (
                     (frame_index - 1)
                     % frame_skip
                     == 0
                 )
+
+                # The faint Zone layer of the result video is drawn under the boxes / trajectories. On a frame that is detected it is drawn
+                # AFTER the detector has read the frame (PKT 1.48.0): before, YOLO saw the drawn zone lines when the video was recorded, so
+                # recording the video could change the detections. Nothing is drawn on the frame between here and the detection.
+                if measurement_enabled and render_needed and not should_process:
+                    self.draw_measurement_overlay(
+                        frame, frame_index, fps, zone_track_state, line_track_state,
+                        zone_entry_count, line_cross_count
+                    )
 
                 if should_process:
 
@@ -9258,10 +9275,29 @@ class Run1App:
                             _fp16_key = "half"
                         track_kwargs[_fp16_key] = 16 if _fp16_key == "quantize" else True
 
+                    # the letterbox of this frame was made by the reader thread (exactly what Ultralytics would make here)
+                    lb_state["frame"], lb_state["lb"] = frame, reader.prepared
                     results = model.track(
                         frame,
                         **track_kwargs
                     )
+                    lb_state["frame"] = lb_state["lb"] = None
+                    if reader.prepare is None and getattr(model, "predictor", None) is not None:
+                        _orig_pre = model.predictor.pre_transform
+
+                        def _pre_transform(im, _orig=_orig_pre, _st=lb_state):
+                            if len(im) == 1 and _st["lb"] is not None and im[0] is _st["frame"]:
+                                return [_st["lb"]]
+                            return _orig(im)
+
+                        model.predictor.pre_transform = _pre_transform
+                        reader.prepare = lambda fr, _orig=_orig_pre: _orig([fr])[0]
+
+                    if measurement_enabled and render_needed:
+                        self.draw_measurement_overlay(
+                            frame, frame_index, fps, zone_track_state, line_track_state,
+                            zone_entry_count, line_cross_count
+                        )
 
                     result = results[0]
                     boxes = result.boxes

@@ -195,6 +195,18 @@ while True:
     _got.append(None if _f is None else int(_f.mean()))
 _r.close()
 _c.release()
+_c = _cv2.VideoCapture(_src)
+_r = m.BackgroundFrameReader(_c, lambda n: True, 0, 6)
+_r.prepare = lambda fr: int(fr.mean()) + 1000                        # (the main loop puts the YOLO letterbox here)
+_prep = []
+while True:
+    _ok, _f = _r.next()
+    if not _ok:
+        break
+    _prep.append((int(_f.mean()), _r.prepared))
+_r.close()
+_c.release()
+check("background reader: what prepare() made belongs to the frame next() returned", all(p == f + 1000 for f, p in _prep[1:]) and len(_prep) == 6, str(_prep))
 check("background reader: skipped frames come as None, stops at the last frame of the window", len(_got) == 10 and _got[1] is None and _got[0] == _direct[0] and _got[2] == _direct[2], str(_got))
 _out = os.path.join(_d, "out.avi")
 _bw = m.BackgroundVideoWriter(_cv2.VideoWriter(_out, _cv2.VideoWriter_fourcc(*"MJPG"), 10.0, (64, 48)))
