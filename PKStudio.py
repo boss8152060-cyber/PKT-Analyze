@@ -4494,18 +4494,48 @@ class ClipListPanel(ttk.Frame):
         try:
             self.winfo_toplevel().config(cursor="watch")
             self.update_idletasks()
+            try:
+                stop = max(0.0, float(self.app.run3_speed_stop_var.get()))
+            except (tk.TclError, ValueError, AttributeError):
+                stop = 5.0
+            upgraded = self.upgrade_results(path, stop)
             done = cc.combine_top_folders(os.path.dirname(path), [os.path.basename(path)], log=lambda *_: None)
         except Exception as e:
             messagebox.showerror("รวมผลลัพธ์", f"รวมผลลัพธ์ไม่สำเร็จ:\n{e}")
             return
         finally:
             self.winfo_toplevel().config(cursor="")
+        note = ("\n\nจัดผลรุ่นเก่าเป็นรูปแบบใหม่ (1_ID_Zone … 8_PET, 0_Raw, 9_Summary + 2_Speed.csv)" + f": {upgraded}") if upgraded else ""
         if not done:
-            messagebox.showinfo("รวมผลลัพธ์", "ไม่มีอะไรให้รวม: โฟลเดอร์นี้มีผลวิเคราะห์ไม่ถึง 2 คลิป")
+            messagebox.showinfo("รวมผลลัพธ์", "ไม่มีอะไรให้รวม: โฟลเดอร์นี้มีผลวิเคราะห์ไม่ถึง 2 คลิป" + note)
             return
         parent = os.path.dirname(path)
         lines = "\n".join(f"• {os.path.normpath(os.path.join(parent, k, cc.COMBINED_DIR))}  (จำนวนคลิป {len(v['clips'])})" for k, v in sorted(done.items()))
-        messagebox.showinfo("รวมผลลัพธ์", "รวมผลลัพธ์แล้ว (ผลรายคลิปยังอยู่ที่เดิม):\n\n" + lines)
+        messagebox.showinfo("รวมผลลัพธ์", "รวมผลลัพธ์แล้ว (ผลรายคลิปยังอยู่ที่เดิม):\n\n" + lines + note)
+
+    def upgrade_results(self, path, stop_kmh=5.0):
+        """Results of clips analysed by older versions (no new analysis): adds 2_Speed.csv (speed per vehicle per zone,
+        from the per-frame Speed file) where it is missing and moves the files into the layout of 1.50.0 (1_ID_Zone ...
+        8_PET, 0_Raw, 9_Summary). Returns the number of clip folders changed."""
+        cc = _tools_module("combine_clips")
+        changed = 0
+        for folder, _label in cc.find_clip_folders(path):
+            made = False
+            if not cc.result_file(folder, "Speed_Zone.csv"):
+                frames = cc.result_file(folder, "Speed.csv")
+                if frames:
+                    with open(frames, newline="", encoding="utf-8-sig") as f:
+                        rows = list(csv.DictReader(f))
+                    if rows and {"Vehicle_ID", "Zone", "Time_s", "Speed_kmh"} <= set(rows[0]):
+                        with open(os.path.join(folder, "Speed_Zone.csv"), "w", newline="", encoding="utf-8-sig") as f:
+                            w = csv.DictWriter(f, fieldnames=SPEED_ZONE_FIELDS)
+                            w.writeheader()
+                            w.writerows({k: excel_safe_value(v) for k, v in r.items()}
+                                        for r in speed_zone_summary(rows, stop_kmh=stop_kmh))
+                        made = True
+            if cc.arrange_clip_folder(folder) or made:
+                changed += 1
+        return changed
 
     def _levels(self):
         try:

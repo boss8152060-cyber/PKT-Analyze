@@ -127,11 +127,15 @@ def _swap_paths(value, moved):
 
 def arrange_clip_folder(folder):
     """Moves the plain-named results of a clip folder into LAYOUT (an older arranged copy is replaced) and puts the new
-    paths into its JSON files. Returns {old path: new path}. Files that are not in LAYOUT (videos, pictures) stay."""
+    paths into its JSON files. Returns {old path: new path}. Files that are not in LAYOUT (videos, pictures) stay.
+    Results of older versions named <clip>_LDP.csv / Run_3_LDP.csv ... are moved the same way (a plain name wins)."""
     moved = []
+    clip = os.path.basename(os.path.normpath(folder))
     for plain, rel in LAYOUT.items():
-        src = os.path.join(folder, plain)
-        if not os.path.isfile(src):
+        src = next((p for p in (os.path.join(folder, n) for n in (plain, f"{clip}_{plain}", f"{clip}_Research_{plain}",
+                                                                   f"Run_3_{plain}", f"Run_1_Research_{plain}"))
+                    if os.path.isfile(p)), None)
+        if src is None:
             continue
         dst = os.path.join(folder, *rel.split("/"))
         os.makedirs(os.path.dirname(dst), exist_ok=True)

@@ -327,6 +327,18 @@ class CombineClips(unittest.TestCase):
         combine_clips.arrange_clip_folder(d)                                    # nothing left to move: nothing happens
         self.assertTrue(os.path.isfile(os.path.join(d, "3_LDP.csv")))
 
+    def test_results_with_the_old_names_are_arranged_too(self):
+        import combine_clips
+        a = self._clip("Site/d1/a", [30], old_names=True)                   # Run_3_LDP.csv ...
+        b = self._clip("Site/d1/b", [40], clip_prefixed=True)               # b_LDP.csv ...
+        combine_clips.arrange_clip_folder(a)
+        combine_clips.arrange_clip_folder(b)
+        for d in (a, b):
+            self.assertTrue(os.path.isfile(os.path.join(d, "3_LDP.csv")))
+            self.assertTrue(os.path.isfile(os.path.join(d, "0_Raw", "Speed_Frames.csv")))
+            self.assertTrue(os.path.isfile(os.path.join(d, "9_Summary", "Summary.json")))
+        self.assertEqual(sorted(os.listdir(b)), ["0_Raw", "3_LDP.csv", "5_Gap_Acceptance.csv", "9_Summary"])
+
     def test_the_combined_files_of_older_versions_are_replaced(self):
         import combine_clips
         self._clip("Site/d1/a", [30])

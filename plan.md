@@ -260,3 +260,4 @@
 - เทสต์: unit (arrange, ไฟล์รวมเก่าถูกแทน, speed per zone), e2e_batch_gui / e2e_chain / e2e_window / e2e_run3 ผ่าน (e2e_chain แก้คอลัมน์เครื่องหมายต่อคลิปที่ย้ายไปท้ายตาราง); ลองกับสำเนาผล R6 จริง
 - ค้าง: ผลรุ่นเก่ายังเป็นแบบเดิม (ไม่ย้ายอัตโนมัติ) และไม่มี `2_Speed.csv` จนกว่าจะวิเคราะห์ใหม่
 - 1.50.1: ผู้ใช้ขอไม่นับรถจอดใน Speed → `speed_zone_summary(stop_kmh)` ตัดเฟรม < `speed_stop_kmh` (5 = ค่าเดียวกับ Gap `waiting_speed_threshold` / TTC `ttc_min_speed_kmh`), คอลัมน์ Moving/Stopped_Frames, Stopped_Time_s; เทสต์ unit + e2e_run3 ผ่าน
+- 1.51.0: `upgrade_results` (ปุ่มรวมผล) จัดผลรุ่นเก่า + สร้าง 2_Speed จาก Speed รายเฟรม; ผู้ใช้สั่งจัดผล R1–R6 (`D:/PK Program/Test/Output/Test`) — จัดแล้ว ไม่ได้สร้าง All_Clips เพราะเป็นการรันคลิปเดียวกันต่างค่า

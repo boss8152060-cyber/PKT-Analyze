@@ -2045,3 +2045,6 @@ EXACT.update({'Speed — เฉลี่ยรายคันรายโซน'
 
 # 1.50.1: Speed leaves out standing frames
 EXACT.update({'ถือว่ารถจอด/หยุดรอ เมื่อช้ากว่า (km/h, 0 = ปิด) — เฟรมเหล่านี้ไม่นำมาคิดความเร็วใน 2_Speed.csv (ค่าเดียวกับ Gap / TTC = 5)': 'Vehicle counts as standing / waiting below (km/h, 0 = off) — these frames are left out of the speeds in 2_Speed.csv (same value as Gap / TTC = 5)'})
+
+# 1.51.0: older results brought to the new layout
+EXACT.update({'จัดผลรุ่นเก่าเป็นรูปแบบใหม่': 'Results of older versions brought to the new layout'})
