@@ -4380,6 +4380,7 @@ class ClipListPanel(ttk.Frame):
         ttk.Label(out, text="โฟลเดอร์ผลลัพธ์").grid(row=0, column=0, padx=(0, 6))
         ttk.Entry(out, textvariable=app.output_var).grid(row=0, column=1, sticky="ew")
         ttk.Button(out, text="Browse", command=app.browse_output).grid(row=0, column=2, padx=(6, 0))
+        ttk.Button(out, text="รวมผลลัพธ์หลายคลิป…", command=self.combine_results).grid(row=0, column=3, padx=(6, 0))
         opts = ttk.Frame(self)
         opts.grid(row=4, column=0, sticky="w", pady=(4, 0))
         ttk.Checkbutton(opts, text="ข้ามคลิปที่วิเคราะห์เสร็จแล้ว (ดูจากโฟลเดอร์ผลลัพธ์ของคลิปนั้น)", variable=self.skip_done_var).pack(side="left")
@@ -4405,6 +4406,32 @@ class ClipListPanel(ttk.Frame):
         link.bind("<Button-1>", toggle_tips)
 
     # ---- list ----
+    def combine_results(self):
+        """Put together the results of clips analysed earlier (no new analysis): the chosen folder and every folder
+        inside it that holds 2 or more clips (e.g. each day) get an All_Clips folder."""
+        start = self.app.output_var.get().strip()
+        path = filedialog.askdirectory(title="เลือกโฟลเดอร์ผลลัพธ์ที่จะรวม (เช่นโฟลเดอร์ของวัน หรือของไซต์)",
+                                       initialdir=start if os.path.isdir(start) else None)
+        if not path:
+            return
+        path = os.path.normpath(path)
+        cc = _tools_module("combine_clips")
+        try:
+            self.winfo_toplevel().config(cursor="watch")
+            self.update_idletasks()
+            done = cc.combine_top_folders(os.path.dirname(path), [os.path.basename(path)], log=lambda *_: None)
+        except Exception as e:
+            messagebox.showerror("รวมผลลัพธ์", f"รวมผลลัพธ์ไม่สำเร็จ:\n{e}")
+            return
+        finally:
+            self.winfo_toplevel().config(cursor="")
+        if not done:
+            messagebox.showinfo("รวมผลลัพธ์", "ไม่มีอะไรให้รวม: โฟลเดอร์นี้มีผลวิเคราะห์ไม่ถึง 2 คลิป")
+            return
+        parent = os.path.dirname(path)
+        lines = "\n".join(f"• {os.path.normpath(os.path.join(parent, k, cc.COMBINED_DIR))}  (จำนวนคลิป {len(v['clips'])})" for k, v in sorted(done.items()))
+        messagebox.showinfo("รวมผลลัพธ์", "รวมผลลัพธ์แล้ว (ผลรายคลิปยังอยู่ที่เดิม):\n\n" + lines)
+
     def _levels(self):
         try:
             return max(0, int(self.keep_levels_var.get()))
@@ -5990,7 +6017,7 @@ class Run1App:
         self.status_var.set(f"Batch finished: {len(ok)}/{total} clips" + (" (stopped)" if stopped else ""))
         self.progress_var.set("100%" if not stopped else "")
         msg = f"Batch {'หยุดกลางทาง' if stopped else 'เสร็จ'}: {len(ok)} จาก {total} คลิป\n\nผลลัพธ์:\n{out_root}\n\n"
-        msg += "• โฟลเดอร์ของแต่ละคลิป (ตามโครงสร้างต้นฉบับ) = CSV ของคลิปนั้น (ชื่อไฟล์ขึ้นต้นด้วยชื่อคลิป)\n• All_Clips (ในโฟลเดอร์ชั้นบนสุดที่นำเข้า) = CSV รวมทุกคลิป มีคอลัมน์ Clip บอกว่าแถวมาจากคลิปไหน (รวมคลิปรอบก่อน ๆ ที่อยู่ในโฟลเดอร์เดียวกัน)\n• Batch_Comparison.csv = ตารางเปรียบเทียบทุกคลิปในโฟลเดอร์ผลลัพธ์"
+        msg += "• โฟลเดอร์ของแต่ละคลิป (ตามโครงสร้างต้นฉบับ) = ผลรายคลิป (CSV ของคลิปนั้น)\n• All_Clips = ผลรวมหลายคลิป มีคอลัมน์ Clip บอกว่าแถวมาจากคลิปไหน: ในโฟลเดอร์ชั้นบนสุดที่นำเข้า (ทุกคลิป) และในทุกโฟลเดอร์ย่อยที่มีตั้งแต่ 2 คลิป เช่นโฟลเดอร์ของแต่ละวัน (คลิปของวันนั้น); All_Clips.csv = ตารางรายคลิป, All_Statistics.csv = สถิติรวม\n• Batch_Comparison.csv = ตารางเปรียบเทียบทุกคลิปในโฟลเดอร์ผลลัพธ์"
         if bad:
             msg += "\n\nคลิปที่มีปัญหา:\n" + "\n".join(f"- {r['Run']}: {r['Status']}" for r in bad)
         if empties:

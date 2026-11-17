@@ -6,6 +6,9 @@ This module puts the same kind of file from all clips together into one CSV per 
 first column `Clip` saying which clip a row comes from (vehicle IDs are only unique inside a clip, so always read
 an ID together with Clip), plus All_Clips.csv (the list of clips) and All_Statistics.csv (Mean, SD, V50, V85 ...
 over all clips).  It is rebuilt from the clip folders that exist, so adding clips later only means running it again.
+This is done for every folder level that holds 2 or more clips: e.g. Site/All_Clips (every day) and
+Site/<day>/All_Clips (the clips of that day); a level whose clips are exactly those of the level above is skipped
+(it would be a copy).  All_Clips.csv is also a table of the clips (frames, length, vehicles, rows of each indicator).
 
 The batch calls combine_top_folders() after every run; it can also be used on its own:
     python tools/combine_clips.py <output root> [<top folder name> ...]
@@ -28,7 +31,11 @@ ID_COLUMNS = ("track_id", "Vehicle_ID", "Vehicle_ID_A", "Vehicle_ID_B", "Vehicle
 
 # kinds of CSV that are put together (the file of a clip is <clip>_<kind>.csv; older runs: Run_3_<kind>.csv)
 KINDS = ("Gap_Acceptance", "Critical_Gap", "Headway", "LDP", "Lateral_Clearance", "Lateral_Clearance_Pairs", "TTC", "TTC_Detail", "PET",
-         "Speed", "Speed_Detail", "Duplicate_Tracks", "ID_Zone_Summary")      # Speed = the speed of every frame; Speed_Detail only exists in older results (merged, no statistics)
+         "Speed", "Speed_Detail", "Duplicate_Tracks", "ID_Zone_Summary",      # Speed = the speed of every frame; Speed_Detail only exists in older results (merged, no statistics)
+         "Indicator_Summary", "Zone_Summary")                                  # the summary of each clip, one under the other
+
+# kinds counted per clip in All_Clips.csv (column Rows_<kind>)
+COUNTED_KINDS = ("LDP", "Lateral_Clearance_Pairs", "Gap_Acceptance", "Headway", "TTC", "PET", "Speed")
 
 # kind -> (indicator name, value column, group columns) for All_Statistics.csv
 STATISTICS = {
@@ -192,11 +199,18 @@ def combine(clips, target_dir):
                 w.writeheader()
                 w.writerows(rows_all)
 
+    counts = {}                                          # (label, kind) -> rows of that clip
+    for kind in COUNTED_KINDS:
+        for r in merged.get(kind, []):
+            counts[(r["Clip"], kind)] = counts.get((r["Clip"], kind), 0) + 1
     with open(os.path.join(target_dir, "All_Clips.csv"), "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["Clip", "Clip_Start", "Folder"])
+        w.writerow(["Clip", "Clip_Start", "Status", "Frames", "Duration_s", "Unique_Track_IDs"]
+                   + [f"Rows_{k}" for k in COUNTED_KINDS] + ["Folder"])
         for folder, label in clips:
-            w.writerow([label, clip_start_time(label), folder])
+            info = clip_info(folder)
+            w.writerow([label, clip_start_time(label), info["status"], info["frames"], info["duration"], info["vehicles"]]
+                       + [counts.get((label, k), 0) for k in COUNTED_KINDS] + [folder])
 
     out_rows = []
     for kind, (indicator, column, group_cols) in STATISTICS.items():
@@ -225,9 +239,56 @@ def combine(clips, target_dir):
     return summary
 
 
+def clip_info(folder):
+    """{status, frames, duration (s), vehicles} of a clip folder from its Run_Summary.json / Settings.json ('' = unknown)."""
+    info = {"status": "", "frames": "", "duration": "", "vehicles": ""}
+    try:
+        with open(result_file(folder, "Run_Summary.json") or "", encoding="utf-8") as f:
+            rs = json.load(f)
+    except (OSError, ValueError):
+        return info
+    info["status"] = rs.get("status", "")
+    frames = rs.get("processed_frames", rs.get("total_frames"))
+    info["frames"] = frames if isinstance(frames, int) else ""
+    info["vehicles"] = rs.get("unique_track_ids", "")
+    try:
+        with open(result_file(folder, "Settings.json") or "", encoding="utf-8") as f:
+            fps = to_float(json.load(f).get("video_fps"))
+        if fps and isinstance(frames, int):
+            info["duration"] = f"{frames / fps:.1f}"
+    except (OSError, ValueError, AttributeError):
+        pass
+    return info
+
+
+def _sub_levels(src, clips, min_clips):
+    """[(folder, clips relabelled from the parent of that folder)] for every folder below src that holds min_clips or
+    more clips, unless they are exactly the clips of the folder above it (that one already has them all)."""
+    src = os.path.normpath(src)
+    under = {}                                            # folder -> [clip folder] (every depth, walk order)
+    for folder, _label in clips:
+        d = os.path.dirname(os.path.normpath(folder))
+        while len(d) > len(src) and d.startswith(src):
+            under.setdefault(d, []).append(folder)
+            d = os.path.dirname(d)
+    clip_dirs = {os.path.normpath(f) for f, _ in clips}
+    out = []
+    for d in sorted(under):
+        members = under[d]
+        if d in clip_dirs or len(members) < min_clips:
+            continue
+        parent = os.path.dirname(d)
+        if len(under.get(parent, [f for f, _ in clips] if parent == src else [])) == len(members):
+            continue                                      # same clips as the folder above -> its All_Clips is the same
+        base = os.path.dirname(d)
+        out.append((d, [(f, os.path.relpath(f, base).replace("\\", "/")) for f in members]))
+    return out
+
+
 def combine_top_folders(out_root, tops, min_clips=2, log=print):
     """For every top folder name in `tops` ('' = clips placed straight in out_root) combine all of its clips
-    (every depth, old and new) into <top folder>/All_Clips/. Returns {top: summary}."""
+    (every depth, old and new) into <top folder>/All_Clips/, and the clips of every folder below it that holds 2 or
+    more of them (e.g. one day) into <that folder>/All_Clips/. Returns {top or 'top/sub/folder': summary}."""
     result = {}
     for top in sorted(set(tops)):
         src = os.path.join(out_root, top) if top else out_root
@@ -243,6 +304,12 @@ def combine_top_folders(out_root, tops, min_clips=2, log=print):
         target = os.path.join(src, COMBINED_DIR)
         result[top] = combine(clips, target)
         log("combined -> " + target)
+        if top:
+            for folder, sub_clips in _sub_levels(src, clips, min_clips):
+                target = os.path.join(folder, COMBINED_DIR)
+                key = os.path.relpath(folder, out_root).replace("\\", "/")
+                result[key] = combine(sub_clips, target)
+                log("combined -> " + target)
     return result
 
 

@@ -247,3 +247,8 @@
 ## 2026-11-17 — Run 1 เร็วขึ้น (1.48.0)
 
 - letterbox ในเธรดอ่านวิดีโอ (`BackgroundFrameReader.prepare`) + วาดชั้นโซนหลังตรวจจับ; วัด 131.9→123.4 s ผลเหมือนเดิมทุกบรรทัด; คอขวดที่เหลือคือ GPU (TensorRT ~23 ms/เฟรมบน GTX 1650) — ถ้าจะเร็วกว่านี้ต้องทำ pipeline ภายใน Ultralytics หรือลดโมเดล/ขนาดภาพ (ผลเปลี่ยน)
+
+## 2026-11-17 — ผลรวมรายวัน (1.49.0)
+
+- `tools/combine_clips.py`: `combine_top_folders` รวมทุกชั้นที่มี ≥2 คลิป (`_sub_levels`), เพิ่ม `Indicator_Summary`/`Zone_Summary`, `All_Clips.csv` มี `clip_info` + Rows_<ตัวชี้วัด>; ปุ่ม `ClipListPanel.combine_results`; ข้อความท้าย Batch + คำแปลใน `pkt_analyze_lang.py`; เทสต์ใน `tests/test_tools.py`
+- ทดสอบกับผลจริง R1–R5 จัดเป็น Site8/2 วัน: ได้ All_Clips ของไซต์ + ของแต่ละวัน; ความยาวคลิป (Duration_s) ว่างกับผลรุ่นเก่าที่ไม่มี video_fps ใน Settings.json

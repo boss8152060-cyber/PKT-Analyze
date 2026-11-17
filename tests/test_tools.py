@@ -276,6 +276,44 @@ class CombineClips(unittest.TestCase):
         self.assertEqual(combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None), {})
         self.assertFalse(os.path.exists(os.path.join(self.root, "Site", "All_Clips")))
 
+    def test_every_day_folder_gets_its_own_combined_files(self):
+        import combine_clips
+        self._clip("Site/d1/a", [30, 40])
+        self._clip("Site/d1/b", [50])
+        self._clip("Site/d2/c", [60])
+        self._clip("Site/d3/x/e", [70])                                     # d3/x holds the same clips as d3 -> only d3
+        self._clip("Site/d3/x/f", [80])
+        out = combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
+        self.assertEqual(sorted(out), ["Site", "Site/d1", "Site/d3"])
+        self.assertFalse(os.path.exists(os.path.join(self.root, "Site", "d2", "All_Clips")))       # one clip only
+        self.assertFalse(os.path.exists(os.path.join(self.root, "Site", "d3", "x", "All_Clips")))
+        day = os.path.join(self.root, "Site", "d1", "All_Clips")
+        with open(os.path.join(day, "All_LDP.csv"), newline="", encoding="utf-8-sig") as f:
+            self.assertEqual([r["Clip"] for r in csv.DictReader(f)], ["d1/a", "d1/a", "d1/b"])     # only the clips of that day
+        with open(os.path.join(self.root, "Site", "All_Clips", "All_LDP.csv"), newline="", encoding="utf-8-sig") as f:
+            self.assertEqual(len(list(csv.DictReader(f))), 6)                 # the site: every day
+        with open(os.path.join(day, "All_Clips.csv"), newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual([(r["Clip"], r["Rows_LDP"], r["Rows_Speed"]) for r in rows], [("d1/a", "2", "2"), ("d1/b", "1", "1")])
+
+    def test_the_summary_of_each_clip_is_put_together_too(self):
+        import combine_clips
+        for rel in ("Site/d1/a", "Site/d1/b"):
+            d = self._clip(rel, [30])
+            with open(os.path.join(d, "Indicator_Summary.csv"), "w", newline="", encoding="utf-8-sig") as f:
+                f.write("Indicator,N,Mean" + chr(10) + "LDP,1,30" + chr(10))
+            with open(os.path.join(d, "Run_Summary.json"), "w") as f:
+                f.write('{"status": "completed", "processed_frames": 300, "unique_track_ids": 7}')
+            with open(os.path.join(d, "Settings.json"), "w") as f:
+                f.write('{"video_fps": "30"}')
+        combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
+        target = os.path.join(self.root, "Site", "All_Clips")
+        with open(os.path.join(target, "All_Indicator_Summary.csv"), newline="", encoding="utf-8-sig") as f:
+            self.assertEqual([(r["Clip"], r["Indicator"]) for r in csv.DictReader(f)], [("Site/d1/a", "LDP"), ("Site/d1/b", "LDP")])
+        with open(os.path.join(target, "All_Clips.csv"), newline="", encoding="utf-8-sig") as f:
+            r = next(csv.DictReader(f))
+        self.assertEqual((r["Status"], r["Frames"], r["Duration_s"], r["Unique_Track_IDs"]), ("completed", "300", "10.0", "7"))
+
     def test_the_combined_folder_is_never_read_as_a_clip(self):
         import combine_clips
         self._clip("Site/d1/a", [30])
