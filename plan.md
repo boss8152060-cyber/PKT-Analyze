@@ -252,3 +252,10 @@
 
 - `tools/combine_clips.py`: `combine_top_folders` รวมทุกชั้นที่มี ≥2 คลิป (`_sub_levels`), เพิ่ม `Indicator_Summary`/`Zone_Summary`, `All_Clips.csv` มี `clip_info` + Rows_<ตัวชี้วัด>; ปุ่ม `ClipListPanel.combine_results`; ข้อความท้าย Batch + คำแปลใน `pkt_analyze_lang.py`; เทสต์ใน `tests/test_tools.py`
 - ทดสอบกับผลจริง R1–R5 จัดเป็น Site8/2 วัน: ได้ All_Clips ของไซต์ + ของแต่ละวัน; ความยาวคลิป (Duration_s) ว่างกับผลรุ่นเก่าที่ไม่มี video_fps ใน Settings.json
+
+## 2026-11-17 — จัดไฟล์ผลลัพธ์ใหม่ + Speed รายโซน (1.50.0)
+
+- ผู้ใช้เลือกแบบ "แยก 3 โฟลเดอร์": `LAYOUT`/`arrange_clip_folder` ใน `tools/combine_clips.py` (เรียกท้าย `run_processing` ก่อน `finish_integrated_ui`), `result_file` รู้จักชื่อใหม่, `find_clip_folders` ข้าม `0_Raw`/`9_Summary`, `pkt_plugin.find_analysis_outputs` อ่าน `9_Summary`
+- `speed_zone_summary` (CORE) → `Speed_Zone.csv` → `2_Speed.csv`; แถว "Speed (mean per vehicle in zone)" ใน Indicator_Summary + สถิติรวม (ผู้ใช้ขอค่าเฉลี่ยต่อโซนเอง — เดิม v28(131) เลิกสถิติ Speed)
+- เทสต์: unit (arrange, ไฟล์รวมเก่าถูกแทน, speed per zone), e2e_batch_gui / e2e_chain / e2e_window / e2e_run3 ผ่าน (e2e_chain แก้คอลัมน์เครื่องหมายต่อคลิปที่ย้ายไปท้ายตาราง); ลองกับสำเนาผล R6 จริง
+- ค้าง: ผลรุ่นเก่ายังเป็นแบบเดิม (ไม่ย้ายอัตโนมัติ) และไม่มี `2_Speed.csv` จนกว่าจะวิเคราะห์ใหม่

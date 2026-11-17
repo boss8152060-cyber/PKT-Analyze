@@ -17,6 +17,8 @@ import cv2
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 import batch_run  # noqa: E402
+import combine_clips  # noqa: E402
+RF = combine_clips.result_file
 
 failures = []
 
@@ -62,7 +64,7 @@ base.update({"analysis_start_s": "1.0", "analysis_end_s": "0:02", "record_start_
 rows = batch_run.run_batch(app, base, os.path.join(tmp, "out"), [(clip, "", {})], save_video=True, log=lambda *_: None)
 check("run completed", rows[0]["Status"] == "completed", rows[0]["Status"])
 run_dir = os.path.join(tmp, "out", "clip")
-det = list(csv.DictReader(open(os.path.join(run_dir, "Detection_Records.csv"), encoding="utf-8-sig")))
+det = list(csv.DictReader(open(RF(run_dir, "Detection_Records.csv"), encoding="utf-8-sig")))
 frames = sorted({int(r["frame"]) for r in det})
 stamps = [float(r["timestamp"]) for r in det]
 import math
@@ -76,7 +78,7 @@ n = int(v.get(cv2.CAP_PROP_FRAME_COUNT))
 v.release()
 check("recorded video = frames 73..91 only (1.2 s - 1.5 s) = 19 frames", abs(n - 19) <= 1, str(n))
 import json
-summ = json.load(open(os.path.join(run_dir, "Run_Summary.json"), encoding="utf-8"))
+summ = json.load(open(RF(run_dir, "Run_Summary.json"), encoding="utf-8"))
 check("run summary states the analysis window", summ.get("analysis_window", {}).get("first_frame") == first_exp and summ["analysis_window"]["last_frame"] == last_exp, str(summ.get("analysis_window")))
 root.destroy()
 shutil.rmtree(tmp, ignore_errors=True)

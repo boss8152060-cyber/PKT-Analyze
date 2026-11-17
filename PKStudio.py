@@ -494,6 +494,7 @@ RUN3_CSV_CHOICES = [
     ("Headway.csv", "headway", "Headway"),
     ("TTC.csv", "ttc", "TTC — รายเหตุการณ์"),
     ("PET.csv", "pet", "PET"),
+    ("Speed_Zone.csv", "speed", "Speed — เฉลี่ยรายคันรายโซน"),
     ("Speed.csv", "speed", "Speed — ทุกเฟรมในโซน"),
     ("Indicator_Summary.csv", None, "สรุปทุกตัวชี้วัด (ค่าเฉลี่ย / SD / P85 …)"),
     ("Detection_Records_Topview.csv", None, "พิกัดรถเป็นเมตร (ใช้วาดผัง X–Y)"),
@@ -2235,6 +2236,65 @@ def topview_px_setting(text, default=1280):
     except ValueError:
         return int(default)
     return v if v > 0 else int(default)
+
+
+SPEED_ZONE_FIELDS = ["Vehicle_ID", "Vehicle_Class", "Movement", "Zone_Path", "Zone_Order", "Zone", "Entry_Time_s", "Exit_Time_s",
+                     "Time_In_Zone_s", "Frames", "Mean_Speed_kmh", "Median_Speed_kmh", "P85_Speed_kmh", "Min_Speed_kmh", "Max_Speed_kmh",
+                     "Entry_Speed_kmh", "Exit_Speed_kmh", "Frames_Above_Max", "QC_Flag"]
+
+
+def speed_zone_summary(speed_rows, split_gap_s=1.0):
+    """One row per vehicle per stay in a zone, made from the per-frame Speed rows (Vehicle_ID, Vehicle_Class, Zone, Movement, Time_s,
+    Speed_kmh, QC_Flag; in the order they were made: vehicle by vehicle, stay by stay): when it entered / left the zone, how long it
+    was inside and its mean / median / P85 / min / max / entry / exit speed there. Frames flagged Speed_Above_Max are left out of the
+    values (counted in Frames_Above_Max); a stay with only such frames has blank values and QC_Flag All_Frames_Above_Max.
+    Zone_Path = the zones of the vehicle in order (e.g. 2-3-4), Zone_Order = the place of this stay in it.
+    A break of more than split_gap_s inside the same zone starts a new stay."""
+    stays = []
+    for r in speed_rows:
+        try:
+            t = float(r["Time_s"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        cur = stays[-1] if stays else None
+        if (cur is None or str(cur["id"]) != str(r.get("Vehicle_ID")) or cur["zone"] != r.get("Zone")
+                or t - cur["t"][-1] > split_gap_s):
+            cur = {"id": r.get("Vehicle_ID"), "cls": r.get("Vehicle_Class", ""), "mv": r.get("Movement", ""), "zone": r.get("Zone", ""),
+                   "t": [], "v": [], "bad": 0}
+            stays.append(cur)
+        cur["t"].append(t)
+        try:
+            v = float(r.get("Speed_kmh"))
+        except (TypeError, ValueError):
+            v = None
+        if "Speed_Above_Max" in str(r.get("QC_Flag", "")):
+            cur["bad"] += 1
+        elif v is not None:
+            cur["v"].append(v)
+    paths = {}
+    for s in stays:
+        paths.setdefault(str(s["id"]), []).append(str(s["zone"]).replace("Zone", "").strip())
+    order = {}
+    out = []
+    fmt = lambda x: "" if x is None else f"{x:.2f}"
+    for s in stays:
+        key = str(s["id"])
+        order[key] = order.get(key, 0) + 1
+        v = s["v"]
+        a = np.asarray(v, dtype=float)
+        has = a.size > 0
+        out.append({
+            "Vehicle_ID": s["id"], "Vehicle_Class": s["cls"], "Movement": s["mv"], "Zone_Path": "-".join(paths[key]),
+            "Zone_Order": order[key], "Zone": s["zone"], "Entry_Time_s": f"{s['t'][0]:.3f}", "Exit_Time_s": f"{s['t'][-1]:.3f}",
+            "Time_In_Zone_s": f"{s['t'][-1] - s['t'][0]:.3f}", "Frames": len(s["t"]),
+            "Mean_Speed_kmh": fmt(float(a.mean()) if has else None), "Median_Speed_kmh": fmt(float(np.median(a)) if has else None),
+            "P85_Speed_kmh": fmt(float(np.percentile(a, 85)) if has else None),
+            "Min_Speed_kmh": fmt(float(a.min()) if has else None), "Max_Speed_kmh": fmt(float(a.max()) if has else None),
+            "Entry_Speed_kmh": fmt(v[0] if has else None), "Exit_Speed_kmh": fmt(v[-1] if has else None),
+            "Frames_Above_Max": s["bad"],
+            "QC_Flag": "" if has else ("All_Frames_Above_Max" if s["bad"] else "No_Speed"),
+        })
+    return out
 
 
 # ==== CORE-END ====
@@ -6017,7 +6077,7 @@ class Run1App:
         self.status_var.set(f"Batch finished: {len(ok)}/{total} clips" + (" (stopped)" if stopped else ""))
         self.progress_var.set("100%" if not stopped else "")
         msg = f"Batch {'หยุดกลางทาง' if stopped else 'เสร็จ'}: {len(ok)} จาก {total} คลิป\n\nผลลัพธ์:\n{out_root}\n\n"
-        msg += "• โฟลเดอร์ของแต่ละคลิป (ตามโครงสร้างต้นฉบับ) = ผลรายคลิป (CSV ของคลิปนั้น)\n• All_Clips = ผลรวมหลายคลิป มีคอลัมน์ Clip บอกว่าแถวมาจากคลิปไหน: ในโฟลเดอร์ชั้นบนสุดที่นำเข้า (ทุกคลิป) และในทุกโฟลเดอร์ย่อยที่มีตั้งแต่ 2 คลิป เช่นโฟลเดอร์ของแต่ละวัน (คลิปของวันนั้น); All_Clips.csv = ตารางรายคลิป, All_Statistics.csv = สถิติรวม\n• Batch_Comparison.csv = ตารางเปรียบเทียบทุกคลิปในโฟลเดอร์ผลลัพธ์"
+        msg += "• โฟลเดอร์ของแต่ละคลิป (ตามโครงสร้างต้นฉบับ) = ผลรายคลิป (1_ID_Zone … 8_PET, 0_Raw, 9_Summary)\n• All_Clips = ผลรวมหลายคลิป มีคอลัมน์ Clip บอกว่าแถวมาจากคลิปไหน: ในโฟลเดอร์ชั้นบนสุดที่นำเข้า (ทุกคลิป) และในทุกโฟลเดอร์ย่อยที่มีตั้งแต่ 2 คลิป เช่นโฟลเดอร์ของแต่ละวัน (คลิปของวันนั้น); 1_ID_Zone … 8_PET = ผลวิเคราะห์, 0_Raw = ข้อมูลดิบ, 9_Summary = สรุป (Clip_List.csv = ตารางรายคลิป, Statistics.csv = สถิติรวม)\n• Batch_Comparison.csv = ตารางเปรียบเทียบทุกคลิปในโฟลเดอร์ผลลัพธ์"
         if bad:
             msg += "\n\nคลิปที่มีปัญหา:\n" + "\n".join(f"- {r['Run']}: {r['Status']}" for r in bad)
         if empties:
@@ -10400,6 +10460,16 @@ class Run1App:
                     log.exception("Could not add the Run 3 result to %s", output_summary)
                     print("WARNING: could not add the Run 3 result to the summary JSON:", output_summary)
 
+            # results numbered 1_ID_Zone ... 8_PET, raw data in 0_Raw, summaries in 9_Summary (videos stay where they are)
+            try:
+                moved = _tools_module("combine_clips").arrange_clip_folder(output_dir)
+                new = lambda p: moved.get(p, p) if p else p
+                output_csv, output_settings, output_summary = new(output_csv), new(output_settings), new(output_summary)
+                output_id_zone_summary, output_zone_summary = new(output_id_zone_summary), new(output_zone_summary)
+                self.run3_last_outputs = {k: new(v) for k, v in (self.run3_last_outputs or {}).items()}
+            except Exception:
+                log.exception("Could not arrange the result files of %s", output_dir)
+
             self.post_ui(
                 lambda: self.finish_integrated_ui(
                     stopped,
@@ -12874,6 +12944,14 @@ class Run1App:
             outputs["speed"] = write_csv("Speed.csv", ["Frame","Time_s","Vehicle_ID","Vehicle_Class","Zone","Movement","Speed_kmh","QC_Flag"], speed_rows)
             n_flag = sum(1 for r in speed_rows if "Speed_Above_Max" in r["QC_Flag"])
             summary["indicators"]["Speed"] = {"rows": len(speed_rows), "vehicles": len({r["Vehicle_ID"] for r in speed_rows}), "above_max_flagged": n_flag}
+            zone_rows = speed_zone_summary(speed_rows)              # the mean speed of every vehicle in every zone it passed
+            outputs["speed_zone"] = write_csv("Speed_Zone.csv", SPEED_ZONE_FIELDS, zone_rows)
+            means = [(r["Zone"], float(r["Mean_Speed_kmh"])) for r in zone_rows if r["Mean_Speed_kmh"] != ""]
+            if means:
+                indicator("Speed (mean per vehicle in zone)", "Speed", "km/h", "All zones", [m for _, m in means])
+                for z in sorted({z for z, _ in means}):
+                    indicator("Speed (mean per vehicle in zone)", "Speed", "km/h", z, [m for zz, m in means if zz == z])
+            summary["indicators"]["Speed"]["vehicle_zone_rows"] = len(zone_rows)
             summary["diagnostics"]["speed"] = (f"rows={len(speed_rows)}; zones={sorted(c['speed_zones'])}; smoothing_samples={c['speed_smoothing_samples']}; "
                                                f"frame_window_s={c.get('speed_frame_window_s', 0.5)}; max_plausible_kmh={c.get('speed_max_kmh', 0)}; flagged_above_max={n_flag}")
         run_step("speed", "Speed.csv", do_speed)

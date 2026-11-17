@@ -141,5 +141,42 @@ class GpuBackends(unittest.TestCase):
         self.assertEqual(NS["directml_onnx_name"](os.path.join("m", "best.pt"), 640), os.path.join("m", "best") + "_640_dml.onnx")
 
 
+class SpeedPerZone(unittest.TestCase):
+    """2_Speed.csv: one row per vehicle per stay in a zone, made from the per-frame speeds."""
+
+    @staticmethod
+    def _rows(vid, zone, t0, speeds, flag_at=(), mv="2-3-4"):
+        return [{"Vehicle_ID": vid, "Vehicle_Class": "Car", "Zone": zone, "Movement": mv, "Time_s": f"{t0 + i / 30.0:.6f}",
+                 "Speed_kmh": f"{v:.2f}", "QC_Flag": "Speed_Above_Max" if i in flag_at else ""} for i, v in enumerate(speeds)]
+
+    def test_one_row_per_vehicle_and_zone_in_the_order_it_passed(self):
+        rows = self._rows(1, "Zone 2", 0.0, [20, 30, 40]) + self._rows(1, "Zone 3", 0.1, [10, 20]) + self._rows(1, "Zone 4", 0.2, [50, 60])
+        rows += self._rows(2, "Zone 2", 5.0, [25, 35])
+        out = NS["speed_zone_summary"](rows)
+        self.assertEqual([(r["Vehicle_ID"], r["Zone"], r["Zone_Order"], r["Zone_Path"]) for r in out],
+                         [(1, "Zone 2", 1, "2-3-4"), (1, "Zone 3", 2, "2-3-4"), (1, "Zone 4", 3, "2-3-4"), (2, "Zone 2", 1, "2")])
+        z2 = out[0]
+        self.assertEqual((z2["Mean_Speed_kmh"], z2["Median_Speed_kmh"], z2["Min_Speed_kmh"], z2["Max_Speed_kmh"]), ("30.00", "30.00", "20.00", "40.00"))
+        self.assertEqual((z2["Entry_Speed_kmh"], z2["Exit_Speed_kmh"], z2["Frames"]), ("20.00", "40.00", 3))
+        self.assertEqual((z2["Entry_Time_s"], z2["Exit_Time_s"], z2["Time_In_Zone_s"]), ("0.000", "0.067", "0.067"))
+        self.assertEqual(set(out[0]), set(NS["SPEED_ZONE_FIELDS"]))
+
+    def test_frames_above_the_limit_are_left_out_of_the_values(self):
+        out = NS["speed_zone_summary"](self._rows(1, "Zone 3", 0.0, [20, 300, 40], flag_at=(1,)))
+        self.assertEqual((out[0]["Mean_Speed_kmh"], out[0]["Frames_Above_Max"], out[0]["QC_Flag"]), ("30.00", 1, ""))
+        out = NS["speed_zone_summary"](self._rows(1, "Zone 3", 0.0, [300], flag_at=(0,)))
+        self.assertEqual((out[0]["Mean_Speed_kmh"], out[0]["QC_Flag"]), ("", "All_Frames_Above_Max"))
+
+    def test_coming_back_to_a_zone_is_a_new_stay(self):
+        rows = self._rows(1, "Zone 3", 0.0, [10, 10]) + self._rows(1, "Zone 6", 1.0, [20]) + self._rows(1, "Zone 3", 2.0, [30])
+        rows += self._rows(1, "Zone 3", 9.0, [40])                     # a long break in the same zone: also a new stay
+        out = NS["speed_zone_summary"](rows)
+        self.assertEqual([r["Zone"] for r in out], ["Zone 3", "Zone 6", "Zone 3", "Zone 3"])
+        self.assertEqual(out[0]["Zone_Path"], "3-6-3-3")
+
+    def test_nothing_in_nothing_out(self):
+        self.assertEqual(NS["speed_zone_summary"]([]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

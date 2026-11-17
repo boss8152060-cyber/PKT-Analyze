@@ -197,26 +197,26 @@ class CombineClips(unittest.TestCase):
         out = combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
         self.assertEqual(sorted(out["Site"]["clips"]), ["Site/d1/a", "Site/d2/b"])
         target = os.path.join(self.root, "Site", "All_Clips")
-        with open(os.path.join(target, "All_LDP.csv"), newline="", encoding="utf-8-sig") as f:
+        with open(os.path.join(target, "3_LDP.csv"), newline="", encoding="utf-8-sig") as f:
             rows = list(csv.DictReader(f))
         self.assertEqual([(r["Clip"], r["Vehicle_ID"], r["LDP_percent"]) for r in rows],
                          [("Site/d1/a", "1", "30"), ("Site/d1/a", "2", "40"), ("Site/d2/b", "1", "50")])
-        with open(os.path.join(target, "All_Speed.csv"), newline="", encoding="utf-8-sig") as f:       # the per-frame speed is merged too ...
+        with open(os.path.join(target, "0_Raw", "Speed_Frames.csv"), newline="", encoding="utf-8-sig") as f:       # the per-frame speed is merged too ...
             self.assertEqual(len(list(csv.DictReader(f))), 3)
-        self.assertFalse(os.path.exists(os.path.join(target, "All_Gap_Acceptance.csv")))    # nothing but headers -> no file
-        with open(os.path.join(target, "All_Statistics.csv"), newline="", encoding="utf-8-sig") as f:
+        self.assertFalse(os.path.exists(os.path.join(target, "5_Gap_Acceptance.csv")))    # nothing but headers -> no file
+        with open(os.path.join(target, "9_Summary", "Statistics.csv"), newline="", encoding="utf-8-sig") as f:
             st = {r["Group"]: r for r in csv.DictReader(f)}
         self.assertEqual(st["All"]["N"], "3")
         self.assertAlmostEqual(float(st["All"]["Mean"]), 40.0)
         self.assertAlmostEqual(float(st["All"]["V50_Median"]), 40.0)
-        self.assertEqual({r["Indicator"] for r in csv.DictReader(open(os.path.join(target, "All_Statistics.csv"), newline="", encoding="utf-8-sig"))}, {"LDP"})   # ... but no Speed statistics
+        self.assertEqual({r["Indicator"] for r in csv.DictReader(open(os.path.join(target, "9_Summary", "Statistics.csv"), newline="", encoding="utf-8-sig"))}, {"LDP"})   # ... but no Speed statistics
 
     def test_ids_that_restart_in_every_clip_get_a_unique_key(self):
         import combine_clips
         self._clip("Site/d1/20260907_084751A_", [30, 40])
         self._clip("Site/d1/b", [50])
         combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
-        with open(os.path.join(self.root, "Site", "All_Clips", "All_LDP.csv"), newline="", encoding="utf-8-sig") as f:
+        with open(os.path.join(self.root, "Site", "All_Clips", "3_LDP.csv"), newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             header = reader.fieldnames
             rows = list(reader)
@@ -243,7 +243,7 @@ class CombineClips(unittest.TestCase):
         self._clip("Site/d1/b", [60], clip_prefixed=True)
         self._clip("Site/d1/c", [90])
         combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
-        with open(os.path.join(self.root, "Site", "All_Clips", "All_LDP.csv"), newline="", encoding="utf-8-sig") as f:
+        with open(os.path.join(self.root, "Site", "All_Clips", "3_LDP.csv"), newline="", encoding="utf-8-sig") as f:
             self.assertEqual(sorted(r["Clip"] for r in csv.DictReader(f)), ["Site/d1/a", "Site/d1/b", "Site/d1/c"])
 
     def test_gap_statistics_read_the_new_and_the_old_column_name(self):
@@ -255,7 +255,7 @@ class CombineClips(unittest.TestCase):
                 w.writerow(["Subject_ID", "Decision_Stage", "Gap_Role", col, "QC_Flag"])
                 w.writerow([1, "Access", "Accepted", 2.0, ""])
         combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
-        with open(os.path.join(self.root, "Site", "All_Clips", "All_Statistics.csv"), newline="", encoding="utf-8-sig") as f:
+        with open(os.path.join(self.root, "Site", "All_Clips", "9_Summary", "Statistics.csv"), newline="", encoding="utf-8-sig") as f:
             rows = [r for r in csv.DictReader(f) if r["Indicator"].startswith("Gap Acceptance") and r["Group"] == "All"]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["N"], "2")                                   # one value from each clip
@@ -267,7 +267,7 @@ class CombineClips(unittest.TestCase):
         combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
         self._clip("Site/d2/c", [50])
         combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)      # rebuilt from every clip folder
-        with open(os.path.join(self.root, "Site", "All_Clips", "All_Clips.csv"), newline="", encoding="utf-8-sig") as f:
+        with open(os.path.join(self.root, "Site", "All_Clips", "9_Summary", "Clip_List.csv"), newline="", encoding="utf-8-sig") as f:
             self.assertEqual([r["Clip"] for r in csv.DictReader(f)], ["Site/d1/a", "Site/d1/b", "Site/d2/c"])
 
     def test_one_clip_is_not_combined_with_itself(self):
@@ -288,13 +288,59 @@ class CombineClips(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.root, "Site", "d2", "All_Clips")))       # one clip only
         self.assertFalse(os.path.exists(os.path.join(self.root, "Site", "d3", "x", "All_Clips")))
         day = os.path.join(self.root, "Site", "d1", "All_Clips")
-        with open(os.path.join(day, "All_LDP.csv"), newline="", encoding="utf-8-sig") as f:
+        with open(os.path.join(day, "3_LDP.csv"), newline="", encoding="utf-8-sig") as f:
             self.assertEqual([r["Clip"] for r in csv.DictReader(f)], ["d1/a", "d1/a", "d1/b"])     # only the clips of that day
-        with open(os.path.join(self.root, "Site", "All_Clips", "All_LDP.csv"), newline="", encoding="utf-8-sig") as f:
+        with open(os.path.join(self.root, "Site", "All_Clips", "3_LDP.csv"), newline="", encoding="utf-8-sig") as f:
             self.assertEqual(len(list(csv.DictReader(f))), 6)                 # the site: every day
-        with open(os.path.join(day, "All_Clips.csv"), newline="", encoding="utf-8-sig") as f:
+        with open(os.path.join(day, "9_Summary", "Clip_List.csv"), newline="", encoding="utf-8-sig") as f:
             rows = list(csv.DictReader(f))
-        self.assertEqual([(r["Clip"], r["Rows_LDP"], r["Rows_Speed"]) for r in rows], [("d1/a", "2", "2"), ("d1/b", "1", "1")])
+        self.assertEqual([(r["Clip"], r["Rows_LDP"], r["Rows_TTC"]) for r in rows], [("d1/a", "2", "0"), ("d1/b", "1", "0")])
+
+    def test_a_clip_folder_is_arranged_and_still_found(self):
+        import combine_clips
+        d = self._clip("Site/d1/a", [30, 40])
+        for name in ("Detection_Records.csv", "ID_Zone_Summary.csv", "Speed_Zone.csv"):
+            with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+                f.write("x" + chr(10))
+        with open(os.path.join(d, "Tracking_Result.mp4"), "w") as f:
+            f.write("v")
+        with open(os.path.join(d, "Summary.json"), "w", encoding="utf-8") as f:       # a path inside a JSON file follows its file
+            json.dump({"outputs": {"ldp": os.path.join(d, "LDP.csv"), "video": os.path.join(d, "Tracking_Result.mp4")}}, f)
+        moved = combine_clips.arrange_clip_folder(d)
+        self.assertEqual(len(moved), 7)
+        self.assertEqual(sorted(f for f in os.listdir(d)),
+                         ["0_Raw", "1_ID_Zone.csv", "2_Speed.csv", "3_LDP.csv", "5_Gap_Acceptance.csv", "9_Summary", "Tracking_Result.mp4"])
+        self.assertEqual(sorted(os.listdir(os.path.join(d, "0_Raw"))), ["Detection_Records.csv", "Speed_Frames.csv"])
+        with open(os.path.join(d, "9_Summary", "Summary.json"), encoding="utf-8") as f:
+            out = json.load(f)["outputs"]
+        self.assertEqual(out["ldp"], os.path.join(d, "3_LDP.csv"))
+        self.assertEqual(out["video"], os.path.join(d, "Tracking_Result.mp4"))
+        rf = combine_clips.result_file
+        self.assertEqual(rf(d, "Speed.csv"), os.path.join(d, "0_Raw", "Speed_Frames.csv"))      # found under the old plain name
+        self.assertEqual(rf(d, "Detection_Records.csv"), os.path.join(d, "0_Raw", "Detection_Records.csv"))
+        self.assertIsNotNone(combine_clips.summary_path(d))
+        self._clip("Site/d1/b", [50])
+        combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
+        self.assertEqual([lab for _f, lab in combine_clips.find_clip_folders(os.path.join(self.root, "Site"))], ["Site/d1/a", "Site/d1/b"])  # 9_Summary is no clip
+        with open(os.path.join(self.root, "Site", "All_Clips", "3_LDP.csv"), newline="", encoding="utf-8-sig") as f:
+            self.assertEqual(len(list(csv.DictReader(f))), 3)
+        combine_clips.arrange_clip_folder(d)                                    # nothing left to move: nothing happens
+        self.assertTrue(os.path.isfile(os.path.join(d, "3_LDP.csv")))
+
+    def test_the_combined_files_of_older_versions_are_replaced(self):
+        import combine_clips
+        self._clip("Site/d1/a", [30])
+        self._clip("Site/d1/b", [40])
+        target = os.path.join(self.root, "Site", "All_Clips")
+        os.makedirs(target)
+        for old in ("All_LDP.csv", "All_Clips.csv", "All_Summary.json", "my_notes.txt"):
+            with open(os.path.join(target, old), "w") as f:
+                f.write("x")
+        combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
+        names = sorted(os.listdir(target))
+        self.assertNotIn("All_LDP.csv", names)
+        self.assertIn("my_notes.txt", names)                                   # a file of the user stays
+        self.assertIn("3_LDP.csv", names)
 
     def test_the_summary_of_each_clip_is_put_together_too(self):
         import combine_clips
@@ -308,9 +354,9 @@ class CombineClips(unittest.TestCase):
                 f.write('{"video_fps": "30"}')
         combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
         target = os.path.join(self.root, "Site", "All_Clips")
-        with open(os.path.join(target, "All_Indicator_Summary.csv"), newline="", encoding="utf-8-sig") as f:
+        with open(os.path.join(target, "9_Summary", "Indicator_Summary.csv"), newline="", encoding="utf-8-sig") as f:
             self.assertEqual([(r["Clip"], r["Indicator"]) for r in csv.DictReader(f)], [("Site/d1/a", "LDP"), ("Site/d1/b", "LDP")])
-        with open(os.path.join(target, "All_Clips.csv"), newline="", encoding="utf-8-sig") as f:
+        with open(os.path.join(target, "9_Summary", "Clip_List.csv"), newline="", encoding="utf-8-sig") as f:
             r = next(csv.DictReader(f))
         self.assertEqual((r["Status"], r["Frames"], r["Duration_s"], r["Unique_Track_IDs"]), ("completed", "300", "10.0", "7"))
 
@@ -320,7 +366,7 @@ class CombineClips(unittest.TestCase):
         self._clip("Site/d1/b", [40])
         combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
         combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
-        with open(os.path.join(self.root, "Site", "All_Clips", "All_LDP.csv"), newline="", encoding="utf-8-sig") as f:
+        with open(os.path.join(self.root, "Site", "All_Clips", "3_LDP.csv"), newline="", encoding="utf-8-sig") as f:
             self.assertEqual(len(list(csv.DictReader(f))), 2)
 
 

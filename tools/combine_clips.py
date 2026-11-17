@@ -2,13 +2,15 @@
 
 Every clip has its own folder with its own CSV files (Gap_Acceptance.csv, Speed.csv, ...; results of older versions
 were named <clip>_Speed.csv or Run_3_Speed.csv and are still found).
-This module puts the same kind of file from all clips together into one CSV per kind (All_<kind>.csv), with the
-first column `Clip` saying which clip a row comes from (vehicle IDs are only unique inside a clip, so always read
-an ID together with Clip), plus All_Clips.csv (the list of clips) and All_Statistics.csv (Mean, SD, V50, V85 ...
-over all clips).  It is rebuilt from the clip folders that exist, so adding clips later only means running it again.
+This module puts the same kind of file from all clips together into one CSV per kind, in the same layout as a clip
+folder (1_ID_Zone.csv ... 8_PET.csv, 0_Raw/, 9_Summary/ - see LAYOUT), with the first column `Clip` saying which clip a
+row comes from (vehicle IDs are only unique inside a clip, so always read an ID together with Clip), plus
+9_Summary/Clip_List.csv (a table of the clips: frames, length, vehicles, rows of each indicator) and
+9_Summary/Statistics.csv (Mean, SD, V50, V85 ... over all clips).  It is rebuilt from the clip folders that exist, so
+adding clips later only means running it again.
 This is done for every folder level that holds 2 or more clips: e.g. Site/All_Clips (every day) and
 Site/<day>/All_Clips (the clips of that day); a level whose clips are exactly those of the level above is skipped
-(it would be a copy).  All_Clips.csv is also a table of the clips (frames, length, vehicles, rows of each indicator).
+(it would be a copy).
 
 The batch calls combine_top_folders() after every run; it can also be used on its own:
     python tools/combine_clips.py <output root> [<top folder name> ...]
@@ -30,15 +32,53 @@ ID_COLUMNS = ("track_id", "Vehicle_ID", "Vehicle_ID_A", "Vehicle_ID_B", "Vehicle
               "Event_ID", "Decision_Event_ID")
 
 # kinds of CSV that are put together (the file of a clip is <clip>_<kind>.csv; older runs: Run_3_<kind>.csv)
-KINDS = ("Gap_Acceptance", "Critical_Gap", "Headway", "LDP", "Lateral_Clearance", "Lateral_Clearance_Pairs", "TTC", "TTC_Detail", "PET",
-         "Speed", "Speed_Detail", "Duplicate_Tracks", "ID_Zone_Summary",      # Speed = the speed of every frame; Speed_Detail only exists in older results (merged, no statistics)
+KINDS = ("ID_Zone_Summary", "Speed_Zone", "LDP", "Lateral_Clearance_Pairs", "Gap_Acceptance", "Critical_Gap", "Headway", "TTC", "PET",
+         "Speed", "Speed_Detail", "Lateral_Clearance", "TTC_Detail", "Duplicate_Tracks",   # Speed = the speed of every frame; Speed_Detail only exists in older results (merged, no statistics)
          "Indicator_Summary", "Zone_Summary")                                  # the summary of each clip, one under the other
 
-# kinds counted per clip in All_Clips.csv (column Rows_<kind>)
-COUNTED_KINDS = ("LDP", "Lateral_Clearance_Pairs", "Gap_Acceptance", "Headway", "TTC", "PET", "Speed")
+# kinds counted per clip in the clip table (column Rows_<kind>)
+COUNTED_KINDS = ("Speed_Zone", "LDP", "Lateral_Clearance_Pairs", "Gap_Acceptance", "Headway", "TTC", "PET")
 
-# kind -> (indicator name, value column, group columns) for All_Statistics.csv
+# Layout of a clip folder (since 1.50.0). The analysis writes plain names (LDP.csv ...) and arrange_clip_folder() then
+# moves them here: the analysis results numbered in the order of the work, the raw / checking data in 0_Raw, the
+# summaries and settings in 9_Summary; videos and pictures stay in the clip folder. All_Clips uses the same layout.
+RAW_DIR = "0_Raw"
+SUMMARY_DIR = "9_Summary"
+LAYOUT = {
+    "ID_Zone_Summary.csv": "1_ID_Zone.csv",
+    "Speed_Zone.csv": "2_Speed.csv",                     # mean speed of every vehicle in every zone it passed
+    "LDP.csv": "3_LDP.csv",
+    "Lateral_Clearance_Pairs.csv": "4_Lateral_Clearance.csv",
+    "Gap_Acceptance.csv": "5_Gap_Acceptance.csv",
+    "Critical_Gap.csv": "5_Critical_Gap.csv",
+    "Headway.csv": "6_Headway.csv",
+    "TTC.csv": "7_TTC.csv",
+    "PET.csv": "8_PET.csv",
+    "Detection_Records.csv": RAW_DIR + "/Detection_Records.csv",
+    "Detection_Records_Topview.csv": RAW_DIR + "/Detection_Records_Topview.csv",
+    "Speed.csv": RAW_DIR + "/Speed_Frames.csv",          # the speed of every frame
+    "Speed_Detail.csv": RAW_DIR + "/Speed_Detail.csv",
+    "Lateral_Clearance.csv": RAW_DIR + "/Lateral_Clearance_Samples.csv",
+    "TTC_Detail.csv": RAW_DIR + "/TTC_Detail.csv",
+    "TTC_Frames.csv": RAW_DIR + "/TTC_Frames.csv",
+    "Duplicate_Tracks.csv": RAW_DIR + "/Duplicate_Tracks.csv",
+    "Indicator_Summary.csv": SUMMARY_DIR + "/Indicator_Summary.csv",
+    "Zone_Summary.csv": SUMMARY_DIR + "/Zone_Summary.csv",
+    "Summary.json": SUMMARY_DIR + "/Summary.json",
+    "Run_Summary.json": SUMMARY_DIR + "/Run_Summary.json",
+    "Settings.json": SUMMARY_DIR + "/Settings.json",
+    "Measurement_Summary.json": SUMMARY_DIR + "/Measurement_Summary.json",
+    "ByteTrack.yaml": SUMMARY_DIR + "/ByteTrack.yaml",
+}
+LAYOUT_DIRS = (RAW_DIR, SUMMARY_DIR)
+# files of the combined folder (besides the LAYOUT names of the kinds)
+CLIP_LIST = SUMMARY_DIR + "/Clip_List.csv"
+STATISTICS_FILE = SUMMARY_DIR + "/Statistics.csv"
+COMBINED_SUMMARY = SUMMARY_DIR + "/Combined_Summary.json"
+
+# kind -> (indicator name, value column, group columns) for the combined statistics
 STATISTICS = {
+    "Speed_Zone": ("Speed (mean per vehicle in zone)", "Mean_Speed_kmh", ("Zone",)),
     "LDP": ("LDP", "LDP_percent", ("Zone",)),
     "Lateral_Clearance_Pairs": ("Lateral Clearance (pair minimum)", "Lateral_Clearance_Min_m", ("Zone",)),
     "TTC": ("TTC", "TTC_s", ("TTC_Type",)),
@@ -55,14 +95,61 @@ OLD_COLUMN_NAMES = {"Available_Gap_s": "X31_Available_Gap"}
 def result_file(folder, new_name, clip_name=None):
     """Path of a result file inside a clip folder, or None. New results have plain names (Speed.csv, Summary.json,
     Tracking_Result.mp4 ...); results of older versions are found too (<clip>_Speed.csv, <clip>_Research_Settings.json,
-    Run_3_Speed.csv ...)."""
+    Run_3_Speed.csv ...) and so are the arranged results (3_LDP.csv, 0_Raw/Speed_Frames.csv, 9_Summary/Summary.json)."""
     clip_name = clip_name or os.path.basename(os.path.normpath(folder))
-    for name in (new_name, f"{clip_name}_{new_name}", f"{clip_name}_Research_{new_name}", f"Run_3_{new_name}",
-                 f"Run_1_Research_{new_name}"):
-        p = os.path.join(folder, name)
+    names = [new_name]
+    if new_name in LAYOUT:
+        names.append(LAYOUT[new_name])
+    names += [f"{clip_name}_{new_name}", f"{clip_name}_Research_{new_name}", f"Run_3_{new_name}", f"Run_1_Research_{new_name}"]
+    for name in names:
+        p = os.path.join(folder, *name.split("/"))
         if os.path.isfile(p):
             return p
     return None
+
+
+def _same_path(a, b):
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
+def _swap_paths(value, moved):
+    """`value` (from a JSON file) with every path of a moved file replaced by its new path."""
+    if isinstance(value, dict):
+        return {k: _swap_paths(v, moved) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_swap_paths(v, moved) for v in value]
+    if isinstance(value, str) and len(value) > 3 and ("/" in value or "\\" in value):
+        for old, new in moved:
+            if _same_path(value, old):
+                return new
+    return value
+
+
+def arrange_clip_folder(folder):
+    """Moves the plain-named results of a clip folder into LAYOUT (an older arranged copy is replaced) and puts the new
+    paths into its JSON files. Returns {old path: new path}. Files that are not in LAYOUT (videos, pictures) stay."""
+    moved = []
+    for plain, rel in LAYOUT.items():
+        src = os.path.join(folder, plain)
+        if not os.path.isfile(src):
+            continue
+        dst = os.path.join(folder, *rel.split("/"))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        os.replace(src, dst)
+        moved.append((src, dst))
+    if moved:
+        for rel in (LAYOUT["Summary.json"], LAYOUT["Run_Summary.json"]):
+            path = os.path.join(folder, *rel.split("/"))
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(_swap_paths(data, moved), f, indent=4, ensure_ascii=False)
+            except (OSError, ValueError):
+                pass
+    return dict(moved)
 
 
 def summary_path(clip_dir, clip_name=None):
@@ -80,7 +167,7 @@ def find_clip_folders(root):
     found = []
     base_parent = os.path.dirname(os.path.normpath(root))
     for dirpath, dirnames, _files in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d != COMBINED_DIR)
+        dirnames[:] = sorted(d for d in dirnames if d != COMBINED_DIR and d not in LAYOUT_DIRS)
         if summary_path(dirpath):
             found.append((dirpath, os.path.relpath(dirpath, base_parent).replace("\\", "/")))
     return found
@@ -167,6 +254,18 @@ def to_float(text):
 def combine(clips, target_dir):
     """clips = [(clip folder, label)] -> writes the combined files into target_dir; returns a summary dict."""
     os.makedirs(target_dir, exist_ok=True)
+    for name in os.listdir(target_dir):                   # files of the layout before 1.50.0 (All_LDP.csv ...)
+        if (name.startswith("All_") and name.endswith(".csv")) or name == "All_Summary.json":
+            try:
+                os.remove(os.path.join(target_dir, name))
+            except OSError:
+                pass
+    for d in LAYOUT_DIRS:
+        os.makedirs(os.path.join(target_dir, d), exist_ok=True)
+
+    def out_path(rel):
+        return os.path.join(target_dir, *rel.split("/"))
+
     merged = {}
     for kind in KINDS:
         rows_all, fields = [], []
@@ -194,7 +293,7 @@ def combine(clips, target_dir):
                 header.append(k)
                 if k in ID_COLUMNS:
                     header.append(k + "_Unique")
-            with open(os.path.join(target_dir, f"All_{kind}.csv"), "w", newline="", encoding="utf-8-sig") as f:
+            with open(out_path(LAYOUT.get(kind + ".csv", RAW_DIR + "/" + kind + ".csv")), "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
                 w.writeheader()
                 w.writerows(rows_all)
@@ -203,7 +302,7 @@ def combine(clips, target_dir):
     for kind in COUNTED_KINDS:
         for r in merged.get(kind, []):
             counts[(r["Clip"], kind)] = counts.get((r["Clip"], kind), 0) + 1
-    with open(os.path.join(target_dir, "All_Clips.csv"), "w", newline="", encoding="utf-8-sig") as f:
+    with open(out_path(CLIP_LIST), "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(["Clip", "Clip_Start", "Status", "Frames", "Duration_s", "Unique_Track_IDs"]
                    + [f"Rows_{k}" for k in COUNTED_KINDS] + ["Folder"])
@@ -228,13 +327,13 @@ def combine(clips, target_dir):
             s = stats([v for _, v in items])
             out_rows.append({"Indicator": indicator, "Group": key, "Clips": len({c for c, _ in items}), **s})
     cols = ["Indicator", "Group", "Clips", "N", "Mean", "SD", "V50_Median", "P85", "Min", "Max"]
-    with open(os.path.join(target_dir, "All_Statistics.csv"), "w", newline="", encoding="utf-8-sig") as f:
+    with open(out_path(STATISTICS_FILE), "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
         for r in out_rows:
             w.writerow({k: ("" if r[k] is None else (f"{r[k]:.6f}" if isinstance(r[k], float) else r[k])) for k in cols})
     summary = {"clips": [label for _f, label in clips], "files": {k: len(v) for k, v in merged.items()}, "statistics_rows": len(out_rows)}
-    with open(os.path.join(target_dir, "All_Summary.json"), "w", encoding="utf-8") as f:
+    with open(out_path(COMBINED_SUMMARY), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
     return summary
 

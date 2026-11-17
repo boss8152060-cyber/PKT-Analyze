@@ -278,7 +278,11 @@ def scene1(app):
     lim = {r["Pair_ID"] for r in read_csv(os.path.join(out_l, "Lateral_Clearance.csv"))}
     check("Lateral Clearance sideways limit 3.5 m drops D-E (4.1 m) and keeps the closer pairs", "4_5" not in lim and {"1_2", "1_5", "2_5"} <= lim, str(sorted(lim)))
     ind = read_csv(os.path.join(out, "Indicator_Summary.csv"))
-    check("indicator summary lists LDP and Lateral Clearance (Speed is per frame in Speed.csv since v28(131), no statistics rows)", any("LDP" in r["Indicator"] for r in ind) and any("Lateral Clearance" in r["Indicator"] for r in ind) and not any(r["Indicator"].startswith("Speed") for r in ind))
+    check("indicator summary lists LDP and Lateral Clearance; Speed only as the mean per vehicle in a zone (1.50.0), not per frame", any("LDP" in r["Indicator"] for r in ind) and any("Lateral Clearance" in r["Indicator"] for r in ind) and all(r["Indicator"] == "Speed (mean per vehicle in zone)" for r in ind if r["Indicator"].startswith("Speed")))
+    zs = read_csv(os.path.join(out, "Speed_Zone.csv"))
+    sp = read_csv(os.path.join(out, "Speed.csv"))
+    check("Speed_Zone.csv: one row per vehicle per zone, its mean is the mean of its frames", zs and all(r["Zone_Path"] and r["Zone_Order"] for r in zs)
+          and abs(float(zs[0]["Mean_Speed_kmh"]) - sum(float(r["Speed_kmh"]) for r in sp if r["Vehicle_ID"] == zs[0]["Vehicle_ID"] and r["Zone"] == zs[0]["Zone"] and not r["QC_Flag"]) / max(1, sum(1 for r in sp if r["Vehicle_ID"] == zs[0]["Vehicle_ID"] and r["Zone"] == zs[0]["Zone"] and not r["QC_Flag"]))) < 0.05, str(zs[:2]))
 
 
 def scene2(app):

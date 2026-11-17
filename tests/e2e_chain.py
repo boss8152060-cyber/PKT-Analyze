@@ -23,6 +23,8 @@ import cv2
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 import batch_run  # noqa: E402
+import combine_clips  # noqa: E402
+RF = combine_clips.result_file
 
 failures = []
 
@@ -97,7 +99,7 @@ panel.clips[0].update({"save_video": False})
 panel.clips[1].update({"analysis_start_s": "0:00.05", "save_video": True, "record_start_s": "0:00.5", "record_end_s": "0:01.0"})
 panel.refresh()
 vals = [panel.tree.item(i, "values") for i in panel.tree.get_children()]
-check("the list shows b's own time range and recording and the continue mark", vals[1][1].startswith("0:00.05") and vals[1][3].startswith("↳") and vals[0][3] == "" and vals[2][3] == "", str(vals))
+check("the list shows b's own time range and recording and the continue mark", vals[1][1].startswith("0:00.05") and vals[1][-1].startswith("↳") and vals[0][-1] == "" and vals[2][-1] == "", str(vals))
 panel.skip_done_var.set(False)
 app.start_analysis()
 wait_in_mainloop(lambda: not app.running, 900)
@@ -110,7 +112,7 @@ a_dir, b_dir, c_dir = (os.path.join(site, x) for x in ("a", "b", "c"))
 
 
 def det(d):
-    return list(csv.DictReader(open(os.path.join(d, "Detection_Records.csv"), encoding="utf-8-sig")))
+    return list(csv.DictReader(open(RF(d, "Detection_Records.csv"), encoding="utf-8-sig")))
 
 
 da, db, dc = det(a_dir), det(b_dir), det(c_dir)
@@ -125,12 +127,12 @@ rv.release()
 check("b's video holds only the 0.5 s that was asked for", 0.4 * fps <= rec_frames <= 0.6 * fps + 2, f"{rec_frames} frames")
 ids = {k: {int(r["track_id"]) for r in rows if int(r["track_id"]) >= 0} for k, rows in (("a", da), ("b", db), ("c", dc))}
 check("a vehicle in view at the cut keeps ONE ID in a and in b (the tracker continued)", len(ids["a"] & ids["b"]) >= 1, f"IDs in both: {sorted(ids['a'] & ids['b'])[:8]}")
-sa, sb, sc = (json.load(open(os.path.join(d, "Run_Summary.json"), encoding="utf-8")) for d in (a_dir, b_dir, c_dir))
+sa, sb, sc = (json.load(open(RF(d, "Run_Summary.json"), encoding="utf-8")) for d in (a_dir, b_dir, c_dir))
 check("the run summaries say what happened: only b continued the tracker", (sa["tracker_continued_from_previous_clip"], sb["tracker_continued_from_previous_clip"], sc["tracker_continued_from_previous_clip"]) == (False, True, False))
 check("b keeps a's numbering (same offset), c starts after the highest ID of the folder", sb["id_offset"] == sa["id_offset"] and sc["id_offset"] == max(sa["max_track_id"], sb["max_track_id"]),
       f"offsets a {sa['id_offset']} b {sb['id_offset']} c {sc['id_offset']}; max IDs a {sa['max_track_id']} b {sb['max_track_id']}")
 check("c's IDs are all above the others (no ID used twice in the folder)", ids["c"] and min(ids["c"]) > max(ids["a"] | ids["b"]) and not (ids["c"] & (ids["a"] | ids["b"])), f"c min {min(ids['c'])} / a,b max {max(ids['a'] | ids['b'])}")
-ac = [r["Clip"] for r in csv.DictReader(open(os.path.join(site, "All_Clips", "All_Clips.csv"), encoding="utf-8-sig"))]
+ac = [r["Clip"] for r in csv.DictReader(open(os.path.join(site, "All_Clips", "9_Summary", "Clip_List.csv"), encoding="utf-8-sig"))]
 check("the combined files list a, b and c", sorted(ac) == ["Site/a", "Site/b", "Site/c"], str(ac))
 
 root.destroy()

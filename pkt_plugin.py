@@ -183,18 +183,23 @@ def find_analysis_outputs(root, limit=30):
         depth = os.path.relpath(dirpath, root).count(os.sep) + (0 if dirpath == root else 1)
         if depth >= 4:
             dirnames[:] = []
-        if "Run_Summary.json" in files:
+        sdir = dirpath                                       # the summaries: in the clip folder, or in its 9_Summary (since 1.50.0)
+        if "Run_Summary.json" not in files and os.path.isfile(os.path.join(dirpath, "9_Summary", "Run_Summary.json")):
+            sdir = os.path.join(dirpath, "9_Summary")
+        if os.path.basename(dirpath) == "9_Summary":
+            continue
+        if os.path.isfile(os.path.join(sdir, "Run_Summary.json")):
             info = {"name": os.path.basename(dirpath), "folder": dirpath, "clip": "", "ttc": None, "pet": None,
-                    "mtime": os.path.getmtime(os.path.join(dirpath, "Run_Summary.json"))}
+                    "mtime": os.path.getmtime(os.path.join(sdir, "Run_Summary.json"))}
             try:
-                with open(os.path.join(dirpath, "Run_Summary.json"), encoding="utf-8") as f:
+                with open(os.path.join(sdir, "Run_Summary.json"), encoding="utf-8") as f:
                     run = json.load(f)
                 info["clip"] = os.path.basename(str(run.get("video", "")).replace("\\", "/"))
             except (OSError, ValueError):
                 pass
-            if "Summary.json" in files:
+            if os.path.isfile(os.path.join(sdir, "Summary.json")):
                 try:
-                    with open(os.path.join(dirpath, "Summary.json"), encoding="utf-8") as f:
+                    with open(os.path.join(sdir, "Summary.json"), encoding="utf-8") as f:
                         ind = (json.load(f).get("indicators") or {})
                     info["ttc"] = (ind.get("TTC") or {}).get("N")
                     info["pet"] = (ind.get("PET") or {}).get("N")
