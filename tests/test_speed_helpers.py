@@ -174,6 +174,18 @@ class SpeedPerZone(unittest.TestCase):
         self.assertEqual([r["Zone"] for r in out], ["Zone 3", "Zone 6", "Zone 3", "Zone 3"])
         self.assertEqual(out[0]["Zone_Path"], "3-6-3-3")
 
+    def test_standing_frames_are_left_out_like_gap_and_ttc(self):
+        speeds = [0.0, 3.0, 0.5, 4.9, 20.0, 30.0]                       # waits 4 frames (< 5 km/h, the box flickers), then drives off
+        out = NS["speed_zone_summary"](self._rows(1, "Zone 1", 0.0, speeds))
+        r = out[0]
+        self.assertEqual((r["Mean_Speed_kmh"], r["Min_Speed_kmh"], r["Entry_Speed_kmh"]), ("25.00", "20.00", "20.00"))
+        self.assertEqual((r["Moving_Frames"], r["Stopped_Frames"], r["Stopped_Time_s"], r["Frames"]), (2, 4, "0.133", 6))
+        self.assertEqual(r["QC_Flag"], "")
+        only = NS["speed_zone_summary"](self._rows(1, "Zone 1", 0.0, [0.2, 1.0, 0.0]))[0]       # never moved: no speed
+        self.assertEqual((only["Mean_Speed_kmh"], only["QC_Flag"]), ("", "Stopped"))
+        keep = NS["speed_zone_summary"](self._rows(1, "Zone 1", 0.0, speeds), stop_kmh=0)[0]    # 0 = keep every frame
+        self.assertEqual(keep["Moving_Frames"], 6)
+
     def test_nothing_in_nothing_out(self):
         self.assertEqual(NS["speed_zone_summary"]([]), [])
 

@@ -612,6 +612,7 @@ RUN3_DEFAULTS = {
     "speed_smoothing_samples": "5",         # rolling-median window on positions before Speed (1 = off)
     "speed_frame_window_s": "0.50",        # the speed written for every frame (Detection_Records_Topview.csv) uses the vehicle positions within +-this/2 s
     "speed_max_kmh": "80",                  # Speed above this is flagged Speed_Above_Max and left out of the statistics (0 = off)
+    "speed_stop_kmh": "5.0",                # 2_Speed.csv: frames slower than this = the vehicle stands (waits / parked box that flickers) and are left out of the speeds; same 5 km/h as Gap Acceptance (stopped) and TTC (minimum speed); 0 = off
     "lc_zones": [2, 3, 4, 5, 6, 7],
     "lc_motorcycle_pairs_only": False,      # False = every pair of vehicles; True = only pairs that include a motorcycle
     "pet_zone6": True,
@@ -2240,14 +2241,18 @@ def topview_px_setting(text, default=1280):
 
 SPEED_ZONE_FIELDS = ["Vehicle_ID", "Vehicle_Class", "Movement", "Zone_Path", "Zone_Order", "Zone", "Entry_Time_s", "Exit_Time_s",
                      "Time_In_Zone_s", "Frames", "Mean_Speed_kmh", "Median_Speed_kmh", "P85_Speed_kmh", "Min_Speed_kmh", "Max_Speed_kmh",
-                     "Entry_Speed_kmh", "Exit_Speed_kmh", "Frames_Above_Max", "QC_Flag"]
+                     "Entry_Speed_kmh", "Exit_Speed_kmh", "Moving_Frames", "Stopped_Frames", "Stopped_Time_s", "Frames_Above_Max", "QC_Flag"]
 
 
-def speed_zone_summary(speed_rows, split_gap_s=1.0):
+def speed_zone_summary(speed_rows, split_gap_s=1.0, stop_kmh=5.0):
     """One row per vehicle per stay in a zone, made from the per-frame Speed rows (Vehicle_ID, Vehicle_Class, Zone, Movement, Time_s,
     Speed_kmh, QC_Flag; in the order they were made: vehicle by vehicle, stay by stay): when it entered / left the zone, how long it
     was inside and its mean / median / P85 / min / max / entry / exit speed there. Frames flagged Speed_Above_Max are left out of the
     values (counted in Frames_Above_Max); a stay with only such frames has blank values and QC_Flag All_Frames_Above_Max.
+    Frames slower than stop_kmh (the vehicle stands: waits, or a parked vehicle whose box flickers and gives a speed that swings) are
+    left out too - the speeds are those of the vehicle while it moves; Stopped_Frames / Stopped_Time_s tell how long it stood
+    (the time of a frame = up to the next frame of the stay). A stay that only stood gets blank speeds and QC_Flag Stopped
+    (0 = keep every frame). Gap Acceptance and TTC use the same 5 km/h for "stopped".
     Zone_Path = the zones of the vehicle in order (e.g. 2-3-4), Zone_Order = the place of this stay in it.
     A break of more than split_gap_s inside the same zone starts a new stay."""
     stays = []
@@ -2260,7 +2265,7 @@ def speed_zone_summary(speed_rows, split_gap_s=1.0):
         if (cur is None or str(cur["id"]) != str(r.get("Vehicle_ID")) or cur["zone"] != r.get("Zone")
                 or t - cur["t"][-1] > split_gap_s):
             cur = {"id": r.get("Vehicle_ID"), "cls": r.get("Vehicle_Class", ""), "mv": r.get("Movement", ""), "zone": r.get("Zone", ""),
-                   "t": [], "v": [], "bad": 0}
+                   "t": [], "v": [], "bad": 0, "kind": []}
             stays.append(cur)
         cur["t"].append(t)
         try:
@@ -2269,8 +2274,17 @@ def speed_zone_summary(speed_rows, split_gap_s=1.0):
             v = None
         if "Speed_Above_Max" in str(r.get("QC_Flag", "")):
             cur["bad"] += 1
+            cur["kind"].append("bad")
+        elif v is not None and stop_kmh and v < stop_kmh:
+            cur["kind"].append("stop")
         elif v is not None:
             cur["v"].append(v)
+            cur["kind"].append("move")
+        else:
+            cur["kind"].append("none")
+    for s in stays:                                       # a standing frame lasts until the next frame of the stay
+        s["stop"] = s["kind"].count("stop")
+        s["stop_t"] = sum(s["t"][i + 1] - s["t"][i] for i, k in enumerate(s["kind"][:-1]) if k == "stop")
     paths = {}
     for s in stays:
         paths.setdefault(str(s["id"]), []).append(str(s["zone"]).replace("Zone", "").strip())
@@ -2291,8 +2305,9 @@ def speed_zone_summary(speed_rows, split_gap_s=1.0):
             "P85_Speed_kmh": fmt(float(np.percentile(a, 85)) if has else None),
             "Min_Speed_kmh": fmt(float(a.min()) if has else None), "Max_Speed_kmh": fmt(float(a.max()) if has else None),
             "Entry_Speed_kmh": fmt(v[0] if has else None), "Exit_Speed_kmh": fmt(v[-1] if has else None),
+            "Moving_Frames": len(v), "Stopped_Frames": s["stop"], "Stopped_Time_s": f"{s['stop_t']:.3f}",
             "Frames_Above_Max": s["bad"],
-            "QC_Flag": "" if has else ("All_Frames_Above_Max" if s["bad"] else "No_Speed"),
+            "QC_Flag": "" if has else ("Stopped" if s["stop"] else ("All_Frames_Above_Max" if s["bad"] else "No_Speed")),
         })
     return out
 
@@ -4864,6 +4879,7 @@ class Run1App:
         self.run3_speed_zone_vars = {z: tk.BooleanVar(value=(z in RUN3_DEFAULTS["speed_zones"])) for z in ZONE_IDS}
         self.run3_speed_smoothing_var = tk.StringVar(value=RUN3_DEFAULTS["speed_smoothing_samples"])
         self.run3_speed_max_var = tk.StringVar(value=RUN3_DEFAULTS["speed_max_kmh"])
+        self.run3_speed_stop_var = tk.StringVar(value=RUN3_DEFAULTS["speed_stop_kmh"])
         self.run3_speed_frame_window_var = tk.StringVar(value=RUN3_DEFAULTS["speed_frame_window_s"])
         self.run3_zone_calibrations = {}          # {"4": {"points": [[x, y] x 4], "lengths": [l12, l23, l34, l41]}}: own reference quad per zone
         self.run3_zone_cal_text = tk.StringVar(value="")
@@ -5619,6 +5635,7 @@ class Run1App:
         self._entry_row(box, 2, "Median smoothing (จำนวนตัวอย่าง, 1 = ปิด)", self.run3_speed_smoothing_var)
         self._entry_row(box, 3, "ความเร็วสูงสุดที่สมเหตุสมผล (km/h, 0 = ปิด) — เกินนี้ติดธง Speed_Above_Max ในไฟล์ Speed.csv (ไม่ลบแถว)", self.run3_speed_max_var, span=6)
         self._entry_row(box, 4, "หน้าต่างความเร็วต่อเฟรม (s) — ความเร็วทุกเฟรมในตารางพิกัดเมตร ใช้ตำแหน่งในช่วง ± ครึ่งหนึ่งของค่านี้", self.run3_speed_frame_window_var)
+        self._entry_row(box, 5, "ถือว่ารถจอด/หยุดรอ เมื่อช้ากว่า (km/h, 0 = ปิด) — เฟรมเหล่านี้ไม่นำมาคิดความเร็วใน 2_Speed.csv (ค่าเดียวกับ Gap / TTC = 5)", self.run3_speed_stop_var, span=6)
 
         self._indicator_page(nb, "เกณฑ์ความเสี่ยง")
         box = ttk.LabelFrame(self._page, text="เกณฑ์ระดับความเสี่ยง (ดัชนี + ความเร็ว) — ค่าตั้งต้นตามสไลด์สัมมนา / CROW 2009", padding=10)
@@ -7128,6 +7145,7 @@ class Run1App:
                 "speed_zones": [z for z,v in self.run3_speed_zone_vars.items() if v.get()],
                 "speed_smoothing_samples": self.run3_speed_smoothing_var.get(),
                 "speed_max_kmh": self.run3_speed_max_var.get(),
+                "speed_stop_kmh": self.run3_speed_stop_var.get(),
                 "speed_frame_window_s": self.run3_speed_frame_window_var.get(),
                 "zone_calibrations": json.loads(json.dumps(self.run3_zone_calibrations)),
                 "lc_zones": [z for z,v in self.run3_lc_zone_vars.items() if v.get()],
@@ -7402,6 +7420,7 @@ class Run1App:
                 ("ttc_angle_crossing_deg", self.run3_ttc_angle_cross_var),
                 ("speed_smoothing_samples", self.run3_speed_smoothing_var),
                 ("speed_max_kmh", self.run3_speed_max_var),
+                ("speed_stop_kmh", self.run3_speed_stop_var),
                 ("speed_frame_window_s", self.run3_speed_frame_window_var),
                 ("ldp_smoothing_samples", self.run3_ldp_smoothing_var),
                 ("waiting_speed_threshold", self.run3_waiting_speed_threshold_var),
@@ -8365,6 +8384,7 @@ class Run1App:
             need_zone(self.run3_speed_zone_vars, "Speed")
             self._run3_float(self.run3_speed_smoothing_var.get(), "speed smoothing samples")
             self._run3_float(self.run3_speed_max_var.get(), "max plausible speed (km/h)")
+            self._run3_float(self.run3_speed_stop_var.get(), "Speed: stopped below (km/h)", positive=False)
             self._run3_float(self.run3_speed_frame_window_var.get(), "per-frame speed window (s)")
         if enabled["lc"]:
             need_zone(self.run3_lc_zone_vars, "Lateral Clearance")
@@ -10760,6 +10780,7 @@ class Run1App:
             "speed_zones": zones_of(self.run3_speed_zone_vars),
             "speed_smoothing_samples": max(1, int(num(self.run3_speed_smoothing_var, 5) or 1)),
             "speed_max_kmh": max(0.0, num(self.run3_speed_max_var, 80.0) or 0.0),
+            "speed_stop_kmh": max(0.0, num(self.run3_speed_stop_var, 5.0) or 0.0),
             "speed_frame_window_s": max(0.05, num(self.run3_speed_frame_window_var, 0.5) or 0.5),
             "zone_calibrations": self._run3_clean_zone_calibrations(),
             "lc_zones": zones_of(self.run3_lc_zone_vars),
@@ -12944,7 +12965,7 @@ class Run1App:
             outputs["speed"] = write_csv("Speed.csv", ["Frame","Time_s","Vehicle_ID","Vehicle_Class","Zone","Movement","Speed_kmh","QC_Flag"], speed_rows)
             n_flag = sum(1 for r in speed_rows if "Speed_Above_Max" in r["QC_Flag"])
             summary["indicators"]["Speed"] = {"rows": len(speed_rows), "vehicles": len({r["Vehicle_ID"] for r in speed_rows}), "above_max_flagged": n_flag}
-            zone_rows = speed_zone_summary(speed_rows)              # the mean speed of every vehicle in every zone it passed
+            zone_rows = speed_zone_summary(speed_rows, stop_kmh=c.get("speed_stop_kmh", 5.0))   # the mean speed of every vehicle in every zone it passed (standing frames left out)
             outputs["speed_zone"] = write_csv("Speed_Zone.csv", SPEED_ZONE_FIELDS, zone_rows)
             means = [(r["Zone"], float(r["Mean_Speed_kmh"])) for r in zone_rows if r["Mean_Speed_kmh"] != ""]
             if means:

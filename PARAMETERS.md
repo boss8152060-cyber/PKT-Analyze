@@ -169,7 +169,7 @@ py -3.12 tools/batch_run.py --settings "../Output/Test/R5/คลิป/Settings.
 | ไฟล์ | เนื้อหา |
 |---|---|
 | `1_ID_Zone.csv` | เส้นทางโซนต่อ ID (เดิม `ID_Zone_Summary.csv`) |
-| `2_Speed.csv` | **Speed รายคันรายโซน** (ใหม่ 1.50.0): หนึ่งแถวต่อรถหนึ่งคันต่อการอยู่ในโซนหนึ่งครั้ง — `Zone_Path` (เช่น 2→3→4), `Zone_Order`, เวลาเข้า/ออก, เวลาในโซน, `Mean/Median/P85/Min/Max_Speed_kmh`, ความเร็วตอนเข้า/ออก; เฟรมที่เกินความเร็วสูงสุดที่เป็นไปได้ไม่นับในค่า (นับไว้ใน `Frames_Above_Max`) |
+| `2_Speed.csv` | **Speed รายคันรายโซน** (ใหม่ 1.50.0): หนึ่งแถวต่อรถหนึ่งคันต่อการอยู่ในโซนหนึ่งครั้ง — `Zone_Path` (เช่น 2→3→4), `Zone_Order`, เวลาเข้า/ออก, เวลาในโซน, `Mean/Median/P85/Min/Max_Speed_kmh`, ความเร็วตอนเข้า/ออก; ความเร็วเป็นของช่วงที่รถเคลื่อนที่เท่านั้น: เฟรมที่ช้ากว่า "ถือว่ารถจอด/หยุดรอ" (ค่าตั้งต้น 5 km/h เท่ากับ Gap / TTC) ไม่นับ (บอกไว้ใน `Stopped_Frames`, `Stopped_Time_s`; จอดตลอด = ค่าว่าง + QC_Flag `Stopped`) และเฟรมที่เกินความเร็วสูงสุดที่เป็นไปได้ไม่นับ (`Frames_Above_Max`) |
 | `3_LDP.csv` | LDP |
 | `4_Lateral_Clearance.csv` | Lateral Clearance ค่าต่ำสุดต่อคู่ (เดิม `Lateral_Clearance_Pairs.csv`) |
 | `5_Gap_Acceptance.csv`, `5_Critical_Gap.csv` | Gap Acceptance |
