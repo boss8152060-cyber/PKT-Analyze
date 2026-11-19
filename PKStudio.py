@@ -32,6 +32,7 @@
 import os
 import sys
 import csv
+import copy
 import json
 import importlib.util
 import time
@@ -2271,6 +2272,59 @@ def edge_length_errors(pairs, factor=1.0):
     return out
 
 
+ZONE_COLORS_BGR = [(0, 200, 0), (0, 160, 255), (255, 120, 0), (200, 0, 200), (0, 220, 220), (60, 60, 255), (255, 200, 0)]      # Zone 1..7 (the pictures use them in this order)
+
+
+def zone_polygon_area(points):
+    """The area of a polygon (shoelace), in the unit of the points squared."""
+    n = len(points)
+    if n < 3:
+        return 0.0
+    return abs(sum(points[i][0] * points[(i + 1) % n][1] - points[(i + 1) % n][0] * points[i][1] for i in range(n))) / 2.0
+
+
+def build_zone_file(zones, lines, width, height, video_path="", frame_index=None, old=None):
+    """The zone file (the format of the zone editor of PKT Data, which the program loads) from {zone name: [(x, y) ...]} and {line name: [(x, y), (x, y)]}
+    in the pixels of a width x height frame. Zones with fewer than 3 points and lines without 2 points are left out. `old` = a zone file read as a dictionary:
+    what it holds besides the zones and lines, and the colour / label of each zone, are kept."""
+    old = dict(old or {})
+    old_items = {}
+    for it in (old.get("zones") if isinstance(old.get("zones"), list) else []):
+        if isinstance(it, dict):
+            nm = it.get("name") or (f"Zone {it.get('id')}" if it.get("id") is not None else None)
+            if nm:
+                old_items[nm] = it
+
+    def zone_no(name):
+        tail = str(name).split()[-1]
+        return int(tail) if tail.isdigit() else None
+
+    items = []
+    for name in sorted(zones, key=lambda n: (zone_no(n) is None, zone_no(n) or 0, str(n))):
+        pts = [[int(round(x)), int(round(y))] for x, y in zones[name]]
+        if len(pts) < 3:
+            continue
+        zid = zone_no(name)
+        item = dict(old_items.get(name, {}))
+        item.update({"id": zid, "name": name, "points": pts,
+                     "points_norm": [[round(x / float(width), 6), round(y / float(height), 6)] for x, y in pts],
+                     "area_px": round(zone_polygon_area(pts), 2)})
+        item.setdefault("color_bgr", list(ZONE_COLORS_BGR[(zid - 1) % len(ZONE_COLORS_BGR)]) if zid else [0, 255, 0])
+        item.setdefault("show_label", True)
+        item.setdefault("reference_frame_index", frame_index)
+        items.append(item)
+    out = dict(old)
+    out.update({"video_path": video_path or old.get("video_path", ""), "frame_width": int(width), "frame_height": int(height), "zones": items})
+    good = {n: [[int(round(x)), int(round(y))] for x, y in p] for n, p in (lines or {}).items() if len(p) == 2}
+    if good:
+        out["lines"] = good
+        out["lines_frame_width"], out["lines_frame_height"] = int(width), int(height)
+    else:
+        for key in ("lines", "lines_frame_width", "lines_frame_height"):
+            out.pop(key, None)
+    return out
+
+
 def eta_seconds(total_frames, frame_index, processing_fps, frame_skip=1):
     """Seconds left of a clip. frame_index / total_frames count the frames of the video; processing_fps counts the frames that were detected per second,
     and with Frame Skip n only every n-th frame is detected, so the frames left are divided by n (else the time shown is n times too long)."""
@@ -3097,6 +3151,535 @@ class _ZoomPane:
         self.photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+
+
+class ZoneLineEditor:
+    """Draw the zones (Zone 1-7) and the Lines on a frame of the video, here in PKT Analyze (no need to make the zone file in PKT Data first).
+    Zone: pick a zone in the list and click its corners one by one (a corner near a corner / edge of another zone snaps to it, so neighbouring zones share
+    corners); close it with Enter, the button, or a click on the first corner. Drag a corner to move it (the corners that other zones share move together).
+    Line: pick a Line and click its two ends; drag an end to move it. The result is written as a zone file (the format of PKT Data) in the program's
+    own data folder and loaded as the zone file of the program; the video itself is never touched."""
+
+    HIT_PX = 12                                               # screen pixels: a click this near a corner grabs it / closes the polygon
+    SNAP_PX = 10                                              # screen pixels: a new corner this near another zone's corner / edge snaps to it
+
+    def __init__(self, app, video_path, on_done=None):
+        self.app, self.video_path, self.on_done = app, video_path, on_done
+        self.zones, self.lines = {}, {}
+        self._copy_from_app()
+        self.draft = []                                        # the corners of the zone being drawn (not closed yet)
+        self.line_draft = []                                   # the first end of a Line being drawn
+        self.drag = None
+        self.sel = None                                        # (zone name, index) of the corner picked last
+        self.undo_stack, self.redo_stack = [], []
+        self.frame_index = None
+        self.cur_zone = next((z for z in ZONE_NAMES if len(self.zones[z]) < 3), ZONE_NAMES[0])
+        self.cur_line = next((n for n in LINE_NAMES if len(self.lines[n]) != 2), LINE_NAMES[0])
+        self.top = tk.Toplevel(app.root)
+        self.T = app.tr_text
+        self.top.title(self.T("วาดโซนและเส้น (Zone / Line)"))
+        sw, sh = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
+        self.top.geometry(f"{min(1500, sw - 30)}x{min(900, sh - 80)}+10+10")
+        self.top.protocol("WM_DELETE_WINDOW", self.close)
+        self.top.dialog = self
+        self.msg_var = tk.StringVar(value="")
+        self.vpath_var = tk.StringVar(value=video_path)
+        self.frame_var = tk.StringVar(value="")
+        self.mode_var = tk.StringVar(value="zone")
+        self.snap_var = tk.BooleanVar(value=True)
+        self.img = None
+        self.load_frame(None)
+        self._build()
+        self.pane.set_image(self.img)
+        self._refresh_lists()
+        self.top.bind("<Return>", lambda e: self.finish_zone())
+        self.top.bind("<Escape>", lambda e: self.cancel_draft())
+        self.top.bind("<BackSpace>", lambda e: self.remove_last_draft_point())
+        self.top.bind("<Delete>", lambda e: self.delete_selected_corner())
+        self.top.bind("<Control-z>", lambda e: self.undo())
+        self.top.bind("<Control-y>", lambda e: self.redo())
+        self._say("pick")
+
+    # ----- data -----
+    def _copy_from_app(self):
+        self.zones = {z: [[float(x), float(y)] for x, y in (self.app.zones.get(z) or [])] for z in ZONE_NAMES}
+        self.lines = {n: [[float(x), float(y)] for x, y in (self.app.lines.get(n) or [])] for n in LINE_NAMES}
+
+    def _snapshot(self):
+        return copy.deepcopy((self.zones, self.lines))
+
+    def _push_undo(self):
+        self.undo_stack.append(self._snapshot())
+        del self.undo_stack[:-60]
+        self.redo_stack.clear()
+
+    def undo(self):
+        if not self.undo_stack:
+            return False
+        self.redo_stack.append(self._snapshot())
+        self.zones, self.lines = self.undo_stack.pop()
+        self.draft, self.line_draft, self.sel = [], [], None
+        self._refresh_lists()
+        self.pane.refresh()
+        return True
+
+    def redo(self):
+        if not self.redo_stack:
+            return False
+        self.undo_stack.append(self._snapshot())
+        self.zones, self.lines = self.redo_stack.pop()
+        self.draft, self.line_draft, self.sel = [], [], None
+        self._refresh_lists()
+        self.pane.refresh()
+        return True
+
+    def load_frame(self, frame):
+        img = read_picture_any(self.video_path, frame)
+        if img is None:
+            img = np.full((720, 1280, 3), 60, np.uint8)
+        self.img = img
+        try:
+            self.frame_index = int(frame) if frame not in (None, "") else None
+        except (TypeError, ValueError):
+            self.frame_index = None
+        return True
+
+    def change_video(self, path=None):
+        path = path or choose_background_video(self.app, self.top, self.video_path)
+        if not path:
+            return False
+        old_size = self.img.shape[:2]
+        self.video_path = path
+        self.vpath_var.set(path)
+        self.app.edit_video = path
+        self.load_frame(self.frame_var.get() or None)
+        if self.img.shape[:2] != old_size and any(len(p) >= 3 for p in self.zones.values()):
+            self.msg_var.set(self.T("ขนาดภาพของวิดีโอนี้ต่างจากเดิม — ตำแหน่งโซนที่วาดไว้อาจไม่ตรง ตรวจก่อนใช้"))
+        self.pane.set_image(self.img)
+        return True
+
+    def reload_frame(self):
+        self.load_frame(self.frame_var.get() or None)
+        self.pane.set_image(self.img)
+
+    def open_file(self, path=None):
+        """Load a zone file (a PKT Data export or one saved here) to look at / change it."""
+        path = path or filedialog.askopenfilename(parent=self.top, title=self.T("เปิดไฟล์โซน"), filetypes=[("Zone JSON", "*.json"), ("All files", "*.*")])
+        if not path:
+            return False
+        try:
+            if not self.app._load_pkstudio_json(path):
+                return False
+        except Exception as exc:
+            messagebox.showerror(self.T("เปิดไฟล์โซน"), str(exc), parent=self.top)
+            return False
+        self._push_undo()
+        self._copy_from_app()
+        self.draft, self.line_draft, self.sel = [], [], None
+        self._refresh_lists()
+        self.pane.refresh()
+        return True
+
+    # ----- geometry helpers -----
+    def _k(self):
+        return self.pane.view[0] if self.pane.view else 1.0
+
+    def _vertices(self, exclude=()):
+        for z in ZONE_NAMES:
+            for i, q in enumerate(self.zones[z]):
+                if (z, i) not in exclude:
+                    yield z, i, q
+
+    def _hit_zone_corner(self, ex, ey):
+        best, best_d = None, float(self.HIT_PX)
+        for z, i, q in self._vertices():
+            vx, vy = self.pane.to_view(q[0], q[1])
+            d = math.hypot(vx - ex, vy - ey)
+            if d <= best_d:
+                best, best_d = (z, i), d
+        return best
+
+    def _hit_line_end(self, ex, ey):
+        best, best_d = None, float(self.HIT_PX)
+        for n in LINE_NAMES:
+            for k, q in enumerate(self.lines[n]):
+                vx, vy = self.pane.to_view(q[0], q[1])
+                d = math.hypot(vx - ex, vy - ey)
+                if d <= best_d:
+                    best, best_d = (n, k), d
+        return best
+
+    def _snap(self, x, y, exclude=()):
+        """(x, y) moved onto a corner of another zone, else onto an edge of another zone, when one is within SNAP_PX screen pixels; clamped to the picture."""
+        h, w = self.img.shape[:2]
+        x, y = min(max(0.0, x), w - 1.0), min(max(0.0, y), h - 1.0)
+        if not self.snap_var.get():
+            return [x, y]
+        r = self.SNAP_PX / max(1e-6, self._k())
+        best, best_d = None, r
+        for _z, _i, q in self._vertices(exclude):
+            d = math.hypot(q[0] - x, q[1] - y)
+            if d <= best_d:
+                best, best_d = [q[0], q[1]], d
+        if best is not None:
+            return best
+        ex_best, ex_d = None, r * 0.8
+        for z in ZONE_NAMES:
+            pts = self.zones[z]
+            n = len(pts)
+            if n < 3:
+                continue
+            for i in range(n):
+                if (z, i) in exclude or (z, (i + 1) % n) in exclude:
+                    continue
+                a, b = pts[i], pts[(i + 1) % n]
+                dx, dy = b[0] - a[0], b[1] - a[1]
+                ll = dx * dx + dy * dy
+                if ll <= 0:
+                    continue
+                t = max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / ll))
+                px, py = a[0] + t * dx, a[1] + t * dy
+                d = math.hypot(px - x, py - y)
+                if d <= ex_d:
+                    ex_best, ex_d = [px, py], d
+        return ex_best if ex_best is not None else [x, y]
+
+    # ----- mouse -----
+    def on_click(self, x, y):
+        """A click (without dragging) on the picture: a new zone corner or a Line end."""
+        if self.mode_var.get() == "zone":
+            return self._click_zone(x, y)
+        return self._click_line(x, y)
+
+    def _click_zone(self, x, y):
+        z = self.cur_zone
+        if len(self.zones[z]) >= 3 and not self.draft:
+            self.msg_var.set(self.T("โซนนี้วาดแล้ว — ลากมุมเพื่อแก้ หรือกด \"ล้างโซน/เส้นนี้\" เพื่อวาดใหม่ (หรือเลือกโซนอื่นในรายการ)"))
+            return False
+        if len(self.draft) >= 3:
+            fx, fy = self.pane.to_view(self.draft[0][0], self.draft[0][1])
+            ex, ey = self.pane.to_view(x, y)
+            if math.hypot(fx - ex, fy - ey) <= self.HIT_PX:
+                return self.finish_zone()
+        self._push_undo()
+        self.draft.append(self._snap(x, y))
+        self._say("drawing")
+        self.pane.refresh()
+        return True
+
+    def _click_line(self, x, y):
+        n = self.cur_line
+        if len(self.lines[n]) == 2 and not self.line_draft:
+            self.msg_var.set(self.T("เส้นนี้วาดแล้ว — ลากปลายเพื่อแก้ หรือกด \"ล้างโซน/เส้นนี้\" เพื่อวาดใหม่"))
+            return False
+        self._push_undo()
+        self.line_draft.append([min(max(0.0, x), self.img.shape[1] - 1.0), min(max(0.0, y), self.img.shape[0] - 1.0)])
+        if len(self.line_draft) == 2:
+            self.lines[n] = self.line_draft
+            self.line_draft = []
+            self.cur_line = next((m for m in LINE_NAMES if len(self.lines[m]) != 2), n)
+            self._refresh_lists()
+        self.pane.refresh()
+        return True
+
+    def on_press(self, ix, iy, ex, ey):
+        """Grab a corner (zone mode) or a Line end (line mode) to drag it."""
+        if self.mode_var.get() == "zone":
+            if self.draft:
+                return False
+            hit = self._hit_zone_corner(ex, ey)
+            if hit is None:
+                return False
+            z, i = hit
+            self._push_undo()
+            pos = self.zones[z][i]
+            members = [(zz, ii) for zz, ii, q in self._vertices() if abs(q[0] - pos[0]) <= 0.75 and abs(q[1] - pos[1]) <= 0.75]
+            self.drag = {"kind": "zone", "members": members}
+            self.sel = (z, i)
+            if z != self.cur_zone:
+                self.cur_zone = z
+                self._refresh_lists()
+            return True
+        if self.line_draft:
+            return False
+        hit = self._hit_line_end(ex, ey)
+        if hit is None:
+            return False
+        self._push_undo()
+        self.drag = {"kind": "line", "line": hit[0], "end": hit[1]}
+        self.cur_line = hit[0]
+        self._refresh_lists()
+        return True
+
+    def on_drag(self, ix, iy):
+        if not self.drag:
+            return
+        if self.drag["kind"] == "zone":
+            members = self.drag["members"]
+            p = self._snap(ix, iy, exclude=set(members))
+            for zz, ii in members:
+                self.zones[zz][ii] = [p[0], p[1]]
+        else:
+            h, w = self.img.shape[:2]
+            self.lines[self.drag["line"]][self.drag["end"]] = [min(max(0.0, ix), w - 1.0), min(max(0.0, iy), h - 1.0)]
+        self.pane.refresh()
+
+    def on_release(self):
+        self.drag = None
+        self.pane.refresh()
+
+    # ----- actions -----
+    def finish_zone(self):
+        """Close the zone being drawn (3 corners or more)."""
+        if len(self.draft) < 3:
+            self.msg_var.set(self.T("โซนต้องมีอย่างน้อย 3 มุม"))
+            return False
+        self.zones[self.cur_zone] = self.draft
+        self.draft = []
+        self.sel = None
+        self.cur_zone = next((z for z in ZONE_NAMES if len(self.zones[z]) < 3), self.cur_zone)       # on to the next zone that is not drawn yet
+        self._refresh_lists()
+        self._say("closed")
+        self.pane.refresh()
+        return True
+
+    def cancel_draft(self):
+        if self.draft or self.line_draft:
+            self.draft, self.line_draft = [], []
+            self.pane.refresh()
+            self._say("pick")
+            return True
+        return False
+
+    def remove_last_draft_point(self):
+        if self.draft:
+            self.draft.pop()
+        elif self.line_draft:
+            self.line_draft.pop()
+        else:
+            return False
+        self.pane.refresh()
+        return True
+
+    def delete_selected_corner(self):
+        """Delete the corner picked last (the polygon keeps at least 3 corners)."""
+        if not self.sel:
+            return False
+        z, i = self.sel
+        if i >= len(self.zones[z]) or len(self.zones[z]) <= 3:
+            self.msg_var.set(self.T("โซนต้องมีอย่างน้อย 3 มุม — ลบมุมนี้ไม่ได้ (ถ้าไม่ต้องการโซนนี้กด \"ล้างโซน/เส้นนี้\")"))
+            return False
+        self._push_undo()
+        del self.zones[z][i]
+        self.sel = None
+        self.pane.refresh()
+        return True
+
+    def clear_current(self):
+        if self.mode_var.get() == "zone":
+            self._push_undo()
+            self.zones[self.cur_zone] = []
+            self.draft = []
+        else:
+            self._push_undo()
+            self.lines[self.cur_line] = []
+            self.line_draft = []
+        self.sel = None
+        self._refresh_lists()
+        self.pane.refresh()
+        return True
+
+    def _on_zone_pick(self):
+        sel = self.zone_list.curselection()
+        if sel:
+            if self.draft:
+                self.draft = []
+            self.cur_zone = ZONE_NAMES[sel[0]]
+            self.mode_var.set("zone")
+            self.pane.refresh()
+
+    def _on_line_pick(self):
+        sel = self.line_list.curselection()
+        if sel:
+            self.line_draft = []
+            self.cur_line = LINE_NAMES[sel[0]]
+            self.mode_var.set("line")
+            self.pane.refresh()
+
+    def _refresh_lists(self):
+        if not getattr(self, "zone_list", None):
+            return
+        self.zone_list.delete(0, "end")
+        for z in ZONE_NAMES:
+            n = len(self.zones[z])
+            self.zone_list.insert("end", ("{0}   ✓ {1}".format(z, n) if n >= 3 else "{0}   —".format(z)))
+        self.zone_list.selection_clear(0, "end")
+        self.zone_list.selection_set(ZONE_NAMES.index(self.cur_zone))
+        self.line_list.delete(0, "end")
+        for n in LINE_NAMES:
+            self.line_list.insert("end", ("{0}   ✓".format(n) if len(self.lines[n]) == 2 else "{0}   —".format(n)))
+        self.line_list.selection_clear(0, "end")
+        self.line_list.selection_set(LINE_NAMES.index(self.cur_line))
+
+    def _say(self, what):
+        if what == "pick":
+            self.msg_var.set(self.T("เลือกโซนในรายการ แล้วคลิกมุมของโซนบนภาพทีละมุม — ปิดโซนด้วย Enter หรือคลิกมุมแรกซ้ำ"))
+        elif what == "drawing":
+            self.msg_var.set(self.T("{0}: วาดแล้ว {1} มุม — คลิกต่อ แล้วกด Enter (หรือคลิกมุมแรก) เพื่อปิดโซน · Backspace = ลบมุมล่าสุด · Esc = ยกเลิก").format(self.cur_zone, len(self.draft)))
+        elif what == "closed":
+            self.msg_var.set(self.T("ปิดโซนแล้ว — ลากมุมเพื่อแก้ได้ มุมที่โซนข้างเคียงใช้ร่วมกันจะขยับด้วยกัน"))
+
+    # ----- result -----
+    def target_path(self):
+        folder = os.path.join(_PK_STUDIO_DIR, "Zones")
+        os.makedirs(folder, exist_ok=True)
+        cur = str(self.app.zone_line_config_var.get() or "")
+        if cur.lower().endswith(".json") and os.path.normcase(os.path.dirname(os.path.abspath(cur))) == os.path.normcase(os.path.abspath(folder)):
+            return cur                                           # a file this editor wrote before: it goes on being that file
+        stem = os.path.splitext(os.path.basename(self.video_path))[0] or "zones"
+        base = os.path.join(folder, f"{stem}_zones")
+        path, k = base + ".json", 2
+        while os.path.exists(path):
+            path = f"{base}_{k}.json"
+            k += 1
+        return path
+
+    def use(self):
+        """Write the zone file and make it the zone file of the program. Returns its path (None when it cannot be done)."""
+        if self.draft and len(self.draft) >= 3:
+            self.finish_zone()
+        if not any(len(p) >= 3 for p in self.zones.values()):
+            messagebox.showerror(self.T("ใช้โซนนี้"), self.T("ยังไม่มีโซนที่วาดครบ (อย่างน้อย 1 โซน 3 มุม)"), parent=self.top)
+            return None
+        old = {}
+        cur = str(self.app.zone_line_config_var.get() or "")
+        if cur.lower().endswith(".json") and os.path.isfile(cur):
+            try:
+                with open(cur, "r", encoding="utf-8") as f:
+                    old = json.load(f)
+            except Exception:
+                old = {}
+        h, w = self.img.shape[:2]
+        data = build_zone_file(self.zones, self.lines, w, h, self.video_path, self.frame_index, old)
+        path = self.target_path()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            self.app._load_pkstudio_json(path)
+            self.app.validate_measurements()
+        except Exception as exc:
+            messagebox.showerror(self.T("ใช้โซนนี้"), str(exc), parent=self.top)
+            return None
+        self.msg_var.set(self.T("ใช้โซนนี้แล้ว: {0}").format(path))
+        if self.on_done:
+            self.on_done(path)
+        return path
+
+    def use_and_align(self):
+        """Use the zones, then go on to the Align (the corners of the zones are its pins)."""
+        if self.use() is None:
+            return False
+        self.close()
+        self.app.open_align()
+        return True
+
+    # ----- drawing -----
+    def draw(self, out, pane):
+        k = pane.view[0] if pane.view else 1.0
+        over = out.copy()
+        for zi, z in enumerate(ZONE_NAMES):
+            pts = self.zones[z]
+            if len(pts) < 3:
+                continue
+            col = ZONE_COLORS_BGR[zi % len(ZONE_COLORS_BGR)]
+            poly = np.array([pane.to_view(x, y) for x, y in pts], np.int32)
+            cv2.fillPoly(over, [poly], col)
+        cv2.addWeighted(over, 0.25, out, 0.75, 0, out)
+        shared = {}
+        for z, i, q in self._vertices():
+            shared.setdefault((round(q[0], 1), round(q[1], 1)), []).append(z)
+        for zi, z in enumerate(ZONE_NAMES):
+            pts = self.zones[z]
+            col = ZONE_COLORS_BGR[zi % len(ZONE_COLORS_BGR)]
+            if len(pts) >= 3:
+                poly = np.array([pane.to_view(x, y) for x, y in pts], np.int32)
+                cv2.polylines(out, [poly], True, col, 3 if z == self.cur_zone else 2, cv2.LINE_AA)
+                cx, cy = poly.mean(axis=0).astype(int)
+                cv2.putText(out, z, (int(cx) - 30, int(cy)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 3, cv2.LINE_AA)
+                cv2.putText(out, z, (int(cx) - 30, int(cy)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, col, 1, cv2.LINE_AA)
+            for i, (x, y) in enumerate(pts):
+                vx, vy = pane.to_view(x, y)
+                common = len(shared.get((round(x, 1), round(y, 1)), [])) > 1
+                cv2.rectangle(out, (vx - 5, vy - 5), (vx + 5, vy + 5), (255, 255, 255) if common else col, -1)
+                cv2.rectangle(out, (vx - 5, vy - 5), (vx + 5, vy + 5), (0, 0, 0), 1)
+                if self.sel == (z, i):
+                    cv2.circle(out, (vx, vy), 11, (0, 255, 255), 2, cv2.LINE_AA)
+        if self.draft:
+            col = ZONE_COLORS_BGR[ZONE_NAMES.index(self.cur_zone) % len(ZONE_COLORS_BGR)]
+            pv = [pane.to_view(x, y) for x, y in self.draft]
+            for a, b in zip(pv, pv[1:]):
+                cv2.line(out, a, b, col, 2, cv2.LINE_AA)
+            for p in pv:
+                cv2.circle(out, p, 5, col, -1, cv2.LINE_AA)
+            if len(pv) >= 3:
+                cv2.circle(out, pv[0], self.HIT_PX, (255, 255, 255), 2, cv2.LINE_AA)       # a click here closes the zone
+        for n in LINE_NAMES:
+            p = self.lines[n]
+            if len(p) == 2:
+                a, b = pane.to_view(*p[0]), pane.to_view(*p[1])
+                cv2.line(out, a, b, (0, 255, 255), 3 if n == self.cur_line else 2, cv2.LINE_AA)
+                for e in (a, b):
+                    cv2.circle(out, e, 6, (0, 255, 255), -1, cv2.LINE_AA)
+                    cv2.circle(out, e, 6, (0, 0, 0), 1, cv2.LINE_AA)
+                cv2.putText(out, n, ((a[0] + b[0]) // 2 + 6, (a[1] + b[1]) // 2 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(out, n, ((a[0] + b[0]) // 2 + 6, (a[1] + b[1]) // 2 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1, cv2.LINE_AA)
+        for p in self.line_draft:
+            cv2.circle(out, pane.to_view(*p), 6, (0, 255, 255), 2, cv2.LINE_AA)
+
+    # ----- window -----
+    def _build(self):
+        top, T = self.top, self.T
+        ttk.Label(top, text=T("วาดโซนบนเฟรมของวิดีโอ: เลือกโซนในรายการ แล้วคลิกมุมทีละมุม (มุมที่ใกล้มุม/ขอบของโซนอื่นจะดูดติด โซนข้างเคียงจึงใช้มุมร่วมกัน) · ปิดโซนด้วย Enter หรือคลิกมุมแรกซ้ำ · "
+                             "ลากมุมเพื่อแก้ · ล้อเมาส์ = ซูม · ลากพื้นที่ว่าง = เลื่อนภาพ"), wraplength=1440, justify="left").pack(anchor="w", padx=8, pady=(6, 2))
+        bar0 = ttk.Frame(top)
+        bar0.pack(fill="x", padx=8, pady=(0, 2))
+        ttk.Label(bar0, text=T("วิดีโอข้างทาง")).pack(side="left")
+        ttk.Entry(bar0, textvariable=self.vpath_var, width=80, state="readonly").pack(side="left", padx=4)
+        ttk.Button(bar0, text=T("เปลี่ยนวิดีโอ…"), command=self.change_video).pack(side="left")
+        ttk.Label(bar0, text=T("เฟรมที่")).pack(side="left", padx=(14, 2))
+        ttk.Entry(bar0, textvariable=self.frame_var, width=7).pack(side="left")
+        ttk.Button(bar0, text=T("โหลดเฟรม"), command=self.reload_frame).pack(side="left", padx=4)
+        ttk.Button(bar0, text=T("เปิดไฟล์โซน…"), command=self.open_file).pack(side="left", padx=(14, 0))
+        body = ttk.Frame(top)
+        body.pack(fill="both", expand=True, padx=8, pady=4)
+        side = ttk.Frame(body)
+        side.pack(side="left", fill="y", padx=(0, 8))
+        ttk.Radiobutton(side, text=T("วาดโซน"), variable=self.mode_var, value="zone").pack(anchor="w")
+        self.zone_list = tk.Listbox(side, height=7, exportselection=False, width=16)
+        self.zone_list.pack(anchor="w", pady=(2, 6))
+        self.zone_list.bind("<<ListboxSelect>>", lambda e: self._on_zone_pick())
+        ttk.Radiobutton(side, text=T("วาดเส้น (Line)"), variable=self.mode_var, value="line").pack(anchor="w")
+        self.line_list = tk.Listbox(side, height=6, exportselection=False, width=16)
+        self.line_list.pack(anchor="w", pady=(2, 6))
+        self.line_list.bind("<<ListboxSelect>>", lambda e: self._on_line_pick())
+        ttk.Checkbutton(side, text=T("ดูดติดมุม/ขอบโซนอื่น"), variable=self.snap_var).pack(anchor="w", pady=(0, 6))
+        for text, cmd in (("จบโซน (Enter)", self.finish_zone), ("ลบมุมที่เลือก (Delete)", self.delete_selected_corner), ("ล้างโซน/เส้นนี้", self.clear_current),
+                          ("↶ ย้อน", self.undo), ("↷ ทำซ้ำ", self.redo)):
+            ttk.Button(side, text=T(text), command=cmd).pack(anchor="w", fill="x", pady=1)
+        self.pane = _ZoomPane(body, 1000, 640, self.on_click, self.draw, on_press=self.on_press, on_drag=self.on_drag, on_release=self.on_release)
+        self.pane.canvas.pack(side="left", fill="both", expand=True)
+        foot = ttk.Frame(top)
+        foot.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Button(foot, text=T("ปิด"), command=self.close).pack(side="right")
+        ttk.Button(foot, text=T("✅ ใช้โซนและเส้นนี้ แล้วจัดแนวต่อ ▶"), command=self.use_and_align).pack(side="right", padx=6)
+        ttk.Button(foot, text=T("✅ ใช้โซนและเส้นนี้"), command=self.use).pack(side="right", padx=6)
+        tk.Label(foot, textvariable=self.msg_var, anchor="w", foreground="#a00", wraplength=900, justify="left").pack(side="left", fill="x", expand=True)
+
+    def close(self):
+        try:
+            self.top.destroy()
+        except tk.TclError:
+            pass
 
 
 class AlignDialog:
@@ -5717,9 +6300,10 @@ class Run1App:
         box.columnconfigure(1, weight=1)       # the path entry takes the free width
         ttk.Label(box, text="ไฟล์โซน").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(box, textvariable=self.zone_line_config_var).grid(row=0, column=1, sticky="ew", pady=4)
-        ttk.Button(box, text="วาด Line…", command=self.open_line_editor).grid(row=0, column=2, padx=(5, 0))
-        ttk.Button(box, text="Browse", command=self.load_measurement_config).grid(row=0, column=3, padx=(5, 0))
-        ttk.Label(box, textvariable=self.measurement_status_var, foreground=gray, anchor="w").grid(row=1, column=0, columnspan=4, sticky="w")
+        ttk.Button(box, text="✏️ วาดโซนและเส้น…", command=self.open_zone_line_editor).grid(row=0, column=2, padx=(5, 0))
+        ttk.Button(box, text="วาด Line…", command=self.open_line_editor).grid(row=0, column=3, padx=(5, 0))
+        ttk.Button(box, text="Browse", command=self.load_measurement_config).grid(row=0, column=4, padx=(5, 0))
+        ttk.Label(box, textvariable=self.measurement_status_var, foreground=gray, anchor="w").grid(row=1, column=0, columnspan=5, sticky="w")
 
         box = self.section("จุดที่ใช้ตัดสินว่ารถอยู่โซนไหน")
         ttk.Label(box, text="ตำแหน่งบนกรอบรถ").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
@@ -8614,6 +9198,14 @@ class Run1App:
             txt += f" (เว้นจุดตรวจ {info['loo_rms_m'] * 100:.0f} ซม.)"
         return txt + ("" if self.run3_align_enabled_var.get() else " — ยังไม่ได้ติ๊กใช้")
 
+    def open_zone_line_editor(self):
+        """The window that draws the zones and the Lines on a frame of the video (the zone file can be made here instead of in PKT Data)."""
+        video = self._edit_video_path()
+        if not video or not os.path.isfile(video):
+            messagebox.showerror("วาดโซนและเส้น", "เลือกวิดีโอก่อน (โซนและเส้นวาดบนเฟรมของวิดีโอ)")
+            return None
+        return ZoneLineEditor(self, video)
+
     def open_align_and_zones(self):
         """One button for the whole work with the drone picture: with a saved Align (and the zones and the drone picture it needs) the zone editor opens
         (it has a button back to the Align); otherwise the Align window opens (its button "ใช้ค่านี้ แล้วแก้โซน" goes on to the zone editor)."""
@@ -8623,7 +9215,9 @@ class Run1App:
             data = {}
         has_zones = any(len(self.zones.get(z, [])) >= 3 for z in ZONE_NAMES)
         drone_ok = os.path.isfile(str((data.get("drone") or {}).get("path", "")))
-        if data.get("pairs") and has_zones and drone_ok:
+        if not has_zones:
+            return self.open_zone_line_editor()                  # no zones yet: draw them first (the Align takes its pins from them)
+        if data.get("pairs") and drone_ok:
             return self.open_zone_editor()
         return self.open_align()
 

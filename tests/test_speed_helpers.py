@@ -224,6 +224,25 @@ class SpeedPerZone(unittest.TestCase):
         self.assertEqual(err([(10.0, None), (10.0, 0)]), [None, None])
         self.assertAlmostEqual(err([(10.0, 11.0)], 1.1)[0], 0.0)                        # after the factor it fits
 
+    def test_zone_file_builder(self):
+        f = NS["build_zone_file"]
+        d = f({"Zone 2": [(1.4, 2.6), (10, 2), (10, 9)], "Zone 9": [(0, 0), (1, 1)], "Zone 1": [(0, 0), (4, 0), (4, 4)]},
+              {"Line 1": [(1, 1), (2, 2)], "Line 2": [(1, 1)]}, 20, 10, video_path="v.mp4", frame_index=7)
+        self.assertEqual([z["name"] for z in d["zones"]], ["Zone 1", "Zone 2"])               # in order; a zone with 2 corners is left out
+        self.assertEqual(d["zones"][0]["area_px"], 8.0)
+        self.assertEqual(d["zones"][1]["points"][0], [1, 3])                                  # whole pixels
+        self.assertEqual(d["zones"][0]["points_norm"][1], [0.2, 0.0])
+        self.assertEqual((d["zones"][0]["id"], d["zones"][0]["color_bgr"], d["zones"][0]["show_label"], d["zones"][0]["reference_frame_index"]),
+                         (1, list(NS["ZONE_COLORS_BGR"][0]), True, 7))
+        self.assertEqual((d["frame_width"], d["frame_height"], d["video_path"]), (20, 10, "v.mp4"))
+        self.assertEqual(list(d["lines"]), ["Line 1"])                                        # a Line with one end is left out
+        self.assertEqual((d["lines_frame_width"], d["lines_frame_height"]), (20, 10))
+        old = {"note": "keep", "zones": [{"id": 1, "name": "Zone 1", "color_bgr": [9, 9, 9], "show_label": False}], "lines": {"Line 3": [[0, 0], [1, 1]]}}
+        d2 = f({"Zone 1": [(0, 0), (4, 0), (4, 4)]}, {}, 20, 10, old=old)
+        self.assertEqual((d2["note"], d2["zones"][0]["color_bgr"], d2["zones"][0]["show_label"]), ("keep", [9, 9, 9], False))   # what the old file had is kept
+        self.assertNotIn("lines", d2)                                                          # no Lines now: the old ones are not carried over
+        self.assertEqual(NS["zone_polygon_area"]([(0, 0), (2, 0)]), 0.0)
+
     def test_nothing_in_nothing_out(self):
         self.assertEqual(NS["speed_zone_summary"]([]), [])
 
