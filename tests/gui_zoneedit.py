@@ -105,6 +105,28 @@ app.run3_align_var.set("")
 check("without an alignment the editor says so (no window)", app.open_zone_editor() is None)
 app.run3_align_var.set(align_json)
 
+# ---- the single button "จัดแนวและแก้โซน" (1.53.0): Align first, then the zone editor, and a way back
+app.run3_align_var.set("")
+w0 = app.open_align_and_zones()
+root.update()
+check("one button: without an alignment it opens the Align window", isinstance(w0, m.AlignDialog))
+w0.close()
+app.run3_align_var.set(align_json)
+w1 = app.open_align_and_zones()
+root.update()
+check("one button: with an alignment it opens the zone editor", isinstance(w1, m.ZoneAlignEditor))
+calls = []
+app.open_align = lambda: (calls.append("align"), None)[1]
+check("the zone editor has a way back to the Align window", w1.back_to_align() is True and calls == ["align"])
+del app.open_align
+d2 = app.open_align()
+root.update()
+opened = []
+app.open_zone_editor = lambda: (opened.append("zones"), None)[1]
+check("'ใช้ค่านี้ แล้วแก้โซน' saves the Align and goes on to the zone editor", d2.apply(then_zones=True) is True and opened == ["zones"])
+del app.open_zone_editor
+check("the Align saved that way is the usable one", bool(json.loads(app.run3_align_var.get() or "{}").get("pairs")))
+
 ed = app.open_zone_editor()
 root.update()
 check("the editor opens with the three views", ed is not None and ed.video_img is not None and ed.plan_img is not None and ed.vpane.view is not None)

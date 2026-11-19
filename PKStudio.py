@@ -3570,6 +3570,7 @@ class AlignDialog:
         ttk.Button(left, text="ลบคู่ที่เลือก", command=self.delete_pair).grid(row=4, column=0, pady=4, sticky="w")
         ttk.Button(left, text="ใช้ค่านี้", command=self.apply).grid(row=4, column=1, padx=4, sticky="w")
         ttk.Button(left, text="ปิด", command=self.close).grid(row=4, column=2, sticky="w")
+        ttk.Button(left, text="ใช้ค่านี้ แล้วแก้โซน ▶", command=lambda: self.apply(then_zones=True)).grid(row=4, column=3, padx=4, sticky="w")
         ttk.Button(left, text="ลบคู่ที่แย่สุด", command=self.delete_worst).grid(row=5, column=0, pady=2, sticky="w")
         ttk.Radiobutton(left, text="วัดระยะทดสอบ (คลิก 2 จุดบนภาพโดรน)", variable=self.mode_var, value="measure").grid(row=5, column=1, columnspan=3, sticky="w")
         ttk.Radiobutton(left, text="หมุดโซน (ไล่ทีละหมุด)", variable=self.mode_var, value="pins", command=self.set_mode_pins).grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
@@ -3592,7 +3593,7 @@ class AlignDialog:
         self.report_text.pack(side="left", fill="both", expand=True)
         tk.Label(top, textvariable=self.msg_var, anchor="w", foreground="#a00").pack(fill="x", padx=8)
 
-    def apply(self):
+    def apply(self, then_zones=False):
         rep = self.compute()
         if "error" in rep:
             messagebox.showerror("จัดแนวกับภาพโดรน", rep["error"], parent=self.top)
@@ -3611,6 +3612,8 @@ class AlignDialog:
             return False
         self.on_apply(data)
         self.close()
+        if then_zones:                                           # straight on to the zone editor (it uses the Align just saved)
+            self.app.open_zone_editor()
         return True
 
     def close(self):
@@ -3958,6 +3961,7 @@ class ZoneAlignEditor:
         ttk.Checkbutton(bar, text="ดูดติดโซนอื่น", variable=self.snap_var).pack(side="left", padx=(12, 2))
         ttk.Entry(bar, textvariable=self.snap_cm_var, width=4).pack(side="left")
         ttk.Label(bar, text="ซม.").pack(side="left", padx=(2, 12))
+        ttk.Button(bar, text="◀ แก้คู่จุดจัดแนว…", command=self.back_to_align).pack(side="left", padx=(0, 12))
         ttk.Button(bar, text="↶ ย้อน", command=self.undo).pack(side="left")
         ttk.Button(bar, text="↷ ทำซ้ำ", command=self.redo).pack(side="left", padx=4)
         ttk.Button(bar, text="รีเซ็ตเป็นไฟล์เดิม", command=self.reset).pack(side="left", padx=4)
@@ -4005,6 +4009,15 @@ class ZoneAlignEditor:
             self.report.config(state="disabled")
 
     # ----- save -----
+    def back_to_align(self):
+        """Back to the Align window to change the pairs. Zone corners moved here and not saved are lost, so that is asked first."""
+        if self.undo_stack and not messagebox.askyesno(
+                "กลับไปจัดแนว", "มีการลากมุมโซนที่ยังไม่ได้บันทึก — ถ้ากลับไปจัดแนวจะหายไป กลับไปเลยไหม?\n(กด ไม่ แล้วบันทึกเป็นไฟล์โซนใหม่ก่อนได้)", parent=self.top):
+            return False
+        self.close()
+        self.app.open_align()
+        return True
+
     def use_for_analysis(self):
         """One click: write the edited zones to `<name>_aligned.json` beside the loaded zone file (the original stays) and make it the zone
         file of the program - what the analysis, the previews and the X-Y outputs use from now on."""
@@ -5599,8 +5612,7 @@ class Run1App:
         r += 1
         alignf = ttk.LabelFrame(cal, text="จัดแนวกับภาพโดรน (Align) — แปลงพิกัดวิดีโอให้ตรงกับผังจริงของโดรน (ภาพโดรนใช้เฉพาะตอนจัดแนว)", padding=4)
         alignf.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 2))
-        ttk.Button(alignf, text="🧭 จัดแนว…", command=self.open_align).pack(side="left")
-        ttk.Button(alignf, text="🧩 แก้รูปโซนบนภาพโดรน…", command=self.open_zone_editor).pack(side="left", padx=(8, 0))
+        ttk.Button(alignf, text="🧭 จัดแนวและแก้โซน…", command=self.open_align_and_zones).pack(side="left")
         ttk.Checkbutton(alignf, text="ใช้ผลการจัดแนวแทน PPM / Perspective", variable=self.run3_align_enabled_var).pack(side="left", padx=10)
         self.align_status_var = tk.StringVar(value="")
         ttk.Label(alignf, textvariable=self.align_status_var, foreground="#0a7a3d").pack(side="left", padx=6)
@@ -8428,6 +8440,19 @@ class Run1App:
         if info.get("loo_rms_m") is not None:
             txt += f" (เว้นจุดตรวจ {info['loo_rms_m'] * 100:.0f} ซม.)"
         return txt + ("" if self.run3_align_enabled_var.get() else " — ยังไม่ได้ติ๊กใช้")
+
+    def open_align_and_zones(self):
+        """One button for the whole work with the drone picture: with a saved Align (and the zones and the drone picture it needs) the zone editor opens
+        (it has a button back to the Align); otherwise the Align window opens (its button "ใช้ค่านี้ แล้วแก้โซน" goes on to the zone editor)."""
+        try:
+            data = json.loads(self.run3_align_var.get() or "{}")
+        except (ValueError, TypeError):
+            data = {}
+        has_zones = any(len(self.zones.get(z, [])) >= 3 for z in ZONE_NAMES)
+        drone_ok = os.path.isfile(str((data.get("drone") or {}).get("path", "")))
+        if data.get("pairs") and has_zones and drone_ok:
+            return self.open_zone_editor()
+        return self.open_align()
 
     def open_align(self):
         video = self._edit_video_path()
