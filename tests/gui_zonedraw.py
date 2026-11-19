@@ -206,25 +206,25 @@ ed2.close()
 
 # ---- the way on: use + Align
 opened = []
-app.open_zone_editor = lambda: (opened.append("editor"), None)[1]
+app.open_site_studio = lambda: (opened.append("editor"), None)[1]
 ed.cur_zone = "Zone 7"
 for p in ((50, 50), (150, 50), (150, 150)):
     click(*p)
 ed.finish_zone()
 check("'use, then go on' writes the zone file and opens the window that aligns and edits the zones", ed.use_and_align() is True and opened == ["editor"])
-del app.open_zone_editor
+del app.open_site_studio
 
 # ---- the single button: no zones -> the drawing window; zones but no Align -> the Align
 app.zones = {z: [] for z in m.ZONE_NAMES}
 app.run3_align_var.set("")
 w = app.open_align_and_zones()
 root.update()
-check("one button: no zones yet opens the drawing window", isinstance(w, m.ZoneLineEditor))
+check("one button: it opens the one window of the site setup (here with no zones yet)", isinstance(w, m.SiteStudio))
 w.close()
 app.zones["Zone 2"] = [(1, 1), (50, 1), (50, 50)]
 w = app.open_align_and_zones()
 root.update()
-check("one button: zones but no Align opens the window that aligns and edits them (in the Align mode)", isinstance(w, m.ZoneAlignEditor) and w.mode == "align" and not w.aligned)
+check("one button: with zones but no Align it opens the same window, nothing aligned yet", isinstance(w, m.SiteStudio) and not w.aligned and len(w.nodes) == 3)
 w.close()
 
 # ---- the helper that builds the file

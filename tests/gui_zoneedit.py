@@ -111,7 +111,7 @@ w0.close()
 app.run3_align_var.set(align_json)
 w1 = app.open_align_and_zones()
 root.update()
-check("one button: with an alignment it opens the same window in the edit mode", isinstance(w1, m.ZoneAlignEditor) and w1.mode == "edit" and w1.aligned)
+check("one button: with an alignment it opens the one window of the site setup, aligned", isinstance(w1, m.SiteStudio) and w1.aligned)
 w1.close()
 
 ed = app.open_zone_editor()
