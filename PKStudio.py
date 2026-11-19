@@ -3576,11 +3576,11 @@ class ZoneLineEditor:
         return path
 
     def use_and_align(self):
-        """Use the zones, then go on to the Align (the corners of the zones are its pins)."""
+        """Use the zones, then go on to the window that aligns them with the drone picture (the corners of the zones are the pins)."""
         if self.use() is None:
             return False
         self.close()
-        self.app.open_align()
+        self.app.open_zone_editor()
         return True
 
     # ----- drawing -----
@@ -4238,11 +4238,32 @@ class ZoneAlignEditor:
 
     HIT_PX = 14
 
-    def __init__(self, app, video_path, data, cfg, on_saved=None):
-        self.app, self.video_path, self.cfg, self.data, self.on_saved = app, video_path, cfg, data, on_saved
+    def __init__(self, app, video_path, data, cfg, on_saved=None, ask_drone=True):
+        self.app, self.video_path, self.on_saved = app, video_path, on_saved
+        self.T = app.tr_text
+        data = dict(data or {})
+        self.data = data
         self.video_img = read_picture_any(video_path, data.get("video_frame") or None)
+        if self.video_img is None:
+            self.video_img = np.full((720, 1280, 3), 60, np.uint8)
         drone = data.get("drone") or {}
-        self.drone_img = read_picture_any(drone.get("path"), drone.get("frame") or None)
+        self.drone_path, self.drone_frame = str(drone.get("path", "") or ""), str(drone.get("frame", "") or "")
+        self.drone_img = read_picture_any(self.drone_path, self.drone_frame or None)
+        # the Align is done in this window: the zone corners are the pins (and any extra points), the kind of transformation, the scale
+        self.pairs = [{"s": tuple(q["s"]), "d": tuple(q["d"]), **({"l": q["l"]} if q.get("l") else {})} for q in data.get("pairs", [])]
+        self.skipped = set(data.get("skipped", []))
+        self.kind = data.get("kind") if data.get("kind") in ALIGN_KINDS else "projective"
+        self.scale = float(data.get("scale") or 0.0)                       # metres per drone pixel (0 = not set yet)
+        self.rot_deg = float(data.get("rot_deg") or 0.0)
+        self.pending_free = None                                           # a video point (not a zone corner) waiting for its place on the drone picture
+        self.cur_pin = None                                                # the zone corner waiting for its place on the drone picture
+        self.cfg = cfg if (cfg and "error" not in cfg) else None
+        if self.cfg is None and len(self.pairs) >= ALIGN_KINDS[self.kind][0]:
+            fit = align_build(self._data_dict(self.scale if self.scale > 0 else 1.0, with_edges=False))
+            self.cfg = fit if "error" not in fit else None
+        self.aligned = self.cfg is not None
+        if not self.aligned:
+            self.cfg = self._provisional_cfg()                              # (the views of the drone and the plane stay empty until the Align fits)
         self.names = [z for z in ZONE_NAMES if len(app.zones.get(z, [])) >= 3]
         self.zones = {z: [[float(x), float(y)] for x, y in app.zones[z]] for z in self.names}
         self.orig = {z: [list(q) for q in pts] for z, pts in self.zones.items()}
@@ -4272,8 +4293,10 @@ class ZoneAlignEditor:
         self.drag = None
         self.selected_zone = None
         self.selected_group = None
+        self.mode = "edit" if (self.aligned and self.scale > 0) else "align"
+        self._next_pin(0)
         self.top = tk.Toplevel(app.root)
-        self.top.title("แก้รูปโซนบนภาพโดรน / ผัง X–Y (3 มุมมองพร้อมกัน)")
+        self.top.title(self.T("จัดแนวและแก้โซน — วิดีโอ | โดรน | ผัง X–Y (3 มุมมองพร้อมกัน)"))
         sw, sh = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
         self.top.geometry(f"{min(1560, sw - 30)}x{min(940, sh - 80)}+10+10")
         self.top.protocol("WM_DELETE_WINDOW", self.close)
@@ -4284,14 +4307,304 @@ class ZoneAlignEditor:
         self.snap_cm_var = tk.StringVar(value="25")
         self.level_var = tk.BooleanVar(value=False)
         self.vpath_var = tk.StringVar(value=video_path)
+        self.mode_var = tk.StringVar(value=self.mode)
+        self.dpath_var = tk.StringVar(value=self.drone_path)
+        self.dframe_var = tk.StringVar(value=self.drone_frame)
+        self.kind_var = tk.StringVar(value=ALIGN_KINDS[self.kind][1])
+        self.scale_var = tk.StringVar(value=(f"{self.scale:.6g}" if self.scale > 0 else ""))
         self._setup_plan()
         self._build()
         self.vpane.set_image(self.video_img if self.video_img is not None else np.full((720, 1280, 3), 60, np.uint8))
         self.dpane.set_image(self.drone_img if self.drone_img is not None else np.full((720, 1280, 3), 60, np.uint8))
         self.ppane.set_image(self.plan_img)
         self.refresh_all()
+        self.msg_var.set(self._pin_message() if self.mode == "align" else "")
+        if ask_drone and not self.drone_path:
+            self.top.after(300, self.choose_drone)                         # no drone picture yet: ask for it
 
     # ----- real lengths of the edges (optional: leave blank what is not known) -----
+    # ----- the Align (zone corners as pins) -----
+    def _provisional_cfg(self):
+        """An identity transformation so that the geometry methods work before the Align exists (nothing of it is shown)."""
+        h, w = self.video_img.shape[:2]
+        return align_build({"pairs": [{"s": [0, 0], "d": [0, 0]}, {"s": [w, 0], "d": [w, 0]}], "kind": "helmert", "scale": 1.0, "video_size": [w, h]})
+
+    def _pin_label(self, gid):
+        """Z<zone no>.<corner no> of the corner, joined by "=" with the same corner of the neighbouring zones (the labels of the Align window)."""
+        return "=".join(f"Z{zz.split()[-1]}.{ii + 1}" for zz, ii in self.members[gid])
+
+    def _pin_state(self, gid):
+        first = self._pin_label(gid).split("=")[0]
+        if any(q.get("l") == first for q in self.pairs):
+            return "done"
+        return "skip" if first in self.skipped else "todo"
+
+    def _next_pin(self, start=0):
+        """Point at the next zone corner still to do (from the corner number `start`, wrapping round); None when there is none."""
+        order = sorted(self.members)
+        for k in range(len(order)):
+            gid = order[(start + k) % len(order)]
+            if self._pin_state(gid) == "todo":
+                self.cur_pin = gid
+                return gid
+        self.cur_pin = None
+        return None
+
+    def _pin_counts(self):
+        c = {"todo": 0, "done": 0, "skip": 0}
+        for gid in self.members:
+            c[self._pin_state(gid)] += 1
+        return c
+
+    def _pin_message(self):
+        c = self._pin_counts()
+        if self.pending_free is not None:
+            return self.T("จุดเสริมบนวิดีโอแล้ว — คลิกตำแหน่งเดียวกันบนภาพโดรน")
+        if self.cur_pin is not None:
+            order = sorted(self.members)
+            return self.T("มุมโซน {0} ({1}/{2}) — คลิกตำแหน่งเดียวกันบนภาพโดรน หรือกด ข้ามมุมนี้ · คลิกจุดว่างบนวิดีโอ = เพิ่มจุดเสริม  [ใส่แล้ว {3} · ข้าม {4} · เหลือ {5}]").format(
+                self._pin_label(self.cur_pin), order.index(self.cur_pin) + 1, len(order), c["done"], c["skip"], c["todo"])
+        return self.T("มุมโซนครบแล้ว — ใส่ {0} · ข้าม {1}").format(c["done"], c["skip"])
+
+    def _on_mode(self):
+        self.mode = self.mode_var.get()
+        self.drag = None
+        if self.mode == "align":
+            self.msg_var.set(self._pin_message() if self.drone_img is not None else self.T("เลือกภาพ/วิดีโอโดรนก่อน (ปุ่ม เลือก… ด้านบน)"))
+        else:
+            self.msg_var.set("")
+        for pane in (self.vpane, self.dpane, self.ppane):
+            pane.refresh()
+
+    def _on_click(self, pane_name, x, y):
+        """A click without dragging: in the Align mode on the video picks a zone corner (or an extra point), on the drone picture places it."""
+        if self.mode != "align":
+            return False
+        if pane_name == "video":
+            return self._click_video(x, y)
+        if pane_name == "drone":
+            return self._click_drone(x, y)
+        return False
+
+    def _click_video(self, x, y):
+        k = self.vpane.view[0] if self.vpane.view else 1.0
+        best = None
+        for gid in self.members:
+            vx, vy = self.group_video(gid)
+            d = math.hypot(vx - x, vy - y) * k
+            if d <= 20.0 and (best is None or d < best[0]):
+                best = (d, gid)
+        if best is not None:                                           # a zone corner: it is the one that waits for its place on the drone picture
+            gid = best[1]
+            first = self._pin_label(gid).split("=")[0]
+            had = [q for q in self.pairs if q.get("l") == first]
+            if had:                                                    # (a corner that is done is placed again: the old place goes)
+                self.pairs = [q for q in self.pairs if q.get("l") != first]
+            self.skipped.discard(first)
+            self.cur_pin, self.pending_free = gid, None
+            if had:
+                self._refit()
+            self.msg_var.set(self._pin_message())
+            self.vpane.refresh()
+            return True
+        self.pending_free, self.cur_pin = (float(x), float(y)), self.cur_pin
+        self.msg_var.set(self._pin_message())
+        self.vpane.refresh()
+        return True
+
+    def _click_drone(self, x, y):
+        if self.drone_img is None:
+            self.msg_var.set(self.T("เลือกภาพ/วิดีโอโดรนก่อน (ปุ่ม เลือก… ด้านบน)"))
+            return False
+        if self.pending_free is not None:
+            self.pairs.append({"s": tuple(self.pending_free), "d": (float(x), float(y))})
+            self.pending_free = None
+        elif self.cur_pin is not None:
+            gid = self.cur_pin
+            self.pairs.append({"s": tuple(float(v) for v in self.group_video(gid)), "d": (float(x), float(y)), "l": self._pin_label(gid).split("=")[0]})
+            order = sorted(self.members)
+            self._next_pin(order.index(gid) + 1)
+        else:
+            self.msg_var.set(self._pin_message())
+            return False
+        self._refit()
+        return True
+
+    def skip_pin(self):
+        if self.cur_pin is None:
+            return False
+        order = sorted(self.members)
+        self.skipped.add(self._pin_label(self.cur_pin).split("=")[0])
+        self._next_pin(order.index(self.cur_pin) + 1)
+        self.msg_var.set(self._pin_message())
+        self._store_align()
+        self.refresh_all()
+        return True
+
+    def goto_pin(self, step):
+        """Move to the next / previous zone corner that is not done (a skipped one can be taken up again)."""
+        order = sorted(self.members)
+        if not order:
+            return False
+        j = order.index(self.cur_pin) if self.cur_pin in order else 0
+        for _ in range(len(order)):
+            j = (j + step) % len(order)
+            if self._pin_state(order[j]) != "done":
+                self.cur_pin = order[j]
+                self.skipped.discard(self._pin_label(order[j]).split("=")[0])
+                break
+        self.pending_free = None
+        self.msg_var.set(self._pin_message())
+        self.refresh_all()
+        return True
+
+    def delete_last_pair(self):
+        if not self.pairs:
+            return False
+        gone = self.pairs.pop()
+        if gone.get("l"):
+            for gid in self.members:                                  # a deleted zone-corner pair: that corner is waiting again
+                if self._pin_label(gid).split("=")[0] == gone["l"]:
+                    self.cur_pin = gid
+        self._refit()
+        self.msg_var.set(self._pin_message())
+        return True
+
+    def worst_pair_index(self):
+        """The pair whose removal makes the Align fit best (the leave-one-out error of what is left, else its fit error) - a wrong pair spoils the fit of
+        every other one, so the largest error of a single pair is not a safe sign; None when it cannot be told (too few pairs)."""
+        need = ALIGN_KINDS[self.kind][0]
+        n = len(self.pairs)
+        if n < need:
+            return None
+        size = (self.video_img.shape[1], self.video_img.shape[0])
+        src = np.array([q["s"] for q in self.pairs], dtype=float)
+        dst = np.array([q["d"] for q in self.pairs], dtype=float)
+        if n - 1 >= need:
+            best = None
+            for i in range(n):
+                keep = np.arange(n) != i
+                rep = transform_report(self.kind, src[keep], dst[keep], size)
+                if "error" in rep:
+                    continue
+                score = rep["loo_rms"] if rep.get("loo_rms") is not None else rep["rms"]
+                if best is None or score < best[0]:
+                    best = (score, i)
+            if best is not None:
+                return best[1]
+        rep = transform_report(self.kind, src, dst, size)
+        if "error" in rep:
+            return None
+        vals = rep["loo"] if rep.get("loo") else rep["residuals"]
+        return int(np.argmax(vals))
+
+    def delete_worst_pair(self):
+        i = self.worst_pair_index()
+        if i is None:
+            return False
+        gone = self.pairs.pop(i)
+        if gone.get("l"):
+            for gid in self.members:
+                if self._pin_label(gid).split("=")[0] == gone["l"]:
+                    self.cur_pin = gid
+        self._refit()
+        self.msg_var.set(self.T("ลบคู่ที่ {0} (แย่สุด)").format(i + 1) + " — " + self._pin_message())
+        return True
+
+    def set_kind(self, kind):
+        self.kind = kind
+        self.kind_var.set(ALIGN_KINDS[kind][1])
+        self._refit()
+
+    def set_scale_text(self):
+        """The scale typed in the box (metres per drone pixel)."""
+        try:
+            v = float(str(self.scale_var.get()).strip().replace(",", "."))
+        except ValueError:
+            return False
+        if not v > 0 or abs(v - self.scale) < 1e-12:
+            return False
+        self.scale = v
+        self._refit()
+        return True
+
+    def _fit_report(self):
+        if len(self.pairs) < 2:
+            return None
+        src = np.array([q["s"] for q in self.pairs], dtype=float)
+        dst = np.array([q["d"] for q in self.pairs], dtype=float)
+        return transform_report(self.kind, src, dst, (self.video_img.shape[1], self.video_img.shape[0]))
+
+    def _data_dict(self, cfg_scale=None, with_edges=True):
+        h, w = self.video_img.shape[:2]
+        data = {"pairs": [{"s": list(q["s"]), "d": list(q["d"]), **({"l": q["l"]} if q.get("l") else {})} for q in self.pairs],
+                "skipped": sorted(self.skipped), "kind": self.kind, "scale": float(self.scale if cfg_scale is None else cfg_scale), "rot_deg": self.rot_deg,
+                "origin": list(self.pairs[0]["d"]) if self.pairs else [0.0, 0.0], "video_size": [w, h], "video_frame": str(self.data.get("video_frame", "") or ""),
+                "drone": {"path": self.drone_path, "frame": self.drone_frame}}
+        if with_edges:
+            edge = [{"zone": r["z"], "i": r["i"], "m": self.real[r["key"]]} for r in self.edge_rows() if r["key"] in self.real]
+            if edge:
+                data["edge_lengths"] = edge
+        return data
+
+    def _refit(self, store=True):
+        """The Align again after a pair, the kind or the scale changed: the drone and the plane views follow."""
+        need = ALIGN_KINDS[self.kind][0]
+        self.aligned = False
+        if len(self.pairs) >= need:
+            cfg = align_build(self._data_dict(self.scale if self.scale > 0 else 1.0, with_edges=False))
+            if "error" in cfg:
+                self.msg_var.set(str(cfg["error"]))
+            else:
+                self.cfg, self.aligned = cfg, True
+        if not self.aligned:
+            self.cfg = self._provisional_cfg()
+        self._setup_plan()
+        self.ppane.set_image(self.plan_img)
+        if store:
+            self._store_align()
+        self.refresh_all()
+        if self.mode == "align" and self.pending_free is None:
+            self.msg_var.set(self._pin_message())
+        return self.aligned
+
+    def _store_align(self):
+        """Keep the Align in the project (the same place the Align window used): the analysis uses it once it fits and the scale is set."""
+        if not self.pairs:
+            return
+        data = self._data_dict()
+        rep = self._fit_report() if len(self.pairs) >= ALIGN_KINDS[self.kind][0] else None
+        if rep and "error" not in rep:
+            unit = self.scale if self.scale > 0 else 1.0
+            data["info"] = {"rms_m": rep["rms"] * unit, "loo_rms_m": (rep["loo_rms"] * unit if rep.get("loo_rms") is not None else None),
+                            "unit": "m" if self.scale > 0 else "px"}
+        self.data = data
+        self.app.run3_align_var.set(json.dumps(data))
+        if self.aligned and self.scale > 0:
+            self.app.run3_align_enabled_var.set(True)
+        self.app._align_cache = None
+
+    def choose_drone(self, path=None):
+        path = path or filedialog.askopenfilename(parent=self.top, title=self.T("เลือกภาพหรือวิดีโอโดรน"), filetypes=[
+            ("Picture / video", "*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp *.mp4 *.mov *.avi *.mkv"), ("All files", "*.*")])
+        if not path:
+            return False
+        return self.load_drone(path, self.dframe_var.get() or None)
+
+    def load_drone(self, path, frame=None):
+        img = read_picture_any(path, frame)
+        if img is None:
+            self.msg_var.set(self.T("อ่านภาพโดรนนี้ไม่ได้"))
+            return False
+        self.drone_path, self.drone_frame, self.drone_img = str(path), str(frame or ""), img
+        self.dpath_var.set(self.drone_path)
+        self.dpane.set_image(img)
+        if self.pairs:
+            self._store_align()
+        if self.mode == "align":
+            self.msg_var.set(self._pin_message())
+        return True
+
     def _edge_key(self, z, i):
         """An edge is the pair of its two corners; the same edge of two neighbouring zones (shared corners) is one edge."""
         n = len(self.zones[z])
@@ -4315,10 +4628,8 @@ class ZoneAlignEditor:
         return rows
 
     def _store_real(self):
-        """Keep the real lengths in the saved Align (so they are there next time and when the Align window saves again)."""
-        self.data["edge_lengths"] = [{"zone": r["z"], "i": r["i"], "m": self.real[r["key"]]} for r in self.edge_rows() if r["key"] in self.real]
-        self.app.run3_align_var.set(json.dumps(self.data))
-        self.app._align_cache = None
+        """Keep the real lengths in the saved Align (so they are there next time and when the Align is saved again)."""
+        self._store_align()
 
     def _ask_length(self, label, current):
         """The real length (m) of an edge from the user: a number, "" = not known / clear; None = cancelled. (A method so that tests can answer.)"""
@@ -4369,10 +4680,14 @@ class ZoneAlignEditor:
         self.edge_tree.delete(*self.edge_tree.get_children())
         for idx, (r, err) in enumerate(zip(rows, errors)):
             real = self.real.get(r["key"])
-            self.edge_tree.insert("", "end", iid=str(idx), values=(r["label"], f"{r['measured']:.2f}", "" if real is None else f"{real:g}",
-                                                                     "" if err is None else f"{err:+.1f}%"))
+            self.edge_tree.insert("", "end", iid=str(idx), values=(r["label"], f"{r['measured']:.2f}" if self.aligned else "", "" if real is None else f"{real:g}",
+                                                                     "" if err is None or not self.aligned else f"{err:+.1f}%"))
         known = [pr for pr in pairs if pr[1] is not None]
-        if not known:
+        if not self.aligned:
+            self.edge_msg_var.set(self.T("ยังไม่ได้จัดแนว — ใส่ระยะจริงของขอบที่รู้ไว้ก่อนได้ แล้วจัดแนวในโหมด จัดแนว"))
+        elif self.scale <= 0 and not known:
+            self.edge_msg_var.set(self.T("ยังไม่ได้ตั้งสเกล: ใส่ระยะจริงของขอบที่รู้ (ดับเบิลคลิกแถว) แล้วกด ปรับสเกลตามระยะจริง"))
+        elif not known:
             self.edge_msg_var.set("ดับเบิลคลิกแถวเพื่อใส่ระยะจริงของขอบที่รู้ (ข้ามที่ไม่รู้ได้)")
         else:
             f = edge_scale_factor(known)
@@ -4382,36 +4697,34 @@ class ZoneAlignEditor:
                 len(known), f"{sum(errs) / len(errs):.1f}", f"{f:.4f}", f"{sum(after) / len(after):.1f}"))
 
     def apply_real_scale(self):
-        """Multiplies the scale of the Align by the factor that fits the measured edge lengths to the real ones. Everything measured in metres changes with it,
-        so it is only done after asking."""
+        """Multiplies the scale of the Align by the factor that fits the measured edge lengths to the real ones (or sets it, when it was not set yet).
+        Everything measured in metres changes with it, so it is asked before an existing scale is changed."""
+        if not self.aligned:
+            messagebox.showinfo(self.T("ปรับสเกลตามระยะจริง"), self.T("ต้องจัดแนวก่อน — วางมุมโซนบนภาพโดรนให้ครบอย่างน้อย {0} คู่").format(ALIGN_KINDS[self.kind][0]), parent=self.top)
+            return False
         known = [(r["measured"], self.real.get(r["key"])) for r in self.edge_rows() if r["key"] in self.real]
         f = edge_scale_factor(known)
         if f is None:
-            messagebox.showinfo("ปรับสเกลตามระยะจริง", "ยังไม่ได้ใส่ระยะจริงของขอบใดเลย — ดับเบิลคลิกแถวในตารางเพื่อใส่", parent=self.top)
+            messagebox.showinfo(self.T("ปรับสเกลตามระยะจริง"), self.T("ยังไม่ได้ใส่ระยะจริงของขอบใดเลย — ดับเบิลคลิกแถวในตารางเพื่อใส่"), parent=self.top)
             return False
         old = float(self.cfg["scale"])
-        if abs(f - 1.0) < 1e-6:
-            messagebox.showinfo("ปรับสเกลตามระยะจริง", "ระยะที่วัดได้ตรงกับระยะจริงอยู่แล้ว ไม่ต้องปรับ", parent=self.top)
-            return False
-        if not messagebox.askyesno("ปรับสเกลตามระยะจริง",
-                                   "สเกลภาพโดรนจะเปลี่ยนจาก {0} เป็น {1} เมตร/พิกเซล (×{2}, {3}%)\n\nระยะ ความเร็ว และตัวชี้วัดทุกตัวที่คำนวณเป็นเมตรจะเปลี่ยนตามไปด้วย "
-                                   "(ผลคลิปที่วิเคราะห์ไว้แล้วไม่เปลี่ยน แต่ต่างจากรอบใหม่)\n\nปรับไหม?".format(f"{old:.6f}", f"{old * f:.6f}", f"{f:.4f}", f"{abs(f - 1) * 100:.1f}"),
-                                   parent=self.top):
-            return False
-        data = dict(self.data)
-        data["scale"] = old * f
-        cfg = align_build(data)
-        if "error" in cfg:
-            messagebox.showerror("ปรับสเกลตามระยะจริง", cfg["error"], parent=self.top)
-            return False
-        self.data, self.cfg = data, cfg
-        self.app._align_cache = None
-        self._setup_plan()
-        self.ppane.set_image(self.plan_img)
-        self._store_real()
-        self.refresh_all()
-        self.refresh_edges()
-        self.msg_var.set("ปรับสเกลแล้ว: {0} → {1} เมตร/พิกเซล (×{2})".format(f"{old:.6f}", f"{old * f:.6f}", f"{f:.4f}"))
+        first = not (self.scale > 0)
+        if not first:
+            if abs(f - 1.0) < 1e-6:
+                messagebox.showinfo(self.T("ปรับสเกลตามระยะจริง"), self.T("ระยะที่วัดได้ตรงกับระยะจริงอยู่แล้ว ไม่ต้องปรับ"), parent=self.top)
+                return False
+            if not messagebox.askyesno(self.T("ปรับสเกลตามระยะจริง"),
+                                       self.T("สเกลภาพโดรนจะเปลี่ยนจาก {0} เป็น {1} เมตร/พิกเซล (×{2}, {3}%)\n\nระยะ ความเร็ว และตัวชี้วัดทุกตัวที่คำนวณเป็นเมตรจะเปลี่ยนตามไปด้วย "
+                                         "(ผลคลิปที่วิเคราะห์ไว้แล้วไม่เปลี่ยน แต่ต่างจากรอบใหม่)\n\nปรับไหม?").format(f"{old:.6f}", f"{old * f:.6f}", f"{f:.4f}", f"{abs(f - 1) * 100:.1f}"),
+                                       parent=self.top):
+                return False
+        self.scale = old * f
+        self.scale_var.set(f"{self.scale:.6g}")
+        self._refit()
+        if first:
+            self.msg_var.set(self.T("ตั้งสเกลจากระยะจริงแล้ว: {0} เมตร/พิกเซล").format(f"{self.scale:.6f}"))
+        else:
+            self.msg_var.set(self.T("ปรับสเกลแล้ว: {0} → {1} เมตร/พิกเซล (×{2})").format(f"{old:.6f}", f"{old * f:.6f}", f"{f:.4f}"))
         return True
 
     def change_video(self, path=None):
@@ -4447,21 +4760,30 @@ class ZoneAlignEditor:
         return np.stack([v[:, 0] * c + v[:, 1] * s_, -v[:, 0] * s_ + v[:, 1] * c], axis=1)
 
     def _setup_plan(self):
+        if not self.aligned:                                       # nothing to show until the Align fits
+            img = np.full((420, 600, 3), 38, np.uint8)
+            cv2.putText(img, "not aligned yet", (170, 215), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2, cv2.LINE_AA)
+            self.scale_px, self.pxmin, self.plan_img = 40.0, np.array([0.0, 0.0]), img
+            return
         allp = np.vstack([self.plan_of(self._vpts(z)) for z in self.names])
         lo, hi = allp.min(axis=0) - 6.0, allp.max(axis=0) + 6.0
-        self.scale_px = 40.0
+        ext = float(max(hi[0] - lo[0], hi[1] - lo[1], 1.0))
+        self.scale_px = min(40.0, 1600.0 / ext)                    # (before the scale is set the plane is in drone pixels: far larger than metres)
+        step = 1 if ext <= 120 else (10 if ext <= 1200 else 100)
         self.pxmin = lo
-        w, h = int((hi[0] - lo[0]) * self.scale_px), int((hi[1] - lo[1]) * self.scale_px)
+        w, h = max(50, int((hi[0] - lo[0]) * self.scale_px)), max(50, int((hi[1] - lo[1]) * self.scale_px))
         img = np.full((h, w, 3), 38, np.uint8)
-        for x in range(int(math.ceil(lo[0])), int(hi[0]) + 1):
+        for x in range(int(math.ceil(lo[0] / step)) * step, int(hi[0]) + 1, step):
             px = int((x - lo[0]) * self.scale_px)
-            cv2.line(img, (px, 0), (px, h - 1), (90, 90, 90) if x % 5 == 0 else (55, 55, 55), 1)
-            if x % 5 == 0:
+            major = (x // step) % 5 == 0
+            cv2.line(img, (px, 0), (px, h - 1), (90, 90, 90) if major else (55, 55, 55), 1)
+            if major:
                 cv2.putText(img, f"{x}", (px + 3, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
-        for y in range(int(math.ceil(lo[1])), int(hi[1]) + 1):
+        for y in range(int(math.ceil(lo[1] / step)) * step, int(hi[1]) + 1, step):
             py = int((y - lo[1]) * self.scale_px)
-            cv2.line(img, (0, py), (w - 1, py), (90, 90, 90) if y % 5 == 0 else (55, 55, 55), 1)
-            if y % 5 == 0:
+            major = (y // step) % 5 == 0
+            cv2.line(img, (0, py), (w - 1, py), (90, 90, 90) if major else (55, 55, 55), 1)
+            if major:
                 cv2.putText(img, f"{y}", (4, py - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
         self.plan_img = img
 
@@ -4590,6 +4912,10 @@ class ZoneAlignEditor:
     # ----- the pictures -----
     def _draw(self, out, pane_name, pane):
         meta = getattr(self.app, "zone_meta", {})
+        if not self.aligned and pane_name != "video":                  # nothing is aligned yet: the drone picture shows only the points placed so far
+            if self.mode == "align":
+                self._draw_pairs(out, pane_name, pane)
+            return
         for z in self.names:
             pts = self.pane_xy(pane_name, self._vpts(z))
             vp = np.array([pane.to_view(*q) for q in pts], dtype=np.int32)
@@ -4600,7 +4926,7 @@ class ZoneAlignEditor:
             cv2.polylines(out, [vp.reshape(-1, 1, 2)], True, col, 3 if z == self.selected_zone else 2, cv2.LINE_AA)
             c = vp.mean(axis=0).astype(int)
             cv2.putText(out, z.replace("Zone ", "Z"), (int(c[0]) - 8, int(c[1]) + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
-        if self.len_var.get():                                      # the length of every edge in metres (an edge two zones share is written once)
+        if self.len_var.get() and self.aligned:                     # the length of every edge in metres (an edge two zones share is written once)
             done = set()
             for z in self.names:
                 plan_pts = self.plan_of(self._vpts(z))
@@ -4623,10 +4949,44 @@ class ZoneAlignEditor:
             hot = gid == self.selected_group
             cv2.circle(out, q, 7 if hot else 5, (0, 0, 255) if hot else (255, 255, 255), -1, cv2.LINE_AA)
             cv2.circle(out, q, 7 if hot else 5, (0, 0, 0), 1, cv2.LINE_AA)
+        if self.mode == "align":
+            self._draw_pairs(out, pane_name, pane)
+
+    def _draw_pairs(self, out, pane_name, pane):
+        """The Align mode: on the video the zone corners as pins (hollow = still to do, filled = done, grey = skipped, ring = the one waiting for its place on the drone picture),
+        on the drone picture the places that were clicked."""
+        if pane_name == "video":
+            for gid in self.members:
+                st = self._pin_state(gid)
+                q = pane.to_view(*self.group_video(gid))
+                col = {"todo": (0, 220, 255), "done": (60, 200, 60), "skip": (150, 150, 150)}[st]
+                if st == "done":
+                    cv2.circle(out, q, 6, col, -1, cv2.LINE_AA)
+                else:
+                    cv2.rectangle(out, (q[0] - 6, q[1] - 6), (q[0] + 6, q[1] + 6), col, 2)
+                if gid == self.cur_pin:
+                    cv2.circle(out, q, 13, (0, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(out, self._pin_label(gid).split("=")[0], (q[0] + 8, q[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(out, self._pin_label(gid).split("=")[0], (q[0] + 8, q[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
+            for q_ in self.pairs:
+                if not q_.get("l"):
+                    cv2.circle(out, pane.to_view(*q_["s"]), 5, (0, 140, 255), -1, cv2.LINE_AA)
+            if self.pending_free is not None:
+                cv2.circle(out, pane.to_view(*self.pending_free), 10, (0, 255, 255), 2, cv2.LINE_AA)
+        elif pane_name == "drone":
+            for n, q_ in enumerate(self.pairs, start=1):
+                v = pane.to_view(*q_["d"])
+                cv2.circle(out, v, 6, (60, 200, 60), -1, cv2.LINE_AA)
+                cv2.circle(out, v, 6, (0, 0, 0), 1, cv2.LINE_AA)
+                text = q_.get("l") or f"#{n}"
+                cv2.putText(out, text, (v[0] + 8, v[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(out, text, (v[0] + 8, v[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (60, 255, 60), 1, cv2.LINE_AA)
 
     # ----- mouse -----
     def _on_press(self, pane_name):
         def handler(ix, iy, ex, ey):
+            if self.mode == "align":                                   # (in the Align mode a click places a point; corners are not dragged)
+                return False
             pane = {"video": self.vpane, "drone": self.dpane, "plan": self.ppane}[pane_name]
             best, best_d = None, float(self.HIT_PX)
             for gid in self.members:
@@ -4664,6 +5024,27 @@ class ZoneAlignEditor:
         self.refresh_all()
 
     # ----- report / window -----
+    def fit_text(self):
+        """How the Align fits: the kind, the number of pairs, the mean error (in cm once the scale is set) and the pairs that fit worst."""
+        need = ALIGN_KINDS[self.kind][0]
+        head = self.T("จัดแนว: {0} · {1} คู่").format(ALIGN_KINDS[self.kind][1], len(self.pairs))
+        if len(self.pairs) < need:
+            return head + self.T(" — ต้องมีอย่างน้อย {0} คู่").format(need) + "\n"
+        rep = self._fit_report()
+        if rep is None or "error" in rep:
+            return head + " — " + str((rep or {}).get("error", "")) + "\n"
+        unit, mult, name = (self.scale, 100.0, "ซม.") if self.scale > 0 else (1.0, 1.0, "พิกเซลโดรน")
+        text = head + self.T(" · คลาดเฉลี่ย {0} {1}").format(f"{rep['rms'] * unit * mult:.1f}", self.T(name))
+        if rep.get("loo_rms") is not None:
+            text += self.T(" (เว้นจุดตรวจ {0})").format(f"{rep['loo_rms'] * unit * mult:.1f}")
+        vals = rep["loo"] if rep.get("loo") else rep["residuals"]
+        worst = sorted(range(len(vals)), key=lambda i: -vals[i])[:4]
+        text += "\n" + self.T("คู่ที่คลาดมากสุด: ") + ", ".join(
+            "#{0} {1} {2}".format(i + 1, self.pairs[i].get("l") or "-", f"{vals[i] * unit * mult:.1f}") for i in worst) + "\n"
+        if self.scale <= 0:
+            text += self.T("ยังไม่ได้ตั้งสเกล — ใส่ระยะจริงของขอบที่รู้ในตาราง แล้วกด \"ปรับสเกลตามระยะจริง\" (หรือพิมพ์สเกลภาพโดรนในช่องด้านบน)") + "\n"
+        return text + "\n"
+
     def report_text(self):
         lines = []
         for z in self.names:
@@ -4677,11 +5058,15 @@ class ZoneAlignEditor:
                 tag = f" (เอียง {90.0 - ang:.0f}°)" if ang >= 55.0 and abs(90.0 - ang) >= 1.0 else ""
                 parts.append(f"{i + 1}→{(i + 1) % n + 1} {length:.1f}{tag}")
             lines.append(f"{z}: " + " · ".join(parts))
-        return "ความยาวขอบโซน (เมตร) และขอบตัดขวางที่เอียงจากแนวตั้ง:\n" + "\n".join(lines)
+        if not self.aligned:
+            return self.fit_text()
+        return self.fit_text() + "ความยาวขอบโซน (เมตร) และขอบตัดขวางที่เอียงจากแนวตั้ง:\n" + "\n".join(lines)
 
     def _build(self):
         top = self.top
-        ttk.Label(top, text=("ลากมุมโซน (จุดขาว) ในภาพไหนก็ได้ — วิดีโอ | โดรน | ผัง X–Y อัปเดตพร้อมกัน; มุมที่โซนข้างเคียงใช้ร่วมกันขยับด้วยกัน · "
+        T = self.T
+        ttk.Label(top, text=(T("โหมด จัดแนว: คลิกตำแหน่งเดียวกันของมุมโซน (ไล่ให้ทีละมุม) บนภาพโดรน — ข้ามมุมที่ไม่ชัดได้ แล้วใส่ระยะจริงของขอบที่รู้ในตารางเพื่อตั้งสเกล  ·  โหมด แก้โซน: ") +
+                             "ลากมุมโซน (จุดขาว) ในภาพไหนก็ได้ — วิดีโอ | โดรน | ผัง X–Y อัปเดตพร้อมกัน; มุมที่โซนข้างเคียงใช้ร่วมกันขยับด้วยกัน · "
                              "กด Shift ค้างตอนลาก = ขอบจากมุมก่อนหน้าตั้งฉากกับขอบก่อนนั้น · ติ๊ก ดูดติด = ดูดติดมุม/ขอบของโซนอื่น · "
                              "ปุ่ม ทำให้ตั้งฉาก = ขอบตัดขวางถนนเป็นแนวตั้งในผังทีเดียว · ล้อเมาส์ = ซูม · ลากพื้นที่ว่าง = เลื่อนภาพ"),
                   wraplength=1500, justify="left").pack(anchor="w", padx=8, pady=(6, 2))
@@ -4699,13 +5084,38 @@ class ZoneAlignEditor:
         ttk.Checkbutton(bar, text="ดูดติดโซนอื่น", variable=self.snap_var).pack(side="left", padx=(12, 2))
         ttk.Entry(bar, textvariable=self.snap_cm_var, width=4).pack(side="left")
         ttk.Label(bar, text="ซม.").pack(side="left", padx=(2, 12))
-        ttk.Button(bar, text="◀ แก้คู่จุดจัดแนว…", command=self.back_to_align).pack(side="left", padx=(0, 12))
         ttk.Button(bar, text="↶ ย้อน", command=self.undo).pack(side="left")
         ttk.Button(bar, text="↷ ทำซ้ำ", command=self.redo).pack(side="left", padx=4)
         ttk.Button(bar, text="รีเซ็ตเป็นไฟล์เดิม", command=self.reset).pack(side="left", padx=4)
         ttk.Button(bar, text="✅ ใช้โซนนี้ในการวิเคราะห์", command=self.use_for_analysis).pack(side="right")
         ttk.Button(bar, text="บันทึกเป็นไฟล์โซนใหม่…", command=self.save_new_file).pack(side="right", padx=6)
         ttk.Button(bar, text="ปิด", command=self.close).pack(side="right", padx=6)
+        abar = ttk.Frame(top)
+        abar.pack(fill="x", padx=8, pady=(4, 0))
+        ttk.Radiobutton(abar, text=T("แก้โซน"), variable=self.mode_var, value="edit", command=self._on_mode).pack(side="left")
+        ttk.Radiobutton(abar, text=T("จัดแนว (วางมุมโซนบนภาพโดรน)"), variable=self.mode_var, value="align", command=self._on_mode).pack(side="left", padx=(8, 14))
+        ttk.Label(abar, text=T("ภาพ/วิดีโอโดรน")).pack(side="left")
+        ttk.Entry(abar, textvariable=self.dpath_var, width=44, state="readonly").pack(side="left", padx=4)
+        ttk.Button(abar, text=T("เลือก…"), command=self.choose_drone).pack(side="left")
+        ttk.Label(abar, text=T("เฟรม (ถ้าเป็นวิดีโอ)")).pack(side="left", padx=(8, 2))
+        ttk.Entry(abar, textvariable=self.dframe_var, width=6).pack(side="left")
+        ttk.Button(abar, text=T("โหลด"), command=lambda: self.load_drone(self.drone_path, self.dframe_var.get() or None)).pack(side="left", padx=4)
+        abar2 = ttk.Frame(top)
+        abar2.pack(fill="x", padx=8, pady=(2, 0))
+        ttk.Label(abar2, text=T("ชนิดการแปลง")).pack(side="left")
+        cb = ttk.Combobox(abar2, textvariable=self.kind_var, values=[v[1] for v in ALIGN_KINDS.values()], state="readonly", width=40)
+        cb.pack(side="left", padx=4)
+        cb.bind("<<ComboboxSelected>>", lambda e: self.set_kind(next(k for k, v in ALIGN_KINDS.items() if v[1] == self.kind_var.get())))
+        ttk.Label(abar2, text=T("สเกลภาพโดรน (ม./พิกเซล)")).pack(side="left", padx=(12, 2))
+        ent = ttk.Entry(abar2, textvariable=self.scale_var, width=11)
+        ent.pack(side="left")
+        ent.bind("<Return>", lambda e: self.set_scale_text())
+        ent.bind("<FocusOut>", lambda e: self.set_scale_text())
+        ttk.Button(abar2, text=T("ข้ามมุมนี้"), command=self.skip_pin).pack(side="left", padx=(14, 2))
+        ttk.Button(abar2, text="◀", width=3, command=lambda: self.goto_pin(-1)).pack(side="left")
+        ttk.Button(abar2, text="▶", width=3, command=lambda: self.goto_pin(1)).pack(side="left", padx=2)
+        ttk.Button(abar2, text=T("ลบคู่ล่าสุด"), command=self.delete_last_pair).pack(side="left", padx=(10, 2))
+        ttk.Button(abar2, text=T("ลบคู่ที่แย่สุด"), command=self.delete_worst_pair).pack(side="left")
         panes = ttk.Frame(top)
         panes.pack(fill="both", expand=True, padx=8, pady=4)
         for c_ in range(3):
@@ -4714,9 +5124,9 @@ class ZoneAlignEditor:
         for c_, t_ in enumerate(("วิดีโอข้างทาง", "ภาพโดรน", "ผัง X–Y (เมตร)")):
             ttk.Label(panes, text=t_).grid(row=0, column=c_, sticky="w")
         mk = lambda name: dict(on_press=self._on_press(name), on_drag=self._on_drag(name), on_release=self._on_release)
-        self.vpane = _ZoomPane(panes, 480, 420, lambda x, y: None, lambda o, p: self._draw(o, "video", p), **mk("video"))
-        self.dpane = _ZoomPane(panes, 480, 420, lambda x, y: None, lambda o, p: self._draw(o, "drone", p), **mk("drone"))
-        self.ppane = _ZoomPane(panes, 480, 420, lambda x, y: None, lambda o, p: self._draw(o, "plan", p), **mk("plan"))
+        self.vpane = _ZoomPane(panes, 480, 420, lambda x, y: self._on_click("video", x, y), lambda o, p: self._draw(o, "video", p), **mk("video"))
+        self.dpane = _ZoomPane(panes, 480, 420, lambda x, y: self._on_click("drone", x, y), lambda o, p: self._draw(o, "drone", p), **mk("drone"))
+        self.ppane = _ZoomPane(panes, 480, 420, lambda x, y: self._on_click("plan", x, y), lambda o, p: self._draw(o, "plan", p), **mk("plan"))
         for c_, pane in enumerate((self.vpane, self.dpane, self.ppane)):
             pane.canvas.grid(row=1, column=c_, sticky="nsew", padx=2)
         low = ttk.Frame(top)
@@ -4765,15 +5175,6 @@ class ZoneAlignEditor:
             self.report.config(state="disabled")
 
     # ----- save -----
-    def back_to_align(self):
-        """Back to the Align window to change the pairs. Zone corners moved here and not saved are lost, so that is asked first."""
-        if self.undo_stack and not messagebox.askyesno(
-                "กลับไปจัดแนว", "มีการลากมุมโซนที่ยังไม่ได้บันทึก — ถ้ากลับไปจัดแนวจะหายไป กลับไปเลยไหม?\n(กด ไม่ แล้วบันทึกเป็นไฟล์โซนใหม่ก่อนได้)", parent=self.top):
-            return False
-        self.close()
-        self.app.open_align()
-        return True
-
     def use_for_analysis(self):
         """One click: write the edited zones to `<name>_aligned.json` beside the loaded zone file (the original stays) and make it the zone
         file of the program - what the analysis, the previews and the X-Y outputs use from now on."""
@@ -9223,9 +9624,7 @@ class Run1App:
         drone_ok = os.path.isfile(str((data.get("drone") or {}).get("path", "")))
         if not has_zones:
             return self.open_zone_line_editor()                  # no zones yet: draw them first (the Align takes its pins from them)
-        if data.get("pairs") and drone_ok:
-            return self.open_zone_editor()
-        return self.open_align()
+        return self.open_zone_editor()                           # the Align and the editing are in this one window
 
     def open_align(self):
         video = self._edit_video_path()
@@ -9245,30 +9644,28 @@ class Run1App:
         info = data.get("info", {})
         self.run3_result_text.set(f"จัดแนวกับภาพโดรน: {len(data['pairs'])} คู่" + (f", คลาดเฉลี่ย {info['rms_m'] * 100:.0f} ซม." if info.get("rms_m") is not None else ""))
 
-    def open_zone_editor(self):
-        """The zone editor on the video | drone | X-Y views (needs a saved Align, the zones and the drone picture)."""
+    def open_zone_editor(self, ask_drone=True):
+        """The window that aligns the zones with the drone picture and edits them on the video | drone | X-Y views (the Align is done in it: the zone corners are the pins).
+        Needs the video and the zones; the drone picture is asked for when it is not known yet."""
         video = self._edit_video_path()
         if not video or not os.path.isfile(video):
-            messagebox.showerror("แก้รูปโซน", "เลือกวิดีโอก่อน")
+            messagebox.showerror("จัดแนวและแก้โซน", "เลือกวิดีโอก่อน")
             return None
         if not any(len(self.zones.get(z, [])) >= 3 for z in ZONE_NAMES):
-            messagebox.showerror("แก้รูปโซน", "ยังไม่มีโซนที่วาดไว้ — โหลดไฟล์โซนก่อน (แท็บ ② ไฟล์โซนและเส้น)")
+            messagebox.showerror("จัดแนวและแก้โซน", "ยังไม่มีโซนที่วาดไว้ — กด \"✏️ วาดโซนและเส้น…\" หรือโหลดไฟล์โซนก่อน (แท็บ ② ไฟล์โซนและเส้น)")
             return None
         try:
             data = json.loads(self.run3_align_var.get() or "{}")
         except (ValueError, TypeError):
             data = {}
-        if not data.get("pairs"):
-            messagebox.showerror("แก้รูปโซน", "ยังไม่ได้จัดแนวกับภาพโดรน — กด \"จัดแนว…\" ก่อน (ต้องมีคู่จุดและสเกล)")
-            return None
-        try:
-            cfg = self._run3_align_cfg(silent=False, force=True)
-        except Exception as exc:
-            messagebox.showerror("แก้รูปโซน", str(exc))
-            return None
-        if not os.path.isfile(str((data.get("drone") or {}).get("path", ""))):
-            messagebox.showerror("แก้รูปโซน", "ไม่พบภาพโดรนที่ใช้จัดแนว — เปิด \"จัดแนว…\" แล้วเลือกภาพโดรนใหม่")
-            return None
+        if not isinstance(data, dict):
+            data = {}
+        cfg = None
+        if data.get("pairs"):
+            try:
+                cfg = self._run3_align_cfg(silent=False, force=True)
+            except Exception:
+                cfg = None                                           # (e.g. the scale is not set yet: the window takes it from there)
 
         def saved(path):
             if messagebox.askyesno("ไฟล์โซนใหม่", f"บันทึกแล้ว:\n{path}\n\nใช้ไฟล์ใหม่นี้เป็นไฟล์โซนของโปรแกรมเลย (แทนไฟล์ที่โหลดอยู่) ใช่ไหม?"):
@@ -9276,7 +9673,7 @@ class Run1App:
                     self._load_pkstudio_json(path)
                 except Exception as exc:
                     messagebox.showerror("ไฟล์โซนใหม่", str(exc))
-        return ZoneAlignEditor(self, video, data, cfg, on_saved=saved)
+        return ZoneAlignEditor(self, video, data, cfg, on_saved=saved, ask_drone=ask_drone)
 
     def _run3_align_drone_source(self):
         """(path, frame) of the drone / top-view picture saved with the Align (the background of the X-Y-on-drone video), or None."""

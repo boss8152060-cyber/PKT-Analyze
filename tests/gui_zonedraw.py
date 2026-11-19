@@ -47,6 +47,7 @@ shown = []
 m.messagebox.showinfo = lambda *a, **k: shown.append(("info", a))
 m.messagebox.showerror = lambda *a, **k: shown.append(("error", a))
 app.video_var.set(video)
+m.filedialog.askopenfilename = lambda **k: ""                           # (the zone editor asks for the drone picture: nothing is chosen in a test)
 
 # ---- the entry points
 check("without a video the window refuses to open", (lambda: (app.video_var.set(""), app.open_zone_line_editor())[1])() is None)
@@ -205,13 +206,13 @@ ed2.close()
 
 # ---- the way on: use + Align
 opened = []
-app.open_align = lambda: (opened.append("align"), None)[1]
+app.open_zone_editor = lambda: (opened.append("editor"), None)[1]
 ed.cur_zone = "Zone 7"
 for p in ((50, 50), (150, 50), (150, 150)):
     click(*p)
 ed.finish_zone()
-check("'use, then Align' writes the zone file and opens the Align", ed.use_and_align() is True and opened == ["align"])
-del app.open_align
+check("'use, then go on' writes the zone file and opens the window that aligns and edits the zones", ed.use_and_align() is True and opened == ["editor"])
+del app.open_zone_editor
 
 # ---- the single button: no zones -> the drawing window; zones but no Align -> the Align
 app.zones = {z: [] for z in m.ZONE_NAMES}
@@ -223,7 +224,7 @@ w.close()
 app.zones["Zone 2"] = [(1, 1), (50, 1), (50, 50)]
 w = app.open_align_and_zones()
 root.update()
-check("one button: zones but no Align opens the Align window", isinstance(w, m.AlignDialog))
+check("one button: zones but no Align opens the window that aligns and edits them (in the Align mode)", isinstance(w, m.ZoneAlignEditor) and w.mode == "align" and not w.aligned)
 w.close()
 
 # ---- the helper that builds the file

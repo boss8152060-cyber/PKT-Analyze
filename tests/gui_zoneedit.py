@@ -101,31 +101,18 @@ before_hash = hashlib.md5(open(src_json, "rb").read()).hexdigest()
 # ---- without what it needs
 align_json = app.run3_align_var.get()
 check("the alignment is saved", bool(json.loads(align_json or "{}").get("pairs")))
+m.filedialog.askopenfilename = lambda **k: ""                           # (the editor asks for the drone picture when it does not know it: nothing is chosen in a test)
 app.run3_align_var.set("")
-check("without an alignment the editor says so (no window)", app.open_zone_editor() is None)
-app.run3_align_var.set(align_json)
-
-# ---- the single button "จัดแนวและแก้โซน" (1.53.0): Align first, then the zone editor, and a way back
-app.run3_align_var.set("")
-w0 = app.open_align_and_zones()
+w0 = app.open_zone_editor(ask_drone=False)
 root.update()
-check("one button: without an alignment it opens the Align window", isinstance(w0, m.AlignDialog))
+check("without an Align the editor opens in the Align mode (nothing aligned, no drone picture)", isinstance(w0, m.ZoneAlignEditor) and w0.mode == "align" and not w0.aligned and w0.drone_img is None)
+check("clicking on the drone picture without one says so", w0._click_drone(10, 10) is False)
 w0.close()
 app.run3_align_var.set(align_json)
 w1 = app.open_align_and_zones()
 root.update()
-check("one button: with an alignment it opens the zone editor", isinstance(w1, m.ZoneAlignEditor))
-calls = []
-app.open_align = lambda: (calls.append("align"), None)[1]
-check("the zone editor has a way back to the Align window", w1.back_to_align() is True and calls == ["align"])
-del app.open_align
-d2 = app.open_align()
-root.update()
-opened = []
-app.open_zone_editor = lambda: (opened.append("zones"), None)[1]
-check("'ใช้ค่านี้ แล้วแก้โซน' saves the Align and goes on to the zone editor", d2.apply(then_zones=True) is True and opened == ["zones"])
-del app.open_zone_editor
-check("the Align saved that way is the usable one", bool(json.loads(app.run3_align_var.get() or "{}").get("pairs")))
+check("one button: with an alignment it opens the same window in the edit mode", isinstance(w1, m.ZoneAlignEditor) and w1.mode == "edit" and w1.aligned)
+w1.close()
 
 ed = app.open_zone_editor()
 root.update()
@@ -287,6 +274,131 @@ d3 = app.open_align()
 root.update()
 check("the Align window knows the real lengths", len(d3.edge_lengths) == 1)
 check("and keeps them when it is saved", d3.apply() is True and len(json.loads(app.run3_align_var.get()).get("edge_lengths", [])) == 1)
+ed.close()
+
+
+# ---- the Align inside this window (1.56.0): the zone corners are the pins, the drone picture is clicked, the scale comes from a real length
+for name, g in GROUND_ZONES.items():
+    app.zones[name] = [tuple(float(v) for v in q) for q in video_px(g)]
+corner_ground = np.array(sorted({tuple(q) for g in GROUND_ZONES.values() for q in g}))
+corner_video = video_px(corner_ground)
+corner_drone = drone_px(corner_ground)
+
+
+def drone_of_group(ed_, gid):
+    v = ed_.group_video(gid)
+    return corner_drone[int(np.argmin(np.hypot(*(corner_video - v).T)))]
+
+
+app.run3_align_var.set("")
+app.run3_align_enabled_var.set(False)
+ed = app.open_zone_editor(ask_drone=False)
+root.update()
+check("the 7 corners of the 3 zones are the pins and none is done", len(ed.members) == 7 and ed._pin_counts() == {"todo": 7, "done": 0, "skip": 0}, str(ed._pin_counts()))
+check("the first corner waits for its place (label Z2.1)", ed.cur_pin is not None and ed._pin_label(ed.cur_pin).startswith("Z2.1"), str(ed._pin_label(ed.cur_pin)))
+check("a shared corner has both zones in its label", any("=" in ed._pin_label(g) for g in ed.members), str([ed._pin_label(g) for g in ed.members]))
+check("the drone picture is loaded from a file", ed.load_drone(drone_file) is True and ed.drone_img is not None and ed.dpath_var.get() == drone_file)
+ed.set_kind("lens")
+order = []
+for _ in range(7):
+    gid = ed.cur_pin
+    order.append(gid)
+    check_ok = ed._click_drone(*drone_of_group(ed, gid))
+check("every corner got its place on the drone picture (7 pairs, labelled)", len(ed.pairs) == 7 and all(q.get("l") for q in ed.pairs) and ed._pin_counts()["done"] == 7 and ed.cur_pin is None)
+check("the Align fits once there are enough pairs", ed.aligned is True and ed.cfg is not None)
+check("nothing is in metres yet: the scale is not set and the analysis is not told to use the Align", ed.scale == 0 and not app.run3_align_enabled_var.get())
+saved = json.loads(app.run3_align_var.get())
+check("the Align is kept in the project (pairs, kind, labels, drone picture) with the scale 0", len(saved["pairs"]) == 7 and saved["kind"] == "lens" and saved["scale"] == 0.0
+      and saved["drone"]["path"] == drone_file and all(q.get("l") for q in saved["pairs"]))
+check("the table says that the scale is missing", "สเกล" in ed.edge_msg_var.get(), ed.edge_msg_var.get())
+check("the report names the fit and the missing scale", "จัดแนว" in ed.report_text() and "ยังไม่ได้ตั้งสเกล" in ed.report_text())
+
+# one real length sets the scale (14 m = the edge 1-2 of Zone 2 on the ground)
+rows = ed.edge_rows()
+row = [r for r in rows if r["label"].startswith("Zone 2: 1→2")][0]
+check("without the scale the plane is in drone pixels (the edge is 280 of them)", abs(row["measured"] - 280.0) < 4.0, f"{row['measured']:.1f}")
+ed.set_real_length(row["key"], "14")
+check("the scale is set from the real length, no question asked (nothing to overturn)", ed.apply_real_scale() is True and abs(ed.scale - 0.05) < 0.001, f"{ed.scale}")
+rows = {r["label"]: r for r in ed.edge_rows()}
+check("the other edges now come out in metres (Zone 2: 2→3 = 7.06 m on the ground)", abs([r for r in rows.values() if r["label"].startswith("Zone 2: 2→3")][0]["measured"] - math.hypot(0.9, 7.0)) < 0.1,
+      str([r["measured"] for r in rows.values() if r["label"].startswith("Zone 2: 2→3")]))
+saved = json.loads(app.run3_align_var.get())
+check("the Align now has the scale and the analysis is told to use it", abs(saved["scale"] - 0.05) < 0.001 and app.run3_align_enabled_var.get() is True and saved["info"]["unit"] == "m")
+check("the real length is kept too", saved.get("edge_lengths") and abs(saved["edge_lengths"][0]["m"] - 14.0) < 1e-9)
+check("the status of the project says what the Align is", "7 คู่" in app._align_status_text(), app._align_status_text())
+
+# skipping, going back, an extra point, deleting
+ed.close()
+app.run3_align_var.set("")
+app.run3_align_enabled_var.set(False)
+ed = app.open_zone_editor(ask_drone=False)
+root.update()
+ed.load_drone(drone_file)
+first = ed.cur_pin
+check("a corner can be skipped: the next one waits", ed.skip_pin() is True and ed._pin_state(first) == "skip" and ed.cur_pin != first)
+check("going back takes the skipped corner up again", ed.goto_pin(-1) is True and ed.cur_pin == first and ed._pin_state(first) == "todo")
+vx, vy = ed.group_video(ed.cur_pin)
+ed.vpane.set_image(ed.video_img)
+root.update()
+check("a click on the video away from every corner is an extra point waiting for its place", ed._click_video(vx + 300, vy - 120) is True and ed.pending_free is not None)
+check("the drone click makes it an unlabelled pair", ed._click_drone(300, 200) is True and len(ed.pairs) == 1 and "l" not in ed.pairs[0] and ed.pending_free is None)
+check("the last pair can be deleted", ed.delete_last_pair() is True and not ed.pairs)
+for gid in sorted(ed.members):
+    ed.cur_pin = gid
+    ed._click_drone(*drone_of_group(ed, gid))
+check("all 7 corners placed again", len(ed.pairs) == 7 and ed.aligned)
+ed.set_scale_text if False else None
+ed.scale_var.set("0.05")
+check("the scale can be typed (metres per drone pixel)", ed.set_scale_text() is True and abs(ed.scale - 0.05) < 1e-12 and app.run3_align_enabled_var.get() is True)
+# a wrong extra pair is the worst one and goes with 'delete the worst'
+ed._click_video(corner_video[0][0] + 5.0, corner_video[0][1] + 150.0)
+ed._click_drone(900.0, 40.0)
+n8 = len(ed.pairs)
+check("a wrong extra pair is added (8 pairs)", n8 == 8 and "l" not in ed.pairs[-1])
+check("'delete the worst pair' removes it", ed.delete_worst_pair() is True and len(ed.pairs) == 7 and all(q.get("l") for q in ed.pairs), str(len(ed.pairs)))
+# a corner that is done is placed again by clicking it on the video
+gid0 = sorted(ed.members)[2]
+vx, vy = ed.group_video(gid0)
+check("clicking a corner that is done makes it wait again (its old place goes)", ed._click_video(vx, vy) is True and ed.cur_pin == gid0 and len(ed.pairs) == 6 and ed._pin_state(gid0) == "todo")
+ed._click_drone(*drone_of_group(ed, gid0))
+check("and the new place is taken", len(ed.pairs) == 7 and ed._pin_state(gid0) == "done")
+
+# modes: in the Align mode corners are not dragged, in the edit mode they are
+ed.mode_var.set("align")
+ed._on_mode()
+ex, ey = ed.vpane.to_view(vx, vy)
+check("in the Align mode a press on a corner grabs nothing", ed._on_press("video")(vx, vy, ex, ey) is False)
+ed.mode_var.set("edit")
+ed._on_mode()
+check("in the edit mode it grabs the corner", ed._on_press("video")(vx, vy, ex, ey) is True)
+ed._on_release()
+# the views draw in both modes
+img = np.zeros((500, 700, 3), np.uint8)
+ed.mode_var.set("align")
+ed._on_mode()
+for pn, pane in (("video", ed.vpane), ("drone", ed.dpane), ("plan", ed.ppane)):
+    ed._draw(img, pn, pane)
+check("the pins are drawn on the video and the pairs on the drone picture", True)
+ed.close()
+
+# opened again: aligned, in metres, in the edit mode, the pairs and the real length still there
+ed = app.open_zone_editor(ask_drone=False)
+root.update()
+check("opened again it is aligned with the scale and the 7 pairs and starts in the edit mode", ed.aligned and abs(ed.scale - 0.05) < 1e-9 and len(ed.pairs) == 7 and ed.mode == "edit")
+ed.close()
+
+# the Align saved by the old Align window (the data format is the same) opens here
+app.run3_align_var.set(align_json)
+ed = app.open_zone_editor(ask_drone=False)
+root.update()
+check("an Align saved by the Align window opens here too", ed.aligned and ed.mode == "edit" and ed.drone_img is not None)
+ed.close()
+
+# a pure function: an Align that cannot be fitted yet leaves the views empty
+app.run3_align_var.set("")
+ed = app.open_zone_editor(ask_drone=False)
+root.update()
+check("an editor without an Align draws the views (empty) without error", all(ed._draw(np.zeros((400, 600, 3), np.uint8), pn, pane) is None for pn, pane in (("video", ed.vpane), ("drone", ed.dpane), ("plan", ed.ppane))))
 ed.close()
 
 root.destroy()
