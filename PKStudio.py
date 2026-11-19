@@ -6352,17 +6352,12 @@ class Run1App:
         ttk.Entry(geo, textvariable=self.run3_geometry_vars["median_m"], width=8).grid(row=4, column=2, sticky="w", padx=(4, 16))
         self._update_lane_totals()
 
-        cal = self.section("แปลงพิกัดภาพเป็นเมตร (PPM / Perspective)")
+        cal = self.section("แปลงพิกัดภาพเป็นเมตร (จัดแนวกับภาพโดรน)")
         for col in (1, 3):
             cal.columnconfigure(col, weight=1)
         r = 0
         ttk.Label(cal, text="Site_ID").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(cal, textvariable=self.run3_site_id_var, width=18).grid(row=r, column=1, sticky="w", pady=4)
-        ttk.Label(cal, text="PPM (พิกเซลต่อเมตร)").grid(row=r, column=2, sticky="e", padx=(12, 8), pady=4)
-        ttk.Entry(cal, textvariable=self.run3_ppm_var, width=18).grid(row=r, column=3, sticky="w", pady=4)
-        r += 1
-        ttk.Label(cal, text="Road direction angle (deg) — ใช้เมื่อไม่มี Perspective").grid(row=r, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Entry(cal, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=r, column=2, sticky="w", pady=4)
         r += 1
         ttk.Label(cal, text="วิดีโอและภาพ X–Y: เปิด/ปิดและเลือกสิ่งที่วาดที่หน้า ④ (การแสดงผลและไฟล์)").grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(cal, text="วาดจากพิกัดเมตรเดียวกับที่ตัวชี้วัดใช้ (ไฟล์ Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
@@ -6380,26 +6375,37 @@ class Run1App:
             v_.trace_add("write", _refresh_align_status)
         _refresh_align_status()
         r += 1
-        ttk.Checkbutton(cal, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=r, column=0, sticky="w", pady=(6, 4))
-        ttk.Label(cal, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง (P1→P2 ต้องขนานแนวถนน)", foreground=gray).grid(row=r, column=1, columnspan=2, sticky="w", pady=(6, 4))
-        ttk.Button(cal, text="🎯 Perspective / PPM Calibration", command=self.open_perspective_calibration).grid(row=r, column=3, sticky="e", pady=(6, 4))
+        ttk.Label(cal, textvariable=self.run3_zone_cal_text, foreground="#0a7a3d").grid(row=r, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        # the older ways to get metres (no drone picture): kept as a fallback, folded away. They are used when "use the Align result" is not ticked.
+        cal2 = self.section("สำรอง: PPM / Perspective (ใช้เมื่อไม่มีภาพโดรน หรือไม่ได้ติ๊กใช้ผลการจัดแนว)", collapsed=True)
+        for col in (1, 3):
+            cal2.columnconfigure(col, weight=1)
+        r = 0
+        ttk.Label(cal2, text="PPM (พิกเซลต่อเมตร)").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(cal2, textvariable=self.run3_ppm_var, width=18).grid(row=r, column=1, sticky="w", pady=4)
+        r += 1
+        ttk.Label(cal2, text="Road direction angle (deg) — ใช้เมื่อไม่มี Perspective").grid(row=r, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Entry(cal2, textvariable=self.run3_lateral_axis_angle_var, width=18).grid(row=r, column=2, sticky="w", pady=4)
+        r += 1
+        ttk.Checkbutton(cal2, text="Perspective correction", variable=self.run3_perspective_enabled_var).grid(row=r, column=0, sticky="w", pady=(6, 4))
+        ttk.Label(cal2, text="ใช้เมื่อมีจุดอ้างอิงบนระนาบถนนที่ทราบระยะจริง (P1→P2 ต้องขนานแนวถนน)", foreground=gray).grid(row=r, column=1, columnspan=2, sticky="w", pady=(6, 4))
+        ttk.Button(cal2, text="🎯 Perspective / PPM Calibration", command=self.open_perspective_calibration).grid(row=r, column=3, sticky="e", pady=(6, 4))
         r += 1
         for (la, va, lb, vb) in (("P1", self.run3_perspective_p1_var, "P2", self.run3_perspective_p2_var),
                                  ("P3", self.run3_perspective_p3_var, "P4", self.run3_perspective_p4_var)):
-            ttk.Label(cal, text=la).grid(row=r, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(cal, textvariable=va, width=18, state="readonly").grid(row=r, column=1, sticky="w", pady=2)
-            ttk.Label(cal, text=lb).grid(row=r, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(cal, textvariable=vb, width=18, state="readonly").grid(row=r, column=3, sticky="w", pady=2)
+            ttk.Label(cal2, text=la).grid(row=r, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(cal2, textvariable=va, width=18, state="readonly").grid(row=r, column=1, sticky="w", pady=2)
+            ttk.Label(cal2, text=lb).grid(row=r, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(cal2, textvariable=vb, width=18, state="readonly").grid(row=r, column=3, sticky="w", pady=2)
             r += 1
         for (la, va, lb, vb) in (("ระยะจริง P1→P2 (m)", self.run3_perspective_l12_var, "ระยะจริง P2→P3 (m)", self.run3_perspective_l23_var),
                                  ("ระยะจริง P3→P4 (m)", self.run3_perspective_l34_var, "ระยะจริง P4→P1 (m)", self.run3_perspective_l41_var)):
-            ttk.Label(cal, text=la).grid(row=r, column=0, sticky="w", padx=4, pady=2)
-            ttk.Entry(cal, textvariable=va, width=18).grid(row=r, column=1, sticky="w", pady=2)
-            ttk.Label(cal, text=lb).grid(row=r, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(cal, textvariable=vb, width=18).grid(row=r, column=3, sticky="w", pady=2)
+            ttk.Label(cal2, text=la).grid(row=r, column=0, sticky="w", padx=4, pady=2)
+            ttk.Entry(cal2, textvariable=va, width=18).grid(row=r, column=1, sticky="w", pady=2)
+            ttk.Label(cal2, text=lb).grid(row=r, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(cal2, textvariable=vb, width=18).grid(row=r, column=3, sticky="w", pady=2)
             r += 1
-
-        ttk.Label(cal, textvariable=self.run3_zone_cal_text, foreground="#0a7a3d").grid(row=r, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         dims = self.section("ขนาดรถ (m) — กว้าง W / ยาว L (ใช้กับ Lateral Clearance และ TTC)")
         ttk.Label(dims, text="ชนิด").grid(row=0, column=0, sticky="w", padx=(0, 8))
