@@ -11935,6 +11935,7 @@ class Run1App:
         reader = None
         csv_file = None
         self._run_end = {}                                      # how this clip ended (set below): the batch reads it
+        self._disk_pauses = 0                                   # how many times this run paused for a lost disk
 
         try:
 
@@ -12297,17 +12298,69 @@ class Run1App:
             input_finished = False
             video_lost = False                                  # the video could not be reached any more (the disk was disconnected)
 
+            def pause_for_disk():
+                """The video cannot be reached (the disk was disconnected) but the results folder can: PAUSE here, like the PAUSE button, and wait until the video is back
+                (or the user presses RESUME / STOP); then open the video again at the frame where it stopped and go on. -> True when the input is open again at frame_index;
+                False when the user stopped, or when the results folder is lost too (its open files are dead: the batch does the clip again from its start)."""
+                nonlocal reader, cap
+                if not path_reachable(output_dir):
+                    return False
+                at = frame_index
+                self.pause_event.clear()
+                self._disk_pauses = getattr(self, "_disk_pauses", 0) + 1
+                t_wait = time.time()
+                self.post_ui(lambda: self.pause_button.config(text="▶ RESUME"))
+                while not self.stop_event.is_set():
+                    self.update_ui(status=self.T("ฮาร์ดดิสก์หลุด — หยุดชั่วคราวที่เฟรม {0}/{1} · ทำต่ออัตโนมัติเมื่อกลับมา (หรือกด RESUME) · รอมาแล้ว {2} วินาที").format(
+                        at, total_frames, int(time.time() - t_wait)))
+                    if path_reachable(video_path) and path_reachable(output_dir):
+                        self.stop_event.wait(2.0)                      # (it must stay there for a moment)
+                        if path_reachable(video_path):
+                            new_cap = None
+                            try:
+                                new_cap = open_video_capture(video_path, bool(settings.get("hw_decode")))
+                                if new_cap.isOpened():
+                                    new_cap.set(cv2.CAP_PROP_POS_FRAMES, at)
+                                    if int(new_cap.get(cv2.CAP_PROP_POS_FRAMES)) != at:       # seeking not exact in this file: read forward instead
+                                        new_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                                        for _k in range(at):
+                                            if not new_cap.grab():
+                                                break
+                                    old_prepare = reader.prepare
+                                    reader.close()
+                                    release_quietly(cap)
+                                    cap = new_cap
+                                    reader = BackgroundFrameReader(cap, lambda n: not (frame_skip > 1 and not render_needed and (n % frame_skip) != 0), at, last_frame)
+                                    reader.prepare = old_prepare
+                                    self.pause_event.set()
+                                    self.post_ui(lambda: self.pause_button.config(text="Ⅱ PAUSE"))
+                                    self.update_ui(status="Processing...")
+                                    return True
+                            except Exception:
+                                release_quietly(new_cap)
+                    if self.pause_event.is_set():                       # RESUME pressed while the disk is still away: keep waiting
+                        self.pause_event.clear()
+                    self.stop_event.wait(2.0)
+                self.pause_event.set()
+                self.post_ui(lambda: self.pause_button.config(text="Ⅱ PAUSE"))
+                return False
+
             def next_frame():
                 """The next frame -> (ok, frame, lost). Every 10 s without a frame it looks whether the video can still be reached: a disconnected disk may leave the
-                reading stuck for ever. Gives up on a video that cannot be reached; ends at once when the user stops."""
+                reading stuck for ever. A video that cannot be reached: the run is paused and goes on by itself from the same frame when the disk is back
+                (pause_for_disk); gives up (lost = True) only when the results folder is gone too. Ends at once when the user stops."""
                 while True:
                     got = reader.next(timeout=10.0)
-                    if got is not None:
+                    if got is not None and (got[0] or reader.error is None) and (got[0] or path_reachable(video_path) or frame_index >= total_frames - 1):
                         return got[0], got[1], False
                     if self.stop_event.is_set():
                         return False, None, False
                     if not path_reachable(video_path):
-                        return False, None, True
+                        if pause_for_disk():
+                            continue
+                        return False, None, not self.stop_event.is_set()
+                    if got is not None:                                 # the end of a video that is still there
+                        return got[0], got[1], False
 
             conf = float(
                 settings["confidence"]
@@ -13494,7 +13547,7 @@ class Run1App:
                 "status": "stopped" if stopped else ("interrupted" if interrupted else "completed"),
                 "stop_reason": stop_reason,
                 "input": {"read_to_the_end": bool(read_to_end), "last_frame_read": int(frame_index), "expected_last_frame": int(total_frames),
-                          "first_frame": int(first_frame), "video_lost": bool(disk_lost)},
+                          "first_frame": int(first_frame), "video_lost": bool(disk_lost), "disk_pauses": int(getattr(self, "_disk_pauses", 0))},
                 "model": model_path,
                 "video": video_path,
                 "output_directory": output_dir,

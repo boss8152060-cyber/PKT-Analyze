@@ -236,6 +236,60 @@ win = app.batch_win
 check("the progress window shows it as a problem, with the reason", win is not None and win.state == [win.ERR] and "ก่อนครบ" in win.notes[0], str((win.state, win.notes) if win else None))
 check("the final report lists it as not finished", any(k == "info" and "อ่านวิดีโอไม่ถึงท้าย" in str(a) for k, a in shown), str([str(a)[:60] for k, a in shown]))
 
+# ---------------------------------------------------------------- 4) only the video is lost (results folder stays): PAUSE in place, go on from the same frame
+shutil.rmtree(o, ignore_errors=True)
+shown.clear()
+dlg.clear()
+dlg.add_videos(batch_run.find_videos([os.path.join(tmp, "in", "Site")]))
+dlg.clips = [c for c in dlg.clips if c["video"].endswith("a.mp4") or c["video"].endswith("b.mp4")]
+dlg.refresh()
+pst = {"up": True, "lost": False, "n": 0, "readers": 0, "paused_seen": False}
+in_dir = os.path.join(tmp, "in")
+
+
+def reach2(path, timeout=5.0):
+    if not pst["up"] and str(path).startswith(in_dir):
+        return False
+    return real_reachable(path, timeout)
+
+
+def init2(self, cap, decode, frames_read, last_frame=None, maxsize=6):
+    orig_init(self, cap, decode, frames_read, last_frame, maxsize)
+    pst["readers"] += 1
+    self._t_n = pst["readers"]
+
+
+def next2(self, timeout=None):
+    r = real_next(self, timeout)
+    if r is not None and r[0]:
+        pst["n"] += 1
+        if getattr(self, "_t_n", 0) == 2 and not pst["lost"] and pst["n"] > 3 * int(fps) // 2 + 25:
+            pst["lost"] = True
+            pst["up"] = False
+            threading.Timer(1.5, lambda: pst.__setitem__("up", True)).start()
+            return False, None
+        if not pst["up"]:
+            pst["paused_seen"] = pst["paused_seen"] or (str(app.pause_button.cget("text")).startswith("▶"))
+    return r
+
+
+mod.path_reachable = reach2
+mod.BackgroundFrameReader.__init__ = init2
+mod.BackgroundFrameReader.next = next2
+app.start_analysis()
+wait_in_mainloop(lambda: not app.running, 900)
+wait_in_mainloop(lambda: False, 1)
+mod.path_reachable = real_reachable
+mod.BackgroundFrameReader.next = real_next
+mod.BackgroundFrameReader.__init__ = orig_init
+sa = batch_run.read_json(RF(os.path.join(o, "Site", "day1", "a"), "Run_Summary.json") or "")
+sb = batch_run.read_json(RF(os.path.join(o, "Site", "day1", "b"), "Run_Summary.json") or "")
+check("the video was lost in the middle of clip 2 and the run paused", pst["lost"] and (sb.get("input") or {}).get("disk_pauses") == 1, str(sb.get("input")))
+check("the batch did not have to do the clip again (the pause went on from the same frame)", len(getattr(app, "_disk_events", [])) == 0 and sb.get("status") == "completed", str(sb.get("status")))
+check("the clip that paused has exactly as many frames as the clip that did not", sa.get("processed_frames") == sb.get("processed_frames") and sb.get("processed_frames", 0) > 20,
+      str((sa.get("processed_frames"), sb.get("processed_frames"))))
+check("the PAUSE button went back to normal", str(app.pause_button.cget("text")).startswith("Ⅱ") and app.pause_event.is_set())
+
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
 sys.exit(1 if failures else 0)
