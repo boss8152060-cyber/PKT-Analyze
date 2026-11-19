@@ -382,6 +382,56 @@ class CombineClips(unittest.TestCase):
             self.assertEqual(len(list(csv.DictReader(f))), 2)
 
 
+class RunComplete(unittest.TestCase):
+    """batch_run.run_complete: a clip is done only when it was analysed to the end of its video (a stopped clip, or one whose disk was lost, is done again)."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="pk_runc_")
+        self.d = os.path.join(self.root, "clip1")
+        os.makedirs(self.d)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _write(self, summary=True, run=None):
+        if summary:
+            with open(os.path.join(self.d, "Summary.json"), "w") as f:
+                f.write("{}")
+        if run is not None:
+            with open(os.path.join(self.d, "Run_Summary.json"), "w") as f:
+                json.dump(run, f)
+
+    def test_no_summary_is_not_done(self):
+        self._write(summary=False, run={"status": "completed", "input": {"read_to_the_end": True}})
+        self.assertFalse(batch_run.run_complete(self.d, "clip1"))
+
+    def test_read_to_the_end_is_done(self):
+        self._write(run={"status": "completed", "input": {"read_to_the_end": True}})
+        self.assertTrue(batch_run.run_complete(self.d, "clip1"))
+
+    def test_stopped_or_interrupted_is_not_done(self):
+        for status in ("stopped", "interrupted"):
+            self._write(run={"status": status, "input": {"read_to_the_end": status == "stopped"}})
+            self.assertFalse(batch_run.run_complete(self.d, "clip1"), status)
+
+    def test_a_video_not_read_to_the_end_is_not_done(self):
+        self._write(run={"status": "completed", "input": {"read_to_the_end": False}})
+        self.assertFalse(batch_run.run_complete(self.d, "clip1"))
+
+    def test_older_results_are_judged_by_the_frames(self):
+        full = {"status": "completed", "total_frames": 3600, "processed_frames": 1800, "analysis_window": {"first_frame": 1, "last_frame": 3600}}
+        with open(os.path.join(self.d, "Settings.json"), "w") as f:
+            json.dump({"frame_skip": "1 - Process every 2nd frame"}, f)
+        self._write(run=full)
+        self.assertTrue(batch_run.run_complete(self.d, "clip1"))                              # 1800 detected x 2 = the whole video
+        self._write(run=dict(full, processed_frames=700))
+        self.assertFalse(batch_run.run_complete(self.d, "clip1"))                             # 1400 of 3600: the video was cut
+        self.assertEqual([batch_run.frame_skip_from_text(t) for t in ("NO - Process every frame", "1 - Process every 2nd frame", "4 - Process every 5th frame", "")], [1, 2, 5, 1])
+
+    def test_a_result_with_no_run_summary_is_taken_as_done(self):
+        self._write(run=None)
+        self.assertTrue(batch_run.run_complete(self.d, "clip1"))
+
 class IdContinuation(unittest.TestCase):
     def test_the_continue_mark_is_kept_in_a_plan_but_is_not_a_run_setting(self):
         self.assertIn("continues_previous", batch_run.PLAN_KEYS)

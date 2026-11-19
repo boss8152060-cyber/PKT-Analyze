@@ -143,6 +143,45 @@ def read_json(path):
         return {}
 
 
+def frame_skip_from_text(text):
+    """The frame skip of the settings text ("NO - Process every frame" = 1, "1 - Process every 2nd frame" = 2 ...)."""
+    text = str(text or "")
+    if text.startswith("NO"):
+        return 1
+    for n in (1, 2, 3, 4):
+        if f"{n} - " in text:
+            return n + 1
+    return 1
+
+
+def run_complete(run_dir, name):
+    """True when the clip was analysed to the end of its video: Summary.json is there and Run_Summary.json says completed - and, for a run of an older version that did not
+    say it, the frames it detected (x the frame skip) reach the end of the video. A clip that was stopped, or whose video could not be read to its end (the disk was
+    disconnected), is not done: it is analysed again."""
+    import combine_clips
+    if combine_clips.summary_path(run_dir, name) is None:
+        return False
+    rs = read_json(combine_clips.result_file(run_dir, "Run_Summary.json", name) or "")
+    if not rs:
+        return True                                           # (a result of a very old version: no summary of the run to judge by)
+    if str(rs.get("status", "completed")) != "completed":
+        return False
+    inp = rs.get("input")
+    if isinstance(inp, dict) and "read_to_the_end" in inp:
+        return bool(inp["read_to_the_end"])
+    # an older run: detected frames x frame skip against the length of the video (or of the analysis window)
+    try:
+        expected = (rs.get("analysis_window") or {}).get("last_frame") or rs.get("total_frames") or 0
+        expected = int(expected)
+        st = read_json(combine_clips.result_file(run_dir, "Settings.json", name) or "")
+        skip = frame_skip_from_text(st.get("frame_skip", ""))
+        got = int(rs.get("processed_frames") or 0) * skip
+        first = int((rs.get("analysis_window") or {}).get("first_frame") or 1)
+        return not (expected > 0 and got < 0.97 * (expected - first + 1))
+    except (TypeError, ValueError):
+        return True
+
+
 def count_rows(path):
     if not os.path.isfile(path):
         return None
@@ -290,7 +329,7 @@ def run_batch(app, base_settings, out_root, runs, save_video=False, skip_done=Fa
         st["continue_tracker"] = bool(((clip_params or {}).get(video) or {}).get("continues_previous")) and i > 1
         os.makedirs(run_dir, exist_ok=True)
         import combine_clips
-        if skip_done and combine_clips.summary_path(run_dir, name) is not None:
+        if skip_done and run_complete(run_dir, name):
             app._carry = None
             log(f"[{i}/{len(runs)}] {name}: already done, skipped")
             rows.append(collect_row(run_dir, name, video, rel_dir, overrides, "", 0.0))

@@ -208,6 +208,20 @@ _r.close()
 _c.release()
 check("background reader: what prepare() made belongs to the frame next() returned", all(p == f + 1000 for f, p in _prep[1:]) and len(_prep) == 6, str(_prep))
 check("background reader: skipped frames come as None, stops at the last frame of the window", len(_got) == 10 and _got[1] is None and _got[0] == _direct[0] and _got[2] == _direct[2], str(_got))
+
+class _StuckCap:
+    def read(self):
+        time.sleep(1.5)                       # a disk that was disconnected: the reading does not come back (for a while)
+        return False, None
+    def grab(self):
+        return False
+    def release(self):
+        pass
+_stuck = m.BackgroundFrameReader(_StuckCap(), lambda n: True, 0, None)
+_t0 = time.time()
+_r = _stuck.next(timeout=0.3)
+check("background reader: with a time limit it answers None when no frame comes (the main loop can look at the disk)", _r is None and time.time() - _t0 < 1.2, f"{_r} {time.time() - _t0:.2f}s")
+_stuck.close()
 _out = os.path.join(_d, "out.avi")
 _bw = m.BackgroundVideoWriter(_cv2.VideoWriter(_out, _cv2.VideoWriter_fourcc(*"MJPG"), 10.0, (64, 48)))
 for _i in range(15):

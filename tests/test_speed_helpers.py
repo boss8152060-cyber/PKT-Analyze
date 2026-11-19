@@ -8,7 +8,8 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = open(os.path.join(os.path.dirname(HERE), "PKStudio.py"), encoding="utf-8").read()
-NS = {"np": np, "math": math, "os": os}
+import threading
+NS = {"np": np, "math": math, "os": os, "threading": threading}
 exec(SRC[SRC.index("# ==== CORE-BEGIN"):SRC.index("# ==== CORE-END")], NS)
 
 
@@ -242,6 +243,41 @@ class SpeedPerZone(unittest.TestCase):
         self.assertEqual((d2["note"], d2["zones"][0]["color_bgr"], d2["zones"][0]["show_label"]), ("keep", [9, 9, 9], False))   # what the old file had is kept
         self.assertNotIn("lines", d2)                                                          # no Lines now: the old ones are not carried over
         self.assertEqual(NS["zone_polygon_area"]([(0, 0), (2, 0)]), 0.0)
+
+    def test_how_a_clip_ended(self):
+        f = NS["run_end_state"]
+        self.assertEqual(f(False, True, 3600, 1, 3600), ("completed", True))                 # read to the end of the video
+        self.assertEqual(f(True, False, 1200, 1, 3600), ("stopped", False))                   # the user stopped
+        self.assertEqual(f(True, True, 3600, 1, 3600), ("stopped", True))                      # stopped at the very end: still the user's stop
+        self.assertEqual(f(False, True, 1440, 1, 3600), ("interrupted", False))               # no more frames at 40 %: the video was lost
+        self.assertEqual(f(False, True, 3530, 1, 3600), ("completed", True))                  # 98 %: a few frames less than the file says
+        self.assertEqual(f(False, False, 3600, 1, 3600), ("interrupted", True))               # the loop ended without a reason
+        self.assertEqual(f(False, True, 3600, 1801, 3600), ("completed", True))               # the analysis window counts from its first frame
+        self.assertEqual(f(False, True, 2000, 1801, 3600), ("interrupted", False))
+        self.assertEqual(f(False, True, 0, 1, 0), ("completed", True))                        # nothing to read
+
+    def test_path_reachable_and_release_do_not_hang(self):
+        import tempfile
+        reach = NS["path_reachable"]
+        with tempfile.NamedTemporaryFile() as fh:
+            self.assertTrue(reach(fh.name))
+        self.assertFalse(reach(os.path.join(tempfile.gettempdir(), "no_such_file_for_pkt.mp4")))
+        self.assertFalse(reach(""))
+
+        class Hanging:
+            def release(self):
+                import time
+                time.sleep(3)
+
+        class Failing:
+            def release(self):
+                raise OSError("gone")
+        import time
+        t0 = time.time()
+        NS["release_quietly"](Hanging(), timeout=0.2)
+        NS["release_quietly"](Failing())
+        NS["release_quietly"](None)
+        self.assertLess(time.time() - t0, 1.5)                                                    # (the hanging release did not hold it)
 
     def test_nothing_in_nothing_out(self):
         self.assertEqual(NS["speed_zone_summary"]([]), [])

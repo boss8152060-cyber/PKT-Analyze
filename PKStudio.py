@@ -2252,6 +2252,53 @@ def topview_px_setting(text, default=1280):
     return v if v > 0 else int(default)
 
 
+def run_end_state(stopped, input_finished, frame_index, first_frame, total_frames, tolerance=0.97):
+    """How a clip ended -> (status, read_to_end). The loop that reads the video ends when the user stops it, when the analysis window is over, or when the video gives no more frames -
+    and a disk that was disconnected looks just like the end of the video, so the frames that were really covered are compared with the frames that should have been:
+    status "stopped" (the user), "completed" (the video was read to its end: at least `tolerance` of the frames), "interrupted" (it ended early: the video could not be read on)."""
+    expected = max(0, int(total_frames) - (int(first_frame) - 1))
+    covered = max(0, int(frame_index) - (int(first_frame) - 1))
+    read_to_end = expected <= 0 or covered >= tolerance * expected
+    if stopped:
+        return "stopped", read_to_end
+    if not input_finished or not read_to_end:
+        return "interrupted", read_to_end
+    return "completed", read_to_end
+
+
+def path_reachable(path, timeout=5.0):
+    """Can the file / folder be reached? A disk that was disconnected may answer after a long time or never, so the question is asked in a thread and given `timeout` seconds."""
+    if not path:
+        return False
+    box = []
+
+    def ask():
+        try:
+            box.append(os.path.exists(path))
+        except OSError:
+            box.append(False)
+    t = threading.Thread(target=ask, daemon=True)
+    t.start()
+    t.join(timeout)
+    return bool(box and box[0])
+
+
+def release_quietly(obj, timeout=5.0):
+    """obj.release() that cannot hang the program (a video of a disconnected disk may not let go)."""
+    if obj is None:
+        return
+    t = threading.Thread(target=lambda: _quiet(obj.release), daemon=True)
+    t.start()
+    t.join(timeout)
+
+
+def _quiet(fn):
+    try:
+        fn()
+    except Exception:
+        pass
+
+
 def edge_scale_factor(pairs):
     """pairs = [(measured_m, real_m)] of zone edges whose real length the user knows. The factor f that the metres of the Align must be multiplied by so that the
     measured lengths fit the real ones best (least squares through the origin: f = sum(real * measured) / sum(measured^2)); None when there is nothing to fit."""
@@ -6988,9 +7035,12 @@ class BackgroundFrameReader:
             self.error = exc
         self._put(self._END)
 
-    def next(self):
-        """-> (ok, frame); frame is None for a frame that was only skipped."""
-        item = self.q.get()
+    def next(self, timeout=None):
+        """-> (ok, frame); frame is None for a frame that was only skipped. With `timeout` (seconds): None when no frame came in that time (the decoding may be stuck)."""
+        try:
+            item = self.q.get(timeout=timeout) if timeout else self.q.get()
+        except queue.Empty:
+            return None
         if item is self._END:
             if self.error is not None:
                 raise self.error
@@ -7397,6 +7447,7 @@ class BatchProgressWindow(tk.Toplevel):
     """The window that shows a batch while it runs: which clip is being analysed and what it is doing now, how many clips are done,
     and one row per clip (waiting / analysing / done / skipped / error / stopped) with the time it took."""
     WAIT, RUN, DONE, SKIP, ERR, STOP = "รอ", "กำลังวิเคราะห์", "เสร็จ", "ข้าม (เสร็จแล้ว)", "ผิดพลาด", "หยุด"
+    LOST = "ฮาร์ดดิสก์หลุด"
 
     def __init__(self, app, clips):
         super().__init__(app.root)
@@ -7505,14 +7556,14 @@ class BatchProgressWindow(tk.Toplevel):
         finished_n = done + skipped + errors
         for i in range(n):
             s = self.state[i]
-            tag = {self.WAIT: "wait", self.RUN: "run", self.ERR: "err", self.SKIP: "skip", self.STOP: "wait"}.get(s, "")
+            tag = {self.WAIT: "wait", self.RUN: "run", self.ERR: "err", self.SKIP: "skip", self.STOP: "wait", self.LOST: "err"}.get(s, "")
             try:
                 self.tree.item(str(i), values=self._values(i), tags=(tag,))
             except tk.TclError:
                 return
         self.bar["value"] = finished_n
         if self.finished:
-            self.head.set(self.T("หยุดก่อนครบ" if any(s == self.STOP for s in self.state) else "วิเคราะห์ครบแล้ว"))
+            self.head.set(self.T("หยุดก่อนครบ" if any(s in (self.STOP, self.LOST) for s in self.state) else "วิเคราะห์ครบแล้ว"))
         elif self.current is not None:
             self.head.set(self.T("คลิปที่ {0} จาก {1}: {2}".format(self.current + 1, n, self.names[self.current])))
         else:
@@ -8935,6 +8986,10 @@ class Run1App:
         self.worker_thread.start()
         return True
 
+    def T(self, text):
+        """Short for tr_text (the texts of the batch worker)."""
+        return self.tr_text(text)
+
     def tr_text(self, text):
         """The text in the language chosen in PK Transport (pkt_plugin.py replaces this); the program on its own shows it as written."""
         return text
@@ -8954,6 +9009,29 @@ class Run1App:
         if win is not None:
             self.post_ui(lambda: win.winfo_exists() and win.set_state(i, state, seconds, note))
 
+    MAX_DISK_RETRIES = 50                                     # (a clip that loses its disk this many times is given up)
+
+    def _storage_ready(self, video, out_root):
+        """The video and the folder of the results can both be reached (an external disk that was disconnected cannot)."""
+        return path_reachable(video) and path_reachable(out_root)
+
+    def _wait_for_storage(self, video, out_root, name, i, n, frame=None, of=None):
+        """The disk is gone: wait (and say so) until the video and the results folder can be reached again, for as long as it takes. True when they can;
+        False when the user pressed STOP while waiting."""
+        poll = float(getattr(self, "storage_poll_s", 5.0))
+        t_wait = time.time()
+        while not self.stop_event.is_set():
+            waited = int(time.time() - t_wait)
+            where = self.T("หลุดที่เฟรม {0}/{1}").format(frame, of) if frame else self.T("ก่อนเริ่มคลิป")
+            self.update_ui(status=self.T("ฮาร์ดดิสก์หลุด — รอเชื่อมต่อใหม่ (คลิป {0}/{1}: {2}; {3}; รอมาแล้ว {4} วินาที) · ทำต่ออัตโนมัติเมื่อกลับมา · กด STOP เพื่อเลิกรอ").format(
+                i, n, name, where, waited))
+            if self._storage_ready(video, out_root):
+                self.stop_event.wait(min(poll, 3.0))                # (it must stay there for a moment: a disk that comes and goes is not back yet)
+                if self._storage_ready(video, out_root):
+                    return True
+            self.stop_event.wait(poll)
+        return False
+
     def _batch_worker(self, base_settings, clips, out_root, skip_done):
         bt = _tools_module("batch_run")
         rows, runs, empties = [], [], []
@@ -8961,8 +9039,12 @@ class Run1App:
         fatal = ""
         n = len(clips)
         self._carry = None
+        self._disk_events = []                                    # (clip name, how many times its disk was lost)
         try:
-            os.makedirs(out_root, exist_ok=True)
+            try:
+                os.makedirs(out_root, exist_ok=True)
+            except OSError:
+                pass                                              # (the disk may be away already: the first clip waits for it)
             for i, c in enumerate(clips, 1):
                 rel = str(c.get("rel_dir", "") or "")
                 runs.append((c["video"], rel, {}))
@@ -8973,26 +9055,70 @@ class Run1App:
                 st, name, run_dir = bt.clip_settings(base_settings, c["video"], rel, {}, out_root, c, c.get("save_video", False),
                                                      show_preview=bool(base_settings.get("show_preview")))
                 st["continue_tracker"] = bool(c.get("continues_previous")) and i > 1
+                if not self._storage_ready(c["video"], out_root):      # the disk is not there before the clip even starts
+                    self._batch_mark(i - 1, BatchProgressWindow.LOST, 0.0)
+                    if not self._wait_for_storage(c["video"], out_root, name, i, n):
+                        stopped = True
+                        break
+                    self._batch_mark(i - 1, BatchProgressWindow.RUN)
                 os.makedirs(run_dir, exist_ok=True)
-                if skip_done and bt.summary_path(run_dir, name) is not None:
+                if skip_done and bt.run_complete(run_dir, name):
                     self._carry = None          # nothing was run, so there is no tracker to continue
                     rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, "", 0.0))
                     self.update_ui(status=f"Batch {i}/{n}: {name} — already done, skipped")
                     self._batch_mark(i - 1, BatchProgressWindow.SKIP, 0.0)
                     continue
-                self.update_ui(status=f"Batch {i}/{n}: {name}")
-                self._last_run_error = ""
-                self.run3_last_summary = None
+                attempts = 0
                 t0 = time.time()
-                self.run_processing(st)
+                while True:
+                    self.update_ui(status=f"Batch {i}/{n}: {name}" + (f" (attempt {attempts + 1})" if attempts else ""))
+                    self._last_run_error = ""
+                    self.run3_last_summary = None
+                    t_try = time.time()
+                    try:
+                        os.makedirs(run_dir, exist_ok=True)
+                    except OSError:
+                        pass
+                    self.run_processing(st)
+                    end = getattr(self, "_run_end", None) or {}
+                    # the disk was lost: the video could not be read on, or an error came while the video / the results folder cannot be reached
+                    lost = (not self.stop_event.is_set()) and bool(end.get("disk_lost") or (self._last_run_error and not self._storage_ready(c["video"], out_root)))
+                    if not lost:
+                        break
+                    attempts += 1
+                    self._disk_events.append((name, attempts))
+                    self._batch_mark(i - 1, BatchProgressWindow.LOST, time.time() - t_try)
+                    self._carry = None
+                    if attempts > self.MAX_DISK_RETRIES:
+                        self._last_run_error = self._last_run_error or "the disk was lost too many times"
+                        break
+                    if not self._wait_for_storage(c["video"], out_root, name, i, n, end.get("frame"), end.get("of")):
+                        stopped = True
+                        break
+                    self._batch_mark(i - 1, BatchProgressWindow.RUN)
                 reasons = ((self.run3_last_summary or {}).get("diagnostics", {}) or {}).get("empty_outputs", []) or []
                 if reasons:
                     empties.append((name, list(reasons)))
-                rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, self._last_run_error, time.time() - t0))
+                try:
+                    rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, self._last_run_error, time.time() - t0))
+                except OSError:
+                    rows.append({"Run": name, "Folder": rel, "Video": os.path.basename(c["video"]), "Status": "interrupted", "Seconds": round(time.time() - t0, 1)})
                 status = str(rows[-1].get("Status", ""))
-                self._batch_mark(i - 1, BatchProgressWindow.ERR if (status.startswith("ERROR") or status == "no summary") else
-                                 (BatchProgressWindow.STOP if status.startswith("stopped") else BatchProgressWindow.DONE),
-                                 time.time() - t0, "ตัวชี้วัดว่างบางตัว" if reasons else "")
+                end = getattr(self, "_run_end", None) or {}
+                note = "ตัวชี้วัดว่างบางตัว" if reasons else ""
+                if attempts and status in ("completed", "stopped"):
+                    note = (note + " · " if note else "") + "ฮาร์ดดิสก์หลุด {0} ครั้ง ทำต่อเอง".format(attempts)
+                if status.startswith("interrupted") and (end.get("disk_lost") or attempts):
+                    mark = BatchProgressWindow.LOST
+                elif status.startswith("interrupted") or status.startswith("ERROR") or status == "no summary":
+                    mark = BatchProgressWindow.ERR
+                    if status.startswith("interrupted"):
+                        note = "วิดีโอจบก่อนครบ"
+                elif status.startswith("stopped"):
+                    mark = BatchProgressWindow.STOP
+                else:
+                    mark = BatchProgressWindow.DONE
+                self._batch_mark(i - 1, mark, time.time() - t0, note)
                 if self.stop_event.is_set():
                     stopped = True
                     break
@@ -9014,10 +9140,17 @@ class Run1App:
         self.stop_button.config(state="disabled")
         ok = [r for r in rows if str(r["Status"]).startswith(("completed", "stopped"))]
         bad = [r for r in rows if str(r["Status"]).startswith("ERROR") or r["Status"] == "no summary"]
-        self.status_var.set(f"Batch finished: {len(ok)}/{total} clips" + (" (stopped)" if stopped else ""))
+        cut = [r for r in rows if str(r["Status"]).startswith("interrupted")]                 # the video could not be read to its end: not done
+        self.status_var.set(f"Batch finished: {len(ok)}/{total} clips" + (" (stopped)" if stopped else "") + (f" · {len(cut)} not finished (video lost)" if cut else ""))
         self.progress_var.set("100%" if not stopped else "")
         msg = f"Batch {'หยุดกลางทาง' if stopped else 'เสร็จ'}: {len(ok)} จาก {total} คลิป\n\nผลลัพธ์:\n{out_root}\n\n"
         msg += "• โฟลเดอร์ของแต่ละคลิป (ตามโครงสร้างต้นฉบับ) = ผลรายคลิป (1_ID_Zone … 8_PET, 0_Raw, 9_Summary)\n• All_Clips = ผลรวมหลายคลิป มีคอลัมน์ Clip บอกว่าแถวมาจากคลิปไหน: ในโฟลเดอร์ชั้นบนสุดที่นำเข้า (ทุกคลิป) และในทุกโฟลเดอร์ย่อยที่มีตั้งแต่ 2 คลิป เช่นโฟลเดอร์ของแต่ละวัน (คลิปของวันนั้น); 1_ID_Zone … 8_PET = ผลวิเคราะห์, 0_Raw = ข้อมูลดิบ, 9_Summary = สรุป (Clip_List.csv = ตารางรายคลิป, Statistics.csv = สถิติรวม)\n• Batch_Comparison.csv = ตารางเปรียบเทียบทุกคลิปในโฟลเดอร์ผลลัพธ์"
+        events = getattr(self, "_disk_events", [])
+        if events:
+            msg += "\n\nฮาร์ดดิสก์หลุดระหว่างงาน {0} ครั้ง — โปรแกรมรอจนกลับมาแล้วทำคลิปนั้นต่อเอง".format(len(events))
+        if cut:
+            msg += "\n\nคลิปที่อ่านวิดีโอไม่ถึงท้าย (ยังไม่เสร็จ — ฮาร์ดดิสก์หลุดหรือไฟล์วิดีโอไม่สมบูรณ์):\n" + "\n".join(f"- {r['Run']}" for r in cut)
+            msg += "\nเสียบฮาร์ดดิสก์ให้เรียบร้อยแล้วกด เริ่มวิเคราะห์ ใหม่ (ติ๊ก ข้ามคลิปที่วิเคราะห์เสร็จแล้ว ไว้) โปรแกรมจะทำเฉพาะคลิปที่ยังไม่เสร็จ"
         if bad:
             msg += "\n\nคลิปที่มีปัญหา:\n" + "\n".join(f"- {r['Run']}: {r['Status']}" for r in bad)
         if empties:
@@ -11801,6 +11934,7 @@ class Run1App:
         writer = None
         reader = None
         csv_file = None
+        self._run_end = {}                                      # how this clip ended (set below): the batch reads it
 
         try:
 
@@ -12161,6 +12295,19 @@ class Run1App:
             max_active_tracks = 0
             total_frames_with_detection = 0
             input_finished = False
+            video_lost = False                                  # the video could not be reached any more (the disk was disconnected)
+
+            def next_frame():
+                """The next frame -> (ok, frame, lost). Every 10 s without a frame it looks whether the video can still be reached: a disconnected disk may leave the
+                reading stuck for ever. Gives up on a video that cannot be reached; ends at once when the user stops."""
+                while True:
+                    got = reader.next(timeout=10.0)
+                    if got is not None:
+                        return got[0], got[1], False
+                    if self.stop_event.is_set():
+                        return False, None, False
+                    if not path_reachable(video_path):
+                        return False, None, True
 
             conf = float(
                 settings["confidence"]
@@ -12293,18 +12440,21 @@ class Run1App:
                 # V27: skipped frames are only grabbed (not decoded) when
                 # nothing has to be drawn/saved for them.
                 if frame_skip > 1 and not render_needed and (frame_index % frame_skip) != 0:
-                    if not reader.next()[0]:
+                    ok_, _fr, lost_ = next_frame()
+                    if not ok_:
                         input_finished = True
+                        video_lost = video_lost or lost_
                         break
                     frame_index += 1
                     if frame_index % 50 == 0:
                         self.update_ui(progress=f"{frame_index}/{total_frames}")
                     continue
 
-                success, frame = reader.next()
+                success, frame, lost_ = next_frame()
 
                 if not success:
                     input_finished = True
+                    video_lost = video_lost or lost_
                     break
 
                 frame_index += 1
@@ -13044,6 +13194,11 @@ class Run1App:
                         f"FPS {processing_fps:.2f}"
                     )
 
+            # How the loop ended: the user stopped it, the video was read to its end, or the video could not be read on (a disk that was disconnected looks like the end).
+            end_status, read_to_end = run_end_state(self.stop_event.is_set(), input_finished, frame_index, first_frame, total_frames)
+            interrupted = end_status == "interrupted"
+            disk_lost = interrupted and (video_lost or not path_reachable(video_path))
+
             # =================================================
             # FINALIZE OUTPUTS
             # =================================================
@@ -13057,7 +13212,7 @@ class Run1App:
                 reader.close()
 
             if cap is not None:
-                cap.release()
+                release_quietly(cap)
 
             if writer is not None:
                 writer.release()
@@ -13228,7 +13383,7 @@ class Run1App:
                 device,
                 "FP16" if use_fp16 else "FP32",
                 "stopped_by_user" if self.stop_event.is_set()
-                else ("completed_end_of_video" if input_finished else "stopped")
+                else ("interrupted_video_lost" if interrupted else ("completed_end_of_video" if input_finished else "stopped"))
             ])
 
             # Close files only AFTER every final row has been written.
@@ -13322,21 +13477,24 @@ class Run1App:
                 print("3.", output_zone_summary)
 
             # Research summary.
-            stop_reason = (
-                "Stopped by user"
-                if stopped
-                else (
-                    "Completed: end of input video"
-                    if input_finished
-                    else "Stopped: processing loop ended"
-                )
-            )
+            if stopped:
+                stop_reason = "Stopped by user"
+            elif interrupted:
+                stop_reason = (f"Interrupted: the video could not be read after frame {frame_index} of {total_frames} - the disk was probably disconnected" if disk_lost
+                               else f"Interrupted: the video ended early (frame {frame_index} of {total_frames})")
+            elif input_finished:
+                stop_reason = "Completed: end of input video"
+            else:
+                stop_reason = "Stopped: processing loop ended"
+            self._run_end = {"status": end_status, "disk_lost": bool(disk_lost), "frame": int(frame_index), "of": int(total_frames), "reason": stop_reason}
 
             run_summary = {
                 "run_name": run_name,
                 "run_type": "Run 1 + 2 Integrated Research",
-                "status": "stopped" if stopped else "completed",
+                "status": "stopped" if stopped else ("interrupted" if interrupted else "completed"),
                 "stop_reason": stop_reason,
+                "input": {"read_to_the_end": bool(read_to_end), "last_frame_read": int(frame_index), "expected_last_frame": int(total_frames),
+                          "first_frame": int(first_frame), "video_lost": bool(disk_lost)},
                 "model": model_path,
                 "video": video_path,
                 "output_directory": output_dir,
@@ -13422,7 +13580,7 @@ class Run1App:
             # because Run 1 + Run 2 finalize and close their files first.
             # STOP means: stop video processing, then analyze the data already
             # produced by Run 2.
-            if self.run3_was_requested:
+            if self.run3_was_requested and not interrupted:         # (a clip whose video could not be read on is analysed again from its start: no Run 3 on a part)
                 self.post_ui(lambda: self.status_var.set(
                     "Run 3 — analyzing Run 2 data" + (" (partial run after STOP)" if stopped else "")
                 ))
@@ -13441,7 +13599,7 @@ class Run1App:
 
             # results numbered 1_ID_Zone ... 8_PET, raw data in 0_Raw, summaries in 9_Summary (videos stay where they are)
             try:
-                moved = _tools_module("combine_clips").arrange_clip_folder(output_dir)
+                moved = {} if interrupted else _tools_module("combine_clips").arrange_clip_folder(output_dir)
                 new = lambda p: moved.get(p, p) if p else p
                 output_csv, output_settings, output_summary = new(output_csv), new(output_settings), new(output_summary)
                 output_id_zone_summary, output_zone_summary = new(output_id_zone_summary), new(output_zone_summary)
@@ -13509,6 +13667,7 @@ class Run1App:
             # exception text now instead of closing over Python's exception variable.
             error_message = str(e)
             self._last_run_error = error_message
+            self._run_end = {"status": "error", "disk_lost": False, "reason": error_message}
             self.post_ui(
                 lambda message=error_message: self.show_error(
                     message
@@ -16088,6 +16247,14 @@ class Run1App:
         self.start_button.config(state="normal")
         self.pause_button.config(state="disabled", text="Ⅱ PAUSE")
         self.stop_button.config(state="disabled")
+        end = getattr(self, "_run_end", None) or {}
+        if end.get("status") == "interrupted":
+            self.progress_var.set("")
+            self.status_var.set("Interrupted: the video could not be read to its end")
+            messagebox.showwarning("วิเคราะห์ไม่จบ", self.T("วิเคราะห์ไม่จบ: อ่านวิดีโอไม่ได้หลังเฟรม {0} จาก {1}").format(end.get("frame"), end.get("of")) + "\n\n" +
+                                   (self.T("น่าจะเป็นเพราะฮาร์ดดิสก์หลุด — เสียบให้เรียบร้อยแล้วกด เริ่มวิเคราะห์ ใหม่ (คลิปนี้ยังไม่ถูกนับว่าเสร็จ ผลที่ได้บางส่วนอยู่ในโฟลเดอร์ผลลัพธ์)")
+                                    if end.get("disk_lost") else self.T("ไฟล์วิดีโอจบก่อนความยาวที่ควรเป็น (ไฟล์อาจไม่สมบูรณ์) — คลิปนี้ยังไม่ถูกนับว่าเสร็จ")))
+            return
         if stopped:
             self.status_var.set("Run 1 + 2 + 3 stopped — Run 3 analyzed available data")
         if self.run3_was_requested:
