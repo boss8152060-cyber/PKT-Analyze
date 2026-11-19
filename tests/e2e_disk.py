@@ -147,6 +147,7 @@ def lossy_next(self, timeout=None):
             state["lost_once"] = True
             state["up"] = False
             threading.Timer(0.6, lambda: state.__setitem__("up", True)).start()      # ... and it comes back after a moment
+            threading.Timer(1.6, lambda: app.pause_event.set()).start()                # ... and the user presses RESUME
             return False, None
     elif r is not None:
         pass
@@ -267,6 +268,8 @@ def next2(self, timeout=None):
             pst["lost"] = True
             pst["up"] = False
             threading.Timer(1.5, lambda: pst.__setitem__("up", True)).start()
+            threading.Timer(2.9, lambda: pst.__setitem__("paused_seen", (not app.pause_event.is_set()) and str(app.pause_button.cget("text")).startswith("▶"))).start()   # the disk is back for a while, nobody pressed RESUME: still paused
+            threading.Timer(3.0, lambda: app.pause_event.set()).start()                # the user presses RESUME
             return False, None
         if not pst["up"]:
             pst["paused_seen"] = pst["paused_seen"] or (str(app.pause_button.cget("text")).startswith("▶"))
@@ -288,6 +291,7 @@ check("the video was lost in the middle of clip 2 and the run paused", pst["lost
 check("the batch did not have to do the clip again (the pause went on from the same frame)", len(getattr(app, "_disk_events", [])) == 0 and sb.get("status") == "completed", str(sb.get("status")))
 check("the clip that paused has exactly as many frames as the clip that did not", sa.get("processed_frames") == sb.get("processed_frames") and sb.get("processed_frames", 0) > 20,
       str((sa.get("processed_frames"), sb.get("processed_frames"))))
+check("the run stayed paused (RESUME shown) until the user pressed it", pst["paused_seen"])
 check("the PAUSE button went back to normal", str(app.pause_button.cget("text")).startswith("Ⅱ") and app.pause_event.is_set())
 
 root.destroy()

@@ -9018,19 +9018,30 @@ class Run1App:
     def _wait_for_storage(self, video, out_root, name, i, n, frame=None, of=None):
         """The disk is gone: wait (and say so) until the video and the results folder can be reached again, for as long as it takes. True when they can;
         False when the user pressed STOP while waiting."""
-        poll = float(getattr(self, "storage_poll_s", 5.0))
+        poll = float(getattr(self, "storage_poll_s", 1.0))
         t_wait = time.time()
+        self.pause_event.clear()                                   # paused, like the PAUSE button: the user presses RESUME when the disk is connected again
+        self.post_ui(lambda: self.pause_button.config(text="▶ RESUME"))
+        ok = False
         while not self.stop_event.is_set():
             waited = int(time.time() - t_wait)
             where = self.T("หลุดที่เฟรม {0}/{1}").format(frame, of) if frame else self.T("ก่อนเริ่มคลิป")
-            self.update_ui(status=self.T("ฮาร์ดดิสก์หลุด — รอเชื่อมต่อใหม่ (คลิป {0}/{1}: {2}; {3}; รอมาแล้ว {4} วินาที) · ทำต่ออัตโนมัติเมื่อกลับมา · กด STOP เพื่อเลิกรอ").format(
-                i, n, name, where, waited))
-            if self._storage_ready(video, out_root):
-                self.stop_event.wait(min(poll, 3.0))                # (it must stay there for a moment: a disk that comes and goes is not back yet)
-                if self._storage_ready(video, out_root):
-                    return True
+            back = self._storage_ready(video, out_root)
+            if back:
+                self.update_ui(status=self.T("ฮาร์ดดิสก์กลับมาแล้ว (คลิป {0}/{1}: {2}; {3}) · กด RESUME เพื่อทำคลิปนี้ใหม่").format(i, n, name, where))
+            else:
+                self.update_ui(status=self.T("ฮาร์ดดิสก์หลุด — หยุดชั่วคราว (คลิป {0}/{1}: {2}; {3}; รอมาแล้ว {4} วินาที) · ต่อดิสก์ใหม่แล้วกด RESUME · กด STOP เพื่อเลิก").format(
+                    i, n, name, where, waited))
+            if self.pause_event.is_set():                           # RESUME pressed
+                if back:
+                    ok = True
+                    break
+                self.pause_event.clear()                            # not back yet: stay paused
+                self.post_ui(lambda: self.pause_button.config(text="▶ RESUME"))
             self.stop_event.wait(poll)
-        return False
+        self.pause_event.set()
+        self.post_ui(lambda: self.pause_button.config(text="Ⅱ PAUSE"))
+        return ok
 
     def _batch_worker(self, base_settings, clips, out_root, skip_done):
         bt = _tools_module("batch_run")
@@ -12311,36 +12322,38 @@ class Run1App:
                 t_wait = time.time()
                 self.post_ui(lambda: self.pause_button.config(text="▶ RESUME"))
                 while not self.stop_event.is_set():
-                    self.update_ui(status=self.T("ฮาร์ดดิสก์หลุด — หยุดชั่วคราวที่เฟรม {0}/{1} · ทำต่ออัตโนมัติเมื่อกลับมา (หรือกด RESUME) · รอมาแล้ว {2} วินาที").format(
-                        at, total_frames, int(time.time() - t_wait)))
-                    if path_reachable(video_path) and path_reachable(output_dir):
-                        self.stop_event.wait(2.0)                      # (it must stay there for a moment)
-                        if path_reachable(video_path):
-                            new_cap = None
-                            try:
+                    back = path_reachable(video_path) and path_reachable(output_dir)
+                    if back:
+                        self.update_ui(status=self.T("ฮาร์ดดิสก์กลับมาแล้ว — หยุดอยู่ที่เฟรม {0}/{1} · กด RESUME เพื่อทำต่อ").format(at, total_frames))
+                    else:
+                        self.update_ui(status=self.T("ฮาร์ดดิสก์หลุด — หยุดชั่วคราวที่เฟรม {0}/{1} · ต่อดิสก์ใหม่แล้วกด RESUME · รอมาแล้ว {2} วินาที").format(
+                            at, total_frames, int(time.time() - t_wait)))
+                    if self.pause_event.is_set():                       # the user pressed RESUME
+                        new_cap = None
+                        try:
+                            if back:
                                 new_cap = open_video_capture(video_path, bool(settings.get("hw_decode")))
-                                if new_cap.isOpened():
-                                    new_cap.set(cv2.CAP_PROP_POS_FRAMES, at)
-                                    if int(new_cap.get(cv2.CAP_PROP_POS_FRAMES)) != at:       # seeking not exact in this file: read forward instead
-                                        new_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                                        for _k in range(at):
-                                            if not new_cap.grab():
-                                                break
-                                    old_prepare = reader.prepare
-                                    reader.close()
-                                    release_quietly(cap)
-                                    cap = new_cap
-                                    reader = BackgroundFrameReader(cap, lambda n: not (frame_skip > 1 and not render_needed and (n % frame_skip) != 0), at, last_frame)
-                                    reader.prepare = old_prepare
-                                    self.pause_event.set()
-                                    self.post_ui(lambda: self.pause_button.config(text="Ⅱ PAUSE"))
-                                    self.update_ui(status="Processing...")
-                                    return True
-                            except Exception:
-                                release_quietly(new_cap)
-                    if self.pause_event.is_set():                       # RESUME pressed while the disk is still away: keep waiting
-                        self.pause_event.clear()
-                    self.stop_event.wait(2.0)
+                            if new_cap is not None and new_cap.isOpened():
+                                new_cap.set(cv2.CAP_PROP_POS_FRAMES, at)
+                                if int(new_cap.get(cv2.CAP_PROP_POS_FRAMES)) != at:       # seeking not exact in this file: read forward instead
+                                    new_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                                    for _k in range(at):
+                                        if not new_cap.grab():
+                                            break
+                                old_prepare = reader.prepare
+                                reader.close()
+                                release_quietly(cap)
+                                cap = new_cap
+                                reader = BackgroundFrameReader(cap, lambda n: not (frame_skip > 1 and not render_needed and (n % frame_skip) != 0), at, last_frame)
+                                reader.prepare = old_prepare
+                                self.post_ui(lambda: self.pause_button.config(text="Ⅱ PAUSE"))
+                                self.update_ui(status="Processing...")
+                                return True
+                        except Exception:
+                            release_quietly(new_cap)
+                        self.pause_event.clear()                        # the disk is not back yet: stay paused
+                        self.post_ui(lambda: self.pause_button.config(text="▶ RESUME"))
+                    self.stop_event.wait(1.0)
                 self.pause_event.set()
                 self.post_ui(lambda: self.pause_button.config(text="Ⅱ PAUSE"))
                 return False
