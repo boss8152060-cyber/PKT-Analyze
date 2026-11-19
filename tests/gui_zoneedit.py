@@ -111,7 +111,7 @@ w0.close()
 app.run3_align_var.set(align_json)
 w1 = app.open_align_and_zones()
 root.update()
-check("one button: with an alignment it opens the one window of the site setup, aligned", isinstance(w1, m.SiteStudio) and w1.aligned)
+check("one button: it opens the one window of the site setup (an Align made of free points only has no zone pin: not aligned there)", isinstance(w1, m.SiteStudio) and not w1.aligned)
 w1.close()
 
 ed = app.open_zone_editor()

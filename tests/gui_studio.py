@@ -157,6 +157,23 @@ check("the Align is kept (pairs with their zone-corner labels, scale, drone pict
       and abs(saved["scale"] - 0.05) < 0.001 and saved["drone"]["path"] == drone_file and app.run3_align_enabled_var.get() and saved["edge_lengths"][0]["m"] == 14.0)
 check("the fit text names the kind and the error", "จัดแนว" in st.fit_text() and "7" in st.fit_text())
 
+# ---- the pictures: video and drone are shown, the plane can be switched on
+check("video and drone picture are shown, the plane is hidden at first", st.vpane.canvas.winfo_ismapped() and st.dpane.canvas.winfo_ismapped() and not st.ppane.canvas.winfo_ismapped())
+st.show_vars["plan"].set(True)
+st._apply_layout()
+root.update()
+check("ticking the plane shows it", st.ppane.canvas.winfo_ismapped() and st.ppane.view is not None)
+st.show_vars["video"].set(False)
+st.show_vars["drone"].set(False)
+st.show_vars["plan"].set(False)
+st._apply_layout()
+root.update()
+check("at least one picture stays", st.show_vars["video"].get() and st.vpane.canvas.winfo_ismapped())
+st.show_vars["drone"].set(True)
+st.show_vars["plan"].set(True)
+st._apply_layout()
+root.update()
+
 # ---- a corner dragged in the plane moves on the video only
 nid_p = [n for n in st.nodes if len(st._zones_of(n)) == 1 and "Zone 4" in st._zones_of(n)][0]
 v_before, d_before = list(st.nodes[nid_p]["v"]), list(st.nodes[nid_p]["d"])
@@ -227,8 +244,8 @@ st.undo()
 check("undo brings the corner back", len(st.zones["Zone 2"]) == 4)
 st.cur_zone = "Zone 4"
 st.clear_current()
-check("clearing a zone empties it; a corner only it used that is pinned stays as a pin of its own", st.zones["Zone 4"] == [] and len(st.nodes) == 7
-      and sum(1 for n in st.nodes if not st._zones_of(n)) == 1, str(len(st.nodes)))
+check("clearing a zone empties it and takes the corner only it used away with its pin", st.zones["Zone 4"] == [] and len(st.nodes) == 6
+      and all(st._zones_of(n) for n in st.nodes), str(len(st.nodes)))
 st.undo()
 check("undo draws it back", len(st.zones["Zone 4"]) == 3 and len(st.nodes) == 7)
 
@@ -345,6 +362,66 @@ for w in st.top.winfo_children():
 check("a key of the window (Delete) works when no box has the focus", st._on_key(lambda: "ok") == "ok")
 
 st.close()
+
+# ---- a corner that is not pinned yet is shown on the drone picture where the Align puts it, and a drag pins it
+app.zones = {z: [] for z in m.ZONE_NAMES}
+app.run3_align_var.set("")
+app.run3_align_enabled_var.set(False)
+st = app.open_site_studio(ask_drone=False)
+root.update()
+st.load_drone(drone_file)
+for name in ("Zone 2", "Zone 3", "Zone 4"):
+    draw_zone(name, G[name])
+check("nothing is aligned: an unpinned corner has no place on the drone picture", all(st._pos_in("drone", n, ghost=True) is None for n in st.nodes))
+for nid in sorted(st.nodes)[:5]:
+    st.sel = nid
+    st._click_drone(*drone_of_node(nid))
+check("5 pins: the Align fits", st.aligned and st._pin_counts() == {"todo": 2, "done": 5, "skip": 0})
+rest = [n for n in st.nodes if st.nodes[n]["d"] is None]
+errs = [float(np.hypot(*(np.array(st._pos_in("drone", n, ghost=True)) - drone_of_node(n)))) for n in rest]
+check("the two corners that are not pinned are where they are on the drone picture (the zones are complete there)", max(errs) < 1.0 and all(st._pos_in("drone", n) is None for n in rest),
+      str([round(e, 2) for e in errs]))
+g = rest[0]
+gx, gy = st._pos_in("drone", g, ghost=True)
+ex, ey = st.dpane.to_view(gx, gy)
+check("a press on such a corner grabs it", st.on_press("drone")(gx, gy, ex, ey) is True)
+st.on_drag("drone")(gx + 40, gy + 25)
+st.on_release()
+check("dragging it pins it where it was dropped", st.nodes[g]["d"] == [gx + 40, gy + 25] and st._pin_state(g) == "done")
+img = np.zeros((500, 700, 3), np.uint8)
+st._draw(img, "drone", st.dpane)
+check("the drone picture draws the zones with pinned and not pinned corners", int((img.sum(axis=2) > 0).sum()) > 100)
+st.close()
+
+# ---- an Align saved before the zones were moved, with extra points that are not zone corners
+app.zones = {z: [] for z in m.ZONE_NAMES}
+for name, g_ in G.items():
+    app.zones[name] = [tuple(float(v) for v in q) for q in video_px(g_)]
+app.run3_align_var.set("")
+dlg = app.open_align()
+root.update()
+dlg.load_drone(drone_file)
+dlg.load_zone_pins()
+dlg.set_kind("projective")
+while dlg.pin_index is not None:
+    pin = dlg.pins[dlg.pin_index]
+    dlg.place_pin(*alld[int(np.argmin(np.hypot(*(allv - np.array(pin["p"])).T)))])
+extra_g = (10.0, 8.0)
+dlg.add_pair(tuple(video_px([extra_g])[0]), tuple(drone_px([extra_g])[0]))              # a point that is not a zone corner (the earlier window allowed them)
+dlg.set_scale_from_points((0, 0), (100, 0), 5.0)
+check("an Align with 7 zone pins and 1 extra point is saved", dlg.apply() is True and len(json.loads(app.run3_align_var.get())["pairs"]) == 8)
+moved_ground = (4.6, 5.4)
+app.zones["Zone 2"][0] = tuple(video_px([moved_ground])[0])                              # a corner of Zone 2 was moved afterwards (on the ground)
+st = app.open_site_studio(ask_drone=False)
+root.update()
+check("the extra point is not kept: only the zone corners are pins", len(st.nodes) == 7 and all(st._zones_of(n) for n in st.nodes) and st._pin_counts()["done"] == 7)
+moved = st.zones["Zone 2"][0]
+check("the corner that was moved afterwards is where it is on the drone picture (same transformation, new place)",
+      float(np.hypot(*(np.array(st.nodes[moved]["d"]) - drone_px([moved_ground])[0]))) < 1.0, str(st.nodes[moved]["d"]))
+rep_ = st._fit_report()
+check("the Align fits (a few drone pixels at most, not metres)", st.aligned and rep_ is not None and rep_["rms"] < 3.0, str(rep_["rms"] if rep_ else None))
+st.close()
+
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
 sys.exit(1 if failures else 0)

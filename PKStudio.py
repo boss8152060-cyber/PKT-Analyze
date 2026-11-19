@@ -3809,14 +3809,27 @@ class SiteStudio:
         for n in LINE_NAMES:
             pts = self.app.lines.get(n) or []
             self.lines[n] = [[float(x), float(y)] for x, y in pts] if len(pts) == 2 else []
+        old_cfg = None                                             # the Align as it was saved: it tells where a corner that was moved afterwards is on the drone picture
+        if align.get("pairs"):
+            try:
+                data = dict(align)
+                data["scale"] = float(align.get("scale") or 0.0) or 1.0
+                c = align_build(data)
+                old_cfg = c if "error" not in c else None
+            except (KeyError, TypeError, ValueError, IndexError):
+                old_cfg = None
         for q in align.get("pairs", []):
             try:
                 lab = q.get("l")
                 nid = label_to_nid.get(lab) if lab else None
-                if nid is not None and self.nodes[nid]["d"] is None:
+                if nid is None or self.nodes[nid]["d"] is not None:
+                    continue                                       # (a point that is not a zone corner is not kept: the zone corners are the pins)
+                v = self.nodes[nid]["v"]
+                if old_cfg is not None and math.hypot(float(q["s"][0]) - v[0], float(q["s"][1]) - v[1]) > 2.0:
+                    d = apply_transform(old_cfg["model"], np.array([v], dtype=float))[0]     # the corner was moved on the ground after the Align: same transformation, new place
+                    self.nodes[nid]["d"] = [float(d[0]), float(d[1])]
+                else:
                     self.nodes[nid]["d"] = [float(q["d"][0]), float(q["d"][1])]
-                else:                                              # a point that was not a zone corner: kept as a pin of its own
-                    self._new_node(q["s"][0], q["s"][1], d=q["d"])
             except (KeyError, TypeError, ValueError, IndexError):
                 continue
         for lab in align.get("skipped", []):
@@ -4168,8 +4181,8 @@ class SiteStudio:
         return pane.view[0] if pane.view else 1.0
 
     def _prune(self):
-        """Corners that no zone uses and that have no place on the drone picture go (what a cancelled zone left behind)."""
-        for nid in [i for i, n in self.nodes.items() if not self._zones_of(i) and i not in self.draft and n["d"] is None]:
+        """Corners that no zone uses go (what a cancelled or cleared zone left behind), with their pins."""
+        for nid in [i for i, n in self.nodes.items() if not self._zones_of(i) and i not in self.draft]:
             del self.nodes[nid]
         if self.sel not in self.nodes:
             self.sel = self._next_pin(None)
@@ -4417,12 +4430,15 @@ class SiteStudio:
     def _pane(self, name):
         return {"video": self.vpane, "drone": self.dpane, "plan": self.ppane}[name]
 
-    def _pos_in(self, name, nid):
+    def _pos_in(self, name, nid, ghost=False):
+        """Where the corner is in that picture. On the drone picture a corner that is not pinned yet is where the Align puts it (`ghost`), once the Align fits."""
         n = self.nodes[nid]
         if name == "video":
             return n["v"]
         if name == "drone":
-            return n["d"]
+            if n["d"] is not None:
+                return n["d"]
+            return list(self.drone_of(np.array([n["v"]]))[0]) if (ghost and self.aligned) else None
         if not self.aligned:
             return None
         return self.plan_to_px(self.plan_of(np.array([n["v"]])))[0]
@@ -4431,7 +4447,7 @@ class SiteStudio:
         pane = self._pane(name)
         best, best_d = None, float(self.HIT_PX)
         for nid in self.nodes:
-            p = self._pos_in(name, nid)
+            p = self._pos_in(name, nid, ghost=True)
             if p is None:
                 continue
             vx, vy = pane.to_view(p[0], p[1])
@@ -4817,7 +4833,7 @@ class SiteStudio:
         shown = [z for z in ZONE_NAMES if len(self.zones[z]) >= 3]
         if name == "plan" and not self.aligned:
             return
-        pos = {nid: self._pos_in(name, nid) for nid in self.nodes}
+        pos = {nid: self._pos_in(name, nid, ghost=True) for nid in self.nodes}
         if name == "video" or name == "drone" or name == "plan":
             over = out.copy()
             polys = {}
@@ -4883,8 +4899,11 @@ class SiteStudio:
             col = self._zone_color(zs[0]) if zs else (0, 140, 255)
             st = self._pin_state(nid)
             if name == "drone":
-                cv2.circle(out, q, 6, (60, 200, 60), -1, cv2.LINE_AA)
-                cv2.circle(out, q, 6, (0, 0, 0), 1, cv2.LINE_AA)
+                if n["d"] is None:                                 # not pinned: where the Align puts the corner (drag it to pin it)
+                    cv2.circle(out, q, 6, (0, 220, 255), 2, cv2.LINE_AA)
+                else:
+                    cv2.circle(out, q, 6, (60, 200, 60), -1, cv2.LINE_AA)
+                    cv2.circle(out, q, 6, (0, 0, 0), 1, cv2.LINE_AA)
             else:
                 cv2.rectangle(out, (q[0] - 5, q[1] - 5), (q[0] + 5, q[1] + 5), (255, 255, 255) if len(zs) > 1 else col, -1)
                 cv2.rectangle(out, (q[0] - 5, q[1] - 5), (q[0] + 5, q[1] + 5), (0, 0, 0), 1)
@@ -4963,8 +4982,9 @@ class SiteStudio:
     def refresh_all(self):
         if not getattr(self, "fit_var", None) or not getattr(self, "ppane", None) or not self.top.winfo_exists():
             return
-        for pane in (self.vpane, self.dpane, self.ppane):
-            pane.refresh()
+        for key, pane in (("video", self.vpane), ("drone", self.dpane), ("plan", self.ppane)):
+            if self.show_vars[key].get():
+                pane.refresh()
         self._refresh_lists()
         self.refresh_edges()
         self.fit_var.set(self.fit_text())
@@ -4973,6 +4993,7 @@ class SiteStudio:
     def _build(self):
         top, T = self.top, self.T
         self.stream_status_vars = {}
+        self.show_vars = {"video": tk.BooleanVar(value=True), "drone": tk.BooleanVar(value=True), "plan": tk.BooleanVar(value=False)}
         self.pin_var = tk.StringVar(value="")
         self.fit_var = tk.StringVar(value="")
         self.edge_msg_var = tk.StringVar(value="")
@@ -4993,6 +5014,9 @@ class SiteStudio:
         ttk.Label(bar1, text=T("เฟรม (ถ้าเป็นวิดีโอ)")).pack(side="left", padx=(10, 2))
         ttk.Entry(bar1, textvariable=self.dframe_var, width=6).pack(side="left")
         ttk.Button(bar1, text=T("โหลด"), command=lambda: self.load_drone(self.drone_path, self.dframe_var.get() or None)).pack(side="left", padx=4)
+        ttk.Label(bar1, text=T("แสดง:")).pack(side="left", padx=(14, 2))
+        for key, text in (("video", "วิดีโอ"), ("drone", "โดรน"), ("plan", "ผัง X–Y")):
+            ttk.Checkbutton(bar1, text=T(text), variable=self.show_vars[key], command=self._apply_layout).pack(side="left", padx=2)
         main = ttk.Frame(top)
         main.pack(fill="both", expand=True, padx=8, pady=2)
         side = ttk.Frame(main, width=330)
@@ -5086,11 +5110,12 @@ class SiteStudio:
         # ---- the three pictures
         panes = ttk.Frame(main)
         panes.pack(side="left", fill="both", expand=True)
-        for c_ in range(3):
-            panes.columnconfigure(c_, weight=1)
+        self.panes_frame = panes
         panes.rowconfigure(1, weight=1)
-        for c_, t_ in enumerate((T("วิดีโอข้างทาง"), T("ภาพโดรน"), T("ผัง X–Y (เมตร)"))):
-            ttk.Label(panes, text=t_).grid(row=0, column=c_, sticky="w")
+        self.pane_labels = {}
+        for c_, (key, t_) in enumerate((("video", T("วิดีโอข้างทาง")), ("drone", T("ภาพโดรน")), ("plan", T("ผัง X–Y (เมตร)")))):
+            self.pane_labels[key] = ttk.Label(panes, text=t_)
+            self.pane_labels[key].grid(row=0, column=c_, sticky="w")
 
         def make(name):
             return _ZoomPane(panes, 420, 520, self.on_click(name), lambda o, p, n=name: self._draw(o, n, p),
@@ -5098,6 +5123,7 @@ class SiteStudio:
         self.vpane, self.dpane, self.ppane = make("video"), make("drone"), make("plan")
         for c_, pane in enumerate((self.vpane, self.dpane, self.ppane)):
             pane.canvas.grid(row=1, column=c_, sticky="nsew", padx=2)
+        self._apply_layout()
         foot = ttk.Frame(top)
         foot.pack(fill="x", padx=8, pady=(2, 6))
         ttk.Button(foot, text=T("ปิด"), command=self.close).pack(side="right")
@@ -5106,6 +5132,26 @@ class SiteStudio:
         ttk.Button(foot, text=T("↶ ย้อน"), command=self.undo).pack(side="left")
         ttk.Button(foot, text=T("↷ ทำซ้ำ"), command=self.redo).pack(side="left", padx=(4, 10))
         tk.Label(foot, textvariable=self.msg_var, anchor="w", foreground="#a00", wraplength=900, justify="left").pack(side="left", fill="x", expand=True)
+
+    def _apply_layout(self):
+        """Show the pictures that are ticked (video, drone picture, plane): they share the width; each one zooms with the wheel and pans by dragging."""
+        shown = [k for k in ("video", "drone", "plan") if self.show_vars[k].get()]
+        if not shown:                                              # (at least one picture stays)
+            self.show_vars["video"].set(True)
+            shown = ["video"]
+        for c_, key in enumerate(("video", "drone", "plan")):
+            pane = {"video": self.vpane, "drone": self.dpane, "plan": self.ppane}[key]
+            on = key in shown
+            self.panes_frame.columnconfigure(c_, weight=1 if on else 0, uniform="pane" if on else "")
+            if on:
+                self.pane_labels[key].grid()
+                pane.canvas.grid()
+            else:
+                self.pane_labels[key].grid_remove()
+                pane.canvas.grid_remove()
+        self.panes_frame.update_idletasks()
+        for key in shown:
+            {"video": self.vpane, "drone": self.dpane, "plan": self.ppane}[key].refresh()
 
     def _on_tab(self, idx):
         self.tab = "line" if idx == 1 else "zone"
