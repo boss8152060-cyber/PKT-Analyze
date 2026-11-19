@@ -174,6 +174,18 @@ st.show_vars["plan"].set(True)
 st._apply_layout()
 root.update()
 
+# ---- the real lengths are data, not history: undo does not touch them; they are kept even without a pin
+st.set_real_length(r14["key"], "13")
+nid_u = sorted(st.nodes)[0]
+vu = list(st.nodes[nid_u]["v"])
+ex, ey = st.vpane.to_view(*vu)
+st.on_press("video")(vu[0], vu[1], ex, ey)
+st.on_drag("video")(vu[0] + 30, vu[1] + 20)
+st.on_release()
+st.undo()
+check("undo does not take the real length away", st.real.get(r14["key"]) == 13.0, str(st.real))
+st.set_real_length(r14["key"], "14")
+
 # ---- a corner dragged in the plane moves on the video only
 nid_p = [n for n in st.nodes if len(st._zones_of(n)) == 1 and "Zone 4" in st._zones_of(n)][0]
 v_before, d_before = list(st.nodes[nid_p]["v"]), list(st.nodes[nid_p]["d"])
@@ -372,11 +384,21 @@ root.update()
 st.load_drone(drone_file)
 for name in ("Zone 2", "Zone 3", "Zone 4"):
     draw_zone(name, G[name])
-check("nothing is aligned: an unpinned corner has no place on the drone picture", all(st._pos_in("drone", n, ghost=True) is None for n in st.nodes))
-for nid in sorted(st.nodes)[:5]:
+check("no pin yet: the zones are already on the drone picture, roughly (inside it), and not fitted", not st.aligned and all(
+    st._pos_in("drone", n, ghost=True) is not None and 0 <= st._pos_in("drone", n, ghost=True)[0] <= 1400 and 0 <= st._pos_in("drone", n, ghost=True)[1] <= 560 for n in st.nodes))
+check("... and in the plane too", all(st._pos_in("plan", n) is not None for n in st.nodes) and st.plan_img.shape[0] > 50)
+st.set_kind("lens")                                                       # (6 pins would be needed: with fewer the best that the pins allow is used)
+order5 = sorted(st.nodes)[:5]
+errs_by_n = []
+for k, nid in enumerate(order5, start=1):
     st.sel = nid
     st._click_drone(*drone_of_node(nid))
-check("5 pins: the Align fits", st.aligned and st._pin_counts() == {"todo": 2, "done": 5, "skip": 0})
+    rest_ = [n for n in st.nodes if st.nodes[n]["d"] is None]
+    errs_by_n.append(max(float(np.hypot(*(np.array(st._pos_in("drone", n, ghost=True)) - drone_of_node(n)))) for n in rest_) if rest_ else 0.0)
+check("with every pin the corners that are not pinned come closer to where they are on the drone picture", errs_by_n[3] < errs_by_n[0] and errs_by_n[3] < 2.0, str([round(e, 1) for e in errs_by_n]))
+check("the chosen kind (lens) needs 6: 5 pins show the rough picture, not the fitted one", not st.aligned and st._pin_counts()["done"] == 5 and "ค่าประมาณ" in st.fit_text())
+st.set_kind("projective")
+check("5 pins: the Align fits (projective needs 4)", st.aligned and st._pin_counts() == {"todo": 2, "done": 5, "skip": 0})
 rest = [n for n in st.nodes if st.nodes[n]["d"] is None]
 errs = [float(np.hypot(*(np.array(st._pos_in("drone", n, ghost=True)) - drone_of_node(n)))) for n in rest]
 check("the two corners that are not pinned are where they are on the drone picture (the zones are complete there)", max(errs) < 1.0 and all(st._pos_in("drone", n) is None for n in rest),
@@ -420,6 +442,24 @@ check("the corner that was moved afterwards is where it is on the drone picture 
       float(np.hypot(*(np.array(st.nodes[moved]["d"]) - drone_px([moved_ground])[0]))) < 1.0, str(st.nodes[moved]["d"]))
 rep_ = st._fit_report()
 check("the Align fits (a few drone pixels at most, not metres)", st.aligned and rep_ is not None and rep_["rms"] < 3.0, str(rep_["rms"] if rep_ else None))
+st.close()
+
+# ---- a real length typed before the first pin is kept and comes back
+app.zones = {z: [] for z in m.ZONE_NAMES}
+app.run3_align_var.set("")
+app.run3_align_enabled_var.set(False)
+st = app.open_site_studio(ask_drone=False)
+root.update()
+draw_zone("Zone 2", G["Zone 2"])
+key0 = st.edge_rows()[0]["key"]
+st.set_real_length(key0, "14")
+check("a real length typed with no pin yet is kept in the project", json.loads(app.run3_align_var.get()).get("edge_lengths") == [{"zone": "Zone 2", "i": 0, "m": 14.0}] and not app.run3_align_enabled_var.get(),
+      app.run3_align_var.get()[:160])
+st.use()
+st.close()
+st = app.open_site_studio(ask_drone=False)
+root.update()
+check("opened again the real length is there although nothing is pinned", list(st.real.values()) == [14.0] and not st.aligned, str(st.real))
 st.close()
 
 root.destroy()

@@ -2077,3 +2077,6 @@ TEMPLATES.update({' — ต้องมีอย่างน้อย {0} หม
 
 # 1.57.1: the pictures of the site window can be switched on and off
 EXACT.update({'ผัง X–Y': 'X-Y plane', 'โดรน': 'Drone'})
+
+# 1.57.2: the zones are shown from the first one on
+TEMPLATES.update({' — ต้องมีอย่างน้อย {0} หมุด (ตำแหน่งที่เห็นบนภาพโดรนเป็นค่าประมาณ แม่นขึ้นทุกครั้งที่วางหมุด)': ' — at least {0} pins are needed (the places shown on the drone picture are rough, and get better with every pin)'})

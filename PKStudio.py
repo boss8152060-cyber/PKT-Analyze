@@ -3723,7 +3723,7 @@ class SiteStudio:
         self._init_streams()
         self.cur_zone = next((z for z in ZONE_NAMES if len(self.zones[z]) < 3), ZONE_NAMES[0])
         self.tab = "zone"
-        self.cfg = self._fit_cfg() or self._provisional_cfg()
+        self.cfg = self._fit_cfg()
         self.aligned = self._is_fitted
         self.sel = self._next_pin(None)
         self.top = tk.Toplevel(app.root)
@@ -3845,10 +3845,10 @@ class SiteStudio:
                 continue
 
     def _snapshot(self):
-        return copy.deepcopy((self.nodes, self.zones, self.lines, self.real, self._stream_state(), self._next))
+        return copy.deepcopy((self.nodes, self.zones, self.lines, self._stream_state(), self._next))
 
     def _restore(self, snap):
-        self.nodes, self.zones, self.lines, self.real, streams, self._next = copy.deepcopy(snap)
+        self.nodes, self.zones, self.lines, streams, self._next = copy.deepcopy(snap)
         self._set_stream_state(streams)
         self.draft, self.line_draft, self.drag = [], [], None
         if self.sel not in self.nodes:
@@ -3956,15 +3956,46 @@ class SiteStudio:
         h, w = self.video_img.shape[:2]
         return align_build({"pairs": [{"s": [0, 0], "d": [0, 0]}, {"s": [w, 0], "d": [w, 0]}], "kind": "helmert", "scale": 1.0, "video_size": [w, h]})
 
+    def _base_map(self):
+        """The first guess of where the video is on the drone picture, with no pin at all: the corners of the zones spread over the middle of the drone picture."""
+        h, w = self.video_img.shape[:2]
+        pts = np.array([n["v"] for n in self.nodes.values()], dtype=float) if self.nodes else np.array([[0.0, 0.0], [float(w), float(h)]])
+        lo, hi = pts.min(axis=0), pts.max(axis=0)
+        bw, bh = max(float(hi[0] - lo[0]), 1.0), max(float(hi[1] - lo[1]), 1.0)
+        dh, dw = self.drone_img.shape[:2] if self.drone_img is not None else (h, w)
+        sc = min(0.6 * dw / bw, 0.6 * dh / bh)
+        return sc, np.array([dw / 2.0, dh / 2.0]) - sc * (lo + hi) / 2.0, lo, hi
+
     def _fit_cfg(self):
-        """The Align of the pinned corners (None while there are too few)."""
+        """The Align of the pinned corners. With enough pins it is the kind that was chosen (`self._is_fitted` True); with fewer pins it is the best that the pins allow - a
+        similarity from 2, an affine from 3, a projective from 4; with 1 pin the first guess moved onto it; with none the first guess alone - so the zones are always shown
+        on the drone picture (roughly at first) and the picture gets better with every pin."""
+        pairs = self._pairs()
+        n = len(pairs)
+        h, w = self.video_img.shape[:2]
         self._is_fitted = False
-        if len(self._pairs()) < ALIGN_KINDS[self.kind][0]:
-            return None
-        cfg = align_build(self._data_dict(self.scale if self.scale > 0 else 1.0, with_edges=False))
+        sc_cfg = self.scale if self.scale > 0 else 1.0
+        if n >= ALIGN_KINDS[self.kind][0]:
+            cfg = align_build(self._data_dict(sc_cfg, with_edges=False))
+            if "error" not in cfg:
+                self._is_fitted = True
+                return cfg
+        kind = next((k for k in ("projective", "affine", "helmert") if ALIGN_KINDS[k][0] <= n and k != self.kind), None) if n >= 2 else "helmert"
+        if kind == "helmert" and n < 2:                           # one pin or none: the first guess (moved onto the pin)
+            sc, t, lo, hi = self._base_map()
+            if n == 1:
+                v0, d0 = np.array(pairs[0][1], dtype=float), np.array(pairs[0][2], dtype=float)
+                v1 = v0 + np.array([max(float(hi[0] - lo[0]), 50.0) * 0.5, 0.0])
+                src, dst = [v0, v1], [d0, d0 + sc * (v1 - v0)]
+            else:
+                src = [lo, hi if float(np.hypot(*(hi - lo))) > 1.0 else lo + 100.0]
+                dst = [sc * q + t for q in src]
+            pr = [{"s": list(map(float, a)), "d": list(map(float, b))} for a, b in zip(src, dst)]
+        else:
+            pr = [{"s": list(v), "d": list(d)} for _, v, d in pairs]
+        cfg = align_build({"pairs": pr, "kind": kind or "helmert", "scale": sc_cfg, "video_size": [w, h], "origin": pr[0]["d"], "rot_deg": self.rot_deg})
         if "error" in cfg:
-            return None
-        self._is_fitted = True
+            cfg = self._provisional_cfg()
         return cfg
 
     def _fit_report(self):
@@ -4005,10 +4036,9 @@ class SiteStudio:
         return pairs[int(np.argmax(vals))][0]
 
     def _refit(self, store=True):
-        """The Align again after a pin, the kind or the scale changed: the plane and the drone views follow."""
-        cfg = self._fit_cfg()
-        self.aligned = cfg is not None
-        self.cfg = cfg if cfg is not None else self._provisional_cfg()
+        """The Align again after a pin, the kind or the scale changed: the drone picture and the plane follow."""
+        self.cfg = self._fit_cfg()
+        self.aligned = self._is_fitted
         self._setup_plan()
         if getattr(self, "ppane", None):
             self.ppane.set_image(self.plan_img)
@@ -4018,9 +4048,10 @@ class SiteStudio:
         return self.aligned
 
     def _store_align(self):
-        """Keep the Align in the project (the format of the earlier Align window): the analysis uses it once it fits and the scale is set."""
+        """Keep the Align in the project (the format of the earlier Align window): the analysis uses it once it fits and the scale is set. The real lengths of the edges are
+        kept even before the first pin."""
         pairs = self._pairs()
-        if not pairs:
+        if not pairs and not self.real:
             return
         data = self._data_dict()
         rep = self._fit_report() if len(pairs) >= ALIGN_KINDS[self.kind][0] else None
@@ -4045,13 +4076,14 @@ class SiteStudio:
         return self.plan_of(np.array([self.nodes[i]["v"] for i in ids])) if ids else np.zeros((0, 2))
 
     def _setup_plan(self):
-        if not self.aligned or not any(len(self.zones[z]) >= 3 for z in ZONE_NAMES):
+        if not any(len(self.zones[z]) >= 3 for z in ZONE_NAMES):
             img = np.full((420, 600, 3), 38, np.uint8)
-            cv2.putText(img, "not aligned yet", (170, 215), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2, cv2.LINE_AA)
+            cv2.putText(img, "no zone yet", (200, 215), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2, cv2.LINE_AA)
             self.scale_px, self.pxmin, self.plan_img = 40.0, np.array([0.0, 0.0]), img
             return
         allp = self._all_plan()
-        lo, hi = allp.min(axis=0) - 6.0, allp.max(axis=0) + 6.0
+        margin = max(6.0, 0.08 * float(np.max(allp.max(axis=0) - allp.min(axis=0))))          # (before the scale is set the plane is in drone pixels: the margin grows with it)
+        lo, hi = allp.min(axis=0) - margin, allp.max(axis=0) + margin
         ext = float(max(hi[0] - lo[0], hi[1] - lo[1], 1.0))
         self.scale_px = min(40.0, 1600.0 / ext)                    # (before the scale is set the plane is in drone pixels: far larger than metres)
         step = 1 if ext <= 120 else (10 if ext <= 1200 else 100)
@@ -4438,9 +4470,7 @@ class SiteStudio:
         if name == "drone":
             if n["d"] is not None:
                 return n["d"]
-            return list(self.drone_of(np.array([n["v"]]))[0]) if (ghost and self.aligned) else None
-        if not self.aligned:
-            return None
+            return list(self.drone_of(np.array([n["v"]]))[0]) if ghost else None
         return self.plan_to_px(self.plan_of(np.array([n["v"]])))[0]
 
     def _hit_node(self, name, ex, ey):
@@ -4480,7 +4510,7 @@ class SiteStudio:
                 self.stream_var.set(hit[2])
                 self.drag = {"kind": "line", "line": hit[0], "end": hit[1], "moved": False, "sx": ex, "sy": ey, "undo": False}
                 return True
-            if name == "plan" and not self.aligned:
+            if name == "plan" and not self.aligned:                # (a move on the ground needs the Align that was chosen to fit)
                 return False
             nid = self._hit_node(name, ex, ey)
             if nid is None:
@@ -4807,7 +4837,7 @@ class SiteStudio:
             messagebox.showerror(self.T("เปิดไฟล์โซน"), str(exc), parent=self.top)
             return False
         self._push_undo()
-        self.nodes, self.zones, self._next = {}, {z: [] for z in ZONE_NAMES}, 1
+        self.nodes, self.zones, self._next, self.real = {}, {z: [] for z in ZONE_NAMES}, 1, {}      # (new corner numbers: the real lengths of the old ones go)
         self.lines = {n: [] for n in LINE_NAMES}
         self._load_from_app({})
         self.draft, self.line_draft = [], []
@@ -4831,8 +4861,6 @@ class SiteStudio:
 
     def _draw(self, out, name, pane):
         shown = [z for z in ZONE_NAMES if len(self.zones[z]) >= 3]
-        if name == "plan" and not self.aligned:
-            return
         pos = {nid: self._pos_in(name, nid, ghost=True) for nid in self.nodes}
         if name == "video" or name == "drone" or name == "plan":
             over = out.copy()
@@ -4922,7 +4950,7 @@ class SiteStudio:
         need = ALIGN_KINDS[self.kind][0]
         head = self.T("จัดแนว: {0} · {1} หมุด").format(ALIGN_KINDS[self.kind][1], len(pairs))
         if len(pairs) < need:
-            return head + self.T(" — ต้องมีอย่างน้อย {0} หมุด").format(need)
+            return head + self.T(" — ต้องมีอย่างน้อย {0} หมุด (ตำแหน่งที่เห็นบนภาพโดรนเป็นค่าประมาณ แม่นขึ้นทุกครั้งที่วางหมุด)").format(need)
         rep = self._fit_report()
         if rep is None or "error" in rep:
             return head + " — " + str((rep or {}).get("error", ""))
