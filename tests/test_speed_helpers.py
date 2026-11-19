@@ -202,6 +202,16 @@ class SpeedPerZone(unittest.TestCase):
         keep = NS["speed_zone_summary"](self._rows(1, "Zone 1", 0.0, speeds), stop_kmh=0)[0]    # 0 = keep every frame
         self.assertEqual(keep["Moving_Frames"], 6)
 
+    def test_eta_counts_only_the_frames_that_are_detected(self):
+        eta = NS["eta_seconds"]
+        self.assertAlmostEqual(eta(90007, 21020, 29.28, 1), (90007 - 21020) / 29.28)           # every frame: frames left / frames per second
+        self.assertAlmostEqual(eta(90007, 21020, 29.28, 2), (90007 - 21020) / 2 / 29.28)       # every 2nd frame: half of it (was shown twice as long)
+        self.assertAlmostEqual(eta(100, 0, 10, 5), 2.0)
+        self.assertEqual(eta(100, 100, 10, 2), 0.0)
+        self.assertEqual(eta(100, 120, 10, 2), 0.0)                                            # past the end: never negative
+        self.assertEqual(eta(100, 10, 0, 2), 0.0)                                              # no speed yet
+        self.assertAlmostEqual(eta(100, 0, 10, 0), 10.0)                                       # a skip below 1 counts as 1
+
     def test_nothing_in_nothing_out(self):
         self.assertEqual(NS["speed_zone_summary"]([]), [])
 

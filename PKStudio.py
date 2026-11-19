@@ -2251,6 +2251,17 @@ def topview_px_setting(text, default=1280):
     return v if v > 0 else int(default)
 
 
+def eta_seconds(total_frames, frame_index, processing_fps, frame_skip=1):
+    """Seconds left of a clip. frame_index / total_frames count the frames of the video; processing_fps counts the frames that were detected per second,
+    and with Frame Skip n only every n-th frame is detected, so the frames left are divided by n (else the time shown is n times too long)."""
+    try:
+        if processing_fps <= 0:
+            return 0.0
+        return max(0.0, (total_frames - frame_index) / max(1, int(frame_skip)) / processing_fps)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 SPEED_ZONE_FIELDS = ["Vehicle_ID", "Vehicle_Class", "Movement", "Zone_Path", "Zone_Order", "Zone", "Entry_Time_s", "Exit_Time_s",
                      "Time_In_Zone_s", "Frames", "Mean_Speed_kmh", "Median_Speed_kmh", "P85_Speed_kmh", "Min_Speed_kmh", "Max_Speed_kmh",
                      "Entry_Speed_kmh", "Exit_Speed_kmh", "Moving_Frames", "Stopped_Frames", "Stopped_Time_s", "Frames_Above_Max", "QC_Flag"]
@@ -5243,9 +5254,9 @@ class Run1App:
         info.grid(row=2, column=0, sticky="w")
         ttk.Label(info, textvariable=self.progress_var).pack(side="left", padx=(0, 12))
         ttk.Label(info, textvariable=self.time_var).pack(side="left", padx=(0, 12))
-        ttk.Label(info, textvariable=self.hardware_var, foreground="#666666").pack(side="left")
         self.batch_win = None
-        ttk.Button(info, text="ดูความคืบหน้าทีละคลิป", command=self.show_batch_progress).pack(side="left", padx=(14, 0))
+        ttk.Button(info, text="ดูความคืบหน้าทีละคลิป", command=self.show_batch_progress).pack(side="left", padx=(0, 12))   # before the long hardware text: at its end it was cut off by the buttons on the right
+        ttk.Label(info, textvariable=self.hardware_var, foreground="#666666").pack(side="left")
         self.pause_button = ttk.Button(bottom, text="Ⅱ PAUSE", command=self.toggle_pause, state="disabled")
         self.pause_button.grid(row=1, column=1, rowspan=2, padx=5, ipadx=10, ipady=6)
         self.start_button = ttk.Button(bottom, text="▶ เริ่มวิเคราะห์", command=self.start_analysis)
@@ -10172,26 +10183,18 @@ class Run1App:
 
                 if processing_fps > 0:
 
-                    remaining_frames = (
-                        total_frames
-                        - frame_index
-                    )
-
-                    eta_seconds = (
-                        remaining_frames
-                        / processing_fps
-                    )
+                    eta_seconds_left = eta_seconds(total_frames, frame_index, processing_fps, frame_skip)
 
                 else:
 
-                    eta_seconds = 0
+                    eta_seconds_left = 0
 
                 elapsed_text = self.format_time(
                     elapsed
                 )
 
                 eta_text = self.format_time(
-                    eta_seconds
+                    eta_seconds_left
                 )
 
                 info_lines = [
