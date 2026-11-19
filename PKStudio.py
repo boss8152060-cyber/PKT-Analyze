@@ -2251,6 +2251,26 @@ def topview_px_setting(text, default=1280):
     return v if v > 0 else int(default)
 
 
+def edge_scale_factor(pairs):
+    """pairs = [(measured_m, real_m)] of zone edges whose real length the user knows. The factor f that the metres of the Align must be multiplied by so that the
+    measured lengths fit the real ones best (least squares through the origin: f = sum(real * measured) / sum(measured^2)); None when there is nothing to fit."""
+    rows = [(float(m), float(r)) for m, r in pairs if m is not None and r is not None and float(m) > 0 and float(r) > 0]
+    if not rows:
+        return None
+    return sum(m * r for m, r in rows) / sum(m * m for m, _ in rows)
+
+
+def edge_length_errors(pairs, factor=1.0):
+    """[(measured * factor - real) / real] in percent for each (measured_m, real_m) with a known real length (None where the real length is unknown)."""
+    out = []
+    for m, r in pairs:
+        if m is None or r is None or not float(r) > 0:
+            out.append(None)
+        else:
+            out.append((float(m) * factor - float(r)) / float(r) * 100.0)
+    return out
+
+
 def eta_seconds(total_frames, frame_index, processing_fps, frame_skip=1):
     """Seconds left of a clip. frame_index / total_frames count the frames of the video; processing_fps counts the frames that were detected per second,
     and with Frame Skip n only every n-th frame is detected, so the frames left are divided by n (else the time shown is n times too long)."""
@@ -3091,6 +3111,7 @@ class AlignDialog:
         self.pairs = [{"s": tuple(q["s"]), "d": tuple(q["d"]), **({"l": q["l"]} if q.get("l") else {})} for q in initial.get("pairs", [])]
         self.pins = []                                           # the zone corners as pins: {"l": name, "p": video pixel, "state": todo | done | skip}
         self.skipped_saved = set(initial.get("skipped", []))
+        self.edge_lengths = [dict(e) for e in (initial.get("edge_lengths") or [])]      # real lengths of zone edges (entered in the zone editor): kept when the Align is saved again
         self.pin_index = None                                    # the pin waiting for its place on the drone picture
         self.pending = None
         self.scale = float(initial.get("scale") or 0.0)
@@ -3606,6 +3627,8 @@ class AlignDialog:
                 "origin": list(self.pairs[0]["d"]), "video_size": [self.video_img.shape[1], self.video_img.shape[0]],
                 "video_frame": self.frame_var.get(), "drone": {"path": self.drone_path, "frame": self.dframe_var.get()},
                 "info": {"rms_m": rep["rms_u"], "loo_rms_m": rep["loo_rms_u"], "unit": rep["unit"]}}
+        if self.edge_lengths:
+            data["edge_lengths"] = self.edge_lengths
         cfg = align_build(data)
         if "error" in cfg:
             messagebox.showerror("จัดแนวกับภาพโดรน", cfg["error"], parent=self.top)
@@ -3654,6 +3677,15 @@ class ZoneAlignEditor:
                     self.group_of[(z, i)] = gid
                     self.members[gid] = [(z, i)]
         self.undo_stack, self.redo_stack = [], []
+        self.real = {}                                             # (group a, group b) -> the real length (m) of that edge, only those the user knows
+        for e in (data.get("edge_lengths") or []):
+            try:
+                z, i, m = str(e["zone"]), int(e["i"]), float(e["m"])
+                n = len(self.zones[z])
+                if m > 0:
+                    self.real[self._edge_key(z, i)] = m
+            except (KeyError, TypeError, ValueError):
+                continue
         self.drag = None
         self.selected_zone = None
         self.selected_group = None
@@ -3675,6 +3707,129 @@ class ZoneAlignEditor:
         self.dpane.set_image(self.drone_img if self.drone_img is not None else np.full((720, 1280, 3), 60, np.uint8))
         self.ppane.set_image(self.plan_img)
         self.refresh_all()
+
+    # ----- real lengths of the edges (optional: leave blank what is not known) -----
+    def _edge_key(self, z, i):
+        """An edge is the pair of its two corners; the same edge of two neighbouring zones (shared corners) is one edge."""
+        n = len(self.zones[z])
+        return tuple(sorted((self.group_of[(z, i)], self.group_of[(z, (i + 1) % n)])))
+
+    def edge_rows(self):
+        """[{key, label, measured}] one per distinct edge, in the order of the zones: the length (m) now measured on the aligned plane."""
+        rows, seen = [], {}
+        for z in self.names:
+            p = self.plan_of(self._vpts(z))
+            n = len(p)
+            for i in range(n):
+                key = self._edge_key(z, i)
+                label = f"{z}: {i + 1}→{(i + 1) % n + 1}"
+                if key in seen:
+                    seen[key]["label"] += f" = {label}"                 # the same edge in the next zone
+                    continue
+                row = {"key": key, "z": z, "i": i, "label": label, "measured": float(np.hypot(*(p[(i + 1) % n] - p[i])))}
+                seen[key] = row
+                rows.append(row)
+        return rows
+
+    def _store_real(self):
+        """Keep the real lengths in the saved Align (so they are there next time and when the Align window saves again)."""
+        self.data["edge_lengths"] = [{"zone": r["z"], "i": r["i"], "m": self.real[r["key"]]} for r in self.edge_rows() if r["key"] in self.real]
+        self.app.run3_align_var.set(json.dumps(self.data))
+        self.app._align_cache = None
+
+    def _ask_length(self, label, current):
+        """The real length (m) of an edge from the user: a number, "" = not known / clear; None = cancelled. (A method so that tests can answer.)"""
+        text = simpledialog.askstring("ระยะจริงของขอบ", "{0}\nระยะจริง (เมตร) — เว้นว่าง = ไม่รู้ / ล้างค่า:".format(label), parent=self.top,
+                                      initialvalue=("" if current is None else f"{current:g}"))
+        return None if text is None else text.strip()
+
+    def set_real_length(self, key, text):
+        """text = the typed length. Returns True when something changed."""
+        text = str(text).strip().replace(",", ".")
+        if text == "":
+            changed = key in self.real
+            self.real.pop(key, None)
+        else:
+            try:
+                value = float(text)
+            except ValueError:
+                self.msg_var.set("ระยะจริงต้องเป็นตัวเลข (เมตร)")
+                return False
+            if not value > 0:
+                self.msg_var.set("ระยะจริงต้องมากกว่า 0")
+                return False
+            changed = self.real.get(key) != value
+            self.real[key] = value
+        if changed:
+            self._store_real()
+            self.refresh_edges()
+        return changed
+
+    def _on_edge_double_click(self, event=None):
+        sel = self.edge_tree.selection()
+        if not sel:
+            return
+        rows = {str(i): r for i, r in enumerate(self.edge_rows())}
+        row = rows.get(sel[0])
+        if row is None:
+            return
+        text = self._ask_length(row["label"], self.real.get(row["key"]))
+        if text is not None:
+            self.set_real_length(row["key"], text)
+
+    def refresh_edges(self):
+        if not getattr(self, "edge_tree", None) or not self.top.winfo_exists():
+            return
+        rows = self.edge_rows()
+        pairs = [(r["measured"], self.real.get(r["key"])) for r in rows]
+        errors = edge_length_errors(pairs)
+        self.edge_tree.delete(*self.edge_tree.get_children())
+        for idx, (r, err) in enumerate(zip(rows, errors)):
+            real = self.real.get(r["key"])
+            self.edge_tree.insert("", "end", iid=str(idx), values=(r["label"], f"{r['measured']:.2f}", "" if real is None else f"{real:g}",
+                                                                     "" if err is None else f"{err:+.1f}%"))
+        known = [pr for pr in pairs if pr[1] is not None]
+        if not known:
+            self.edge_msg_var.set("ดับเบิลคลิกแถวเพื่อใส่ระยะจริงของขอบที่รู้ (ข้ามที่ไม่รู้ได้)")
+        else:
+            f = edge_scale_factor(known)
+            errs = [abs(e) for e in edge_length_errors(known) if e is not None]
+            after = [abs(e) for e in edge_length_errors(known, f) if e is not None]
+            self.edge_msg_var.set("ใส่ {0} ขอบ · ต่างจากภาพโดรนเฉลี่ย {1}% · ถ้าปรับสเกล ×{2} จะเหลือ {3}%".format(
+                len(known), f"{sum(errs) / len(errs):.1f}", f"{f:.4f}", f"{sum(after) / len(after):.1f}"))
+
+    def apply_real_scale(self):
+        """Multiplies the scale of the Align by the factor that fits the measured edge lengths to the real ones. Everything measured in metres changes with it,
+        so it is only done after asking."""
+        known = [(r["measured"], self.real.get(r["key"])) for r in self.edge_rows() if r["key"] in self.real]
+        f = edge_scale_factor(known)
+        if f is None:
+            messagebox.showinfo("ปรับสเกลตามระยะจริง", "ยังไม่ได้ใส่ระยะจริงของขอบใดเลย — ดับเบิลคลิกแถวในตารางเพื่อใส่", parent=self.top)
+            return False
+        old = float(self.cfg["scale"])
+        if abs(f - 1.0) < 1e-6:
+            messagebox.showinfo("ปรับสเกลตามระยะจริง", "ระยะที่วัดได้ตรงกับระยะจริงอยู่แล้ว ไม่ต้องปรับ", parent=self.top)
+            return False
+        if not messagebox.askyesno("ปรับสเกลตามระยะจริง",
+                                   "สเกลภาพโดรนจะเปลี่ยนจาก {0} เป็น {1} เมตร/พิกเซล (×{2}, {3}%)\n\nระยะ ความเร็ว และตัวชี้วัดทุกตัวที่คำนวณเป็นเมตรจะเปลี่ยนตามไปด้วย "
+                                   "(ผลคลิปที่วิเคราะห์ไว้แล้วไม่เปลี่ยน แต่ต่างจากรอบใหม่)\n\nปรับไหม?".format(f"{old:.6f}", f"{old * f:.6f}", f"{f:.4f}", f"{abs(f - 1) * 100:.1f}"),
+                                   parent=self.top):
+            return False
+        data = dict(self.data)
+        data["scale"] = old * f
+        cfg = align_build(data)
+        if "error" in cfg:
+            messagebox.showerror("ปรับสเกลตามระยะจริง", cfg["error"], parent=self.top)
+            return False
+        self.data, self.cfg = data, cfg
+        self.app._align_cache = None
+        self._setup_plan()
+        self.ppane.set_image(self.plan_img)
+        self._store_real()
+        self.refresh_all()
+        self.refresh_edges()
+        self.msg_var.set("ปรับสเกลแล้ว: {0} → {1} เมตร/พิกเซล (×{2})".format(f"{old:.6f}", f"{old * f:.6f}", f"{f:.4f}"))
+        return True
 
     def change_video(self, path=None):
         """Another roadside video (from the clip list or a file) as the left picture; the zones keep their pixel positions."""
@@ -3988,6 +4143,23 @@ class ZoneAlignEditor:
             self.zone_list.insert("end", z)
         self.zone_list.bind("<<ListboxSelect>>", lambda e: self._on_list())
         self.zone_list.pack(side="left", padx=(0, 8))
+        edges = ttk.Frame(low)
+        edges.pack(side="left", padx=(0, 8))
+        ttk.Label(edges, text="ระยะจริงของขอบ (ใส่เฉพาะที่รู้)").pack(anchor="w")
+        self.edge_tree = ttk.Treeview(edges, columns=("edge", "measured", "real", "diff"), show="headings", height=6, selectmode="browse")
+        for col, text, w in (("edge", "ขอบ", 150), ("measured", "วัดได้ (ม.)", 70), ("real", "จริง (ม.)", 60), ("diff", "ต่าง", 55)):
+            self.edge_tree.heading(col, text=text)
+            self.edge_tree.column(col, width=w, anchor="w" if col == "edge" else "e")
+        esb = ttk.Scrollbar(edges, orient="vertical", command=self.edge_tree.yview)
+        self.edge_tree.configure(yscrollcommand=esb.set)
+        self.edge_tree.pack(side="left", fill="y")
+        esb.pack(side="left", fill="y")
+        self.edge_tree.bind("<Double-1>", self._on_edge_double_click)
+        ebtn = ttk.Frame(edges)
+        ebtn.pack(side="left", padx=6, anchor="n")
+        ttk.Button(ebtn, text="ปรับสเกลตามระยะจริง", command=self.apply_real_scale).pack(anchor="w")
+        self.edge_msg_var = tk.StringVar(value="")
+        ttk.Label(ebtn, textvariable=self.edge_msg_var, wraplength=260, justify="left", foreground="#555555").pack(anchor="w", pady=(6, 0))
         self.report = tk.Text(low, height=8, wrap="word", state="disabled")
         self.report.pack(side="left", fill="x", expand=True)
         tk.Label(top, textvariable=self.msg_var, anchor="w", foreground="#a00").pack(fill="x", padx=8)
@@ -4002,6 +4174,7 @@ class ZoneAlignEditor:
             return
         for pane in (self.vpane, self.dpane, self.ppane):
             pane.refresh()
+        self.refresh_edges()
         if report:
             self.report.config(state="normal")
             self.report.delete("1.0", "end")

@@ -244,6 +244,51 @@ app.edit_video = ""
 ed.len_var.set(True)
 ed.close()
 
+# ---- real lengths of the zone edges (1.54.0): optional, kept in the Align, fit the scale
+ed = app.open_zone_editor()
+root.update()
+rows = ed.edge_rows()
+labels = [r["label"] for r in rows]
+check("the table lists every distinct edge once (11 sides of 3 zones, 2 shared -> 9)", len(rows) == len({r["key"] for r in rows}) and len(rows) == 9, str(labels))
+check("an edge shared by two zones is one row, named after both", any(" = " in lab for lab in labels), str(labels))
+check("nothing is entered at first and the table says what to do", not ed.real and "ดับเบิลคลิก" in ed.edge_msg_var.get())
+r0, r1 = rows[0], rows[1]
+check("a number with a comma is read (12,5 = 12.5 m)", ed.set_real_length(r0["key"], "12,5") is True and ed.real[r0["key"]] == 12.5)
+check("a text or a zero is refused and changes nothing", ed.set_real_length(r1["key"], "abc") is False and ed.set_real_length(r1["key"], "0") is False and r1["key"] not in ed.real)
+saved = json.loads(app.run3_align_var.get())
+check("the real length is kept in the saved Align", saved.get("edge_lengths") == [{"zone": r0["z"], "i": r0["i"], "m": 12.5}], str(saved.get("edge_lengths")))
+check("the table shows the difference to what the Align measures", ed.edge_tree.item("0", "values")[2] == "12.5" and ed.edge_tree.item("0", "values")[3].endswith("%"))
+ed.close()
+ed = app.open_zone_editor()
+root.update()
+check("opened again the real length is still there", ed.real.get(r0["key"]) == 12.5)
+
+# make the measured length 10 % short of the real one for two edges, then fit
+meas = {r["key"]: r["measured"] for r in ed.edge_rows()}
+ed.set_real_length(r0["key"], f"{meas[r0['key']] * 1.1:.4f}")
+ed.set_real_length(r1["key"], f"{meas[r1['key']] * 1.1:.4f}")
+scale0 = float(ed.cfg["scale"])
+asked.clear()
+check("the scale is adjusted by the fitted factor after asking", ed.apply_real_scale() is True and len(asked) == 1)
+check("the new scale is 10 % larger", abs(float(ed.cfg["scale"]) / scale0 - 1.1) < 5e-4, f"{float(ed.cfg['scale']) / scale0:.5f}")
+check("the measured lengths now fit the real ones", all(abs(r["measured"] - ed.real[r["key"]]) < 0.02 for r in ed.edge_rows() if r["key"] in ed.real))
+check("the Align saved for the analysis has the new scale", abs(json.loads(app.run3_align_var.get())["scale"] / scale0 - 1.1) < 5e-4)
+check("nothing more to adjust once it fits", ed.apply_real_scale() is False)
+m.messagebox.askyesno = lambda *a, **k: (asked.append(a), False)[1]
+ed.set_real_length(r1["key"], f"{ed.edge_rows()[1]['measured'] * 1.5:.4f}")
+scale1 = float(ed.cfg["scale"])
+check("answering No leaves the scale alone", ed.apply_real_scale() is False and float(ed.cfg["scale"]) == scale1)
+m.messagebox.askyesno = lambda *a, **k: (asked.append(a), True)[1]
+ed.set_real_length(r1["key"], "")
+check("an empty entry clears the real length of that edge", r1["key"] not in ed.real and len(json.loads(app.run3_align_var.get())["edge_lengths"]) == 1)
+
+# the Align window keeps the real lengths when it saves again
+d3 = app.open_align()
+root.update()
+check("the Align window knows the real lengths", len(d3.edge_lengths) == 1)
+check("and keeps them when it is saved", d3.apply() is True and len(json.loads(app.run3_align_var.get()).get("edge_lengths", [])) == 1)
+ed.close()
+
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
 sys.exit(1 if failures else 0)

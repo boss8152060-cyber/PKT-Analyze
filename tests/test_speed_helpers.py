@@ -212,6 +212,18 @@ class SpeedPerZone(unittest.TestCase):
         self.assertEqual(eta(100, 10, 0, 2), 0.0)                                              # no speed yet
         self.assertAlmostEqual(eta(100, 0, 10, 0), 10.0)                                       # a skip below 1 counts as 1
 
+    def test_edge_length_scale_factor(self):
+        f = NS["edge_scale_factor"]
+        self.assertIsNone(f([]))
+        self.assertIsNone(f([(10.0, None), (0.0, 5.0), (4.0, 0.0)]))                  # nothing usable
+        self.assertAlmostEqual(f([(10.0, 11.0)]), 1.1)                                  # one known edge: the ratio
+        self.assertAlmostEqual(f([(10.0, 11.0), (20.0, 22.0), (5.0, 5.5)]), 1.1)        # all edges 10 % short: the same factor
+        self.assertAlmostEqual(f([(10.0, 11.0), (20.0, 20.0)]), (110 + 400) / (100 + 400))   # least squares through the origin: long edges count more
+        err = NS["edge_length_errors"]
+        self.assertAlmostEqual(err([(10.0, 11.0)])[0], -100.0 / 11.0)                   # measured 10 against real 11: -9.09 %
+        self.assertEqual(err([(10.0, None), (10.0, 0)]), [None, None])
+        self.assertAlmostEqual(err([(10.0, 11.0)], 1.1)[0], 0.0)                        # after the factor it fits
+
     def test_nothing_in_nothing_out(self):
         self.assertEqual(NS["speed_zone_summary"]([]), [])
 
