@@ -160,6 +160,29 @@ st.set_real_length(r14b["key"], "")
 check("clearing the real length keeps the scale that was worked out", abs(st.scale - 0.05) < 0.001, str(st.scale))
 st.set_real_length(r14b["key"], "14")
 r72 = [r for r in st.edge_rows() if r["label"].startswith("Zone 2: 2→3")][0]
+# ---- picking a row of the table shows that edge on the pictures
+import numpy as np
+
+
+def red_core(name, pane):
+    img = np.zeros((pane.img.shape[0], pane.img.shape[1], 3), np.uint8)
+    st._draw(img, name, pane)
+    return int(((img[:, :, 2] > 200) & (img[:, :, 1] < 60) & (img[:, :, 0] < 60)).sum())
+
+
+st.edge_focus = None
+before = {n: red_core(n, p_) for n, p_ in (("video", st.vpane), ("drone", st.dpane))}
+iid = [i for i, r in enumerate(st.edge_rows()) if r["label"].startswith("Zone 2: 1→2")][0]
+st.edge_tree.selection_set(str(iid))
+root.update()
+check("picking a row sets the edge to show", st.edge_focus is not None and st.edge_focus == st.edge_rows()[iid]["key"], str(st.edge_focus))
+after = {n: red_core(n, p_) for n, p_ in (("video", st.vpane), ("drone", st.dpane))}
+check("the picked edge is drawn on the video and on the drone picture", after["video"] > before["video"] + 40 and after["drone"] > before["drone"] + 40, str((before, after)))
+st.refresh_edges()
+check("the table keeps the picked row when it is rebuilt (the picture does not forget it)", st.edge_tree.selection() == (str(iid),) and st.edge_focus is not None)
+st.edge_tree.selection_remove(str(iid))
+root.update()
+check("nothing picked = nothing highlighted", st.edge_focus is None and red_core("video", st.vpane) <= before["video"] + 5)
 check("the other edges are in metres (7.06 m on the ground)", abs(r72["measured"] - math.hypot(0.9, 7.0)) < 0.1, f"{r72['measured']:.2f}")
 saved = json.loads(app.run3_align_var.get())
 check("the Align is kept (pairs with their zone-corner labels, scale, drone picture) and the analysis is told to use it", len(saved["pairs"]) == 7 and all(q.get("l") for q in saved["pairs"])

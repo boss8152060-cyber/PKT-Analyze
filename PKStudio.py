@@ -4744,6 +4744,17 @@ class SiteStudio:
             self.refresh_edges()
         return changed
 
+    def _on_edge_pick(self, event=None):
+        """A row of the table was picked: that edge is shown on the video, the drone picture and the plane."""
+        if getattr(self, "_edge_rebuilding", False):
+            return
+        sel = self.edge_tree.selection()
+        row = {str(i): r for i, r in enumerate(self.edge_rows())}.get(sel[0]) if sel else None
+        self.edge_focus = row["key"] if row is not None else None
+        for key, pane in (("video", self.vpane), ("drone", self.dpane), ("plan", self.ppane)):
+            if self.show_vars[key].get():
+                pane.refresh()
+
     def _on_edge_double_click(self, event=None):
         sel = self.edge_tree.selection()
         if not sel:
@@ -4954,6 +4965,23 @@ class SiteStudio:
                         continue
                     va, vb = pane.to_view(*pos[a]), pane.to_view(*pos[b])
                     self._text(out, f"{r['measured']:.1f}m", ((va[0] + vb[0]) // 2 - 12, (va[1] + vb[1]) // 2 - 4), (255, 255, 255), 0.5)
+            focus = getattr(self, "edge_focus", None)                # the edge picked in the table: a white band with a red core, rings on its two corners, its name
+            if focus is not None and focus[0] in pos and focus[1] in pos and pos[focus[0]] is not None and pos[focus[1]] is not None:
+                fa, fb = pane.to_view(*pos[focus[0]]), pane.to_view(*pos[focus[1]])
+                cv2.line(out, fa, fb, (0, 0, 0), 11, cv2.LINE_AA)
+                cv2.line(out, fa, fb, (255, 255, 255), 8, cv2.LINE_AA)
+                cv2.line(out, fa, fb, (0, 0, 255), 4, cv2.LINE_AA)
+                for e_ in (fa, fb):
+                    cv2.circle(out, e_, 11, (0, 0, 0), 4, cv2.LINE_AA)
+                    cv2.circle(out, e_, 11, (0, 0, 255), 2, cv2.LINE_AA)
+                row = next((r for r in self.edge_rows() if r["key"] == focus), None)
+                if row is not None:
+                    txt = row["label"].split(" = ")[0] + (f" · {row['measured']:.2f} m" if self.aligned and self.scale > 0 else "")
+                    mid = ((fa[0] + fb[0]) // 2, (fa[1] + fb[1]) // 2)
+                    (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                    x0, y0 = max(2, mid[0] - tw // 2), max(th + 6, mid[1] - 14)
+                    cv2.rectangle(out, (x0 - 4, y0 - th - 4), (x0 + tw + 4, y0 + 5), (0, 0, 255), -1)
+                    cv2.putText(out, txt, (x0, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
         if name == "video":
             for s in self.streams:                                 # the Lines of the Gap streams
                 if s["mode"] == "edge":
@@ -5052,11 +5080,18 @@ class SiteStudio:
         rows = self.edge_rows()
         pairs = [(r["measured"], self.real.get(r["key"])) for r in rows]
         errors = edge_length_errors(pairs)
-        self.edge_tree.delete(*self.edge_tree.get_children())
-        for idx, (r, err) in enumerate(zip(rows, errors)):
-            real = self.real.get(r["key"])
-            self.edge_tree.insert("", "end", iid=str(idx), values=(r["label"], f"{r['measured']:.2f}" if self.aligned else "", "" if real is None else f"{real:g}",
-                                                                     "" if err is None or not self.aligned else f"{err:+.1f}%"))
+        self._edge_rebuilding = True
+        try:
+            self.edge_tree.delete(*self.edge_tree.get_children())
+            focus = getattr(self, "edge_focus", None)
+            for idx, (r, err) in enumerate(zip(rows, errors)):
+                real = self.real.get(r["key"])
+                self.edge_tree.insert("", "end", iid=str(idx), values=(r["label"], f"{r['measured']:.2f}" if self.aligned else "", "" if real is None else f"{real:g}",
+                                                                         "" if err is None or not self.aligned else f"{err:+.1f}%"))
+                if focus is not None and r["key"] == focus:
+                    self.edge_tree.selection_set(str(idx))
+        finally:
+            self._edge_rebuilding = False
         known = [pr for pr in pairs if pr[1] is not None]
         if not self.aligned:
             self.edge_msg_var.set(self.T("ยังไม่ได้จัดแนว — ใส่ระยะจริงของขอบที่รู้ไว้ก่อนได้ แล้ววางหมุดบนภาพโดรน"))
@@ -5187,6 +5222,7 @@ class SiteStudio:
         self.edge_tree.pack(side="left", fill="both", expand=True)
         esb.pack(side="left", fill="y")
         self.edge_tree.bind("<Double-1>", self._on_edge_double_click)
+        self.edge_tree.bind("<<TreeviewSelect>>", self._on_edge_pick)
         ttk.Label(t3, textvariable=self.edge_msg_var, wraplength=300, justify="left", foreground="#555555").pack(anchor="w", pady=2)
         ttk.Separator(t3).pack(fill="x", pady=6)
         row = ttk.Frame(t3)
