@@ -4755,6 +4755,22 @@ class SiteStudio:
             if self.show_vars[key].get():
                 pane.refresh()
 
+    def _on_click_anywhere(self, event):
+        """A click anywhere outside the table of the edges (the pictures, the other tabs, the buttons) takes the highlight of the picked edge away."""
+        w = event.widget
+        if w is getattr(self, "edge_tree", None) or w is getattr(self, "_edge_sb", None):
+            return
+        if getattr(self, "edge_focus", None) is None and not (getattr(self, "edge_tree", None) and self.edge_tree.selection()):
+            return
+        self.edge_focus = None
+        try:
+            self.edge_tree.selection_remove(*self.edge_tree.selection())
+        except tk.TclError:
+            pass
+        for key, pane in (("video", self.vpane), ("drone", self.dpane), ("plan", self.ppane)):
+            if self.show_vars[key].get():
+                self.top.after_idle(pane.refresh)
+
     def _on_edge_double_click(self, event=None):
         sel = self.edge_tree.selection()
         if not sel:
@@ -5223,6 +5239,9 @@ class SiteStudio:
         esb.pack(side="left", fill="y")
         self.edge_tree.bind("<Double-1>", self._on_edge_double_click)
         self.edge_tree.bind("<<TreeviewSelect>>", self._on_edge_pick)
+        self.edge_tree.bind("<ButtonRelease-1>", lambda e: self.top.after_idle(self._on_edge_pick))          # (a click on the row that is picked already sends no select event)
+        self._edge_sb = esb
+        self.top.bind("<Button-1>", self._on_click_anywhere, add="+")
         ttk.Label(t3, textvariable=self.edge_msg_var, wraplength=300, justify="left", foreground="#555555").pack(anchor="w", pady=2)
         ttk.Separator(t3).pack(fill="x", pady=6)
         row = ttk.Frame(t3)
