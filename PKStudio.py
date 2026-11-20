@@ -4086,6 +4086,9 @@ class SiteStudio:
         """The Align again after a pin, the kind or the scale changed: the drone picture and the plane follow."""
         self.cfg = self._fit_cfg()
         self.aligned = self._is_fitted
+        if self._rescale_to_edges():                              # the scale follows the real lengths of the edges
+            self.cfg = self._fit_cfg()
+            self.aligned = self._is_fitted
         self._setup_plan()
         if getattr(self, "ppane", None):
             self.ppane.set_image(self.plan_img)
@@ -4093,6 +4096,20 @@ class SiteStudio:
             self._store_align()
         self.refresh_all()
         return self.aligned
+
+    def _rescale_to_edges(self):
+        """The scale of the drone picture is worked out from the real lengths typed for the edges: whenever at least one real length is known, the scale is the one that fits
+        the measured edges to the real ones best, so nobody has to type or adjust it. Without a real length the scale stays as it is (typed, or from an older Align).
+        True when the scale changed."""
+        if not getattr(self, "edge_tree", None) and not self.real:
+            return False
+        known = [(r["measured"], self.real[r["key"]]) for r in self.edge_rows() if r["key"] in self.real]
+        f = edge_scale_factor(known)
+        if f is None or abs(f - 1.0) < 1e-4:
+            return False
+        self.scale = (self.scale if self.scale > 0 else 1.0) * f
+        self.scale_var.set(f"{self.scale:.6g}")
+        return True
 
     def _store_align(self):
         """Keep the Align in the project (the format of the earlier Align window): the analysis uses it once it fits and the scale is set. The real lengths of the edges are
@@ -4723,7 +4740,7 @@ class SiteStudio:
             changed = self.real.get(key) != value
             self.real[key] = value
         if changed:
-            self._store_align()
+            self._refit()                                         # (stores the Align, and the scale follows the real lengths)
             self.refresh_edges()
         return changed
 
@@ -5009,7 +5026,7 @@ class SiteStudio:
         worst = sorted(range(len(vals)), key=lambda i: -vals[i])[:4]
         text += "\n" + self.T("หมุดที่คลาดมากสุด: ") + ", ".join("{0} {1}".format(self._label(pairs[i][0]), f"{vals[i] * unit * mult:.1f}") for i in worst)
         if self.scale <= 0:
-            text += "\n" + self.T("ยังไม่ได้ตั้งสเกล — ใส่ระยะจริงของขอบที่รู้ในตาราง แล้วกด \"ปรับสเกลตามระยะจริง\" (หรือพิมพ์สเกลภาพโดรนในช่องด้านบน)")
+            text += "\n" + self.T("ยังไม่ได้ตั้งสเกล — ใส่ระยะจริงของขอบที่รู้ในตาราง สเกลภาพโดรนจะคำนวณให้เอง (หรือพิมพ์ในช่องด้านบน)")
         return text
 
     def _refresh_lists(self):
@@ -5044,15 +5061,13 @@ class SiteStudio:
         if not self.aligned:
             self.edge_msg_var.set(self.T("ยังไม่ได้จัดแนว — ใส่ระยะจริงของขอบที่รู้ไว้ก่อนได้ แล้ววางหมุดบนภาพโดรน"))
         elif self.scale <= 0 and not known:
-            self.edge_msg_var.set(self.T("ยังไม่ได้ตั้งสเกล: ใส่ระยะจริงของขอบที่รู้ (ดับเบิลคลิกแถว) แล้วกด ปรับสเกลตามระยะจริง"))
+            self.edge_msg_var.set(self.T("ยังไม่ได้ตั้งสเกล: ใส่ระยะจริงของขอบที่รู้ (ดับเบิลคลิกแถว) สเกลภาพโดรนจะคำนวณให้เอง"))
         elif not known:
-            self.edge_msg_var.set(self.T("ดับเบิลคลิกแถวเพื่อใส่ระยะจริงของขอบที่รู้ (ข้ามที่ไม่รู้ได้)"))
+            self.edge_msg_var.set(self.T("ดับเบิลคลิกแถวเพื่อใส่ระยะจริงของขอบที่รู้ (ข้ามที่ไม่รู้ได้) — สเกลภาพโดรนคำนวณให้เองจากระยะที่ใส่"))
         else:
-            f = edge_scale_factor(known)
             errs = [abs(e) for e in edge_length_errors(known) if e is not None]
-            after = [abs(e) for e in edge_length_errors(known, f) if e is not None]
-            self.edge_msg_var.set(self.T("ใส่ {0} ขอบ · ต่างจากภาพโดรนเฉลี่ย {1}% · ถ้าปรับสเกล ×{2} จะเหลือ {3}%").format(
-                len(known), f"{sum(errs) / len(errs):.1f}", f"{f:.4f}", f"{sum(after) / len(after):.1f}"))
+            self.edge_msg_var.set(self.T("สเกลภาพโดรน {0} ม./พิกเซล คำนวณจาก {1} ขอบที่ใส่ระยะจริง · ขอบเหล่านี้ต่างจากระยะจริงเฉลี่ย {2}%").format(
+                f"{self.scale:.6g}", len(known), f"{sum(errs) / len(errs):.1f}"))
 
     def refresh_all(self):
         if not getattr(self, "fit_var", None) or not getattr(self, "ppane", None) or not self.top.winfo_exists():
@@ -5153,7 +5168,7 @@ class SiteStudio:
         cb.bind("<<ComboboxSelected>>", lambda e: self.set_kind(next(k for k, v in ALIGN_KINDS.items() if v[1] == self.kind_var.get())))
         row = ttk.Frame(t3)
         row.pack(anchor="w")
-        ttk.Label(row, text=T("สเกลภาพโดรน (ม./พิกเซล)")).pack(side="left")
+        ttk.Label(row, text=T("สเกลภาพโดรน (ม./พิกเซล) — คำนวณจากระยะขอบ")).pack(side="left")
         ent = ttk.Entry(row, textvariable=self.scale_var, width=11)
         ent.pack(side="left", padx=4)
         ent.bind("<Return>", lambda e: self.set_scale_text())
@@ -5173,7 +5188,6 @@ class SiteStudio:
         esb.pack(side="left", fill="y")
         self.edge_tree.bind("<Double-1>", self._on_edge_double_click)
         ttk.Label(t3, textvariable=self.edge_msg_var, wraplength=300, justify="left", foreground="#555555").pack(anchor="w", pady=2)
-        ttk.Button(t3, text=T("ปรับสเกลตามระยะจริง"), command=self.apply_real_scale).pack(anchor="w")
         ttk.Separator(t3).pack(fill="x", pady=6)
         row = ttk.Frame(t3)
         row.pack(anchor="w")

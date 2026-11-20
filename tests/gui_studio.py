@@ -149,7 +149,16 @@ rows = {r["label"]: r for r in st.edge_rows()}
 r14 = [r for r in rows.values() if r["label"].startswith("Zone 2: 1→2")][0]
 check("before the scale the plane is in drone pixels (the 14 m edge is 280 of them)", abs(r14["measured"] - 280.0) < 3.0, f"{r14['measured']:.1f}")
 st.set_real_length(r14["key"], "14")
-check("the real length of one edge sets the scale (no question: nothing to overturn)", st.apply_real_scale() is True and abs(st.scale - 0.05) < 0.001, str(st.scale))
+check("the real length of one edge sets the scale by itself (no button, no question)", abs(st.scale - 0.05) < 0.001 and abs(float(st.scale_var.get()) - 0.05) < 0.001, str(st.scale))
+check("the scale is already right, so the old button has nothing to adjust", st.apply_real_scale() is False)
+r14b = [r for r in st.edge_rows() if r["label"].startswith("Zone 2: 1→2")][0]
+st.set_real_length(r14b["key"], "28")
+check("a new real length changes the scale at once (twice as long = twice the scale)", abs(st.scale - 0.10) < 0.002, str(st.scale))
+st.set_real_length(r14b["key"], "14")
+check("and back", abs(st.scale - 0.05) < 0.001, str(st.scale))
+st.set_real_length(r14b["key"], "")
+check("clearing the real length keeps the scale that was worked out", abs(st.scale - 0.05) < 0.001, str(st.scale))
+st.set_real_length(r14b["key"], "14")
 r72 = [r for r in st.edge_rows() if r["label"].startswith("Zone 2: 2→3")][0]
 check("the other edges are in metres (7.06 m on the ground)", abs(r72["measured"] - math.hypot(0.9, 7.0)) < 0.1, f"{r72['measured']:.2f}")
 saved = json.loads(app.run3_align_var.get())
