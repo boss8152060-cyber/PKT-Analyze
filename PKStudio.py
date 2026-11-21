@@ -4331,6 +4331,11 @@ class SiteStudio:
             mode = "edge" if (source == "zone_edge" or (source == "per_stream" and str(row or "").startswith("Edge"))) else "drawn"
             self.streams.append({"mv": mv, "line": assign[mv], "mode": mode})
 
+    def _show_site_type(self):
+        key = self.app.run3_site_type()
+        text = self.T(SITE_KIND_LABELS[SITE_KIND_OF_TYPE[key]]) + (" · " + self.T("มีเกาะกลาง") if key == "x_median" else "")
+        self.site_label_var.set(self.T("ประเภทหน้างาน") + ": " + text + "  (" + self.T("เปลี่ยนที่ ② ทางแยก") + ")")
+
     def _on_site_type_changed(self, *_):
         """Another site type: the streams that need a reference line are the ones of that type (the boxes of the Gap tab are made again)."""
         try:
@@ -4338,6 +4343,7 @@ class SiteStudio:
                 return
         except tk.TclError:
             return
+        self._show_site_type()
         old = {s["mv"]: dict(s) for s in self.streams}
         self._init_streams()
         for s in self.streams:                                     # (a stream that stays keeps its Line and its choice)
@@ -5337,7 +5343,9 @@ class SiteStudio:
         # ---- tab 1: zones and pins
         t1 = ttk.Frame(nb, padding=6)
         nb.add(t1, text=T("โซนและหมุด"))
-        build_site_type_row(t1, self.app, T).pack(anchor="w", pady=(0, 6))
+        self.site_label_var = tk.StringVar(value="")                      # the site type is chosen at (2) in the main window; here it is only shown
+        ttk.Label(t1, textvariable=self.site_label_var, foreground="#555555", wraplength=300, justify="left").pack(anchor="w", pady=(0, 6))
+        self._show_site_type()
         self._site_trace = self.app.run3_site_type_var.trace_add("write", self._on_site_type_changed)
         ttk.Label(t1, text=T("วาดโซน: เลือกโซนในรายการ แล้วคลิกมุมบนวิดีโอทีละมุม")).pack(anchor="w")
         self.zone_list = tk.Listbox(t1, height=8, exportselection=False, width=24)
