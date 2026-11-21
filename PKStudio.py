@@ -2384,6 +2384,43 @@ def _quiet(fn):
         pass
 
 
+def nearest_existing_dir(path, reachable=None):
+    """The folder a file dialog should open in for what is typed in a path box: the folder itself, else the folder of the file, else the nearest folder above that is there ("" when none):
+    a path of a disk that is not connected, or of another computer, must not make the dialog fail or hang. `reachable(path)` says whether a path can be asked about (default: it exists)."""
+    ok = reachable or os.path.isdir
+    p = str(path or "").strip().strip('"')
+    if not p:
+        return ""
+    p = os.path.normpath(p)
+    for _ in range(40):
+        if ok(p):
+            return p
+        parent = os.path.dirname(p)
+        if not parent or parent == p:
+            return ""
+        p = parent
+    return ""
+
+
+def clips_source_text(videos):
+    """One line saying where the clips come from: the folder they have in common (or the folders, when they are in several places), the disk, and how many. `videos` = file paths."""
+    vids = [os.path.normpath(str(v)) for v in videos if v]
+    if not vids:
+        return ""
+    groups = {}
+    for v in vids:
+        groups.setdefault(os.path.splitdrive(v)[0].upper() or "/", []).append(v)
+    parts = []
+    for drive, items in sorted(groups.items()):
+        dirs = [os.path.dirname(v) for v in items]
+        try:
+            common = os.path.commonpath(dirs)
+        except ValueError:
+            common = dirs[0]
+        parts.append(f"{common}  ({len(items)} clips" + (f", disk {drive}" if drive != "/" else "") + ")")
+    return " | ".join(parts)
+
+
 def edge_scale_factor(pairs):
     """pairs = [(measured_m, real_m)] of zone edges whose real length the user knows. The factor f that the metres of the Align must be multiplied by so that the
     measured lengths fit the real ones best (least squares through the origin: f = sum(real * measured) / sum(measured^2)); None when there is nothing to fit."""
@@ -7405,16 +7442,18 @@ class ClipListPanel(ttk.Frame):
         listbox = ttk.Frame(self)
         listbox.grid(row=1, column=0, sticky="nsew")
         listbox.columnconfigure(0, weight=1)
-        listbox.rowconfigure(0, weight=1)
+        listbox.rowconfigure(1, weight=1)
+        self.source_var = tk.StringVar(value="")
+        ttk.Label(listbox, textvariable=self.source_var, foreground="#555555", wraplength=1100, justify="left").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 2))
         self.tree = ttk.Treeview(listbox, columns=("no", "clip", "analysis", "record", "xy", "drone", "chain"), show="headings", height=9, selectmode="extended")
         for col, text, width in (("no", "ลำดับ", 56), ("clip", "คลิป (โฟลเดอร์ในผลลัพธ์ / ไฟล์)", 330), ("analysis", "ช่วงที่วิเคราะห์", 120), ("record", "วิดีโอปกติ", 130),
                                  ("xy", "วิดีโอ X–Y", 130), ("drone", "X–Y บนภาพโดรน", 130), ("chain", "ต่อเนื่อง", 110)):
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width, anchor="center" if col == "no" else "w", stretch=(col != "no"))
-        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.tree.grid(row=1, column=0, sticky="nsew")
         tree_sb = ttk.Scrollbar(listbox, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=tree_sb.set)
-        tree_sb.grid(row=0, column=1, sticky="ns")
+        tree_sb.grid(row=1, column=1, sticky="ns")
         self.tree.bind("<Control-a>", lambda e: (self.select_all(), "break")[1])
         self.tree.bind("<Double-1>", lambda e: self.edit_selected())
         self.tree.bind("<<TreeviewSelect>>", lambda e: self.app.refresh_checklist())
@@ -7579,6 +7618,7 @@ class ClipListPanel(ttk.Frame):
             self.tree.insert("", "end", iid=str(i), values=(i + 1, name, ana, rec, xy, dr, "↳ ต่อจากคลิปก่อน" if cont else ""))
         if self.clips:
             self.app.video_var.set(self.clips[0]["video"])
+        self.source_var.set((self.app.T("ที่มา") + ": " + clips_source_text([c["video"] for c in self.clips])) if self.clips else self.app.T("ยังไม่ได้เลือกคลิป"))
         self.app.refresh_checklist()
 
     def edit_selected(self):
@@ -8516,7 +8556,7 @@ class Run1App:
         ttk.Label(box, text="ไฟล์โซน").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(box, textvariable=self.zone_line_config_var).grid(row=0, column=1, sticky="ew", pady=4)
         ttk.Button(box, text="🧭 ตั้งค่าทางแยก… (โซน · เส้น Gap · จัดแนวกับภาพโดรน)", command=self.open_site_studio).grid(row=0, column=2, padx=(5, 0))
-        ttk.Button(box, text="Browse", command=self.load_measurement_config).grid(row=0, column=3, padx=(5, 0))
+        ttk.Button(box, text="Browse", command=self.browse_zone_file).grid(row=0, column=3, padx=(5, 0))
         ttk.Label(box, textvariable=self.measurement_status_var, foreground=gray, anchor="w").grid(row=1, column=0, columnspan=4, sticky="w")
         build_site_type_row(box, self).grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 2))
 
@@ -9163,6 +9203,17 @@ class Run1App:
             return False
 
     def load_measurement_config(self):
+        return self.load_pkstudio_zones()
+
+    def browse_zone_file(self):
+        """The Browse button of the zone file: always opens the file dialog (in the folder of the file that is there, if it can be found); a path already in the box does not stop it."""
+        path = filedialog.askopenfilename(
+            title="Load PK Studio Zone File",
+            initialdir=nearest_existing_dir(os.path.dirname(self.zone_line_config_var.get().strip())) or None,
+            filetypes=[("PK Studio Zone files", "*.json *.py"), ("JSON files", "*.json"), ("Python files", "*.py"), ("All files", "*.*")])
+        if not path:
+            return False
+        self.zone_line_config_var.set(path)
         return self.load_pkstudio_zones()
 
     # ========================================================
@@ -10229,6 +10280,7 @@ class Run1App:
 
         path = filedialog.askopenfilename(
             title="Select Model",
+            initialdir=nearest_existing_dir(os.path.dirname(self.model_var.get().strip())) or None,
             filetypes=[
                 ("PyTorch Model", "*.pt"),
                 ("All Files", "*.*")
@@ -10242,6 +10294,7 @@ class Run1App:
 
         path = filedialog.askopenfilename(
             title="Select Video",
+            initialdir=nearest_existing_dir(os.path.dirname(self.video_var.get().strip())) or None,
             filetypes=[
                 ("Video", "*.mp4 *.avi *.mov *.mkv"),
                 ("MP4", "*.mp4"),
@@ -10255,7 +10308,8 @@ class Run1App:
     def browse_output(self):
 
         path = filedialog.askdirectory(
-            title="Select Output Folder"
+            title="Select Output Folder",
+            initialdir=nearest_existing_dir(self.output_var.get().strip()) or None,
         )
 
         if path:
@@ -10583,9 +10637,13 @@ class Run1App:
                 raise ValueError("Settings file must contain a JSON object.")
 
             missing = self.set_settings(settings) or []
+            emptied = list(getattr(self, "paths_emptied", []) or [])
             self.status_var.set(f"เปิดโปรเจกต์แล้ว: {os.path.basename(path)}")
             n = len((settings.get("project") or {}).get("clips", []))
             msg = "โหลดการตั้งค่าทั้งหมดและโซน/Line แล้ว" + (f" พร้อมรายการคลิป {n} คลิป" if n else " (ไฟล์นี้เก่า ไม่มีรายการคลิป — รายการคลิปเดิมไม่เปลี่ยน)")
+            if emptied:
+                names = {"model": "โมเดล", "video": "วิดีโอ", "zone_file": "ไฟล์โซน", "output": "โฟลเดอร์ผลลัพธ์", "drone": "ภาพ/วิดีโอโดรน"}
+                msg += "\n\nไม่พบในเครื่องนี้ จึงเว้นว่างไว้ให้เลือกใหม่:\n" + "\n".join(f"• {names.get(k, k)}: {v}" for k, v in emptied)
             if missing:
                 msg += "\n\nไม่พบไฟล์วิดีโอเหล่านี้ในเครื่องนี้ (ยังอยู่ในรายการ ลบหรือเลือกใหม่ได้):\n" + "\n".join(missing[:12]) + ("\n..." if len(missing) > 12 else "")
                 messagebox.showwarning("เปิดโปรเจกต์", msg)
@@ -10593,6 +10651,35 @@ class Run1App:
                 messagebox.showinfo("เปิดโปรเจกต์", msg)
         except Exception as e:
             messagebox.showerror("Load Error", f"Could not load settings:\n\n{e}")
+
+    def blank_paths_not_here(self):
+        """A project opened on another computer (or with a disk that is not connected): a file or folder that is not here is left EMPTY instead of kept as a path that cannot work.
+        The model, the video and the zone file must exist; the output folder may be new, so it is kept when its parent folder is here. Returns what was emptied."""
+        emptied = []
+        for label, var, must_exist in (("model", self.model_var, "file"), ("video", self.video_var, "file"), ("zone_file", self.zone_line_config_var, "file"),
+                                       ("output", self.output_var, "parent")):
+            value = str(var.get() or "").strip()
+            if not value:
+                continue
+            if must_exist == "file":
+                here = os.path.isfile(value)
+            else:
+                here = os.path.isdir(value) or os.path.isdir(os.path.dirname(os.path.normpath(value)))
+            if not here:
+                var.set("")
+                emptied.append((label, value))
+        # the picture / video of the drone in the saved Align: not on this computer -> the Align keeps its pins and scale, the file is chosen again in the window
+        try:
+            data = json.loads(self.run3_align_var.get() or "{}")
+            drone = data.get("drone") if isinstance(data, dict) else None
+            if isinstance(drone, dict) and str(drone.get("path") or "").strip() and not os.path.isfile(str(drone["path"])):
+                emptied.append(("drone", str(drone["path"])))
+                drone["path"] = ""
+                self.run3_align_var.set(json.dumps(data))
+        except (ValueError, TypeError):
+            pass
+        self.paths_emptied = emptied
+        return emptied
 
     def set_settings(self, settings):
         """Apply settings and restore embedded Zone geometry first, without requiring the original Zone file."""
@@ -10866,6 +10953,7 @@ class Run1App:
             if zone_path and os.path.isfile(zone_path):
                 self.load_pkstudio_zones()
 
+        self.blank_paths_not_here()
         self.refresh_measurement_status()
         self.update_trajectory_position_controls()
         # the project part: the list of clips (a settings file from before projects has none: the list is left as it is)

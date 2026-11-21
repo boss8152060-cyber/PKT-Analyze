@@ -121,6 +121,63 @@ check("a list with nothing to scroll lets the page scroll (the wheel is not lost
 app._page_canvases[tab] = real_canvas
 check("the list has a scroll bar", any(isinstance(w, m.ttk.Scrollbar) for w in panel.tree.master.winfo_children()))
 
+# ------------------------------------------------------------------ where the clips come from
+panel.add_videos(panel.bt.find_videos([os.path.join(tmp, "Site")]))
+root.update()
+check("a line above the list says where the clips come from: the folder, the number of clips and the disk", os.path.join(tmp, "Site", "day1") in panel.source_var.get().replace("/", os.sep)
+      and "25 clips" in panel.source_var.get(), panel.source_var.get())
+panel.clear()
+check("an empty list says there are no clips yet", "ยังไม่ได้เลือกคลิป" in panel.source_var.get() or "No clip" in panel.source_var.get(), panel.source_var.get())
+
+# ------------------------------------------------------------------ Browse of the zone file always opens the dialog
+zone_a = os.path.join(tmp, "zones_a.json")
+zone_b = os.path.join(tmp, "zones_b.json")
+for z in (zone_a, zone_b):
+    open(z, "w").write("{}")
+app.zone_line_config_var.set(zone_a)
+asked = []
+loaded = []
+m.filedialog.askopenfilename = lambda **k: (asked.append(k), zone_b)[1]
+app.load_pkstudio_zones = lambda: (loaded.append(app.zone_line_config_var.get()), True)[1]
+app.browse_zone_file()
+check("a zone file already in the box does not stop Browse: the dialog opens (in the folder of that file)", len(asked) == 1 and os.path.normpath(asked[0].get("initialdir") or "") == os.path.normpath(tmp), str(asked))
+check("the file chosen replaces the one in the box and is loaded", app.zone_line_config_var.get() == zone_b and loaded == [zone_b], str(loaded))
+asked.clear()
+m.filedialog.askopenfilename = lambda **k: (asked.append(k), "")[1]
+app.zone_line_config_var.set("Q:/gone/disk/zones.json")
+app.browse_zone_file()
+check("a path on a disk that is not there: the dialog still opens (with no folder to start in)", len(asked) == 1 and not asked[0].get("initialdir"), str(asked))
+check("cancelling leaves the box as it was", app.zone_line_config_var.get() == "Q:/gone/disk/zones.json")
+asked.clear()
+m.filedialog.askdirectory = lambda **k: (asked.append(k), "")[1]
+app.output_var.set("Q:/gone/disk/out")
+app.browse_output()
+check("the output Browse opens although the folder in the box is not there", len(asked) == 1 and not asked[0].get("initialdir"), str(asked))
+
+# ------------------------------------------------------------------ a project opened on another computer: what is not there stays empty
+real_model = os.path.join(tmp, "best.pt")
+open(real_model, "wb").write(b"x")
+real_video = vids[0]
+settings = {"model": "C:/Users/someone/Desktop/Model/best.pt", "video": "F:/data/2026/a.mp4", "output": "Z:/results/Analyze/x", "zone_file": "C:/Users/someone/zones.json", "confidence": 0.3}
+msgs = []
+m.messagebox.showinfo = lambda *a, **k: msgs.append(a)
+m.messagebox.showwarning = lambda *a, **k: msgs.append(a)
+app.model_var.set(real_model)
+app.set_settings(settings)
+check("a model, a video, a zone file and an output folder that are not on this computer are left empty", app.model_var.get() == "" and app.video_var.get() == "" and app.zone_line_config_var.get() == ""
+      and app.output_var.get() == "", str((app.model_var.get(), app.video_var.get(), app.zone_line_config_var.get(), app.output_var.get())))
+check("... and it is known what was emptied", [k for k, _ in app.paths_emptied] == ["model", "video", "zone_file", "output"], str(app.paths_emptied))
+check("a setting that is not a path is applied as it was saved", abs(float(app.conf_var.get()) - 0.3) < 1e-9)
+settings_ok = {"model": real_model, "video": real_video, "output": os.path.join(tmp, "newfolder"), "zone_file": zone_a}
+app.set_settings(settings_ok)
+check("paths that are here stay (the output folder may be a new one inside a folder that is here)", app.model_var.get() == real_model and app.video_var.get() == real_video
+      and app.output_var.get() == os.path.join(tmp, "newfolder") and app.zone_line_config_var.get() == zone_a and app.paths_emptied == [], str(app.paths_emptied))
+import json as _json
+app.run3_align_var.set(_json.dumps({"pairs": [], "scale": 0.05, "kind": "projective", "drone": {"path": "C:/gone/drone.png", "frame": ""}}))
+app.blank_paths_not_here()
+check("the drone picture of the Align that is not here is emptied; the scale stays", _json.loads(app.run3_align_var.get())["drone"]["path"] == "" and abs(_json.loads(app.run3_align_var.get())["scale"] - 0.05) < 1e-9
+      and ("drone", "C:/gone/drone.png") in app.paths_emptied, str(app.paths_emptied))
+
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
 sys.exit(1 if failures else 0)

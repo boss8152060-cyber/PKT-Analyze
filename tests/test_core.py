@@ -20,7 +20,7 @@ def load_core():
         text = f.read()
     begin = text.index("# ==== CORE-BEGIN")
     end = text.index("# ==== CORE-END ====")
-    ns = {}
+    ns = {"os": os}
     exec(compile(text[begin:end], "PKStudio.py[CORE]", "exec"), ns)
     return ns
 
@@ -590,6 +590,36 @@ def _after_core(line, name):
     ns = {}
     exec(line, ns)
     return ns[name]
+
+
+class Paths(unittest.TestCase):
+    """Where a dialog opens and where the clips come from (1.59.5)."""
+
+    def test_a_dialog_opens_where_there_is_a_folder(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        sub = os.path.join(d, "a", "b")
+        os.makedirs(sub)
+        f = CORE["nearest_existing_dir"]
+        self.assertEqual(f(sub), os.path.normpath(sub))
+        self.assertEqual(f(os.path.join(sub, "gone", "deeper")), os.path.normpath(sub))        # a folder that is not there: the nearest one that is
+        self.assertEqual(f(""), "")
+        self.assertEqual(f(None), "")
+        self.assertEqual(f(os.path.join(sub, "file.json")), os.path.normpath(sub))             # a file that is not there: its folder
+        self.assertEqual(f("Q:/no/such/disk/x", reachable=lambda p: False), "")                # nothing can be reached: nothing (the dialog uses its own start)
+
+    def test_the_source_of_the_clips(self):
+        t = CORE["clips_source_text"]
+        n = os.path.normpath
+        self.assertEqual(t([]), "")
+        one = t(["F:/Project/2026_08_29/a.mp4", "F:/Project/2026_08_29/b.mp4"])
+        self.assertIn(n("F:/Project/2026_08_29"), one)
+        self.assertIn("2 clips", one)
+        self.assertIn("disk F:", one)
+        two = t(["F:/P/day1/a.mp4", "F:/P/day2/b.mp4", "D:/X/c.mp4"])
+        self.assertIn(n("F:/P"), two)
+        self.assertIn(n("D:/X"), two)
+        self.assertIn("|", two)                                                               # one part for each disk
 
 
 class SiteTypes(unittest.TestCase):
