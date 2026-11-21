@@ -54,8 +54,8 @@ check("without a video the window refuses to open", (lambda: (app.video_var.set(
 app.video_var.set(video)
 ed = app.open_zone_line_editor()
 root.update()
-check("the window opens on a frame of the video with the 7 zones and 6 Lines listed", ed is not None and ed.img.shape[:2] == (CH, CW)
-      and ed.zone_list.size() == 7 and ed.line_list.size() == 6, str(ed.img.shape if ed else ""))
+check("the window opens on a frame of the video with the 8 zones and 8 Lines listed", ed is not None and ed.img.shape[:2] == (CH, CW)
+      and ed.zone_list.size() == 8 and ed.line_list.size() == 8, str(ed.img.shape if ed else ""))
 check("it starts on Zone 1 (nothing is drawn yet)", ed.cur_zone == "Zone 1" and not any(ed.zones.values()))
 
 

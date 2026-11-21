@@ -97,7 +97,8 @@ class SharedEdge(unittest.TestCase):
         self.assertIsNone(edge(self.A, [(30, 0), (40, 0), (40, 10), (30, 10)]))
 
     def test_the_user_s_edge_table(self):
-        self.assertEqual(NS["ZONE_EDGE_DEFAULT"], {"1-3-4": (1, 3), "1-3-6-7": (1, 3), "2-3-1": (2, 3), "2-3-4": (2, 3), "5-6-7": (5, 6), "5-6-3-1": (3, 6)})
+        self.assertEqual(NS["ZONE_EDGE_DEFAULT"], {"1-3-4": (1, 3), "1-3-6-7": (1, 3), "2-3-1": (2, 3), "2-3-4": (2, 3), "5-6-7": (5, 6), "5-6-3-1": (3, 6),
+                                                 "8-6-7": (8, 6), "8-6-3-4": (8, 6), "5-6-8": (5, 6), "1-3-6-8": (1, 3), "8-6-3-1": (6, 8)})
 
 
 if __name__ == "__main__":

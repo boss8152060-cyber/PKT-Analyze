@@ -55,10 +55,9 @@ class CleanZoneVisits(unittest.TestCase):
 
 class Patterns(unittest.TestCase):
     def test_six_movements(self):
-        self.assertEqual(
-            set(PATTERNS),
-            {"1-3-4", "2-3-1", "1-3-6-7", "5-6-3-1", "2-3-4", "5-6-7"},
-        )
+        # the 3-leg junction (the default site type) has the six Movements it always had; the 4-leg junction has five more
+        self.assertEqual(set(CORE["site_patterns"]("t_full")), {"1-3-4", "2-3-1", "1-3-6-7", "5-6-3-1", "2-3-4", "5-6-7"})
+        self.assertEqual(set(PATTERNS), set(CORE["site_patterns"]("t_full")) | {"8-6-7", "5-6-8", "8-6-3-4", "1-3-6-8", "8-6-3-1"})
 
     def test_id_matches_sequence(self):
         for mid, info in PATTERNS.items():
@@ -82,8 +81,9 @@ class Patterns(unittest.TestCase):
 
 class Classify(unittest.TestCase):
     def test_exact(self):
-        for mid, info in PATTERNS.items():
-            self.assertEqual(classify(info["sequence"]), (mid, "Exact"))
+        for site in CORE["SITE_TYPES"]:
+            for mid, info in CORE["site_patterns"](site).items():
+                self.assertEqual(classify(info["sequence"], site), (mid, "Exact"), (site, mid))
 
     def test_consecutive_duplicates_ignored(self):
         self.assertEqual(classify([2, 2, 3, 3, 4]), ("2-3-4", "Exact"))
@@ -571,7 +571,104 @@ class GapHoldAndIntervals(unittest.TestCase):
             self.assertEqual(info["wait"], (seq[0],))
             self.assertEqual(info["target"], seq[-1])
             self.assertEqual(set(info["middle"]), set(seq[1:-1]))
-        self.assertEqual(set(CORE["GAP_REFERENCE_ZONE"]), {"2-3-4", "5-6-7", "5-6-3-1", "1-3-6-7", "1-3-4", "2-3-1"})      # the last two: Headway only
+        self.assertEqual(set(CORE["GAP_REFERENCE_ZONE"]), set(PATTERNS))      # every Movement (2-3-1 and the Movements that are no subject: Headway only)
+
+
+def _source_dict(name):
+    """A dict that PKStudio.py defines after the CORE part (not loaded here): read from the source and evaluated."""
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "PKStudio.py"), encoding="utf-8").read()
+    i = src.index(chr(10) + name + " = {") + 1
+    j = src.index(chr(10) + "}", i) + 2
+    ns = {}
+    exec(src[i:j], ns)
+    return ns[name]
+
+
+def _after_core(line, name):
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "PKStudio.py"), encoding="utf-8").read()
+    assert line in src
+    ns = {}
+    exec(line, ns)
+    return ns[name]
+
+
+class SiteTypes(unittest.TestCase):
+    """1.59.0: the site type says which zones and Movements a site has (3-leg small / 3-leg full / 4-leg / 4-leg with a median island)."""
+    sites = CORE["SITE_TYPES"]
+
+    def test_the_four_types(self):
+        self.assertEqual(set(self.sites), {"t_small", "t_full", "x_open", "x_median"})
+        self.assertEqual(CORE["SITE_TYPE_DEFAULT"], "t_full")                   # what every run before 1.59.0 was
+        self.assertEqual(self.sites["t_small"]["zones"], (1, 2, 3, 4))
+        self.assertEqual(self.sites["t_full"]["zones"], tuple(range(1, 8)))
+        self.assertEqual(self.sites["x_open"]["zones"], tuple(range(1, 9)))
+        self.assertEqual(self.sites["x_median"]["zones"], tuple(range(1, 9)))
+        self.assertEqual(_after_core("ZONE_IDS = list(range(1, 9))", "ZONE_IDS"), list(range(1, 9)))
+
+    def test_choice_to_type(self):
+        k = CORE["site_key"]
+        self.assertEqual((k("3small"), k("3full"), k("4"), k("4", True), k("")), ("t_small", "t_full", "x_open", "x_median", "t_full"))
+        self.assertEqual(k("x_median"), "x_median")
+
+    def test_the_movements_of_each_type(self):
+        m = CORE["site_movements"]
+        self.assertEqual(set(m("t_small")), {"1-3-4", "2-3-1", "2-3-4"})
+        self.assertEqual(set(m("x_open")), set(PATTERNS))
+        # with a median island: two 3-leg junctions (Zone 1-4 and Zone 5-8, the second the mirror of the first); nothing that crosses the median
+        self.assertEqual(set(m("x_median")), {"2-3-4", "2-3-1", "1-3-4", "5-6-7", "5-6-8", "8-6-7"})
+        for crossing in ("1-3-6-7", "1-3-6-8", "8-6-3-4", "8-6-3-1", "5-6-3-1"):
+            self.assertNotIn(crossing, m("x_median"))
+
+    def test_the_second_junction_mirrors_the_first(self):
+        mirror = {1: 8, 2: 5, 3: 6, 4: 7, 5: 2, 6: 3, 7: 4, 8: 1}
+        for mv in ("2-3-4", "2-3-1", "1-3-4"):
+            mirrored = "-".join(str(mirror[int(z)]) for z in mv.split("-"))
+            self.assertIn(mirrored, CORE["site_movements"]("x_median"), mv)
+        self.assertEqual(CORE["site_gap_conflicts"]("x_median"), {"1-3-4": ["2-3-4"], "8-6-7": ["5-6-7"]})
+
+    def test_the_3_leg_junction_classifies_as_before(self):
+        for seq, want in (((1, 3, 4), ("1-3-4", "Exact")), ((5, 6, 3, 1), ("5-6-3-1", "Exact")), ((6, 3), ("5-6-3-1", "Partial")), ((1, 3, 6), ("1-3-6-7", "Partial"))):
+            self.assertEqual(classify(seq), want)                               # (the default type: not one Movement of the 4-leg junction is looked at)
+        self.assertEqual(classify((8, 6, 7)), ("", "Unclassified"))
+
+    def test_a_fragment_that_fits_one_movement_only_in_a_smaller_site(self):
+        self.assertEqual(classify((3, 1), "t_small"), ("2-3-1", "Partial"))     # (in the 3-leg junction with 7 zones 5-6-3-1 fits it too: ambiguous)
+        self.assertEqual(classify((3, 1), "t_full")[1], "Ambiguous")
+
+    def test_the_4_leg_junction_recognises_zone_8(self):
+        for seq, want in (((8, 6, 7), "8-6-7"), ((5, 6, 8), "5-6-8"), ((8, 6, 3, 4), "8-6-3-4"), ((1, 3, 6, 8), "1-3-6-8"), ((8, 6, 3, 1), "8-6-3-1")):
+            self.assertEqual(classify(seq, "x_open"), (want, "Exact"))
+        self.assertEqual(classify((8, 6, 3, 4), "x_median"), ("", "Unclassified"))   # it crosses the median: not analysed
+        self.assertEqual(classify((8, 6, 7), "x_median"), ("8-6-7", "Exact"))
+
+    def test_who_waits_for_whom_in_the_4_leg_junction(self):
+        c = CORE["site_gap_conflicts"]("x_open")
+        self.assertEqual(c["8-6-7"], ["5-6-7"])
+        self.assertEqual(set(c["8-6-3-4"]), {"5-6-7", "2-3-4", "2-3-1"})
+        self.assertEqual(set(c["1-3-6-8"]), {"2-3-4", "5-6-7", "8-6-3-1"})
+        self.assertEqual(set(c["8-6-3-1"]), {"2-3-4", "5-6-7", "1-3-6-8"})
+        old = CORE["site_gap_conflicts"]("t_full")
+        self.assertEqual(old, {"1-3-4": ["2-3-4"], "1-3-6-7": ["2-3-4", "5-6-7", "5-6-3-1"], "5-6-3-1": ["2-3-4", "1-3-6-7"]})
+        self.assertEqual(CORE["site_gap_conflicts"]("t_small"), {"1-3-4": ["2-3-4"]})
+
+    def test_every_stream_a_subject_waits_for_is_a_movement_of_the_site_and_has_an_edge(self):
+        for site in self.sites:
+            ids = set(CORE["site_movements"](site))
+            for subject, streams in CORE["site_gap_conflicts"](site).items():
+                self.assertIn(subject, ids)
+                self.assertIn(subject, CORE["GAP_PATHS"])
+                for st in streams:
+                    self.assertIn(st, ids, (site, subject, st))
+                    self.assertIn(st, CORE["ZONE_EDGE_DEFAULT"])
+                    self.assertIn(st, CORE["GAP_REFERENCE_ZONE"])
+
+    def test_the_stage_conflicts_of_a_subject_are_streams_it_waits_for(self):
+        stage_conflicts = _source_dict("GAP_STAGE_CONFLICTS")
+        for subject, stages in stage_conflicts.items():
+            waits = set(CORE["site_gap_conflicts"]("x_open")[subject])
+            for zone, streams in stages.items():
+                self.assertIn(zone, CORE["GAP_PATHS"][subject]["middle"], (subject, zone))
+                self.assertTrue(set(streams) <= waits, (subject, zone, streams))
 
 
 class ExcelSafe(unittest.TestCase):

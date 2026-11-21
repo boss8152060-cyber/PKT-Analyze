@@ -75,8 +75,8 @@ def headway(tracks, mv, lengths=None, speed=36.0):
     return NS["_run3_headway"](F(), tracks, c, {}, mv)
 
 
-def run(tracks, mv, selected):
-    c = {"gap_movements": selected, "site_id": 8, "waiting_threshold": 5.0, "hold_min_duration_s": 0.3}
+def run(tracks, mv, selected, site="t_full"):
+    c = {"gap_movements": selected, "site_id": 8, "waiting_threshold": 5.0, "hold_min_duration_s": 0.3, "site_type": site}
     return NS["_run3_gap"](Fake(), tracks, c, {}, mv)
 
 
@@ -114,6 +114,41 @@ class StagedGap(unittest.TestCase):
         last = [r for r in rows if r["Stage_No"] == 2]
         self.assertTrue(last and all(r["Stopped_In_Conflict_Zone"] == 1 for r in last))
         self.assertEqual([r["Gap_Role"] for r in last], ["Accepted"])               # the decision is not reversed
+
+    def test_zone_8_left_turn_waits_for_the_opposite_through_stream(self):
+        tracks, mv = scene({"30": ("8-6-7", track([(0, 8), (6.5, 6), (9.5, 7)]))})
+        rows = run(tracks, mv, ["8-6-7"], "x_open")
+        self.assertTrue(rows)
+        self.assertTrue(all(r["Conflicting_Movement"] == "5-6-7" and r["Decision_Stage"] == "Enter_Zone_6" for r in rows), [r["Conflicting_Movement"] for r in rows])
+
+    def test_zone_8_right_turn_has_two_stages(self):
+        tracks, mv = scene({"31": ("8-6-3-4", track([(0, 8), (6.5, 6), (7.0, 3), (9.5, 4)]))})
+        rows = run(tracks, mv, ["8-6-3-4"], "x_open")
+        st1 = [r for r in rows if r["Stage_No"] == 1]
+        st2 = [r for r in rows if r["Stage_No"] == 2]
+        self.assertTrue(st1 and st2)
+        self.assertTrue(all(r["Decision_Stage"] == "Enter_Zone_6" and r["Conflicting_Movement"] == "5-6-7" for r in st1))
+        self.assertTrue(all(r["Decision_Stage"] == "Enter_Zone_3" and r["Conflicting_Movement"] == "2-3-4" for r in st2))
+
+    def test_across_the_main_road_waits_for_the_stream_the_other_way(self):
+        crossing = {"32": ("8-6-3-1", track([(0, 8), (6.5, 6), (7.0, 3), (10, 1)])),
+                    "33": ("1-3-6-8", track([(5.0, 1)])), "34": ("1-3-6-8", track([(9.0, 1)]))}          # (two cars of the stream the other way make one gap)
+        tracks, mv = scene(crossing)
+        rows = run(tracks, mv, ["8-6-3-1"], "x_open")
+        self.assertTrue(any(r["Conflicting_Movement"] == "1-3-6-8" for r in rows), [r["Conflicting_Movement"] for r in rows])
+        # only streams it must wait for appear (the smallest gap of those open at the entry controls: the others are alternatives that are left out)
+        self.assertTrue({r["Conflicting_Movement"] for r in rows} <= {"1-3-6-8", "5-6-7", "2-3-4"})
+        self.assertEqual({r["Decision_Stage"] for r in rows}, {"Enter_Zone_6", "Enter_Zone_3"})            # two stages, zone 6 first (it comes from Zone 8)
+
+    def test_a_subject_that_the_site_does_not_have_gives_nothing(self):
+        tracks, mv = scene({"36": ("8-6-3-4", track([(0, 8), (6.5, 6), (7.0, 3), (9.5, 4)]))})
+        self.assertEqual(run(tracks, mv, ["8-6-3-4"], "x_median"), [])             # it crosses the median island: not analysed
+        self.assertEqual(run(tracks, mv, ["8-6-3-4"], "t_full"), [])
+
+    def test_with_a_median_island_zone_8_waits_for_5_6_7_only(self):
+        tracks, mv = scene({"35": ("8-6-7", track([(0, 8), (6.5, 6), (9.5, 7)]))})
+        rows = run(tracks, mv, ["8-6-7"], "x_median")
+        self.assertTrue(rows and all(r["Conflicting_Movement"] == "5-6-7" for r in rows))
 
     def test_headway_of_a_stream(self):
         tracks, mv = scene({})                              # stream 2-3-4 enters zone 2 at 2, 3, 6, 8 s; 5-6-7 enters zone 5 at 5, 9 s

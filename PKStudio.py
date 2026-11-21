@@ -4,7 +4,7 @@
 #   Distance: LDP, Lateral Clearance
 #   Time    : Gap Acceptance, TTC (rear-end + side), PET
 #   Speed   : Speed (every frame, inside the selected zones)
-#   Zones 1-7; conflict zones 3 and 6. Movement = full zone sequence (6 patterns).
+#   Zones 1-8 (a site type says which it has: SITE_TYPES); conflict zones 3 and 6. Movement = full zone sequence (6 patterns of a 3-leg junction, 11 of a 4-leg one).
 #   No Tk access from worker thread.
 # ============================================================
 #
@@ -569,7 +569,8 @@ RUN3_DEFAULTS = {
     "pet_include_lane_change": True,       # PET counts pairs of conflict type Lane change
     "pet_include_crossing": True,          # PET counts pairs of conflict type Crossing   (the angle limits are TTC's: ttc_angle_rear_end_deg / ttc_angle_crossing_deg)
     "headway_enabled": True,               # Headway.csv: time headway / time gap of consecutive vehicles of each Movement (extra file, no risk level)
-    "headway_movements": ["1-3-4", "2-3-1", "1-3-6-7", "5-6-3-1", "2-3-4", "5-6-7"],   # Movements analysed by Headway
+    "headway_movements": ["1-3-4", "2-3-1", "1-3-6-7", "5-6-3-1", "2-3-4", "5-6-7", "8-6-7", "5-6-8", "8-6-3-4", "1-3-6-8", "8-6-3-1"],   # Movements analysed by Headway (of these only the Movements of the site type exist)
+    "site_type": "t_full",                 # 1.59.0: t_small / t_full / x_open / x_median (SITE_TYPES)
     "headway_max_s": "",                   # blank = no limit: a follower is paired with the nearest leader in its path, however long ago the leader passed
     "headway_line_mapping": "",            # Site_ID|Movement|Line N for Headway only; a Movement left out uses the Reference Line Mapping of Gap Acceptance, then the origin zone
     "reference_line_source": "zone_edge",   # reference line of a Movement: "zone_edge" = the edge two zones share (ZONE_EDGE_DEFAULT) / "drawn" = the Line of the Reference Line Mapping / "per_stream" = each stream as chosen in the Line window (an `Edge a-b` or a `Line N` row of the mapping)
@@ -609,17 +610,18 @@ RUN3_DEFAULTS = {
     "ldp_smoothing_samples": "5",           # rolling median to suppress bbox jitter (1 = off)
     # Speed: user can select any of Zones 1–6. CSV assigns each selected zone
     # to the research role: Zone 1 = access mouth, 2/4 = approach, 3/5 = exit, 6 = middle/access.
-    "speed_zones": [1, 2, 3, 4, 5, 6, 7],
+    "speed_zones": [1, 2, 3, 4, 5, 6, 7, 8],
     "speed_smoothing_samples": "5",         # rolling-median window on positions before Speed (1 = off)
     "speed_frame_window_s": "0.50",        # the speed written for every frame (Detection_Records_Topview.csv) uses the vehicle positions within +-this/2 s
     "speed_max_kmh": "80",                  # Speed above this is flagged Speed_Above_Max and left out of the statistics (0 = off)
     "speed_stop_kmh": "5.0",                # 2_Speed.csv: frames slower than this = the vehicle stands (waits / parked box that flickers) and are left out of the speeds; same 5 km/h as Gap Acceptance (stopped) and TTC (minimum speed); 0 = off
-    "lc_zones": [2, 3, 4, 5, 6, 7],
+    "lc_zones": [2, 3, 4, 5, 6, 7, 8],
     "lc_motorcycle_pairs_only": False,      # False = every pair of vehicles; True = only pairs that include a motorcycle
     "pet_zone6": True,
     "pet_zones": [3, 6],
     "ttc_zones": [3, 6],
     "ldp_zones": [2, 3, 4, 5, 6, 7],
+    "gap_subject_867": True, "gap_subject_8634": True, "gap_subject_1368": True, "gap_subject_8631": True,       # (the Gap subjects of the 4-leg junction)
     "gap_subject_134": True,
     "gap_subject_1367": True,
     "gap_subject_5631": True,
@@ -658,13 +660,15 @@ RUN3_DEFAULTS = {
 # APPLICATION
 # ============================================================
 
-ZONE_IDS = list(range(1, 8))
-CONFLICT_ZONE_IDS = (3, 6)              # V28: conflict zones (default zones of PET / TTC; every zone 1-7 can be ticked)
+ZONE_IDS = list(range(1, 9))            # Zone 1-8 (Zone 8 = the side street on the other side of a 4-leg junction); a site uses only the zones its type needs
+CONFLICT_ZONE_IDS = (3, 6)              # V28: conflict zones (default zones of PET / TTC; every zone 1-8 can be ticked)
 ZONE_NAMES = [f"Zone {i}" for i in ZONE_IDS]
+NEW_4LEG_MOVEMENTS = ("8-6-7", "5-6-8", "8-6-3-4", "1-3-6-8", "8-6-3-1")
+GAP_SUBJECT_EXTRA_KEYS = {"8-6-7": "gap_subject_867", "8-6-3-4": "gap_subject_8634", "1-3-6-8": "gap_subject_1368", "8-6-3-1": "gap_subject_8631"}
 PET_SPEED_WINDOW_S = 0.5                # PET: speed at the crossing = samples within +-this/2 s of the time the vehicle passes it
 PET_SHOW_LEAD_S, PET_SHOW_TAIL_S = 0.0, 1.0   # PET picture: the crossing mark appears when the second vehicle reaches the crossing (t2) and stays 1 s (user, 2026-10-08)
 PET_GAP_FLAG_S = 0.5                    # PET: a crossing interpolated across a sample gap longer than this is flagged
-LDP_LOCKED_ZONES = (1,)                 # LDP only measures main-road movements (2-3-4, 5-6-7): Zone 1 can never have a value
+LDP_LOCKED_ZONES = (1, 8)              # LDP only measures main-road movements (2-3-4, 5-6-7): Zone 1 (and Zone 8, the side street on the other side) can never have a value
 
 # ==== CORE-BEGIN (pure logic, no GUI: unit-tested by tests/test_core.py) ====
 import math
@@ -740,8 +744,78 @@ MOVEMENT_PATTERNS = {
                 "name": "Through: entry side (Zones 2-3-4)"},
     "5-6-7":   {"sequence": (5, 6, 7),    "type": "Through", "main_road": True,  "side": "opposite",
                 "name": "Through: opposite side (Zones 5-6-7)"},
+    # ---- 4-leg junction (1.59.0): Zone 8 = the side street opposite Zone 1, the mirror of Zone 1 (1<->8, 2<->5, 3<->6, 4<->7)
+    "8-6-7":   {"sequence": (8, 6, 7),    "type": "Left",    "main_road": False, "side": None,
+                "name": "Left turn: opposite side street -> main road"},
+    "5-6-8":   {"sequence": (5, 6, 8),    "type": "Left",    "main_road": False, "side": None,
+                "name": "Left turn: main road (opposite side) -> opposite side street"},
+    "8-6-3-4": {"sequence": (8, 6, 3, 4), "type": "Right",   "main_road": False, "side": None,
+                "name": "Right turn: opposite side street -> entry side"},
+    "1-3-6-8": {"sequence": (1, 3, 6, 8), "type": "Through", "main_road": False, "side": None,
+                "name": "Across the main road: side street -> opposite side street"},
+    "8-6-3-1": {"sequence": (8, 6, 3, 1), "type": "Through", "main_road": False, "side": None,
+                "name": "Across the main road: opposite side street -> side street"},
 }
 MOVEMENT_IDS = list(MOVEMENT_PATTERNS)
+
+# ---- Site types (1.59.0): which zones and which Movements a site has. Only the Movements of the type are recognised, so a 3-leg junction behaves exactly as before.
+#   t_small = 3-leg junction, Zone 1-4;  t_full = 3-leg junction, Zone 1-7 (the default: what every run before 1.59.0 was);  x_open = 4-leg junction, Zone 1-8;
+#   x_median = 4-leg junction with a median island: two 3-leg junctions (Zone 1-4 and Zone 5-8), nothing that crosses the median is analysed.
+SITE_TYPE_DEFAULT = "t_full"
+SITE_TYPES = {
+    "t_small":  {"zones": (1, 2, 3, 4),
+                 "movements": ("1-3-4", "2-3-1", "2-3-4")},
+    "t_full":   {"zones": (1, 2, 3, 4, 5, 6, 7),
+                 "movements": ("1-3-4", "2-3-1", "1-3-6-7", "5-6-3-1", "2-3-4", "5-6-7")},
+    "x_open":   {"zones": (1, 2, 3, 4, 5, 6, 7, 8),
+                 "movements": ("1-3-4", "2-3-1", "1-3-6-7", "5-6-3-1", "2-3-4", "5-6-7", "8-6-7", "5-6-8", "8-6-3-4", "1-3-6-8", "8-6-3-1")},
+    "x_median": {"zones": (1, 2, 3, 4, 5, 6, 7, 8),
+                 "movements": ("1-3-4", "2-3-1", "2-3-4", "8-6-7", "5-6-8", "5-6-7")},
+}
+# Gap Acceptance: subject Movement -> the streams it waits for, per site type (each stream needs a reference line / zone edge)
+_GAP_CONFLICTS_T = {
+    "1-3-4": ["2-3-4"],
+    "1-3-6-7": ["2-3-4", "5-6-7", "5-6-3-1"],
+    "5-6-3-1": ["2-3-4", "1-3-6-7"],
+}
+GAP_CONFLICTS_BY_SITE = {
+    "t_small": {"1-3-4": ["2-3-4"]},
+    "t_full": _GAP_CONFLICTS_T,
+    "x_open": {**_GAP_CONFLICTS_T,
+               "8-6-7": ["5-6-7"],
+               "8-6-3-4": ["5-6-7", "2-3-4", "2-3-1"],
+               "1-3-6-8": ["2-3-4", "5-6-7", "8-6-3-1"],
+               "8-6-3-1": ["2-3-4", "5-6-7", "1-3-6-8"]},
+    "x_median": {"1-3-4": ["2-3-4"], "8-6-7": ["5-6-7"]},
+}
+
+
+def site_key(kind, median=False):
+    """The site type from the choice of the user: kind "3small" / "3full" / "4" (4-leg) and, for a 4-leg junction, whether it has a median island."""
+    kind = str(kind or "")
+    if kind in SITE_TYPES:
+        return kind
+    if kind in ("4", "x", "4leg"):
+        return "x_median" if median else "x_open"
+    return "t_small" if kind in ("3small", "small") else SITE_TYPE_DEFAULT
+
+
+def site_info(site):
+    return SITE_TYPES.get(site) or SITE_TYPES[SITE_TYPE_DEFAULT]
+
+
+def site_movements(site):
+    return list(site_info(site)["movements"])
+
+
+def site_gap_conflicts(site):
+    return {k: list(v) for k, v in (GAP_CONFLICTS_BY_SITE.get(site) or GAP_CONFLICTS_BY_SITE[SITE_TYPE_DEFAULT]).items()}
+
+
+def site_patterns(site):
+    """MOVEMENT_PATTERNS of the Movements the site type has."""
+    ids = site_movements(site)
+    return {m: MOVEMENT_PATTERNS[m] for m in ids}
 
 
 def zone_visits_from_samples(samples, merge_gap_s=ZONE_FLICKER_MERGE_S):
@@ -780,8 +854,8 @@ def zone_on_path(visits, zone, t, tol=0.0):
 
 
 
-def classify_movement(sequence):
-    """Map a zone sequence to (movement_id, status). Never guesses.
+def classify_movement(sequence, site=SITE_TYPE_DEFAULT):
+    """Map a zone sequence to (movement_id, status). Never guesses. Only the Movements of the site type (SITE_TYPES) are looked at.
 
     Exact        - equals one of MOVEMENT_PATTERNS
     Partial      - a fragment (>= 2 zones) that fits exactly ONE pattern
@@ -797,11 +871,12 @@ def classify_movement(sequence):
     if len(seq) < 2:
         return "", "Insufficient"
     tup = tuple(seq)
-    for mid, info in MOVEMENT_PATTERNS.items():
+    patterns = site_patterns(site)
+    for mid, info in patterns.items():
         if info["sequence"] == tup:
             return mid, "Exact"
     n = len(tup)
-    cands = [mid for mid, info in MOVEMENT_PATTERNS.items()
+    cands = [mid for mid, info in patterns.items()
              if any(info["sequence"][i:i + n] == tup for i in range(len(info["sequence"]) - n + 1))]
     if len(cands) == 1:
         return cands[0], "Partial"
@@ -1191,14 +1266,14 @@ def first_visit_order(sequence):
     return out
 
 
-def classify_movement_robust(sequence):
+def classify_movement_robust(sequence, site=SITE_TYPE_DEFAULT):
     """classify_movement on the cleaned zone sequence; when that gives no Exact/Partial
     answer, retry on the first-visit order so a vehicle that wobbles across a zone
     boundary (2-3-2-3-4) is still recognised. Returns (movement_id, status) with status
     Exact | Partial | Exact_AfterDedupe | Partial_AfterDedupe | Ambiguous |
     Unclassified | Insufficient. An Exact/Partial answer of the plain sequence is never
     changed."""
-    movement, status = classify_movement(sequence)
+    movement, status = classify_movement(sequence, site)
     if status in ("Exact", "Partial"):
         return movement, status
     plain = []
@@ -1207,7 +1282,7 @@ def classify_movement_robust(sequence):
             plain.append(int(z))
     uniq = first_visit_order(sequence)
     if uniq != plain:
-        movement2, status2 = classify_movement(uniq)
+        movement2, status2 = classify_movement(uniq, site)
         if status2 == "Exact":
             return movement2, "Exact_AfterDedupe"
         if status2 == "Partial":
@@ -1221,10 +1296,14 @@ GAP_PATHS = {
     "1-3-4":   {"wait": (1,), "middle": (3,),   "target": 4},
     "1-3-6-7": {"wait": (1,), "middle": (3, 6), "target": 7},
     "5-6-3-1": {"wait": (5,), "middle": (6, 3), "target": 1},
+    "8-6-7":   {"wait": (8,), "middle": (6,),   "target": 7},
+    "8-6-3-4": {"wait": (8,), "middle": (6, 3), "target": 4},
+    "1-3-6-8": {"wait": (1,), "middle": (3, 6), "target": 8},
+    "8-6-3-1": {"wait": (8,), "middle": (6, 3), "target": 1},
 }
 # Fallback reference time of a conflicting stream when no Line is usable: the first time
 # a vehicle of that stream is seen in the stream's origin zone.
-GAP_REFERENCE_ZONE = {"2-3-4": 2, "5-6-7": 5, "5-6-3-1": 5, "1-3-6-7": 1, "1-3-4": 1, "2-3-1": 2}   # the last two are only used by Headway
+GAP_REFERENCE_ZONE = {"2-3-4": 2, "5-6-7": 5, "5-6-3-1": 5, "1-3-6-7": 1, "1-3-4": 1, "2-3-1": 2, "8-6-7": 8, "8-6-3-4": 8, "1-3-6-8": 1, "8-6-3-1": 8, "5-6-8": 5}   # the last two are only used by Headway
 GAP_HOLD_SPEED_KMH = 5.0      # default: "stopped" = speed <= this ...
 GAP_HOLD_MIN_S = 0.30         # ... for at least this long (inside the conflict zones)
 
@@ -1324,7 +1403,8 @@ def point_polyline_distance(p, pts):
 
 
 # The edge two zones share is the reference line of a Movement (user's choice, 2026-10-07): the Movement -> the two zones of its entry edge.
-ZONE_EDGE_DEFAULT = {"1-3-4": (1, 3), "1-3-6-7": (1, 3), "2-3-1": (2, 3), "2-3-4": (2, 3), "5-6-7": (5, 6), "5-6-3-1": (3, 6)}
+ZONE_EDGE_DEFAULT = {"1-3-4": (1, 3), "1-3-6-7": (1, 3), "2-3-1": (2, 3), "2-3-4": (2, 3), "5-6-7": (5, 6), "5-6-3-1": (3, 6),
+                     "8-6-7": (8, 6), "8-6-3-4": (8, 6), "5-6-8": (5, 6), "1-3-6-8": (1, 3), "8-6-3-1": (6, 8)}
 
 
 def shared_edge(poly_a, poly_b, tol=6.0):
@@ -1417,7 +1497,7 @@ def excel_safe_value(value):
     """Excel turns text such as 2-3-4 into a date (2 Mar 2004) and 5-6-7 into a number. A
     movement / zone sequence (zone numbers 1-7 joined by hyphens) is therefore written with
     arrows (2→3→4) in the Run 3 CSV files."""
-    if isinstance(value, str) and re.fullmatch(r"[1-7](?:-[1-7])+", value):
+    if isinstance(value, str) and re.fullmatch(r"[1-8](?:-[1-8])+", value):
         return value.replace("-", "→")
     return value
 
@@ -2319,7 +2399,7 @@ def edge_length_errors(pairs, factor=1.0):
     return out
 
 
-ZONE_COLORS_BGR = [(0, 200, 0), (0, 160, 255), (255, 120, 0), (200, 0, 200), (0, 220, 220), (60, 60, 255), (255, 200, 0)]      # Zone 1..7 (the pictures use them in this order)
+ZONE_COLORS_BGR = [(0, 200, 0), (0, 160, 255), (255, 120, 0), (200, 0, 200), (0, 220, 220), (60, 60, 255), (255, 200, 0), (170, 170, 0)]      # Zone 1..7 (the pictures use them in this order)
 
 
 def zone_polygon_area(points):
@@ -2462,18 +2542,18 @@ RUN3_ALL_MOVEMENTS = MOVEMENT_IDS
 # Gap Acceptance: subject movement -> conflicting movements whose line-crossing times
 # form the available gaps (each needs a Reference Line Mapping entry).
 # Confirmed by the user (2026-10-01): a subject may meet any of these streams, also several at once.
-RUN3_GAP_CONFLICT_MAP = {
-    "1-3-4": ["2-3-4"],
-    "1-3-6-7": ["2-3-4", "5-6-7", "5-6-3-1"],
-    "5-6-3-1": ["2-3-4", "1-3-6-7"],
-}
+RUN3_GAP_CONFLICT_MAP = GAP_CONFLICTS_BY_SITE["x_open"]          # all the subjects there are; a run uses site_gap_conflicts(its site type)
 # Streams met at each decision stage (= the middle zone the subject is about to enter), SPEC 6.1.
 GAP_STAGE_CONFLICTS = {
     "1-3-4":   {3: ["2-3-4"]},
     "1-3-6-7": {3: ["2-3-4", "5-6-3-1"], 6: ["5-6-7", "5-6-3-1"]},
     "5-6-3-1": {6: ["1-3-6-7"], 3: ["2-3-4", "1-3-6-7"]},
+    "8-6-7":   {6: ["5-6-7"]},
+    "8-6-3-4": {6: ["5-6-7"], 3: ["2-3-4", "2-3-1"]},
+    "1-3-6-8": {3: ["2-3-4", "8-6-3-1"], 6: ["5-6-7", "8-6-3-1"]},
+    "8-6-3-1": {6: ["5-6-7", "1-3-6-8"], 3: ["2-3-4", "1-3-6-8"]},
 }
-LINE_NAMES = [f"Line {i}" for i in range(1, 7)]
+LINE_NAMES = [f"Line {i}" for i in range(1, 9)]          # (1.59.0: 8 - a 4-leg junction has more streams that need a reference line)
 
 
 class _NoLinesToSave(Exception):
@@ -3729,6 +3809,53 @@ class ZoneLineEditor:
             pass
 
 
+SITE_KIND_LABELS = {"3small": "สามแยกเล็ก (Zone 1–4)", "3full": "สามแยกเต็ม (Zone 1–7)", "4": "สี่แยก (Zone 1–8)"}
+SITE_KIND_OF_TYPE = {"t_small": "3small", "t_full": "3full", "x_open": "4", "x_median": "4"}
+
+
+def build_site_type_row(parent, app, translate=None):
+    """The choice of the site type: 3-leg junction with Zone 1-4 / with Zone 1-7 / 4-leg junction (Zone 1-8), and for a 4-leg junction whether it has a median island
+    (then it is analysed as two 3-leg junctions, Zone 1-4 and Zone 5-8). Writes app.run3_site_type_var; every row built stays in step with it. Returns the frame."""
+    T = translate or getattr(app, "T", None) or (lambda t: t)
+    fr = ttk.Frame(parent)
+    ttk.Label(fr, text=T("ประเภทหน้างาน")).grid(row=0, column=0, sticky="w", padx=(0, 6))
+    kind_var, median_var = tk.StringVar(), tk.BooleanVar()
+    labels = {k: T(v) for k, v in SITE_KIND_LABELS.items()}
+    back = {v: k for k, v in labels.items()}
+    cb = ttk.Combobox(fr, textvariable=kind_var, values=list(labels.values()), state="readonly", width=24)
+    cb.grid(row=0, column=1, sticky="w")
+    chk = ttk.Checkbutton(fr, text=T("มีเกาะกลาง"), variable=median_var)
+    chk.grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
+    ttk.Label(fr, text=T("สี่แยกที่มีเกาะกลาง คิดเป็นสามแยก 2 แห่ง (Zone 1–4 และ Zone 5–8) ไม่คิดเส้นทางที่ข้ามเกาะ"), foreground="#555555", wraplength=300,
+              justify="left").grid(row=2, column=0, columnspan=2, sticky="w")
+
+    def from_type(*_):
+        try:
+            key = app.run3_site_type()
+            kind_var.set(labels[SITE_KIND_OF_TYPE[key]])
+            median_var.set(key == "x_median")
+            chk.state(["!disabled"] if key in ("x_open", "x_median") else ["disabled"])
+        except tk.TclError:
+            pass
+
+    def to_type(*_):
+        app.run3_site_type_var.set(site_key(back.get(kind_var.get(), "3full"), bool(median_var.get())))
+
+    cb.bind("<<ComboboxSelected>>", to_type)
+    chk.configure(command=to_type)
+    tid = app.run3_site_type_var.trace_add("write", from_type)
+
+    def gone(e, t=tid):
+        if e.widget is fr:
+            try:
+                app.run3_site_type_var.trace_remove("write", t)
+            except (tk.TclError, ValueError):
+                pass
+    fr.bind("<Destroy>", gone, add="+")
+    from_type()
+    return fr
+
+
 class SiteStudio:
     """The one window for the setup of a site: draw the zones and the Lines, pin the zone corners on the drone picture (= the Align), edit the zones.
     A zone CORNER is a pin: it has a place on the video and (once pinned) a place on the drone picture - the same spot. Dragging it on the video moves its place on
@@ -4178,7 +4305,7 @@ class SiteStudio:
     def _init_streams(self):
         """The streams that need a reference line, each one using the edge its two zones share or a Line drawn here (like the earlier Line window did)."""
         movements = []
-        for streams in RUN3_GAP_CONFLICT_MAP.values():
+        for streams in site_gap_conflicts(self.app.run3_site_type()).values():
             for mv in streams:
                 if mv not in movements:
                     movements.append(mv)
@@ -4203,6 +4330,49 @@ class SiteStudio:
             row = existing.get(mv)
             mode = "edge" if (source == "zone_edge" or (source == "per_stream" and str(row or "").startswith("Edge"))) else "drawn"
             self.streams.append({"mv": mv, "line": assign[mv], "mode": mode})
+
+    def _on_site_type_changed(self, *_):
+        """Another site type: the streams that need a reference line are the ones of that type (the boxes of the Gap tab are made again)."""
+        try:
+            if not self.top.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        old = {s["mv"]: dict(s) for s in self.streams}
+        self._init_streams()
+        for s in self.streams:                                     # (a stream that stays keeps its Line and its choice)
+            if s["mv"] in old:
+                s["line"], s["mode"] = old[s["mv"]]["line"], old[s["mv"]]["mode"]
+        used = {s["line"] for s in self.streams if s["mv"] in old}
+        free = [ln for ln in LINE_NAMES if ln not in used]
+        for s in self.streams:
+            if s["mv"] not in old:
+                s["line"] = free.pop(0)
+        self.stream_var.set(self.streams[0]["mv"] if self.streams else "")
+        self._build_stream_boxes()
+        self.refresh_all()
+
+    def _build_stream_boxes(self):
+        T = self.T
+        for child in self._stream_host.winfo_children():
+            child.destroy()
+        self.stream_status_vars, self.stream_mode_vars = {}, {}
+        for s in self.streams:
+            box = ttk.LabelFrame(self._stream_host, padding=4)
+            box.pack(fill="x", pady=2)
+            top_row = ttk.Frame(box)
+            top_row.pack(fill="x")
+            ttk.Radiobutton(top_row, text=T("กระแส {0}").format(s["mv"]), variable=self.stream_var, value=s["mv"], command=lambda: self.vpane.refresh()).pack(side="left")
+            ttk.Button(top_row, text=T("ล้าง"), width=5, command=lambda mv=s["mv"]: self.clear_stream(mv)).pack(side="right")
+            mv_var = tk.StringVar(value=s["mode"])
+            self.stream_mode_vars[s["mv"]] = mv_var
+            rb = ttk.Frame(box)
+            rb.pack(fill="x")
+            ttk.Radiobutton(rb, text=T("ขอบโซนที่ติดกัน"), variable=mv_var, value="edge", command=lambda mv=s["mv"], v=mv_var: self.set_stream_mode(mv, v.get())).pack(side="left")
+            ttk.Radiobutton(rb, text=T("วาดเอง"), variable=mv_var, value="drawn", command=lambda mv=s["mv"], v=mv_var: self.set_stream_mode(mv, v.get())).pack(side="left", padx=8)
+            sv = tk.StringVar(value="")
+            self.stream_status_vars[s["mv"]] = sv
+            ttk.Label(box, textvariable=sv, foreground="#0a7a3d", wraplength=290, justify="left").pack(anchor="w")
 
     def _stream_state(self):
         return [dict(s) for s in self.streams]
@@ -5133,7 +5303,6 @@ class SiteStudio:
     # ------------------------------------------------------------------ window
     def _build(self):
         top, T = self.top, self.T
-        self.stream_status_vars = {}
         self.show_vars = {"video": tk.BooleanVar(value=True), "drone": tk.BooleanVar(value=True), "plan": tk.BooleanVar(value=False)}
         self.pin_var = tk.StringVar(value="")
         self.fit_var = tk.StringVar(value="")
@@ -5168,8 +5337,10 @@ class SiteStudio:
         # ---- tab 1: zones and pins
         t1 = ttk.Frame(nb, padding=6)
         nb.add(t1, text=T("โซนและหมุด"))
+        build_site_type_row(t1, self.app, T).pack(anchor="w", pady=(0, 6))
+        self._site_trace = self.app.run3_site_type_var.trace_add("write", self._on_site_type_changed)
         ttk.Label(t1, text=T("วาดโซน: เลือกโซนในรายการ แล้วคลิกมุมบนวิดีโอทีละมุม")).pack(anchor="w")
-        self.zone_list = tk.Listbox(t1, height=7, exportselection=False, width=24)
+        self.zone_list = tk.Listbox(t1, height=8, exportselection=False, width=24)
         self.zone_list.pack(anchor="w", pady=(2, 4))
         self.zone_list.bind("<<ListboxSelect>>", lambda e: self._on_zone_pick())
         row = ttk.Frame(t1)
@@ -5194,22 +5365,9 @@ class SiteStudio:
         nb.add(t2, text=T("เส้น Gap"))
         ttk.Label(t2, text=T("Gap Acceptance ต้องมีเส้นของแต่ละกระแส: ใช้ขอบที่โซนสองโซนติดกัน (ไม่ต้องวาด) หรือวาดเส้นเองบนวิดีโอ (คลิก 2 จุด)"),
                   wraplength=300, justify="left", foreground="#555555").pack(anchor="w", pady=(0, 6))
-        for s in self.streams:
-            box = ttk.LabelFrame(t2, padding=4)
-            box.pack(fill="x", pady=2)
-            top_row = ttk.Frame(box)
-            top_row.pack(fill="x")
-            ttk.Radiobutton(top_row, text=T("กระแส {0}").format(s["mv"]), variable=self.stream_var, value=s["mv"], command=lambda: self.vpane.refresh()).pack(side="left")
-            ttk.Button(top_row, text=T("ล้าง"), width=5, command=lambda mv=s["mv"]: self.clear_stream(mv)).pack(side="right")
-            mv_var = tk.StringVar(value=s["mode"])
-            self.stream_mode_vars[s["mv"]] = mv_var
-            rb = ttk.Frame(box)
-            rb.pack(fill="x")
-            ttk.Radiobutton(rb, text=T("ขอบโซนที่ติดกัน"), variable=mv_var, value="edge", command=lambda mv=s["mv"], v=mv_var: self.set_stream_mode(mv, v.get())).pack(side="left")
-            ttk.Radiobutton(rb, text=T("วาดเอง"), variable=mv_var, value="drawn", command=lambda mv=s["mv"], v=mv_var: self.set_stream_mode(mv, v.get())).pack(side="left", padx=8)
-            sv = tk.StringVar(value="")
-            self.stream_status_vars[s["mv"]] = sv
-            ttk.Label(box, textvariable=sv, foreground="#0a7a3d", wraplength=290, justify="left").pack(anchor="w")
+        self._stream_host = ttk.Frame(t2)
+        self._stream_host.pack(fill="x")
+        self._build_stream_boxes()
         # ---- tab 3: the Align and the real lengths
         t3 = ttk.Frame(nb, padding=6)
         nb.add(t3, text=T("จัดแนวและระยะจริง"))
@@ -5312,6 +5470,10 @@ class SiteStudio:
             self.vpane.refresh()
 
     def close(self):
+        try:
+            self.app.run3_site_type_var.trace_remove("write", self._site_trace)
+        except (AttributeError, tk.TclError, ValueError):
+            pass
         try:
             self.top.destroy()
         except tk.TclError:
@@ -7848,6 +8010,7 @@ class Run1App:
         # RUN 3 SAFETY ANALYSIS VARIABLES
         # ========================================================
         self.run3_site_id_var = tk.StringVar(value=RUN3_DEFAULTS["site_id"])
+        self.run3_site_type_var = tk.StringVar(value=RUN3_DEFAULTS["site_type"])         # t_small / t_full / x_open / x_median (SITE_TYPES)
         self.run3_speed_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["speed_enabled"])
         self.run3_gap_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_enabled"])
         self.run3_lc_enabled_var = tk.BooleanVar(value=RUN3_DEFAULTS["lc_enabled"])
@@ -7948,6 +8111,7 @@ class Run1App:
         self.run3_gap_subject_134_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_subject_134"])
         self.run3_gap_subject_1367_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_subject_1367"])
         self.run3_gap_subject_5631_var = tk.BooleanVar(value=RUN3_DEFAULTS["gap_subject_5631"])
+        self.run3_gap_subject_extra_vars = {mv: tk.BooleanVar(value=RUN3_DEFAULTS[key]) for mv, key in GAP_SUBJECT_EXTRA_KEYS.items()}       # the subjects of the 4-leg junction
         self.run3_use_raff_var = tk.BooleanVar(value=RUN3_DEFAULTS["use_raff"])
         self.run3_use_mle_var = tk.BooleanVar(value=RUN3_DEFAULTS["use_mle"])
         self.run3_reference_mapping_text = RUN3_DEFAULTS["reference_line_mapping"]
@@ -8337,13 +8501,14 @@ class Run1App:
     # ---------------- tab 2: site ----------------
     def build_site_tab(self):
         gray = "#666666"
-        box = self.section("ไฟล์โซนและเส้น (Zone 1–7, Line)")
+        box = self.section("ไฟล์โซนและเส้น (Zone 1–8, Line)")
         box.columnconfigure(1, weight=1)       # the path entry takes the free width
         ttk.Label(box, text="ไฟล์โซน").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(box, textvariable=self.zone_line_config_var).grid(row=0, column=1, sticky="ew", pady=4)
         ttk.Button(box, text="🧭 ตั้งค่าทางแยก… (โซน · เส้น Gap · จัดแนวกับภาพโดรน)", command=self.open_site_studio).grid(row=0, column=2, padx=(5, 0))
         ttk.Button(box, text="Browse", command=self.load_measurement_config).grid(row=0, column=3, padx=(5, 0))
         ttk.Label(box, textvariable=self.measurement_status_var, foreground=gray, anchor="w").grid(row=1, column=0, columnspan=4, sticky="w")
+        build_site_type_row(box, self).grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 2))
 
         box = self.section("จุดที่ใช้ตัดสินว่ารถอยู่โซนไหน")
         ttk.Label(box, text="ตำแหน่งบนกรอบรถ").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
@@ -8398,6 +8563,8 @@ class Run1App:
         r = 0
         ttk.Label(cal, text="Site_ID").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(cal, textvariable=self.run3_site_id_var, width=18).grid(row=r, column=1, sticky="w", pady=4)
+        r += 1
+        build_site_type_row(cal, self).grid(row=r, column=0, columnspan=4, sticky="w", pady=4)
         r += 1
         ttk.Label(cal, text="วิดีโอและภาพ X–Y: เปิด/ปิดและเลือกสิ่งที่วาดที่หน้า ④ (การแสดงผลและไฟล์)").grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Label(cal, text="วาดจากพิกัดเมตรเดียวกับที่ตัวชี้วัดใช้ (ไฟล์ Detection_Records_Topview.csv เขียนทุกครั้ง)", foreground=gray).grid(row=r, column=2, columnspan=2, sticky="w", pady=2)
@@ -8542,9 +8709,13 @@ class Run1App:
         box = self._indicator_box("Gap Acceptance", self.run3_gap_enabled_var,
                                   "รถที่รอ (ดูกระแสที่ต้องให้ทางตามตาราง) ยอมรับ/ปฏิเสธช่องว่างสองขั้น Access/Exit; Line เป็นตัวเลือก (ไม่มี Line ใช้เวลาเข้าโซนต้นทางของกระแสนั้น)")
         ttk.Label(box, text="รถที่รอ (Movement)").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=2)
-        ttk.Checkbutton(box, text="1-3-4", variable=self.run3_gap_subject_134_var).grid(row=1, column=1, sticky="w")
-        ttk.Checkbutton(box, text="1-3-6-7", variable=self.run3_gap_subject_1367_var).grid(row=1, column=2, sticky="w")
-        ttk.Checkbutton(box, text="5-6-3-1", variable=self.run3_gap_subject_5631_var).grid(row=1, column=3, sticky="w")
+        subj = ttk.Frame(box)
+        subj.grid(row=1, column=1, columnspan=7, sticky="w")
+        for i, (mv, var) in enumerate([("1-3-4", self.run3_gap_subject_134_var), ("1-3-6-7", self.run3_gap_subject_1367_var), ("5-6-3-1", self.run3_gap_subject_5631_var),
+                                       *self.run3_gap_subject_extra_vars.items()]):
+            ttk.Checkbutton(subj, text=mv, variable=var).grid(row=i // 4, column=i % 4, sticky="w", padx=(0, 10))
+        ttk.Label(subj, text="(ใช้เฉพาะ Movement ของประเภทหน้างานที่เลือก — 8-6-7, 8-6-3-4, 1-3-6-8, 8-6-3-1 เป็นของสี่แยก)", foreground="#555555").grid(
+            row=2, column=0, columnspan=4, sticky="w")
         self._entry_row(box, 2, "ถือว่ารถ \"หยุด\" กลางแยกเมื่อความเร็ว ≤ (km/h)", self.run3_waiting_speed_threshold_var)
         self._entry_row(box, 3, "... นานอย่างน้อย (s)", self.run3_hold_min_duration_var)
         ttk.Label(box, text="Critical Gap").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=2)
@@ -8573,8 +8744,10 @@ class Run1App:
                                   "เวลาระหว่างรถสองคันที่ตามกันใน Movement เดียวกัน (Time Headway = หน้ารถถึงหน้ารถ, Time Gap = ท้ายรถหน้าถึงหน้ารถหลัง) — "
                                   "จับเฉพาะคันที่อยู่ในแนวทางวิ่งของคันหน้า (รถที่วิ่งขนานไม่นับ) — เขียนไฟล์ Headway.csv, ไม่มีระดับความเสี่ยง")
         ttk.Label(box, text="Movement ที่วิเคราะห์").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=2)
+        hw = ttk.Frame(box)
+        hw.grid(row=1, column=1, columnspan=7, sticky="w")
         for i, (mv, var) in enumerate(self.run3_headway_movement_vars.items()):
-            ttk.Checkbutton(box, text=mv, variable=var).grid(row=1, column=1 + i, sticky="w")
+            ttk.Checkbutton(hw, text=mv, variable=var).grid(row=i // 6, column=i % 6, sticky="w", padx=(0, 10))
         self._entry_row(box, 2, "Headway สูงสุด (s) — ว่าง = ไม่จำกัด (ไม่จับคู่คันที่ห่างกันเกินนี้)", self.run3_headway_max_var, span=7)
         ttk.Label(box, text="Line ของ Headway เอง (Site_ID|Movement|Line N หรือ Edge 1-3) — Movement ที่ไม่ใส่ จะใช้เส้นอ้างอิงตามที่ตั้งในกรอบ Gap Acceptance แล้วใช้โซนต้นทาง").grid(
             row=3, column=0, columnspan=8, sticky="w", pady=(6, 2))
@@ -9270,7 +9443,7 @@ class Run1App:
             messagebox.showerror("วาด Line", "อ่านเฟรมจากวิดีโอไม่ได้")
             return None
         movements = []
-        for streams in RUN3_GAP_CONFLICT_MAP.values():
+        for streams in site_gap_conflicts(self.run3_site_type()).values():
             for mv in streams:
                 if mv not in movements:
                     movements.append(mv)
@@ -10248,6 +10421,7 @@ class Run1App:
             **{key: var.get() for key, var in self.dr_vars.items()},
             "run3": {
                 "site_id": self.run3_site_id_var.get(),
+                "site_type": self.run3_site_type(),
                 "speed_enabled": self.run3_speed_enabled_var.get(),
                 "gap_enabled": self.run3_gap_enabled_var.get(),
                 "lc_enabled": self.run3_lc_enabled_var.get(),
@@ -10336,6 +10510,7 @@ class Run1App:
                 "gap_subject_134": self.run3_gap_subject_134_var.get(),
                 "gap_subject_1367": self.run3_gap_subject_1367_var.get(),
                 "gap_subject_5631": self.run3_gap_subject_5631_var.get(),
+                **{key: self.run3_gap_subject_extra_vars[mv].get() for mv, key in GAP_SUBJECT_EXTRA_KEYS.items()},
                 "use_raff": self.run3_use_raff_var.get(),
                 "use_mle": self.run3_use_mle_var.get(),
                 "reference_line_mapping": self.run3_reference_text.get("1.0", "end-1c") if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text,
@@ -10572,6 +10747,8 @@ class Run1App:
                 ("gap_subject_134", self.run3_gap_subject_134_var),
                 ("gap_subject_1367", self.run3_gap_subject_1367_var),
                 ("gap_subject_5631", self.run3_gap_subject_5631_var),
+                ("site_type", self.run3_site_type_var),
+                *[(key, self.run3_gap_subject_extra_vars[mv]) for mv, key in GAP_SUBJECT_EXTRA_KEYS.items()],
                 ("use_raff", self.run3_use_raff_var),
                 ("use_mle", self.run3_use_mle_var),
             ]
@@ -10579,6 +10756,8 @@ class Run1App:
             for key, variable in mapping_pairs:
                 if key in run3:
                     variable.set(run3[key])
+            if "site_type" not in run3:                                     # a project from before the site types: the 3-leg junction with 7 zones, as it was
+                self.run3_site_type_var.set(SITE_TYPE_DEFAULT)
             if "pet_zones" in run3:
                 for z, var in self.run3_pet_zone_vars.items():
                     var.set(z in set(run3.get("pet_zones") or []))
@@ -10598,13 +10777,15 @@ class Run1App:
             if speed_zone_values is None:
                 legacy = set(run3.get("speed_approach_zones", [])) | set(run3.get("speed_exit_zones", []))
                 speed_zone_values = sorted(legacy)
+            old_project = "site_type" not in run3                                    # (saved before the 4-leg junction: Zone 8 starts ticked, it cannot have been unticked)
             for z in ZONE_IDS:
-                self.run3_speed_zone_vars[z].set(z in set(speed_zone_values or []))
+                self.run3_speed_zone_vars[z].set(z in set(speed_zone_values or []) or (z == 8 and old_project))
                 if "lc_zones" in run3:
-                    self.run3_lc_zone_vars[z].set(z in set(run3.get("lc_zones", [])))
+                    self.run3_lc_zone_vars[z].set(z in set(run3.get("lc_zones", [])) or (z == 8 and old_project))
             if "headway_movements" in run3:
+                saved_mv = set(run3.get("headway_movements") or [])
                 for mv, var in self.run3_headway_movement_vars.items():
-                    var.set(mv in set(run3.get("headway_movements") or []))
+                    var.set(mv in saved_mv or (mv in NEW_4LEG_MOVEMENTS and "site_type" not in run3))          # (a project saved before the 4-leg junction: its new Movements start ticked)
             self.run3_headway_mapping_text = str(run3.get("headway_line_mapping", "") or "")
             if hasattr(self, "run3_headway_text"):
                 self.run3_headway_text.delete("1.0", "end")
@@ -11617,12 +11798,8 @@ class Run1App:
             if str(self.run3_pet_min_speed_var.get()).strip():
                 self._run3_float(self.run3_pet_min_speed_var.get(), "PET minimum vehicle speed (km/h)")
         if enabled["gap"]:
-            if not any([
-                self.run3_gap_subject_134_var.get(),
-                self.run3_gap_subject_1367_var.get(),
-                self.run3_gap_subject_5631_var.get(),
-            ]):
-                raise ValueError("Select at least one Gap Acceptance subject movement.")
+            if not self.run3_gap_subjects():
+                raise ValueError("Select at least one Gap Acceptance subject movement (of the Movements of the site type).")
             self._run3_float(self.run3_waiting_speed_threshold_var.get(), "Gap Acceptance stop speed threshold (km/h)")
             self._run3_float(self.run3_hold_min_duration_var.get(), "Gap Acceptance stop minimum duration (s)")
             if not (self.run3_use_raff_var.get() or self.run3_use_mle_var.get()):
@@ -11632,6 +11809,23 @@ class Run1App:
                 if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text.strip()
             )
         return True
+
+    def run3_site_type(self):
+        """The site type chosen (SITE_TYPES); an unknown value is the default (3-leg junction, Zone 1-7)."""
+        v = str(self.run3_site_type_var.get()).strip()
+        return v if v in SITE_TYPES else SITE_TYPE_DEFAULT
+
+    def run3_gap_subjects(self):
+        """The Movements ticked as waiting drivers of Gap Acceptance that the site type has."""
+        ticked = []
+        for mv, var in (("1-3-4", self.run3_gap_subject_134_var), ("1-3-6-7", self.run3_gap_subject_1367_var), ("5-6-3-1", self.run3_gap_subject_5631_var)):
+            if var.get():
+                ticked.append(mv)
+        for mv, var in self.run3_gap_subject_extra_vars.items():
+            if var.get():
+                ticked.append(mv)
+        have = site_gap_conflicts(self.run3_site_type())
+        return [mv for mv in ticked if mv in have]
 
     def collect_run3_warnings(self):
         """Non-blocking pre-flight checks. Returns a list of warning strings.
@@ -11691,9 +11885,7 @@ class Run1App:
         # Gap Acceptance: a Line per conflicting stream gives the best reference time; without a
         # usable Line the program uses the time a vehicle first enters the stream's origin zone.
         if bool(self.run3_gap_enabled_var.get()):
-            subjects = [m for m, var in (("1-3-4", self.run3_gap_subject_134_var),
-                                         ("1-3-6-7", self.run3_gap_subject_1367_var),
-                                         ("5-6-3-1", self.run3_gap_subject_5631_var)) if var.get()]
+            subjects = self.run3_gap_subjects()
             text = (self.run3_reference_text.get("1.0", "end-1c")
                     if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text)
             fallback = (" For such streams the program uses the time each vehicle first enters the origin zone "
@@ -11706,7 +11898,8 @@ class Run1App:
             if mapping is not None:
                 site = self.run3_site_id_var.get().strip()
                 site_map = {mv: ln for (st, mv), ln in mapping.items() if str(st).strip() == site}
-                needed = sorted({c for m in subjects for c in RUN3_GAP_CONFLICT_MAP[m]})
+                conflicts_of = site_gap_conflicts(self.run3_site_type())
+                needed = sorted({c for m in subjects for c in conflicts_of[m]})
                 source = self.run3_ref_line_source_var.get() if hasattr(self, "run3_ref_line_source_var") else "zone_edge"
                 tol = 6.0
                 try:
@@ -13820,7 +14013,7 @@ class Run1App:
         with open(path, "r", newline="", encoding="utf-8-sig") as f:
             return list(csv.DictReader(f))
 
-    def _run3_build_movement_index(self, tracks, summaries=None, mapping=None, site_id=None):
+    def _run3_build_movement_index(self, tracks, summaries=None, mapping=None, site_id=None, site_type=SITE_TYPE_DEFAULT):
         """One canonical Movement per Vehicle_ID (SPEC v28 section 3).
 
         The Movement comes from the flicker-cleaned zone sequence built from the
@@ -13831,7 +14024,7 @@ class Run1App:
         movement_by_id, status_by_id, sequence_by_id = {}, {}, {}
         for tid, rows in tracks.items():
             seq = zone_sequence_from_samples([(r["_timestamp"], r.get("_zone_num")) for r in rows])
-            movement, status = classify_movement_robust(seq)
+            movement, status = classify_movement_robust(seq, site_type)
             key = str(tid)
             movement_by_id[key] = movement
             status_by_id[key] = status
@@ -14002,10 +14195,8 @@ class Run1App:
             return {z for z, v in var_map.items() if bool(v.get())}
 
         ppm = num(self.run3_ppm_var, 0.0) or 0.0
-        gap_movements = []
-        if self.run3_gap_subject_134_var.get(): gap_movements.append("1-3-4")
-        if self.run3_gap_subject_1367_var.get(): gap_movements.append("1-3-6-7")
-        if self.run3_gap_subject_5631_var.get(): gap_movements.append("5-6-3-1")
+        gap_movements = self.run3_gap_subjects()
+        site_type = self.run3_site_type()
         mapping_text = (
             self.run3_reference_text.get("1.0", "end-1c")
             if hasattr(self, "run3_reference_text") else self.run3_reference_mapping_text
@@ -14019,6 +14210,7 @@ class Run1App:
         w_opp = lane_total("lane_opp_motorcycle_m", "lane_opp_car_m")
         return {
             "site_id": self.run3_site_id_var.get().strip(),
+            "site_type": site_type,
             "speed_enabled": bool(self.run3_speed_enabled_var.get()),
             "gap_enabled": bool(self.run3_gap_enabled_var.get()),
             "lc_enabled": bool(self.run3_lc_enabled_var.get()),
@@ -14062,7 +14254,7 @@ class Run1App:
             "pet_include_lane_change": bool(self.run3_pet_include_lane_var.get()),
             "pet_include_crossing": bool(self.run3_pet_include_cross_var.get()),
             "headway_enabled": bool(self.run3_headway_enabled_var.get()),
-            "headway_movements": [mv for mv, v in self.run3_headway_movement_vars.items() if v.get()],
+            "headway_movements": [mv for mv, v in self.run3_headway_movement_vars.items() if v.get() and mv in site_movements(site_type)],
             "headway_max_s": num(self.run3_headway_max_var, None),
             "reference_line_source": (self.run3_ref_line_source_var.get() if self.run3_ref_line_source_var.get() in ("drawn", "per_stream") else "zone_edge"),
             "zone_edge_tol_px": num(self.run3_zone_edge_tol_var, 6.0) or 6.0,
@@ -14850,8 +15042,8 @@ class Run1App:
             site, movement, lname = parts
             if movement not in RUN3_ALL_MOVEMENTS:
                 raise ValueError(f"Invalid movement in Reference Line Mapping: {movement}")
-            if lname not in LINE_NAMES and not re.fullmatch(r"Edge [1-7]-[1-7]", lname):
-                raise ValueError(f"Invalid line name in Reference Line Mapping: {lname} (Line 1-6, or Edge 1-3 = the edge Zone 1 and Zone 3 share)")
+            if lname not in LINE_NAMES and not re.fullmatch(r"Edge [1-8]-[1-8]", lname):
+                raise ValueError(f"Invalid line name in Reference Line Mapping: {lname} (Line 1-8, or Edge 1-3 = the edge Zone 1 and Zone 3 share)")
             mapping[(site, movement)] = lname
         return mapping
 
@@ -14886,7 +15078,7 @@ class Run1App:
         """The 2 points of a reference line: a drawn Line ("Line 3") or a zone edge ("Edge 1-3" = the edge Zone 1 and Zone 3 share); [] when unusable."""
         if not name:
             return []
-        m = re.fullmatch(r"Edge ([1-7])-([1-7])", str(name))
+        m = re.fullmatch(r"Edge ([1-8])-([1-8])", str(name))
         if m:
             zones = getattr(self, "zones", {}) or {}
             edge = shared_edge(zones.get(f"Zone {m.group(1)}", []), zones.get(f"Zone {m.group(2)}", []), tol)
@@ -14931,8 +15123,9 @@ class Run1App:
         (its Movements) use, as resolved for the run (`c`). Streams that share one line (1-3-4 and 1-3-6-7 -> Zone 1|3) give one entry named after both."""
         streams = []
         if c.get("gap_enabled"):
+            conflicts_of = site_gap_conflicts(c.get("site_type") or SITE_TYPE_DEFAULT)
             for m in c.get("gap_movements") or []:
-                for conflict in RUN3_GAP_CONFLICT_MAP.get(m, []):
+                for conflict in conflicts_of.get(m, []):
                     if conflict not in streams:
                         streams.append(conflict)
         if c.get("headway_enabled"):
@@ -15105,7 +15298,8 @@ class Run1App:
                 "stopped_stages": 0, "stopped_in_conflict_zone": 0, "streams": {}}
 
         # ---- 1) reference events and gap intervals of every stream that is needed ----
-        streams = sorted({cm for mv in selected for cm in RUN3_GAP_CONFLICT_MAP.get(mv, [])})
+        conflicts_of = site_gap_conflicts(c.get("site_type") or SITE_TYPE_DEFAULT)
+        streams = sorted({cm for mv in selected for cm in conflicts_of.get(mv, [])})
         intervals = {}
         for cm in streams:
             events, basis = self._run3_stream_events(tracks, movement_by_id, cm, mapping, site, c)
@@ -15952,7 +16146,7 @@ class Run1App:
             mapping = self._run3_parse_reference_mapping(c["mapping_text"])
         except Exception as exc:
             mapping_parse_error = str(exc)
-        movement_by_id, movement_source_by_id, sequence_by_id = self._run3_build_movement_index(tracks, summaries, mapping, c["site_id"])
+        movement_by_id, movement_source_by_id, sequence_by_id = self._run3_build_movement_index(tracks, summaries, mapping, c["site_id"], c.get("site_type") or SITE_TYPE_DEFAULT)
         tracks_by_zone = defaultdict(int)
         for rows in tracks.values():
             for z in {r.get("_zone_num") for r in rows}:
@@ -15971,7 +16165,8 @@ class Run1App:
             "source_counts": {
                 "detection_records": len(detection_rows), "track_ids": len(tracks),
                 "id_zone_summary_rows": len(id_rows), "tracks_by_zone": dict(tracks_by_zone),
-                "movement_counts": {m: sum(1 for t in tracks if movement_by_id.get(str(t), "") == m) for m in RUN3_ALL_MOVEMENTS},
+                "site_type": c.get("site_type") or SITE_TYPE_DEFAULT,
+                "movement_counts": {m: sum(1 for t in tracks if movement_by_id.get(str(t), "") == m) for m in site_movements(c.get("site_type") or SITE_TYPE_DEFAULT)},
                 "movement_status": {st: sum(1 for t in tracks if movement_source_by_id.get(str(t), "") == st)
                                     for st in ("Exact", "Exact_AfterDedupe", "Partial", "Partial_AfterDedupe",
                                                "Ambiguous", "Unclassified", "Insufficient")},

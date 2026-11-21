@@ -40,11 +40,11 @@ check("W_entry total", app.run3_w_entry_text.get() == "W_entry = 4.750 m", app.r
 check("W_opp total", app.run3_w_opp_text.get() == "W_opp = 4.200 m", app.run3_w_opp_text.get())
 
 # --- Gap Acceptance conflict table given by the user ---
-check("Gap conflict table", m.RUN3_GAP_CONFLICT_MAP == {
+check("Gap conflict table (the 3-leg junction is what it always was)", m.site_gap_conflicts("t_full") == {
     "1-3-4": ["2-3-4"],
     "1-3-6-7": ["2-3-4", "5-6-7", "5-6-3-1"],
     "5-6-3-1": ["2-3-4", "1-3-6-7"],
-}, str(m.RUN3_GAP_CONFLICT_MAP))
+}, str(m.site_gap_conflicts("t_full")))
 
 check("Gap paths and conflict table cover the same subject movements", set(m.GAP_PATHS) == set(m.RUN3_GAP_CONFLICT_MAP))
 
