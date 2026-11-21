@@ -506,8 +506,11 @@ RUN3_VEHICLE_CLASSES = [
     "Bus", "Car", "Motorcycle", "Pickup", "Sidecar", "Truck", "Van"
 ]
 
-RUN3_GEOMETRY_KEYS = ("lane_entry_motorcycle_m", "lane_entry_car_m",
+# 1.59.2: the width of the whole side is one number (W_entry / W_opp, the divisor of LDP: nothing else is used). The four lane widths are kept for projects saved before: when the
+# width of a side is empty, it is the motorcycle lane + the car lane of that side.
+RUN3_GEOMETRY_KEYS = ("width_entry_m", "width_opp_m", "lane_entry_motorcycle_m", "lane_entry_car_m",
                       "lane_opp_motorcycle_m", "lane_opp_car_m", "median_m")
+RUN3_LEGACY_LANE_KEYS = ("lane_entry_motorcycle_m", "lane_entry_car_m", "lane_opp_motorcycle_m", "lane_opp_car_m")
 
 RISK_SETTING_KEYS = ("risk_ttc_limits_s", "risk_pet_limits_s", "risk_ldp_limits_pct", "risk_speed_limits_kmh", "risk_ldp_speed_limits_kmh")
 RISK_SETTING_ASCENDING = {"risk_ttc_limits_s": True, "risk_pet_limits_s": True, "risk_ldp_limits_pct": False,
@@ -602,7 +605,9 @@ RUN3_DEFAULTS = {
     # V28: road geometry (m). Blank = not entered (never guessed).
     # W_entry = entry motorcycle lane + entry car lane (side with the side street: Zones 2-3-4)
     # W_opp   = opposite motorcycle lane + opposite car lane (Zones 5-6-7)
-    "lane_entry_motorcycle_m": "",
+    "width_entry_m": "",                    # the whole side with the side street (Zones 2-3-4), all lanes together
+    "width_opp_m": "",                      # the opposite side (Zones 5-6-7)
+    "lane_entry_motorcycle_m": "",          # (before 1.59.2: kept for older projects)
     "lane_entry_car_m": "",
     "lane_opp_motorcycle_m": "",
     "lane_opp_car_m": "",
@@ -8343,7 +8348,7 @@ class Run1App:
                 except Exception:
                     return False
             widths_needed = bool(self.run3_ldp_enabled_var.get())
-            widths_ok = all(num(self.run3_geometry_vars[k]) for k in ("lane_entry_motorcycle_m", "lane_entry_car_m", "lane_opp_motorcycle_m", "lane_opp_car_m"))
+            widths_ok = all(w is not None for w in self.run3_widths())
             items = {
                 "model": (os.path.isfile(self.model_var.get().strip()), "โมเดล"),
                 "clips": (n_clips > 0, f"คลิป {n_clips}"),
@@ -8549,20 +8554,15 @@ class Run1App:
         ttk.Label(sm, text="1 = ทันที; 3–5 ช่วยไม่ให้กรอบกระพริบตรงขอบโซน (เวลาเข้าโซนช้าลงเล็กน้อย)", foreground="#666666").grid(row=3, column=2, sticky="w")
 
         geo = self.section("ความกว้างถนน (m) — ใช้เป็นตัวหารของ LDP")
-        ttk.Label(geo, text="ฝั่งทางเข้า–ออก (Zone 2-3-4)", foreground="#555555").grid(row=0, column=0, columnspan=4, sticky="w")
-        ttk.Label(geo, text="เลนจักรยานยนต์").grid(row=1, column=0, sticky="w", pady=2)
-        ttk.Entry(geo, textvariable=self.run3_geometry_vars["lane_entry_motorcycle_m"], width=8).grid(row=1, column=1, sticky="w", padx=(4, 16))
-        ttk.Label(geo, text="เลนรถยนต์").grid(row=1, column=2, sticky="w")
-        ttk.Entry(geo, textvariable=self.run3_geometry_vars["lane_entry_car_m"], width=8).grid(row=1, column=3, sticky="w", padx=(4, 16))
-        ttk.Label(geo, textvariable=self.run3_w_entry_text, foreground="#0a5").grid(row=1, column=4, sticky="w")
-        ttk.Label(geo, text="ฝั่งตรงข้ามทางเชื่อม (Zone 5-6-7)", foreground="#555555").grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
-        ttk.Label(geo, text="เลนจักรยานยนต์").grid(row=3, column=0, sticky="w", pady=2)
-        ttk.Entry(geo, textvariable=self.run3_geometry_vars["lane_opp_motorcycle_m"], width=8).grid(row=3, column=1, sticky="w", padx=(4, 16))
-        ttk.Label(geo, text="เลนรถยนต์").grid(row=3, column=2, sticky="w")
-        ttk.Entry(geo, textvariable=self.run3_geometry_vars["lane_opp_car_m"], width=8).grid(row=3, column=3, sticky="w", padx=(4, 16))
-        ttk.Label(geo, textvariable=self.run3_w_opp_text, foreground="#0a5").grid(row=3, column=4, sticky="w")
-        ttk.Label(geo, text="ความกว้างเกาะกลาง (บันทึกไว้ ไม่ใช้คำนวณ)").grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 2))
-        ttk.Entry(geo, textvariable=self.run3_geometry_vars["median_m"], width=8).grid(row=4, column=2, sticky="w", padx=(4, 16))
+        ttk.Label(geo, text="ความกว้างของถนนทั้งฝั่ง รวมทุกเลน (รวมเลนจักรยานยนต์ถ้ามี) — LDP หารด้วยค่านี้", foreground="#555555").grid(row=0, column=0, columnspan=5, sticky="w")
+        ttk.Label(geo, text="ฝั่งทางเข้า–ออก (Zone 2-3-4)").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(geo, textvariable=self.run3_geometry_vars["width_entry_m"], width=8).grid(row=1, column=1, sticky="w", padx=(4, 16))
+        ttk.Label(geo, textvariable=self.run3_w_entry_text, foreground="#0a5").grid(row=1, column=2, sticky="w")
+        ttk.Label(geo, text="ฝั่งตรงข้ามทางเชื่อม (Zone 5-6-7)").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(geo, textvariable=self.run3_geometry_vars["width_opp_m"], width=8).grid(row=2, column=1, sticky="w", padx=(4, 16))
+        ttk.Label(geo, textvariable=self.run3_w_opp_text, foreground="#0a5").grid(row=2, column=2, sticky="w")
+        ttk.Label(geo, text="ความกว้างเกาะกลาง (บันทึกไว้ ไม่ใช้คำนวณ)").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 2))
+        ttk.Entry(geo, textvariable=self.run3_geometry_vars["median_m"], width=8).grid(row=3, column=2, sticky="w", padx=(4, 16))
         self._update_lane_totals()
 
         cal = self.section("แปลงพิกัดภาพเป็นเมตร (จัดแนวกับภาพโดรน)")
@@ -8854,17 +8854,29 @@ class Run1App:
     # INTEGRATED ZONE / LINE MEASUREMENT
     # ========================================================
 
-    def _update_lane_totals(self):
-        """Show W_entry / W_opp (= motorcycle lane + car lane of each side)."""
-        def total(a, b):
+    def run3_widths(self):
+        """(W_entry, W_opp) in metres, None where not known: the width typed for the whole side; empty = the motorcycle lane + the car lane of that side (a project from before 1.59.2)."""
+        def num(key):
             try:
-                x = float(self.run3_geometry_vars[a].get().strip())
-                y = float(self.run3_geometry_vars[b].get().strip())
-                return f"{x + y:.3f} m"
+                v = float(str(self.run3_geometry_vars[key].get()).strip().replace(",", "."))
+                return v if v >= 0 else None
             except Exception:
-                return "-"
-        self.run3_w_entry_text.set("W_entry = " + total("lane_entry_motorcycle_m", "lane_entry_car_m"))
-        self.run3_w_opp_text.set("W_opp = " + total("lane_opp_motorcycle_m", "lane_opp_car_m"))
+                return None
+
+        def side(width_key, moto_key, car_key):
+            w = num(width_key)
+            if w is not None and w > 0:
+                return w
+            a, b = num(moto_key), num(car_key)
+            return a + b if a is not None and b is not None and a + b > 0 else None
+
+        return (side("width_entry_m", "lane_entry_motorcycle_m", "lane_entry_car_m"), side("width_opp_m", "lane_opp_motorcycle_m", "lane_opp_car_m"))
+
+    def _update_lane_totals(self):
+        """Show W_entry / W_opp (the width of each side)."""
+        we, wo = self.run3_widths()
+        self.run3_w_entry_text.set("W_entry = " + ("-" if we is None else f"{we:.3f} m"))
+        self.run3_w_opp_text.set("W_opp = " + ("-" if wo is None else f"{wo:.3f} m"))
 
     def update_trajectory_position_controls(self, event=None):
         """Update the trajectory-position controls.
@@ -10766,6 +10778,12 @@ class Run1App:
                     variable.set(run3[key])
             if "site_type" not in run3:                                     # a project from before the site types: the 3-leg junction with 7 zones, as it was
                 self.run3_site_type_var.set(SITE_TYPE_DEFAULT)
+            for wkey, mkey, ckey in (("width_entry_m", "lane_entry_motorcycle_m", "lane_entry_car_m"), ("width_opp_m", "lane_opp_motorcycle_m", "lane_opp_car_m")):
+                if wkey not in run3 and mkey in run3 and ckey in run3:      # a project from before 1.59.2 (two lanes per side): the width of the side = their sum
+                    try:
+                        self.run3_geometry_vars[wkey].set(f"{float(run3[mkey]) + float(run3[ckey]):g}")
+                    except (TypeError, ValueError):
+                        pass
             if "pet_zones" in run3:
                 for z, var in self.run3_pet_zone_vars.items():
                     var.set(z in set(run3.get("pet_zones") or []))
@@ -11792,12 +11810,15 @@ class Run1App:
         for key in RUN3_GEOMETRY_KEYS:
             text = str(self.run3_geometry_vars[key].get()).strip()
             if text:   # must be numeric when entered (lane widths are required when LDP is enabled)
-                self._run3_float(text, f"road geometry {key}", positive=(key != "median_m"))
+                self._run3_float(text, f"road geometry {key}", positive=(key not in ("median_m", "lane_entry_motorcycle_m", "lane_opp_motorcycle_m")))        # (a side may have no motorcycle lane: 0)
         if enabled["ldp"]:
             need_zone(self.run3_ldp_zone_vars, "LDP")
             self._run3_float(self.run3_ldp_smoothing_var.get(), "LDP smoothing samples")
-            for key in ("lane_entry_motorcycle_m", "lane_entry_car_m", "lane_opp_motorcycle_m", "lane_opp_car_m"):
-                self._run3_float(self.run3_geometry_vars[key].get(), f"road geometry {key} (required by LDP)")
+            we, wo = self.run3_widths()
+            if we is None:
+                raise ValueError("Run 3 requires the road width of the side with the side street (Zone 2-3-4): LDP needs it.")
+            if wo is None:
+                raise ValueError("Run 3 requires the road width of the opposite side (Zone 5-6-7): LDP needs it.")
         if enabled["pet"]:
             need_zone(self.run3_pet_zone_vars, "PET")
             self._run3_float(self.run3_pet_threshold_var.get(), "PET threshold (s)")
@@ -14212,10 +14233,7 @@ class Run1App:
         pet_max = num(self.run3_pet_max_var, None)
         pet_min_speed = num(self.run3_pet_min_speed_var, None)
         geometry = {key: num(self.run3_geometry_vars[key], None) for key in RUN3_GEOMETRY_KEYS}
-        def lane_total(a, b):
-            return geometry[a] + geometry[b] if geometry[a] is not None and geometry[b] is not None else None
-        w_entry = lane_total("lane_entry_motorcycle_m", "lane_entry_car_m")
-        w_opp = lane_total("lane_opp_motorcycle_m", "lane_opp_car_m")
+        w_entry, w_opp = self.run3_widths()
         return {
             "site_id": self.run3_site_id_var.get().strip(),
             "site_type": site_type,

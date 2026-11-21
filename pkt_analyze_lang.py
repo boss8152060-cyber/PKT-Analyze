@@ -2093,3 +2093,4 @@ EXACT.update({'(ใช้เฉพาะ Movement ของประเภทห
 EXACT.update({'มีเกาะกลาง': 'With a median island', 'สี่แยกที่มีเกาะกลาง คิดเป็นสามแยก 2 แห่ง (Zone 1–4 และ Zone 5–8) ไม่คิดเส้นทางที่ข้ามเกาะ': 'A 4-leg junction with a median island is analysed as two 3-leg junctions (Zone 1–4 and Zone 5–8); the ways across the island are not analysed', 'ไฟล์โซนและเส้น (Zone 1–8, Line)': 'Zone file and Lines (Zone 1–8, Line)', '▾ ไฟล์โซนและเส้น (Zone 1–8, Line)': '▾ Zone file and Lines (Zone 1–8, Line)'})
 TEMPLATES.update({'ประเภทหน้างาน: {0} (ตั้งในหน้าตั้งค่าทางแยก)': 'Site type: {0} (set in the site setup window)'})
 EXACT.update({'เปลี่ยนที่ ② ทางแยก': 'change it at (2) Junction'})
+EXACT.update({'ความกว้างของถนนทั้งฝั่ง รวมทุกเลน (รวมเลนจักรยานยนต์ถ้ามี) — LDP หารด้วยค่านี้': 'Width of the whole side of the road, all lanes together (the motorcycle lane included, if there is one) — LDP is divided by this'})

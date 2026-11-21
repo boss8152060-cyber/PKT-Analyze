@@ -9,6 +9,7 @@ resolver on a Detection_Records.csv.  It does NOT run YOLO or need a video.
 """
 import csv
 import importlib.util
+import json
 import os
 import sys
 import tkinter as tk
@@ -53,7 +54,34 @@ st = app.get_settings()
 for key in m.RUN3_GEOMETRY_KEYS:
     g[key].set("")
 app.set_settings(st)
-check("settings round-trip", [g[k].get() for k in m.RUN3_GEOMETRY_KEYS] == ["1.5", "3.25", "1.2", "3.0", "0"])
+check("settings round-trip", [g[k].get() for k in m.RUN3_GEOMETRY_KEYS] == ["", "", "1.5", "3.25", "1.2", "3.0", "0"])
+
+# --- the width of a side is one number (1.59.2); the four lanes are only for older projects ---
+check("without a width the side is its two lanes (older projects)", app.run3_widths() == (4.75, 4.2), str(app.run3_widths()))
+old = json.loads(json.dumps(st))
+for k in ("width_entry_m", "width_opp_m"):
+    old["run3"].pop(k, None)
+for k in m.RUN3_GEOMETRY_KEYS:
+    g[k].set("")
+app.set_settings(old)
+check("a project from before: the width of each side = its two lanes together", (g["width_entry_m"].get(), g["width_opp_m"].get()) == ("4.75", "4.2"), str((g["width_entry_m"].get(), g["width_opp_m"].get())))
+for k in m.RUN3_LEGACY_LANE_KEYS:
+    g[k].set("")
+g["width_entry_m"].set("4"); g["width_opp_m"].set("3.9")
+check("the width of the whole side alone is enough (no motorcycle lane)", app.run3_widths() == (4.0, 3.9) and app.run3_w_entry_text.get() == "W_entry = 4.000 m", app.run3_w_entry_text.get())
+check("the validation accepts it (LDP needs only the two widths)", app.validate_run3_settings() is True)
+cfg_w = app._run3_snapshot_config()
+check("the run gets W_entry and W_opp from them", (cfg_w["w_entry_m"], cfg_w["w_opp_m"]) == (4.0, 3.9), str((cfg_w["w_entry_m"], cfg_w["w_opp_m"])))
+g["width_opp_m"].set("")
+try:
+    app.validate_run3_settings()
+    check("a side without a width is refused (LDP needs it)", False)
+except ValueError as exc:
+    check("a side without a width is refused (LDP needs it)", "opposite" in str(exc), str(exc))
+g["lane_entry_motorcycle_m"].set("0"); g["lane_entry_car_m"].set("4"); g["width_entry_m"].set("")
+check("a motorcycle lane of 0 is allowed (the other lane is the whole side)", app.run3_widths()[0] == 4.0)
+for k, v in (("width_entry_m", ""), ("width_opp_m", ""), ("lane_entry_motorcycle_m", "1.5"), ("lane_entry_car_m", "3.25"), ("lane_opp_motorcycle_m", "1.2"), ("lane_opp_car_m", "3.0"), ("median_m", "0")):
+    g[k].set(v)
 
 # --- validation / snapshot ---
 check("validate_run3_settings", app.validate_run3_settings() is True)
