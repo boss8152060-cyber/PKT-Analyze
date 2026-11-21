@@ -94,7 +94,7 @@ check("dialog lists both clips with place/day", [c["rel_dir"] for c in dlg.clips
 dlg.clips[0].update({"analysis_start_s": "1.0", "analysis_end_s": "0:02", "save_video": True, "record_start_s": "1.2", "record_end_s": "1.5"})
 dlg.clips[1].update({"save_video": False})
 dlg.refresh()
-vals = [dlg.tree.item(i, "values") for i in dlg.tree.get_children()]
+vals = [tuple(dlg.tree.item(i, "values"))[1:] for i in dlg.tree.get_children()]          # (without the number of the clip)
 check("list shows each clip's analysis and recording choice", vals[0][1] == "1.0 – 0:02" and vals[0][2] == "1.2 – 1.5" and vals[1][1] == "ทั้งคลิป" and vals[1][2] == "ไม่บันทึก", str(vals))
 dlg.set_all_record(False)
 check("'no recording for all' clears every clip", all(not c["save_video"] and not c["record_start_s"] for c in dlg.clips))

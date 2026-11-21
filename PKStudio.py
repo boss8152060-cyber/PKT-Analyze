@@ -7402,12 +7402,20 @@ class ClipListPanel(ttk.Frame):
         ttk.Button(bar, text="บันทึกรายการ…", command=self.save_plan).pack(side="right", padx=2)
         ttk.Button(bar, text="โหลดรายการ…", command=self.load_plan).pack(side="right", padx=2)
 
-        self.tree = ttk.Treeview(self, columns=("clip", "analysis", "record", "xy", "drone", "chain"), show="headings", height=9, selectmode="extended")
-        for col, text, width in (("clip", "คลิป (โฟลเดอร์ในผลลัพธ์ / ไฟล์)", 330), ("analysis", "ช่วงที่วิเคราะห์", 120), ("record", "วิดีโอปกติ", 130),
+        listbox = ttk.Frame(self)
+        listbox.grid(row=1, column=0, sticky="nsew")
+        listbox.columnconfigure(0, weight=1)
+        listbox.rowconfigure(0, weight=1)
+        self.tree = ttk.Treeview(listbox, columns=("no", "clip", "analysis", "record", "xy", "drone", "chain"), show="headings", height=9, selectmode="extended")
+        for col, text, width in (("no", "ลำดับ", 56), ("clip", "คลิป (โฟลเดอร์ในผลลัพธ์ / ไฟล์)", 330), ("analysis", "ช่วงที่วิเคราะห์", 120), ("record", "วิดีโอปกติ", 130),
                                  ("xy", "วิดีโอ X–Y", 130), ("drone", "X–Y บนภาพโดรน", 130), ("chain", "ต่อเนื่อง", 110)):
             self.tree.heading(col, text=text)
-            self.tree.column(col, width=width, anchor="w")
-        self.tree.grid(row=1, column=0, sticky="nsew")
+            self.tree.column(col, width=width, anchor="center" if col == "no" else "w", stretch=(col != "no"))
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        tree_sb = ttk.Scrollbar(listbox, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tree_sb.set)
+        tree_sb.grid(row=0, column=1, sticky="ns")
+        self.tree.bind("<Control-a>", lambda e: (self.select_all(), "break")[1])
         self.tree.bind("<Double-1>", lambda e: self.edit_selected())
         self.tree.bind("<<TreeviewSelect>>", lambda e: self.app.refresh_checklist())
         self.rowconfigure(1, weight=1)
@@ -7417,10 +7425,14 @@ class ClipListPanel(ttk.Frame):
         for i, (text, command) in enumerate((("ดูวิดีโอ / กำหนดช่วงเวลา…", self.edit_selected), ("ต่อจากคลิปก่อน (ติ๊ก/เอาออก)", self.toggle_continue),
                                              ("ลบที่เลือก", self.remove_selected), ("ล้างรายการ", self.clear))):
             ttk.Button(act, text=text, command=command).grid(row=0, column=i, padx=2, pady=1, sticky="w")
-        ttk.Button(act, text="ทุกคลิป: บันทึกตลอดช่วงที่วิเคราะห์ (ทั้ง 3 วิดีโอ)",
-                   command=lambda: self.set_all_record(True, ("save_video", "xy_video", "drone_video"))).grid(row=1, column=0, columnspan=2, padx=2, pady=1, sticky="w")
-        ttk.Button(act, text="ทุกคลิป: ไม่บันทึกวิดีโอ (ทั้ง 3)",
-                   command=lambda: self.set_all_record(False, ("save_video", "xy_video", "drone_video"))).grid(row=1, column=2, columnspan=2, padx=2, pady=1, sticky="w")
+        ttk.Button(act, text="เลือกทั้งหมด", command=self.select_all).grid(row=0, column=4, padx=2, pady=1, sticky="w")
+        rec = ttk.LabelFrame(act, text="ตั้งทุกคลิปพร้อมกัน: บันทึกวิดีโอตลอดช่วงที่วิเคราะห์ / ไม่บันทึก", padding=(6, 2))
+        rec.grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 2))
+        for r_, (label, which) in enumerate((("ทั้ง 3 วิดีโอ", ("save_video", "xy_video", "drone_video")), ("วิดีโอปกติ", ("save_video",)),
+                                             ("วิดีโอ X–Y", ("xy_video",)), ("X–Y บนภาพโดรน", ("drone_video",)))):
+            ttk.Label(rec, text=label, width=16).grid(row=r_, column=0, sticky="w", padx=(0, 6), pady=1)
+            ttk.Button(rec, text="บันทึกทุกคลิป", command=lambda w=which: self.set_all_record(True, w)).grid(row=r_, column=1, padx=2, pady=1, sticky="w")
+            ttk.Button(rec, text="ไม่บันทึกทุกคลิป", command=lambda w=which: self.set_all_record(False, w)).grid(row=r_, column=2, padx=2, pady=1, sticky="w")
 
         out = ttk.Frame(self)
         out.grid(row=3, column=0, sticky="ew", pady=(6, 0))
@@ -7546,6 +7558,9 @@ class ClipListPanel(ttk.Frame):
     def selected_indexes(self):
         return sorted(int(i) for i in self.tree.selection())
 
+    def select_all(self):
+        self.tree.selection_set(self.tree.get_children())
+
     def remove_selected(self):
         for i in reversed(self.selected_indexes()):
             del self.clips[i]
@@ -7561,7 +7576,7 @@ class ClipListPanel(ttk.Frame):
             ana, rec, xy, dr = self.bt.clip_labels(c)
             cont = bool(c.get("continues_previous")) and i > 0
             name = "/".join(x for x in (c.get("rel_dir", ""), os.path.basename(c["video"])) if x)
-            self.tree.insert("", "end", iid=str(i), values=(name, ana, rec, xy, dr, "↳ ต่อจากคลิปก่อน" if cont else ""))
+            self.tree.insert("", "end", iid=str(i), values=(i + 1, name, ana, rec, xy, dr, "↳ ต่อจากคลิปก่อน" if cont else ""))
         if self.clips:
             self.app.video_var.set(self.clips[0]["video"])
         self.app.refresh_checklist()
@@ -8251,8 +8266,20 @@ class Run1App:
                 canvas = self._sub_canvases[str(nb)][nb.index(nb.select())]
         except (tk.TclError, IndexError, AttributeError, KeyError):
             return
-        if event.delta:
-            canvas.yview_scroll(int(-event.delta / 120), "units")
+        w = event.widget
+        try:
+            if isinstance(w, ttk.Treeview) and w.yview() != (0.0, 1.0):         # a list that has something to scroll scrolls by itself (the page stays)
+                return
+            if isinstance(w, (tk.Listbox, tk.Text)):
+                return
+        except tk.TclError:
+            pass
+        if event.delta:                                                        # (a touch pad sends small steps: they add up instead of being rounded away)
+            self._wheel_acc = getattr(self, "_wheel_acc", 0.0) - event.delta / 120.0
+            steps = int(self._wheel_acc)
+            if steps:
+                self._wheel_acc -= steps
+                canvas.yview_scroll(steps, "units")
 
     def section(self, title, column=0, row=0, collapsed=False):
         """A titled group on the current page; groups are stacked top to bottom in the order they are built. Click the title to fold / unfold it

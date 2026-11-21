@@ -98,7 +98,7 @@ check("the first clip of the list cannot continue anything", panel.clips[0]["con
 panel.clips[0].update({"save_video": False})
 panel.clips[1].update({"analysis_start_s": "0:00.05", "save_video": True, "record_start_s": "0:00.5", "record_end_s": "0:01.0"})
 panel.refresh()
-vals = [panel.tree.item(i, "values") for i in panel.tree.get_children()]
+vals = [tuple(panel.tree.item(i, "values"))[1:] for i in panel.tree.get_children()]          # (without the number of the clip)
 check("the list shows b's own time range and recording and the continue mark", vals[1][1].startswith("0:00.05") and vals[1][-1].startswith("↳") and vals[0][-1] == "" and vals[2][-1] == "", str(vals))
 panel.skip_done_var.set(False)
 app.start_analysis()
