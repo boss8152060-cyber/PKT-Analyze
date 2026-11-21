@@ -3892,6 +3892,7 @@ class SiteStudio:
         self.rot_deg = float(align.get("rot_deg") or 0.0)
         self.frame_index = None
         self.nodes, self.zones, self.real = {}, {z: [] for z in ZONE_NAMES}, {}
+        self.measuring, self.scale_pts = False, []                 # the two spots of a distance on the drone picture (the scale), while they are being clicked
         self.lines = {n: [] for n in LINE_NAMES}                  # the Lines drawn here (video pixels)
         self._next = 1
         self.draft, self.line_draft = [], []                       # the corners of the zone being drawn / the first end of a Line being drawn
@@ -3928,7 +3929,7 @@ class SiteStudio:
         self.vpane.set_image(self.video_img)
         self.dpane.set_image(self.drone_img if self.drone_img is not None else np.full((720, 1280, 3), 60, np.uint8))
         self.ppane.set_image(self.plan_img)
-        for key, fn in (("<Return>", self.finish_zone), ("<Escape>", self.cancel_draft), ("<BackSpace>", self.remove_last_draft_point),
+        for key, fn in (("<Return>", self.finish_zone), ("<Escape>", lambda e=None: (self.cancel_scale_measure(), self.cancel_draft())), ("<BackSpace>", self.remove_last_draft_point),
                         ("<Delete>", self.delete_selected_corner), ("<Control-z>", self.undo), ("<Control-y>", self.redo)):
             self.top.bind(key, lambda e, f=fn: self._on_key(f))
         self.refresh_all()
@@ -4015,7 +4016,7 @@ class SiteStudio:
             nid = label_to_nid.get(lab)
             if nid is not None and self.nodes[nid]["d"] is None:
                 self.nodes[nid]["skip"] = True
-        for e in (align.get("edge_lengths") or []):
+        for e in []:                                               # (the real lengths of the edges of an older project are not used any more: the scale is what counts)
             try:
                 z, i, m = str(e["zone"]), int(e["i"]), float(e["m"])
                 if m > 0 and len(self.zones[z]) > i:
@@ -4125,9 +4126,7 @@ class SiteStudio:
                 "origin": list(pairs[0][2]) if pairs else [0.0, 0.0], "video_size": [w, h], "video_frame": str(self.align_data.get("video_frame", "") or ""),
                 "drone": {"path": self.drone_path, "frame": self.drone_frame}}
         if with_edges:
-            edge = [{"zone": r["z"], "i": r["i"], "m": self.real[r["key"]]} for r in self.edge_rows() if r["key"] in self.real]
-            if edge:
-                data["edge_lengths"] = edge
+            edge = []
         return data
 
     def _provisional_cfg(self):
@@ -4218,9 +4217,6 @@ class SiteStudio:
         """The Align again after a pin, the kind or the scale changed: the drone picture and the plane follow."""
         self.cfg = self._fit_cfg()
         self.aligned = self._is_fitted
-        if self._rescale_to_edges():                              # the scale follows the real lengths of the edges
-            self.cfg = self._fit_cfg()
-            self.aligned = self._is_fitted
         self._setup_plan()
         if getattr(self, "ppane", None):
             self.ppane.set_image(self.plan_img)
@@ -4229,25 +4225,11 @@ class SiteStudio:
         self.refresh_all()
         return self.aligned
 
-    def _rescale_to_edges(self):
-        """The scale of the drone picture is worked out from the real lengths typed for the edges: whenever at least one real length is known, the scale is the one that fits
-        the measured edges to the real ones best, so nobody has to type or adjust it. Without a real length the scale stays as it is (typed, or from an older Align).
-        True when the scale changed."""
-        if not getattr(self, "edge_tree", None) and not self.real:
-            return False
-        known = [(r["measured"], self.real[r["key"]]) for r in self.edge_rows() if r["key"] in self.real]
-        f = edge_scale_factor(known)
-        if f is None or abs(f - 1.0) < 1e-4:
-            return False
-        self.scale = (self.scale if self.scale > 0 else 1.0) * f
-        self.scale_var.set(f"{self.scale:.6g}")
-        return True
-
     def _store_align(self):
-        """Keep the Align in the project (the format of the earlier Align window): the analysis uses it once it fits and the scale is set. The real lengths of the edges are
+        """Keep the Align in the project (the format of the earlier Align window): the analysis uses it once it fits and the scale is set. The scale is
         kept even before the first pin."""
         pairs = self._pairs()
-        if not pairs and not self.real:
+        if not pairs and not self.real and not self.scale > 0:
             return
         data = self._data_dict()
         rep = self._fit_report() if len(pairs) >= ALIGN_KINDS[self.kind][0] else None
@@ -4755,6 +4737,8 @@ class SiteStudio:
                 self.stream_var.set(hit[2])
                 self.drag = {"kind": "line", "line": hit[0], "end": hit[1], "moved": False, "sx": ex, "sy": ey, "undo": False}
                 return True
+            if getattr(self, "measuring", False):                   # (two clicks on the drone picture are being taken: no pin is grabbed)
+                return False
             if name == "plan" and not self.aligned:                # (a move on the ground needs the Align that was chosen to fit)
                 return False
             nid = self._hit_node(name, ex, ey)
@@ -4849,6 +4833,8 @@ class SiteStudio:
                 self.msg_var.set(self.T("เลือกโซนที่ยังไม่วาดในรายการ เพื่อวาดโซนใหม่ (หรือลากมุมที่มีอยู่เพื่อแก้)"))
                 return False
             if name == "drone":
+                if getattr(self, "measuring", False):
+                    return self._click_scale(x, y)
                 return self._click_drone(x, y)
             return False
         return handler
@@ -4897,33 +4883,59 @@ class SiteStudio:
         return True
 
     # ------------------------------------------------------------------ real lengths (the scale)
-    def _ask_length(self, label, current):
-        """The real length (m) of an edge from the user: a number, "" = not known / clear; None = cancelled. (A method so that tests can answer.)"""
-        text = simpledialog.askstring(self.T("ระยะจริงของขอบ"), "{0}\n{1}".format(label, self.T("ระยะจริง (เมตร) — เว้นว่าง = ไม่รู้ / ล้างค่า:")), parent=self.top,
-                                      initialvalue=("" if current is None else f"{current:g}"))
-        return None if text is None else text.strip()
+    def set_scale_from_points(self, a, b, length_m):
+        """The scale of the drone picture from two spots on it whose real distance is known: metres per drone pixel = the real length / the pixels between them."""
+        try:
+            length_m = float(str(length_m).replace(",", "."))
+        except ValueError:
+            return False
+        px = math.hypot(b[0] - a[0], b[1] - a[1])
+        if not (length_m > 0 and px > 1.0):
+            self.msg_var.set(self.T("วัดสเกลไม่ได้: สองจุดต้องห่างกัน และความยาวจริงต้องมากกว่า 0"))
+            return False
+        self.scale = length_m / px
+        self.scale_var.set(f"{self.scale:.6g}")
+        self._refit()
+        self.msg_var.set(self.T("ตั้งสเกลแล้ว: {0} เมตร/พิกเซล (ระยะ {1} ม. = {2} พิกเซล)").format(f"{self.scale:.6f}", f"{length_m:g}", f"{px:.1f}"))
+        return True
 
-    def set_real_length(self, key, text):
-        """text = the typed length. Returns True when something changed."""
-        text = str(text).strip().replace(",", ".")
-        if text == "":
-            changed = key in self.real
-            self.real.pop(key, None)
+    def _ask_scale_length(self, px):
+        """The real length (m) between the two spots clicked, from the user; None = cancelled. (A method so that tests can answer.)"""
+        return simpledialog.askfloat(self.T("วัดสเกลภาพโดรน"), self.T("ความยาวจริงระหว่างสองจุดที่คลิก (เมตร)\nห่างกัน {0} พิกเซลบนภาพโดรน").format(f"{px:.1f}"),
+                                     parent=self.top, minvalue=0.001)
+
+    def start_scale_measure(self):
+        """The next two clicks on the drone picture are the two ends of a distance that is known (a lane width, a zebra crossing, the length of a marked line)."""
+        if self.drone_img is None:
+            self.msg_var.set(self.T("เลือกภาพ/วิดีโอโดรนก่อน (ปุ่ม เลือก… ด้านบน)"))
+            return False
+        self.measuring, self.scale_pts = True, []
+        self.msg_var.set(self.T("วัดสเกล: คลิกจุดแรกบนภาพโดรน (ซูมเข้าให้ตรงจุด) — จุดที่รู้ระยะจริงถึงอีกจุด · Esc = ยกเลิก"))
+        self.refresh_all()
+        return True
+
+    def cancel_scale_measure(self):
+        if getattr(self, "measuring", False):
+            self.measuring, self.scale_pts = False, []
+            self.msg_var.set(self.T("ยกเลิกการวัดสเกลแล้ว"))
+            self.refresh_all()
+
+    def _click_scale(self, x, y):
+        h, w = self.drone_img.shape[:2]
+        self.scale_pts.append([min(max(0.0, x), w - 1.0), min(max(0.0, y), h - 1.0)])
+        if len(self.scale_pts) < 2:
+            self.msg_var.set(self.T("คลิกจุดที่สองบนภาพโดรน"))
+            self.refresh_all()
+            return True
+        a, b = self.scale_pts
+        length = self._ask_scale_length(math.hypot(b[0] - a[0], b[1] - a[1]))
+        self.measuring, self.scale_pts = False, []
+        if length is not None:
+            self.set_scale_from_points(a, b, length)
         else:
-            try:
-                value = float(text)
-            except ValueError:
-                self.msg_var.set(self.T("ระยะจริงต้องเป็นตัวเลข (เมตร)"))
-                return False
-            if not value > 0:
-                self.msg_var.set(self.T("ระยะจริงต้องมากกว่า 0"))
-                return False
-            changed = self.real.get(key) != value
-            self.real[key] = value
-        if changed:
-            self._refit()                                         # (stores the Align, and the scale follows the real lengths)
-            self.refresh_edges()
-        return changed
+            self.msg_var.set(self.T("ยกเลิกการวัดสเกลแล้ว"))
+        self.refresh_all()
+        return True
 
     def _on_edge_pick(self, event=None):
         """A row of the table was picked: that edge is shown on the video, the drone picture and the plane."""
@@ -4951,48 +4963,6 @@ class SiteStudio:
         for key, pane in (("video", self.vpane), ("drone", self.dpane), ("plan", self.ppane)):
             if self.show_vars[key].get():
                 self.top.after_idle(pane.refresh)
-
-    def _on_edge_double_click(self, event=None):
-        sel = self.edge_tree.selection()
-        if not sel:
-            return
-        row = {str(i): r for i, r in enumerate(self.edge_rows())}.get(sel[0])
-        if row is None:
-            return
-        text = self._ask_length(row["label"], self.real.get(row["key"]))
-        if text is not None:
-            self.set_real_length(row["key"], text)
-
-    def apply_real_scale(self):
-        """Multiplies the scale of the Align by the factor that fits the measured edge lengths to the real ones (or sets it, when it was not set yet).
-        Everything measured in metres changes with it, so it is asked before an existing scale is changed."""
-        if not self.aligned:
-            messagebox.showinfo(self.T("ปรับสเกลตามระยะจริง"), self.T("ต้องจัดแนวก่อน — วางหมุดบนภาพโดรนให้ครบอย่างน้อย {0} หมุด").format(ALIGN_KINDS[self.kind][0]), parent=self.top)
-            return False
-        known = [(r["measured"], self.real.get(r["key"])) for r in self.edge_rows() if r["key"] in self.real]
-        f = edge_scale_factor(known)
-        if f is None:
-            messagebox.showinfo(self.T("ปรับสเกลตามระยะจริง"), self.T("ยังไม่ได้ใส่ระยะจริงของขอบใดเลย — ดับเบิลคลิกแถวในตารางเพื่อใส่"), parent=self.top)
-            return False
-        old = float(self.cfg["scale"])
-        first = not (self.scale > 0)
-        if not first:
-            if abs(f - 1.0) < 1e-6:
-                messagebox.showinfo(self.T("ปรับสเกลตามระยะจริง"), self.T("ระยะที่วัดได้ตรงกับระยะจริงอยู่แล้ว ไม่ต้องปรับ"), parent=self.top)
-                return False
-            if not messagebox.askyesno(self.T("ปรับสเกลตามระยะจริง"),
-                                       self.T("สเกลภาพโดรนจะเปลี่ยนจาก {0} เป็น {1} เมตร/พิกเซล (×{2}, {3}%)\n\nระยะ ความเร็ว และตัวชี้วัดทุกตัวที่คำนวณเป็นเมตรจะเปลี่ยนตามไปด้วย "
-                                         "(ผลคลิปที่วิเคราะห์ไว้แล้วไม่เปลี่ยน แต่ต่างจากรอบใหม่)\n\nปรับไหม?").format(f"{old:.6f}", f"{old * f:.6f}", f"{f:.4f}", f"{abs(f - 1) * 100:.1f}"),
-                                       parent=self.top):
-                return False
-        self.scale = old * f
-        self.scale_var.set(f"{self.scale:.6g}")
-        self._refit()
-        if first:
-            self.msg_var.set(self.T("ตั้งสเกลจากระยะจริงแล้ว: {0} เมตร/พิกเซล").format(f"{self.scale:.6f}"))
-        else:
-            self.msg_var.set(self.T("ปรับสเกลแล้ว: {0} → {1} เมตร/พิกเซล (×{2})").format(f"{old:.6f}", f"{old * f:.6f}", f"{f:.4f}"))
-        return True
 
     def _move_physical(self, nid, plan_xy):
         """The corner is moved on the ground (in the plane): its place on the video follows through the Align, and so does its place on the drone picture when it is pinned,
@@ -5162,6 +5132,15 @@ class SiteStudio:
                         continue
                     va, vb = pane.to_view(*pos[a]), pane.to_view(*pos[b])
                     self._text(out, f"{r['measured']:.1f}m", ((va[0] + vb[0]) // 2 - 12, (va[1] + vb[1]) // 2 - 4), (255, 255, 255), 0.5)
+            if name == "drone" and getattr(self, "measuring", False) and getattr(self, "scale_pts", None):
+                pts = [pane.to_view(*q) for q in self.scale_pts]
+                for q in pts:
+                    cv2.circle(out, q, 9, (0, 0, 0), 3, cv2.LINE_AA)
+                    cv2.circle(out, q, 9, (0, 255, 255), 2, cv2.LINE_AA)
+                    cv2.line(out, (q[0] - 14, q[1]), (q[0] + 14, q[1]), (0, 255, 255), 1, cv2.LINE_AA)
+                    cv2.line(out, (q[0], q[1] - 14), (q[0], q[1] + 14), (0, 255, 255), 1, cv2.LINE_AA)
+                if len(pts) == 2:
+                    cv2.line(out, pts[0], pts[1], (0, 255, 255), 2, cv2.LINE_AA)
             focus = getattr(self, "edge_focus", None)                # the edge picked in the table: a white band with a red core, rings on its two corners, its name
             if focus is not None and focus[0] in pos and focus[1] in pos and pos[focus[0]] is not None and pos[focus[1]] is not None:
                 fa, fb = pane.to_view(*pos[focus[0]]), pane.to_view(*pos[focus[1]])
@@ -5251,7 +5230,7 @@ class SiteStudio:
         worst = sorted(range(len(vals)), key=lambda i: -vals[i])[:4]
         text += "\n" + self.T("หมุดที่คลาดมากสุด: ") + ", ".join("{0} {1}".format(self._label(pairs[i][0]), f"{vals[i] * unit * mult:.1f}") for i in worst)
         if self.scale <= 0:
-            text += "\n" + self.T("ยังไม่ได้ตั้งสเกล — ใส่ระยะจริงของขอบที่รู้ในตาราง สเกลภาพโดรนจะคำนวณให้เอง (หรือพิมพ์ในช่องด้านบน)")
+            text += "\n" + self.T("ยังไม่ได้ตั้งสเกล — พิมพ์ค่าในช่องสเกล หรือกด วัดสเกล แล้วคลิก 2 จุดบนภาพโดรนที่รู้ระยะจริง")
         return text
 
     def _refresh_lists(self):
@@ -5275,31 +5254,22 @@ class SiteStudio:
         if not getattr(self, "edge_tree", None) or not self.top.winfo_exists():
             return
         rows = self.edge_rows()
-        pairs = [(r["measured"], self.real.get(r["key"])) for r in rows]
-        errors = edge_length_errors(pairs)
         self._edge_rebuilding = True
         try:
             self.edge_tree.delete(*self.edge_tree.get_children())
             focus = getattr(self, "edge_focus", None)
-            for idx, (r, err) in enumerate(zip(rows, errors)):
-                real = self.real.get(r["key"])
-                self.edge_tree.insert("", "end", iid=str(idx), values=(r["label"], f"{r['measured']:.2f}" if self.aligned else "", "" if real is None else f"{real:g}",
-                                                                         "" if err is None or not self.aligned else f"{err:+.1f}%"))
+            for idx, r in enumerate(rows):
+                self.edge_tree.insert("", "end", iid=str(idx), values=(r["label"], f"{r['measured']:.2f}" if self.aligned and self.scale > 0 else ""))
                 if focus is not None and r["key"] == focus:
                     self.edge_tree.selection_set(str(idx))
         finally:
             self._edge_rebuilding = False
-        known = [pr for pr in pairs if pr[1] is not None]
         if not self.aligned:
-            self.edge_msg_var.set(self.T("ยังไม่ได้จัดแนว — ใส่ระยะจริงของขอบที่รู้ไว้ก่อนได้ แล้ววางหมุดบนภาพโดรน"))
-        elif self.scale <= 0 and not known:
-            self.edge_msg_var.set(self.T("ยังไม่ได้ตั้งสเกล: ใส่ระยะจริงของขอบที่รู้ (ดับเบิลคลิกแถว) สเกลภาพโดรนจะคำนวณให้เอง"))
-        elif not known:
-            self.edge_msg_var.set(self.T("ดับเบิลคลิกแถวเพื่อใส่ระยะจริงของขอบที่รู้ (ข้ามที่ไม่รู้ได้) — สเกลภาพโดรนคำนวณให้เองจากระยะที่ใส่"))
+            self.edge_msg_var.set(self.T("ยังไม่ได้จัดแนว — วางหมุดบนภาพโดรนให้ครบก่อน"))
+        elif self.scale <= 0:
+            self.edge_msg_var.set(self.T("ยังไม่ได้ตั้งสเกล — พิมพ์ค่าในช่องสเกล หรือกด วัดสเกล แล้วคลิก 2 จุดบนภาพโดรน"))
         else:
-            errs = [abs(e) for e in edge_length_errors(known) if e is not None]
-            self.edge_msg_var.set(self.T("สเกลภาพโดรน {0} ม./พิกเซล คำนวณจาก {1} ขอบที่ใส่ระยะจริง · ขอบเหล่านี้ต่างจากระยะจริงเฉลี่ย {2}%").format(
-                f"{self.scale:.6g}", len(known), f"{sum(errs) / len(errs):.1f}"))
+            self.edge_msg_var.set(self.T("สเกลภาพโดรน {0} ม./พิกเซล · คลิกแถวเพื่อดูว่าเป็นขอบไหน").format(f"{self.scale:.6g}"))
 
     def refresh_all(self):
         if not getattr(self, "fit_var", None) or not getattr(self, "ppane", None) or not self.top.winfo_exists():
@@ -5390,25 +5360,25 @@ class SiteStudio:
         cb.bind("<<ComboboxSelected>>", lambda e: self.set_kind(next(k for k, v in ALIGN_KINDS.items() if v[1] == self.kind_var.get())))
         row = ttk.Frame(t3)
         row.pack(anchor="w")
-        ttk.Label(row, text=T("สเกลภาพโดรน (ม./พิกเซล) — คำนวณจากระยะขอบ")).pack(side="left")
+        ttk.Label(row, text=T("สเกลภาพโดรน (ม./พิกเซล)")).pack(side="left")
         ent = ttk.Entry(row, textvariable=self.scale_var, width=11)
         ent.pack(side="left", padx=4)
         ent.bind("<Return>", lambda e: self.set_scale_text())
         ent.bind("<FocusOut>", lambda e: self.set_scale_text())
+        ttk.Button(t3, text=T("📏 วัดสเกล (คลิก 2 จุดบนภาพโดรน)"), command=self.start_scale_measure).pack(anchor="w", pady=(0, 2))
         ttk.Label(t3, textvariable=self.fit_var, wraplength=300, justify="left", foreground="#0a5").pack(anchor="w", pady=4)
         ttk.Button(t3, text=T("ยกหมุดที่แย่สุดออก"), command=self.delete_worst_pair).pack(anchor="w")
-        ttk.Label(t3, text=T("ระยะจริงของขอบ (ใส่เฉพาะที่รู้)"), font=("TkDefaultFont", 9, "bold")).pack(anchor="w", pady=(8, 2))
+        ttk.Label(t3, text=T("ความยาวขอบโซนที่วัดได้ (ตามสเกลที่ตั้ง)"), font=("TkDefaultFont", 9, "bold")).pack(anchor="w", pady=(8, 2))
         tbl = ttk.Frame(t3)
         tbl.pack(fill="both", expand=True)
-        self.edge_tree = ttk.Treeview(tbl, columns=("edge", "measured", "real", "diff"), show="headings", height=7, selectmode="browse")
-        for col, text, w in (("edge", "ขอบ", 120), ("measured", "วัดได้ (ม.)", 62), ("real", "จริง (ม.)", 55), ("diff", "ต่าง", 48)):
+        self.edge_tree = ttk.Treeview(tbl, columns=("edge", "measured"), show="headings", height=7, selectmode="browse")
+        for col, text, w in (("edge", "ขอบ", 170), ("measured", "ยาว (ม.)", 90)):
             self.edge_tree.heading(col, text=T(text))
             self.edge_tree.column(col, width=w, anchor="w" if col == "edge" else "e")
         esb = ttk.Scrollbar(tbl, orient="vertical", command=self.edge_tree.yview)
         self.edge_tree.configure(yscrollcommand=esb.set)
         self.edge_tree.pack(side="left", fill="both", expand=True)
         esb.pack(side="left", fill="y")
-        self.edge_tree.bind("<Double-1>", self._on_edge_double_click)
         self.edge_tree.bind("<<TreeviewSelect>>", self._on_edge_pick)
         self.edge_tree.bind("<ButtonRelease-1>", lambda e: self.top.after_idle(self._on_edge_pick))          # (a click on the row that is picked already sends no select event)
         self._edge_sb = esb

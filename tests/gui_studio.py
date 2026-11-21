@@ -148,17 +148,38 @@ check("a click on a corner without dragging only picks it", (lambda: (st.on_pres
 rows = {r["label"]: r for r in st.edge_rows()}
 r14 = [r for r in rows.values() if r["label"].startswith("Zone 2: 1→2")][0]
 check("before the scale the plane is in drone pixels (the 14 m edge is 280 of them)", abs(r14["measured"] - 280.0) < 3.0, f"{r14['measured']:.1f}")
-st.set_real_length(r14["key"], "14")
-check("the real length of one edge sets the scale by itself (no button, no question)", abs(st.scale - 0.05) < 0.001 and abs(float(st.scale_var.get()) - 0.05) < 0.001, str(st.scale))
-check("the scale is already right, so the old button has nothing to adjust", st.apply_real_scale() is False)
-r14b = [r for r in st.edge_rows() if r["label"].startswith("Zone 2: 1→2")][0]
-st.set_real_length(r14b["key"], "28")
-check("a new real length changes the scale at once (twice as long = twice the scale)", abs(st.scale - 0.10) < 0.002, str(st.scale))
-st.set_real_length(r14b["key"], "14")
-check("and back", abs(st.scale - 0.05) < 0.001, str(st.scale))
-st.set_real_length(r14b["key"], "")
-check("clearing the real length keeps the scale that was worked out", abs(st.scale - 0.05) < 0.001, str(st.scale))
-st.set_real_length(r14b["key"], "14")
+check("the scale is not set by anything the program guessed (no real lengths of edges): still 0", st.scale == 0)
+asked_len = []
+st._ask_scale_length = lambda px: (asked_len.append(px), 14.0)[1]
+check("'measure the scale' needs the drone picture and starts waiting for two clicks", st.start_scale_measure() is True and st.measuring is True)
+check("while measuring, a press on the drone picture does not grab a pin", st.on_press("drone")(10.0, 10.0, 10, 10) is False)
+st._click_drone_or_scale = None
+handler = st.on_click("drone")
+handler(100.0, 100.0)
+check("the first click is only kept", st.measuring is True and len(st.scale_pts) == 1 and st.scale == 0)
+for nm, pn in (("video", st.vpane), ("drone", st.dpane)):
+    pass
+handler(380.0, 100.0)
+check("the second click asks for the real length (the 280 pixels between the clicks) and sets the scale: 14 m / 280 px = 0.05", st.measuring is False and len(asked_len) == 1 and abs(asked_len[0] - 280.0) < 1e-6
+      and abs(st.scale - 0.05) < 1e-9 and abs(float(st.scale_var.get()) - 0.05) < 1e-9, str((asked_len, st.scale)))
+check("the plane comes out in metres now (the 14 m edge)", abs([r for r in st.edge_rows() if r["label"].startswith("Zone 2: 1→2")][0]["measured"] - 14.0) < 0.2)
+st.start_scale_measure()
+st._ask_scale_length = lambda px: None
+handler(100.0, 100.0)
+handler(300.0, 100.0)
+check("answering Cancel leaves the scale alone", st.measuring is False and abs(st.scale - 0.05) < 1e-9)
+st.start_scale_measure()
+st.cancel_scale_measure()
+check("Esc cancels the measuring", st.measuring is False and st.scale_pts == [])
+check("two spots on top of each other give no scale", st.set_scale_from_points((5, 5), (5, 5), 3.0) is False and abs(st.scale - 0.05) < 1e-9)
+check("a length that is not a number gives no scale", st.set_scale_from_points((0, 0), (100, 0), "abc") is False and abs(st.scale - 0.05) < 1e-9)
+st.scale_var.set("0.04")
+st.set_scale_text()
+check("the scale can also be typed (the box)", abs(st.scale - 0.04) < 1e-12)
+check("... and the drone picture (zones, lengths) follows it", abs([r for r in st.edge_rows() if r["label"].startswith("Zone 2: 1→2")][0]["measured"] - 11.2) < 0.2)
+st.set_scale_from_points((0, 0), (280, 0), 14.0)
+rows = {r["label"]: r for r in st.edge_rows()}
+r14 = [r for r in rows.values() if r["label"].startswith("Zone 2: 1→2")][0]
 r72 = [r for r in st.edge_rows() if r["label"].startswith("Zone 2: 2→3")][0]
 # ---- picking a row of the table shows that edge on the pictures
 import numpy as np
@@ -201,7 +222,7 @@ check("nothing picked = nothing highlighted", st.edge_focus is None and red_core
 check("the other edges are in metres (7.06 m on the ground)", abs(r72["measured"] - math.hypot(0.9, 7.0)) < 0.1, f"{r72['measured']:.2f}")
 saved = json.loads(app.run3_align_var.get())
 check("the Align is kept (pairs with their zone-corner labels, scale, drone picture) and the analysis is told to use it", len(saved["pairs"]) == 7 and all(q.get("l") for q in saved["pairs"])
-      and abs(saved["scale"] - 0.05) < 0.001 and saved["drone"]["path"] == drone_file and app.run3_align_enabled_var.get() and saved["edge_lengths"][0]["m"] == 14.0)
+      and abs(saved["scale"] - 0.05) < 0.001 and saved["drone"]["path"] == drone_file and app.run3_align_enabled_var.get() and "edge_lengths" not in saved)
 check("the fit text names the kind and the error", "จัดแนว" in st.fit_text() and "7" in st.fit_text())
 
 # ---- the pictures: video and drone are shown, the plane can be switched on
@@ -221,8 +242,7 @@ st.show_vars["plan"].set(True)
 st._apply_layout()
 root.update()
 
-# ---- the real lengths are data, not history: undo does not touch them; they are kept even without a pin
-st.set_real_length(r14["key"], "13")
+# ---- the scale is data, not history: undo does not touch it
 nid_u = sorted(st.nodes)[0]
 vu = list(st.nodes[nid_u]["v"])
 ex, ey = st.vpane.to_view(*vu)
@@ -230,8 +250,7 @@ st.on_press("video")(vu[0], vu[1], ex, ey)
 st.on_drag("video")(vu[0] + 30, vu[1] + 20)
 st.on_release()
 st.undo()
-check("undo does not take the real length away", st.real.get(r14["key"]) == 13.0, str(st.real))
-st.set_real_length(r14["key"], "14")
+check("undo does not take the scale away", abs(st.scale - 0.05) < 1e-9, str(st.scale))
 
 # ---- a corner dragged in the plane moves on the video only
 nid_p = [n for n in st.nodes if len(st._zones_of(n)) == 1 and "Zone 4" in st._zones_of(n)][0]
@@ -278,9 +297,7 @@ for nid in order:
     st.sel = nid
     st._click_drone(*drone_of_node(nid))
 check("all pinned again", st._pin_counts()["done"] == 7 and st.aligned)
-r14 = [r for r in st.edge_rows() if r["label"].startswith("Zone 2: 1→2")][0]
-st.set_real_length(r14["key"], "14")
-st.apply_real_scale()
+st.set_scale_from_points((0, 0), (280, 0), 14.0)
 bad = order[3]
 good_d = list(st.nodes[bad]["d"])
 st.nodes[bad]["d"] = [good_d[0] + 160.0, good_d[1] - 90.0]                  # one pin clicked in the wrong place
@@ -379,7 +396,6 @@ st = app.open_site_studio(ask_drone=False)
 root.update()
 check("opened again it has the 7 corners, all pinned, aligned, with the scale", len(st.nodes) == 7 and st._pin_counts()["done"] == 7 and st.aligned and abs(st.scale - 0.05) < 0.001,
       str((len(st.nodes), st._pin_counts(), st.aligned, st.scale)))
-check("the real length is still there", list(st.real.values()) == [14.0], str(st.real))
 check("the Line is back in its stream", len(st.lines[s567["line"]]) == 2 and [s for s in st.streams if s["mv"] == "5-6-7"][0]["mode"] == "drawn")
 st.close()
 
@@ -491,22 +507,22 @@ rep_ = st._fit_report()
 check("the Align fits (a few drone pixels at most, not metres)", st.aligned and rep_ is not None and rep_["rms"] < 3.0, str(rep_["rms"] if rep_ else None))
 st.close()
 
-# ---- a real length typed before the first pin is kept and comes back
+# ---- a scale typed before the first pin is kept and comes back
 app.zones = {z: [] for z in m.ZONE_NAMES}
 app.run3_align_var.set("")
 app.run3_align_enabled_var.set(False)
 st = app.open_site_studio(ask_drone=False)
 root.update()
 draw_zone("Zone 2", G["Zone 2"])
-key0 = st.edge_rows()[0]["key"]
-st.set_real_length(key0, "14")
-check("a real length typed with no pin yet is kept in the project", json.loads(app.run3_align_var.get()).get("edge_lengths") == [{"zone": "Zone 2", "i": 0, "m": 14.0}] and not app.run3_align_enabled_var.get(),
+st.scale_var.set("0.05")
+st.set_scale_text()
+check("a scale typed with no pin yet is kept in the project (and not used for the analysis yet)", abs(json.loads(app.run3_align_var.get()).get("scale", 0) - 0.05) < 1e-9 and not app.run3_align_enabled_var.get(),
       app.run3_align_var.get()[:160])
 st.use()
 st.close()
 st = app.open_site_studio(ask_drone=False)
 root.update()
-check("opened again the real length is there although nothing is pinned", list(st.real.values()) == [14.0] and not st.aligned, str(st.real))
+check("opened again the scale is there although nothing is pinned", abs(st.scale - 0.05) < 1e-9 and not st.aligned, str(st.scale))
 st.close()
 
 root.destroy()
