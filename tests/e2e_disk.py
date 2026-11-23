@@ -292,6 +292,8 @@ check("the batch did not have to do the clip again (the pause went on from the s
 check("the clip that paused has exactly as many frames as the clip that did not", sa.get("processed_frames") == sb.get("processed_frames") and sb.get("processed_frames", 0) > 20,
       str((sa.get("processed_frames"), sb.get("processed_frames"))))
 check("the run stayed paused (RESUME shown) until the user pressed it", pst["paused_seen"])
+check("the time the clip took does not count the 3 s it waited for the disk (the work clock stood still)",
+      sb.get("processing_time_seconds", 99) < sa.get("processing_time_seconds", 0) + 2.0, str((sa.get("processing_time_seconds"), sb.get("processing_time_seconds"))))
 check("the PAUSE button went back to normal", str(app.pause_button.cget("text")).startswith("Ⅱ") and app.pause_event.is_set())
 
 root.destroy()

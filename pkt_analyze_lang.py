@@ -2118,3 +2118,5 @@ EXACT.update({'🔍 รีเซ็ตมุมมอง': '🔍 Reset the view'
 EXACT.update({'ติ๊ก "ใช้ผลการจัดแนวแทน PPM / Perspective" ไว้ แต่ยังไม่ได้จัดแนว (ตั้งค่าทางแยก → วางหมุดบนภาพโดรน) — รอบนี้ใช้ PPM / Perspective แทน': '"Use the Align result instead of PPM / Perspective" is ticked but no Align has been made yet (junction setup → place the pins on the drone picture) — PPM / Perspective is used this time'})
 for _k, _v in {'= ช่วงวิเคราะห์': '= analysed range', 'คัดลอกช่วง': 'Copy range', 'วางช่วง': 'Paste range', 'วางช่วงเวลา': 'Paste a range of times', 'ยังไม่มีช่วงเวลาให้วาง — กด "คัดลอกช่วง" ที่กล่องอื่นก่อน หรือคัดลอกข้อความเช่น 0:10 – 0:20': 'No range of times to paste yet — press "Copy range" in another box first, or copy text such as 0:10 – 0:20'}.items():
     EXACT.setdefault(_k, _v)
+for _k, _v in {'เฟรม / เวลา': 'Frame / time', 'เฟรม / เวลา (ถ้าเป็นวิดีโอ)': 'Frame / time (if it is a video)'}.items():
+    EXACT.setdefault(_k, _v)

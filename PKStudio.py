@@ -1534,6 +1534,29 @@ def parse_clock_time(text):
     return secs
 
 
+def frame_from_text(text, fps, total=0):
+    """The frame (counted from 1) for what was typed in a "frame" box: a whole number is the frame itself; a time - 0:12.5, 1:05, 12.5, 12.5s, 1:02:03 - is the frame at that time
+    (frame N is at the time (N-1)/fps). Kept inside the video when its length (`total`, frames) is known. None for nothing typed or something that is neither."""
+    t = str(text if text is not None else "").strip().lower()
+    if t.endswith("s") and not t.endswith("ms"):
+        t = t[:-1].strip()
+    if not t:
+        return None
+    if t.isdigit():
+        n = max(1, int(t))
+    else:
+        try:
+            secs = parse_clock_time(t)
+        except ValueError:
+            return None
+        if secs is None or not float(fps or 0) > 0:
+            return None
+        n = int(round(secs * float(fps))) + 1
+    if total and total > 0:
+        n = min(n, int(total))
+    return n
+
+
 def format_clock_time(seconds):
     """Seconds -> 'm:ss.s' or 'h:mm:ss.s' (what the player shows and what parse_clock_time reads back)."""
     seconds = max(0.0, float(seconds))
@@ -3257,6 +3280,22 @@ class ClipPlayerDialog:
         self.top.destroy()
 
 
+def frame_number_of(path, text):
+    """The frame number (from 1) that the text of a frame box means for this video (a number as it is, a time turned into the frame at it); None when nothing / nothing usable."""
+    if not str(text if text is not None else "").strip():
+        return None
+    t = str(text).strip()
+    if t.isdigit():
+        return int(t)
+    if not path or not os.path.isfile(path) or os.path.splitext(path)[1].lower() not in (".mp4", ".mov", ".avi", ".mkv", ".m4v"):
+        return None
+    cap = cv2.VideoCapture(path)
+    try:
+        return frame_from_text(t, cap.get(cv2.CAP_PROP_FPS) or 0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
+    finally:
+        cap.release()
+
+
 def read_picture_any(path, frame=None):
     """A picture file (any letters in the path) or a frame of a video -> BGR array or None."""
     if not path or not os.path.isfile(path):
@@ -3265,7 +3304,8 @@ def read_picture_any(path, frame=None):
         cap = cv2.VideoCapture(path)
         try:
             total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
-            idx = max(0, min(total - 1, int(frame) - 1)) if frame not in (None, "") else total // 2
+            n = frame_from_text(frame, cap.get(cv2.CAP_PROP_FPS) or 0, total)             # (a frame number, or a time: 0:12.5)
+            idx = max(0, min(total - 1, n - 1)) if n is not None else total // 2
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ok, fr = cap.read()
             return fr if ok else None
@@ -3505,10 +3545,7 @@ class ZoneLineEditor:
         if img is None:
             img = np.full((720, 1280, 3), 60, np.uint8)
         self.img = img
-        try:
-            self.frame_index = int(frame) if frame not in (None, "") else None
-        except (TypeError, ValueError):
-            self.frame_index = None
+        self.frame_index = frame_number_of(self.video_path, frame)
         return True
 
     def change_video(self, path=None):
@@ -3913,7 +3950,7 @@ class ZoneLineEditor:
         ttk.Label(bar0, text=T("วิดีโอข้างทาง")).pack(side="left")
         ttk.Entry(bar0, textvariable=self.vpath_var, width=80, state="readonly").pack(side="left", padx=4)
         ttk.Button(bar0, text=T("เปลี่ยนวิดีโอ…"), command=self.change_video).pack(side="left")
-        ttk.Label(bar0, text=T("เฟรมที่")).pack(side="left", padx=(14, 2))
+        ttk.Label(bar0, text=T("เฟรม / เวลา")).pack(side="left", padx=(14, 2))
         ttk.Entry(bar0, textvariable=self.frame_var, width=7).pack(side="left")
         ttk.Button(bar0, text=T("โหลดเฟรม"), command=self.reload_frame).pack(side="left", padx=4)
         ttk.Button(bar0, text=T("เปิดไฟล์โซน…"), command=self.open_file).pack(side="left", padx=(14, 0))
@@ -4817,10 +4854,7 @@ class SiteStudio:
         if img is None:
             return False
         self.video_img = img
-        try:
-            self.frame_index = int(self.frame_var.get()) if self.frame_var.get() else None
-        except ValueError:
-            self.frame_index = None
+        self.frame_index = frame_number_of(self.video_path, self.frame_var.get())
         self.vpane.set_image(img)
         return True
 
@@ -5478,7 +5512,7 @@ class SiteStudio:
         ttk.Label(bar0, text=T("วิดีโอข้างทาง")).pack(side="left")
         ttk.Entry(bar0, textvariable=self.vpath_var, width=70, state="readonly").pack(side="left", padx=4)
         ttk.Button(bar0, text=T("เปลี่ยนวิดีโอ…"), command=self.change_video).pack(side="left")
-        ttk.Label(bar0, text=T("เฟรมที่")).pack(side="left", padx=(10, 2))
+        ttk.Label(bar0, text=T("เฟรม / เวลา")).pack(side="left", padx=(10, 2))
         ttk.Entry(bar0, textvariable=self.frame_var, width=6).pack(side="left")
         ttk.Button(bar0, text=T("โหลดเฟรม"), command=self.reload_frame).pack(side="left", padx=4)
         ttk.Button(bar0, text=T("เปิดไฟล์โซน…"), command=self.open_file).pack(side="left", padx=(12, 0))
@@ -5487,7 +5521,7 @@ class SiteStudio:
         ttk.Label(bar1, text=T("ภาพ/วิดีโอโดรน")).pack(side="left")
         ttk.Entry(bar1, textvariable=self.dpath_var, width=70, state="readonly").pack(side="left", padx=4)
         ttk.Button(bar1, text=T("เลือก…"), command=self.choose_drone).pack(side="left")
-        ttk.Label(bar1, text=T("เฟรม (ถ้าเป็นวิดีโอ)")).pack(side="left", padx=(10, 2))
+        ttk.Label(bar1, text=T("เฟรม / เวลา (ถ้าเป็นวิดีโอ)")).pack(side="left", padx=(10, 2))
         ttk.Entry(bar1, textvariable=self.dframe_var, width=6).pack(side="left")
         ttk.Button(bar1, text=T("โหลด"), command=lambda: self.load_drone(self.drone_path, self.dframe_var.get() or None)).pack(side="left", padx=4)
         ttk.Label(bar1, text=T("แสดง:")).pack(side="left", padx=(14, 2))
@@ -7934,8 +7968,8 @@ class BatchProgressWindow(tk.Toplevel):
         self.secs = [None] * len(clips)
         self.notes = [""] * len(clips)
         self.current = None
-        self.started = None                                 # when the clip being analysed started
-        self.t_start = time.time()
+        self.started = None                                 # when the clip being analysed started (on the clock of the work: it stops while the work is paused)
+        self.t_start = app.work_time()
         self.finished = False
         self.head = tk.StringVar(value="")
         self.count = tk.StringVar(value="")
@@ -7985,7 +8019,7 @@ class BatchProgressWindow(tk.Toplevel):
     def _values(self, i):
         secs = self.secs[i]
         if self.state[i] == self.RUN and self.started is not None:
-            secs = time.time() - self.started
+            secs = self.app.work_time() - self.started
         label = self.T(self.state[i]) + (f" — {self.T(self.notes[i])}" if self.notes[i] else "")
         return (i + 1, self.names[i], label, self._clock(secs))
 
@@ -7995,7 +8029,7 @@ class BatchProgressWindow(tk.Toplevel):
         self.notes[i] = note
         if state == self.RUN:
             self.current = i
-            self.started = time.time()
+            self.started = self.app.work_time()
             self.secs[i] = None
         else:
             self.secs[i] = seconds
@@ -8048,7 +8082,7 @@ class BatchProgressWindow(tk.Toplevel):
             if not self.finished:
                 self.stage.set(str(self.app.status_var.get()))
                 self.speed.set(self.T("   ".join(x for x in (str(self.app.progress_var.get()), str(self.app.time_var.get())) if x)
-                                      + f"   | เวลารวม {self._clock(time.time() - self.t_start)}"))
+                                      + f"   | เวลารวม {self._clock(self.app.work_time() - self.t_start)}"))
                 if self.current is not None:
                     self.tree.item(str(self.current), values=self._values(self.current))
             self.after(500, self._tick)
@@ -8082,6 +8116,7 @@ class Run1App:
 
         self.running = False
         self.stop_event = threading.Event()
+        self._pause_acc, self._pause_since = 0.0, None                # seconds the work has been paused (the clock of the work stops then)
         self.pause_event = threading.Event()
         self.pause_event.set()
         self.worker_thread = None
@@ -9556,6 +9591,7 @@ class Run1App:
         poll = float(getattr(self, "storage_poll_s", 1.0))
         t_wait = time.time()
         self.pause_event.clear()                                   # paused, like the PAUSE button: the user presses RESUME when the disk is connected again
+        self._pause_begin()
         self.post_ui(lambda: self.pause_button.config(text="▶ RESUME"))
         ok = False
         while not self.stop_event.is_set():
@@ -9572,9 +9608,11 @@ class Run1App:
                     ok = True
                     break
                 self.pause_event.clear()                            # not back yet: stay paused
+                self._pause_begin()
                 self.post_ui(lambda: self.pause_button.config(text="▶ RESUME"))
             self.stop_event.wait(poll)
         self.pause_event.set()
+        self._pause_end()
         self.post_ui(lambda: self.pause_button.config(text="Ⅱ PAUSE"))
         return ok
 
@@ -9615,12 +9653,12 @@ class Run1App:
                     self._batch_mark(i - 1, BatchProgressWindow.SKIP, 0.0)
                     continue
                 attempts = 0
-                t0 = time.time()
+                t0 = self.work_time()
                 while True:
                     self.update_ui(status=f"Batch {i}/{n}: {name}" + (f" (attempt {attempts + 1})" if attempts else ""))
                     self._last_run_error = ""
                     self.run3_last_summary = None
-                    t_try = time.time()
+                    t_try = self.work_time()
                     try:
                         os.makedirs(run_dir, exist_ok=True)
                     except OSError:
@@ -9633,7 +9671,7 @@ class Run1App:
                         break
                     attempts += 1
                     self._disk_events.append((name, attempts))
-                    self._batch_mark(i - 1, BatchProgressWindow.LOST, time.time() - t_try)
+                    self._batch_mark(i - 1, BatchProgressWindow.LOST, self.work_time() - t_try)
                     self._carry = None
                     if attempts > self.MAX_DISK_RETRIES:
                         self._last_run_error = self._last_run_error or "the disk was lost too many times"
@@ -9646,9 +9684,9 @@ class Run1App:
                 if reasons:
                     empties.append((name, list(reasons)))
                 try:
-                    rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, self._last_run_error, time.time() - t0))
+                    rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, self._last_run_error, self.work_time() - t0))
                 except OSError:
-                    rows.append({"Run": name, "Folder": rel, "Video": os.path.basename(c["video"]), "Status": "interrupted", "Seconds": round(time.time() - t0, 1)})
+                    rows.append({"Run": name, "Folder": rel, "Video": os.path.basename(c["video"]), "Status": "interrupted", "Seconds": round(self.work_time() - t0, 1)})
                 status = str(rows[-1].get("Status", ""))
                 end = getattr(self, "_run_end", None) or {}
                 note = "ตัวชี้วัดว่างบางตัว" if reasons else ""
@@ -9664,7 +9702,7 @@ class Run1App:
                     mark = BatchProgressWindow.STOP
                 else:
                     mark = BatchProgressWindow.DONE
-                self._batch_mark(i - 1, mark, time.time() - t0, note)
+                self._batch_mark(i - 1, mark, self.work_time() - t0, note)
                 if self.stop_event.is_set():
                     stopped = True
                     break
@@ -12519,6 +12557,20 @@ class Run1App:
     # PAUSE
     # ========================================================
 
+    def _pause_begin(self):
+        if self._pause_since is None:
+            self._pause_since = time.time()
+
+    def _pause_end(self):
+        if self._pause_since is not None:
+            self._pause_acc += time.time() - self._pause_since
+            self._pause_since = None
+
+    def work_time(self):
+        """A clock that does not run while the work is paused (the PAUSE button, a disk that was lost): the times taken and the ETA are of the work, not of the waiting.
+        Only differences of it mean something."""
+        return time.time() - self._pause_acc - ((time.time() - self._pause_since) if self._pause_since is not None else 0.0)
+
     def toggle_pause(self):
 
         if not self.running:
@@ -12527,6 +12579,7 @@ class Run1App:
         if self.pause_event.is_set():
 
             self.pause_event.clear()
+            self._pause_begin()
 
             self.pause_button.config(
                 text="▶ RESUME"
@@ -12537,6 +12590,7 @@ class Run1App:
         else:
 
             self.pause_event.set()
+            self._pause_end()
 
             self.pause_button.config(
                 text="Ⅱ PAUSE"
@@ -12557,6 +12611,7 @@ class Run1App:
 
         self.stop_event.set()
         self.pause_event.set()
+        self._pause_end()
 
         self.status_var.set(
             "Stopping..."
@@ -12988,6 +13043,7 @@ class Run1App:
                     return False
                 at = frame_index
                 self.pause_event.clear()
+                self._pause_begin()
                 self._disk_pauses = getattr(self, "_disk_pauses", 0) + 1
                 t_wait = time.time()
                 self.post_ui(lambda: self.pause_button.config(text="▶ RESUME"))
@@ -13016,15 +13072,18 @@ class Run1App:
                                 cap = new_cap
                                 reader = BackgroundFrameReader(cap, lambda n: not (frame_skip > 1 and not render_needed and (n % frame_skip) != 0), at, last_frame)
                                 reader.prepare = old_prepare
+                                self._pause_end()
                                 self.post_ui(lambda: self.pause_button.config(text="Ⅱ PAUSE"))
                                 self.update_ui(status="Processing...")
                                 return True
                         except Exception:
                             release_quietly(new_cap)
                         self.pause_event.clear()                        # the disk is not back yet: stay paused
+                        self._pause_begin()
                         self.post_ui(lambda: self.pause_button.config(text="▶ RESUME"))
                     self.stop_event.wait(1.0)
                 self.pause_event.set()
+                self._pause_end()
                 self.post_ui(lambda: self.pause_button.config(text="Ⅱ PAUSE"))
                 return False
 
@@ -13131,7 +13190,7 @@ class Run1App:
                 last_frame,
             )
 
-            start_time = time.time()
+            start_time = self.work_time()
 
             print()
             print("Image Size  :", img_size)
@@ -13787,7 +13846,7 @@ class Run1App:
                         csv_file.flush()
 
                 elapsed = (
-                    time.time()
+                    self.work_time()
                     - start_time
                 )
 
@@ -14104,7 +14163,7 @@ class Run1App:
                     }, mf, indent=4, ensure_ascii=False)
 
             # Flush final processing event.
-            elapsed_before_summary = time.time() - start_time
+            elapsed_before_summary = self.work_time() - start_time
             final_fps = (
                 processed_frames / elapsed_before_summary
                 if elapsed_before_summary > 0 else 0
@@ -14140,7 +14199,7 @@ class Run1App:
                 cv2.destroyAllWindows()
 
             total_time = (
-                time.time()
+                self.work_time()
                 - start_time
             )
 

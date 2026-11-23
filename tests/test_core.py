@@ -592,6 +592,36 @@ def _after_core(line, name):
     return ns[name]
 
 
+class FrameOrTime(unittest.TestCase):
+    """A frame box takes a frame number or a time (1.60.13)."""
+    f = staticmethod(lambda t, fps=30.0, total=0: CORE["frame_from_text"](t, fps, total))
+
+    def test_a_number_is_the_frame(self):
+        self.assertEqual(self.f("45"), 45)
+        self.assertEqual(self.f(" 7 "), 7)
+        self.assertEqual(self.f("0"), 1)                                       # frames count from 1
+
+    def test_a_time_is_the_frame_at_that_time(self):
+        self.assertEqual(self.f("0:03"), 91)                                   # 3.0 s at 30 fps: frame 91 (frame N is at (N-1)/fps)
+        self.assertEqual(self.f("3.0"), 91)
+        self.assertEqual(self.f("12.5"), 376)
+        self.assertEqual(self.f("12.5s"), 376)
+        self.assertEqual(self.f("1:05.5"), 1966)
+        self.assertEqual(self.f("1:02:03", 10.0), 37231)
+        self.assertEqual(self.f("0:00"), 1)
+
+    def test_kept_inside_the_video(self):
+        self.assertEqual(self.f("10:00", 30.0, 150), 150)
+        self.assertEqual(self.f("400", 30.0, 150), 150)
+
+    def test_nothing_or_nonsense(self):
+        self.assertIsNone(self.f(""))
+        self.assertIsNone(self.f(None))
+        self.assertIsNone(self.f("abc"))
+        self.assertIsNone(self.f("1:75"))
+        self.assertIsNone(self.f("0:03", 0))                                   # a time needs the fps
+
+
 class Paths(unittest.TestCase):
     """Where a dialog opens and where the clips come from (1.59.5)."""
 
