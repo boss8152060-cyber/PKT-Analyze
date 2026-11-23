@@ -4154,6 +4154,7 @@ class SiteStudio:
         self.frame_index = None
         self.nodes, self.zones, self.real = {}, {z: [] for z in ZONE_NAMES}, {}
         self.measuring, self.scale_pts = False, []                 # the two spots of a distance on the drone picture (the scale), while they are being clicked
+        self.ctrl_mode = False                                     # 'control point' is on: a click on the video puts a control point, the next click on the drone picture pins it
         self.lines = {n: [] for n in LINE_NAMES}                  # the Lines drawn here (video pixels)
         self._next = 1
         self.draft, self.line_draft = [], []                       # the corners of the zone being drawn / the first end of a Line being drawn
@@ -4199,7 +4200,7 @@ class SiteStudio:
         self.vpane.set_image(self.video_img)
         self.dpane.set_image(self.drone_img if self.drone_img is not None else np.full((720, 1280, 3), 60, np.uint8))
         self.ppane.set_image(self.plan_img)
-        for key, fn in (("<Return>", self.finish_zone), ("<Escape>", lambda e=None: (self.cancel_scale_measure(), self.cancel_draft())), ("<BackSpace>", self.remove_last_draft_point),
+        for key, fn in (("<Return>", self.finish_zone), ("<Escape>", lambda e=None: (self.cancel_scale_measure(), self.cancel_control_mode(), self.cancel_draft())), ("<BackSpace>", self.remove_last_draft_point),
                         ("<Delete>", self.delete_selected_corner)):
             self.top.bind(key, lambda e, f=fn: self._on_key(f))
         bind_undo_keys(self.top, self.undo, self.redo, lambda: isinstance(self.top.focus_get(), (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text)))
@@ -4219,15 +4220,19 @@ class SiteStudio:
             pass
         return fn()
 
-    def _new_node(self, x, y, d=None):
+    def _new_node(self, x, y, d=None, ctrl=False):
         nid = self._next
         self._next += 1
         self.nodes[nid] = {"v": [float(x), float(y)], "d": ([float(d[0]), float(d[1])] if d is not None else None), "skip": False}
+        if ctrl:
+            self.nodes[nid]["ctrl"] = True
         return nid
 
     def _find_node(self, x, y, tol):
         best, best_d = None, tol
         for nid, n in self.nodes.items():
+            if n.get("ctrl"):
+                continue
             d = math.hypot(n["v"][0] - x, n["v"][1] - y)
             if d <= best_d:
                 best, best_d = nid, d
@@ -4236,11 +4241,18 @@ class SiteStudio:
     def _zones_of(self, nid):
         return [z for z in ZONE_NAMES if nid in self.zones[z]]
 
+    def _is_ctrl(self, nid):
+        """A control point: a spot on the ground that is not a zone corner (a lane marking, a manhole), pinned on the video and on the drone picture to help the Align - more pins
+        than the zone corners make the fit stronger, and they can be put where the lens curves the lanes."""
+        return bool(self.nodes.get(nid, {}).get("ctrl"))
+
     def _label(self, nid):
-        """Z<zone no>.<corner no> of the corner in the first zone that has it (the label the saved Align uses); P<n> for a point that belongs to no zone."""
+        """Z<zone no>.<corner no> of the corner in the first zone that has it (the label the saved Align uses); C<n> for a control point; P<n> for any other point that belongs to no zone."""
         for z in ZONE_NAMES:
             if nid in self.zones[z]:
                 return f"Z{z.split()[-1]}.{self.zones[z].index(nid) + 1}"
+        if self._is_ctrl(nid):
+            return "C{0}".format(sorted(i for i in self.nodes if self._is_ctrl(i)).index(nid) + 1)
         return f"P{nid}"
 
     def _load_from_app(self, align):
@@ -4273,6 +4285,9 @@ class SiteStudio:
         for q in align.get("pairs", []):
             try:
                 lab = q.get("l")
+                if lab and re.fullmatch(r"C\d+", str(lab)):                 # a control point: the pair is kept as it was saved (video place + drone place)
+                    self._new_node(float(q["s"][0]), float(q["s"][1]), (float(q["d"][0]), float(q["d"][1])), ctrl=True)
+                    continue
                 nid = label_to_nid.get(lab) if lab else None
                 if nid is None or self.nodes[nid]["d"] is not None:
                     continue                                       # (a point that is not a zone corner is not kept: the zone corners are the pins)
@@ -4392,7 +4407,7 @@ class SiteStudio:
     def _data_dict(self, cfg_scale=None, with_edges=True):
         h, w = self.video_img.shape[:2]
         pairs = self._pairs()
-        data = {"pairs": [{"s": list(v), "d": list(d), **({"l": self._label(nid)} if self._zones_of(nid) else {})} for nid, v, d in pairs],
+        data = {"pairs": [{"s": list(v), "d": list(d), **({"l": self._label(nid)} if (self._zones_of(nid) or self._is_ctrl(nid)) else {})} for nid, v, d in pairs],
                 "skipped": sorted(self._label(nid) for nid, n in self.nodes.items() if n["skip"] and n["d"] is None and self._zones_of(nid)),
                 "kind": self.kind, "scale": float(self.scale if cfg_scale is None else cfg_scale), "rot_deg": self.rot_deg,
                 "origin": list(pairs[0][2]) if pairs else [0.0, 0.0], "video_size": [w, h], "video_frame": str(self.align_data.get("video_frame", "") or ""),
@@ -4713,7 +4728,7 @@ class SiteStudio:
 
     def _prune(self):
         """Corners that no zone uses go (what a cancelled or cleared zone left behind), with their pins."""
-        for nid in [i for i, n in self.nodes.items() if not self._zones_of(i) and i not in self.draft]:
+        for nid in [i for i, n in self.nodes.items() if not self._zones_of(i) and not n.get("ctrl") and i not in self.draft]:
             del self.nodes[nid]
         if self.sel not in self.nodes:
             self.sel = self._next_pin(None)
@@ -4727,7 +4742,7 @@ class SiteStudio:
         r = self.SNAP_PX / max(1e-6, self._k("video"))
         best, best_d = None, r
         for nid, n in self.nodes.items():
-            if nid in exclude:
+            if nid in exclude or n.get("ctrl"):
                 continue
             d = math.hypot(n["v"][0] - x, n["v"][1] - y)
             if d <= best_d:
@@ -4888,6 +4903,13 @@ class SiteStudio:
         if nid is None:
             return False
         self._push_undo()
+        if self._is_ctrl(nid):                                    # (a control point has nothing to wait for: it goes)
+            lab = self._label(nid)
+            del self.nodes[nid]
+            self.sel = self._next_pin(None)
+            self._refit()
+            self.msg_var.set(self.T("จุดควบคุม {0} ที่ทำให้จัดแนวคลาดมากสุดถูกลบแล้ว").format(lab))
+            return True
         self.nodes[nid]["d"] = None
         self.sel = nid
         self._refit()
@@ -5082,6 +5104,8 @@ class SiteStudio:
         for other, n in self.nodes.items():
             if other == nid or math.hypot(n["v"][0] - v[0], n["v"][1] - v[1]) > 1e-6:
                 continue
+            if n.get("ctrl") or self.nodes[nid].get("ctrl"):
+                continue                                           # (a control point stays a point of its own)
             if any(nid in self.zones[z] and other in self.zones[z] for z in ZONE_NAMES):
                 return False
             for z in ZONE_NAMES:
@@ -5098,6 +5122,8 @@ class SiteStudio:
             if self.tab == "line":
                 return self._click_line(x, y) if name == "video" else False
             if name == "video":
+                if getattr(self, "ctrl_mode", False):
+                    return self.add_control_point(x, y)
                 if self._drawing():
                     return self.add_corner(x, y)
                 self.msg_var.set(self.T("เลือกโซนที่ยังไม่วาดในรายการ เพื่อวาดโซนใหม่ (หรือลากมุมที่มีอยู่เพื่อแก้)"))
@@ -5108,6 +5134,45 @@ class SiteStudio:
                 return self._click_drone(x, y)
             return False
         return handler
+
+    def toggle_control_mode(self):
+        """'Control point' on / off: while it is on, a click on the video puts a control point there and the next click on the drone picture is the same spot."""
+        if getattr(self, "ctrl_mode", False):
+            return self.cancel_control_mode()
+        self.ctrl_mode = True
+        self.ctrl_button.config(text=self.T("■ จบการวางจุดควบคุม (Esc)"))
+        self.msg_var.set(self.T("จุดควบคุมเสริม: คลิกจุดบนพื้นถนนที่เห็นชัดบนวิดีโอ (มุมเส้นขาว ทางม้าลาย ฝาท่อ) แล้วคลิกจุดเดียวกันบนภาพโดรน — วางหลายจุดได้ · Esc = จบ"))
+        self.refresh_all()
+        return True
+
+    def cancel_control_mode(self):
+        if not getattr(self, "ctrl_mode", False):
+            return False
+        self.ctrl_mode = False
+        try:
+            self.ctrl_button.config(text=self.T("➕ จุดควบคุมเสริม"))
+        except (AttributeError, tk.TclError):
+            pass
+        self.msg_var.set(self._pin_message())
+        self.refresh_all()
+        return True
+
+    def add_control_point(self, x, y):
+        """A control point at this place of the video (it waits for its place on the drone picture); a click again before the drone is clicked moves the one that waits."""
+        h, w = self.video_img.shape[:2]
+        x, y = min(max(0.0, x), w - 1.0), min(max(0.0, y), h - 1.0)
+        waiting = self.sel if (self.sel in self.nodes and self._is_ctrl(self.sel) and self.nodes[self.sel]["d"] is None) else None
+        self._push_undo()
+        if waiting is not None:
+            self.nodes[waiting]["v"] = [float(x), float(y)]
+            nid = waiting
+        else:
+            nid = self._new_node(x, y, ctrl=True)
+        self.sel = nid
+        self.msg_var.set(self.T("จุดควบคุม {0} — คลิกตำแหน่งเดียวกันบนภาพโดรน").format(self._label(nid)))
+        self._store_align()
+        self.refresh_all()
+        return True
 
     def _click_drone(self, x, y):
         if self.drone_img is None:
@@ -5124,9 +5189,9 @@ class SiteStudio:
         self._push_undo()
         self.nodes[nid]["d"] = [min(max(0.0, x), w - 1.0), min(max(0.0, y), h - 1.0)]
         self.nodes[nid]["skip"] = False
-        self.sel = self._next_pin(nid)
+        self.sel = None if (getattr(self, "ctrl_mode", False) and self._is_ctrl(nid)) else self._next_pin(nid)
         self._refit()
-        self.msg_var.set(self._pin_message())
+        self.msg_var.set(self.T("จุดควบคุม {0} วางแล้ว — คลิกจุดถัดไปบนวิดีโอ หรือกด Esc เพื่อจบ").format(self._label(nid)) if (getattr(self, "ctrl_mode", False) and self._is_ctrl(nid)) else self._pin_message())
         return True
 
     def _click_line(self, x, y):
@@ -5497,7 +5562,11 @@ class SiteStudio:
             zs = self._zones_of(nid)
             col = self._zone_color(zs[0]) if zs else (0, 140, 255)
             st = self._pin_state(nid)
-            if name == "drone":
+            if n.get("ctrl"):                                       # a control point: a diamond (cyan; green once pinned on both pictures), named C1, C2 ...
+                diamond = np.array([[q[0], q[1] - 7], [q[0] + 7, q[1]], [q[0], q[1] + 7], [q[0] - 7, q[1]]], np.int32)
+                cv2.fillPoly(out, [diamond], (255, 220, 0) if n["d"] is None else (60, 200, 60))
+                cv2.polylines(out, [diamond], True, (0, 0, 0), 1, cv2.LINE_AA)
+            elif name == "drone":
                 if n["d"] is None:                                 # not pinned: where the Align puts the corner (drag it to pin it)
                     cv2.circle(out, q, 6, (0, 220, 255), 2, cv2.LINE_AA)
                 else:
@@ -5675,6 +5744,10 @@ class SiteStudio:
         ttk.Button(row, text="◀", width=3, command=lambda: self.goto_pin(-1)).pack(side="left", padx=(6, 2))
         ttk.Button(row, text="▶", width=3, command=lambda: self.goto_pin(1)).pack(side="left")
         ttk.Button(t1, text=T("ยกหมุดโดรนออก (วางใหม่)"), command=self.unpin_selected).pack(anchor="w")
+        ttk.Separator(t1).pack(fill="x", pady=(8, 4))
+        ttk.Label(t1, text=T("จุดควบคุมเสริม (ปุ่ม ➕ ที่แถบล่าง): จุดบนพื้นถนนที่ไม่ใช่มุมโซน (มุมเส้นขาว ทางม้าลาย ฝาท่อ) วางคู่ วิดีโอ ↔ โดรน เพิ่มหมุดให้จัดแนวแม่นขึ้น โดยเฉพาะเมื่อภาพข้างทางมีเลนโค้ง "
+                             "(ชนิดการแปลงแบบ เลนส์ ต้องใช้ 6 หมุดขึ้นไป) · ลบจุด: เลือกแล้วกด Delete"),
+                  wraplength=275, justify="left", foreground="#555555").pack(anchor="w", pady=(2, 4))
 
         def _wheel_t1(e):                                                 # (bound on the widgets themselves: no application-wide binding is touched)
             if t1.winfo_reqheight() > t1_cv.winfo_height():
@@ -5763,6 +5836,8 @@ class SiteStudio:
         ttk.Button(foot, text=T("บันทึกไฟล์โซน…"), command=self.save_as).pack(side="right")
         ttk.Button(foot, text=T("↶ ย้อน"), command=self.undo).pack(side="left")
         ttk.Button(foot, text=T("↷ ทำซ้ำ"), command=self.redo).pack(side="left", padx=(4, 10))
+        self.ctrl_button = ttk.Button(foot, text=T("➕ จุดควบคุมเสริม"), command=self.toggle_control_mode)          # (always in sight: the side panel scrolls)
+        self.ctrl_button.pack(side="left", padx=(0, 10))
         tk.Label(foot, textvariable=self.msg_var, anchor="w", foreground="#a00", wraplength=900, justify="left").pack(side="left", fill="x", expand=True)
 
     def _apply_layout(self):
