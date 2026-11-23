@@ -3333,7 +3333,7 @@ class _ZoomPane:
         self.last_render = None
         c = self.canvas
         c.bind("<Configure>", lambda e: self._on_configure())
-        c.bind("<ButtonPress-1>", lambda e: self._press(e.x, e.y, False, e.state))
+        c.bind("<ButtonPress-1>", lambda e: (c.focus_set(), self._press(e.x, e.y, False, e.state))[1])
         c.bind("<B1-Motion>", lambda e: self._drag(e.x, e.y, e.state))
         c.bind("<ButtonRelease-1>", lambda e: self._release(e.x, e.y))
         for b in (2, 3):
@@ -3503,8 +3503,7 @@ class ZoneLineEditor:
         self.top.bind("<Escape>", lambda e: self.cancel_draft())
         self.top.bind("<BackSpace>", lambda e: self.remove_last_draft_point())
         self.top.bind("<Delete>", lambda e: self.delete_selected_corner())
-        self.top.bind("<Control-z>", lambda e: self.undo())
-        self.top.bind("<Control-y>", lambda e: self.redo())
+        bind_undo_keys(self.top, self.undo, self.redo, lambda: isinstance(self.top.focus_get(), (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text)))
         self._say("pick")
 
     # ----- data -----
@@ -3990,6 +3989,27 @@ SITE_KIND_LABELS = {"3small": "สามแยกทางเดียว One wa
 SITE_KIND_OF_TYPE = {"t_small": "3small", "t_full": "3full", "x_open": "4", "x_median": "4"}
 
 
+def bind_undo_keys(top, undo, redo, in_text=None):
+    """Ctrl+Z = undo, Ctrl+Y / Ctrl+Shift+Z / Ctrl+X = redo. They are read by the KEY (the Windows key code), so they work with the Thai keyboard too, where the letter is another one.
+    While a box with text has the focus (a scale, a frame number) Ctrl+Z / Ctrl+Y still work (a box has no undo of its own) but Ctrl+X stays the box's own cut.
+    `in_text()` -> True when such a box has the focus."""
+    def handler(e):
+        typing = bool(in_text and in_text())
+        code = e.keycode
+        shift = bool(e.state & 0x1)
+        if code == 90:                                   # Z
+            (redo if shift else undo)()
+            return "break"
+        if code == 89:                                   # Y
+            redo()
+            return "break"
+        if code == 88 and not typing:                    # X (redo; in a box it is cut)
+            redo()
+            return "break"
+        return None
+    top.bind("<Control-KeyPress>", handler, add="+")
+
+
 def build_site_type_row(parent, app, translate=None):
     """The choice of the site type: 3-leg junction with Zone 1-4 / with Zone 1-7 / 4-leg junction (Zone 1-8), and for a 4-leg junction whether it has a median island
     (then it is analysed as two 3-leg junctions, Zone 1-4 and Zone 5-8). Writes app.run3_site_type_var; every row built stays in step with it. Returns the frame."""
@@ -4105,8 +4125,9 @@ class SiteStudio:
         self.dpane.set_image(self.drone_img if self.drone_img is not None else np.full((720, 1280, 3), 60, np.uint8))
         self.ppane.set_image(self.plan_img)
         for key, fn in (("<Return>", self.finish_zone), ("<Escape>", lambda e=None: (self.cancel_scale_measure(), self.cancel_draft())), ("<BackSpace>", self.remove_last_draft_point),
-                        ("<Delete>", self.delete_selected_corner), ("<Control-z>", self.undo), ("<Control-y>", self.redo)):
+                        ("<Delete>", self.delete_selected_corner)):
             self.top.bind(key, lambda e, f=fn: self._on_key(f))
+        bind_undo_keys(self.top, self.undo, self.redo, lambda: isinstance(self.top.focus_get(), (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text)))
         self.refresh_all()
         self.msg_var.set(self._pin_message() if any(len(self.zones[z]) >= 3 for z in ZONE_NAMES)
                          else self.T("ยังไม่มีโซน — กด \"✏️ วาดโซนใหม่\" แล้วคลิกมุมของโซนบนวิดีโอข้างทาง"))
@@ -7689,6 +7710,7 @@ class ClipListPanel(ttk.Frame):
         self.tree.configure(yscrollcommand=tree_sb.set)
         tree_sb.grid(row=1, column=1, sticky="ns")
         self.tree.bind("<Control-a>", lambda e: (self.select_all(), "break")[1])
+        self.tree.bind("<Control-KeyPress>", self._on_ctrl_key)            # Ctrl+C / Ctrl+V copy and paste the settings of a clip (any keyboard language: by the key, not the letter)
         self.tree.bind("<Double-1>", lambda e: self.edit_selected())
         self.tree.bind("<<TreeviewSelect>>", lambda e: self.app.refresh_checklist())
         self.rowconfigure(1, weight=1)
@@ -7699,6 +7721,8 @@ class ClipListPanel(ttk.Frame):
                                              ("ลบที่เลือก", self.remove_selected), ("ล้างรายการ", self.clear))):
             ttk.Button(act, text=text, command=command).grid(row=0, column=i, padx=2, pady=1, sticky="w")
         ttk.Button(act, text="เลือกทั้งหมด", command=self.select_all).grid(row=0, column=4, padx=2, pady=1, sticky="w")
+        ttk.Button(act, text="คัดลอกการตั้งค่าคลิป", command=self.copy_clip_settings).grid(row=0, column=5, padx=(14, 2), pady=1, sticky="w")
+        ttk.Button(act, text="วางการตั้งค่าที่คลิปที่เลือก", command=self.paste_clip_settings).grid(row=0, column=6, padx=2, pady=1, sticky="w")
         rec = ttk.LabelFrame(act, text="ตั้งทุกคลิปพร้อมกัน: บันทึกวิดีโอตลอดช่วงที่วิเคราะห์ / ไม่บันทึก", padding=(6, 2))
         rec.grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 2))
         for r_, (label, which) in enumerate((("ทั้ง 3 วิดีโอ", ("save_video", "xy_video", "drone_video")), ("วิดีโอปกติ", ("save_video",)),
@@ -7833,6 +7857,47 @@ class ClipListPanel(ttk.Frame):
 
     def select_all(self):
         self.tree.selection_set(self.tree.get_children())
+
+    _clip_memory = None                                 # the settings copied last (kept for the next list too)
+
+    def _on_ctrl_key(self, e):
+        if e.keycode == 67:                              # C
+            self.copy_clip_settings()
+            return "break"
+        if e.keycode == 86:                              # V
+            self.paste_clip_settings()
+            return "break"
+        return None
+
+    def copy_clip_settings(self):
+        """Keep the settings of the (first) selected clip: the part to analyse, what to record in each of the 3 videos and the part of each, and whether it continues the clip above."""
+        sel = self.selected_indexes()
+        if not sel:
+            messagebox.showinfo("คัดลอกการตั้งค่า", "เลือกคลิปที่จะคัดลอกการตั้งค่าก่อน (คลิกที่แถวของคลิป)")
+            return False
+        clip = self.clips[sel[0]]
+        ClipListPanel._clip_memory = {k: clip[k] for k in self.bt.PLAN_KEYS if k in clip}
+        self.app.status_var.set(self.app.T("คัดลอกการตั้งค่าของคลิปลำดับ {0} แล้ว — เลือกคลิปปลายทางแล้วกด วางการตั้งค่า").format(sel[0] + 1))
+        return True
+
+    def paste_clip_settings(self):
+        """Give the copied settings to every selected clip (the first clip of the list cannot continue anything: that one is left off there)."""
+        mem = ClipListPanel._clip_memory
+        if not mem:
+            messagebox.showinfo("วางการตั้งค่า", "ยังไม่ได้คัดลอกการตั้งค่า — เลือกคลิปแล้วกด คัดลอกการตั้งค่าคลิป ก่อน")
+            return False
+        sel = self.selected_indexes()
+        if not sel:
+            messagebox.showinfo("วางการตั้งค่า", "เลือกคลิปปลายทางก่อน (เลือกหลายแถวได้: กด Shift หรือ Ctrl ค้างไว้)")
+            return False
+        for i in sel:
+            self.clips[i].update(mem)
+            if i == 0:
+                self.clips[i]["continues_previous"] = False
+        self.refresh()
+        self.tree.selection_set([str(i) for i in sel])
+        self.app.status_var.set(self.app.T("วางการตั้งค่าที่ {0} คลิปแล้ว").format(len(sel)))
+        return True
 
     def remove_selected(self):
         for i in reversed(self.selected_indexes()):

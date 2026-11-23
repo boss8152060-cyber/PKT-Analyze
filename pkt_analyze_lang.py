@@ -2120,3 +2120,7 @@ for _k, _v in {'= ช่วงวิเคราะห์': '= analysed range', 
     EXACT.setdefault(_k, _v)
 for _k, _v in {'เฟรม / เวลา': 'Frame / time', 'เฟรม / เวลา (ถ้าเป็นวิดีโอ)': 'Frame / time (if it is a video)'}.items():
     EXACT.setdefault(_k, _v)
+for _k, _v in {'คัดลอกการตั้งค่า': 'Copy settings', 'คัดลอกการตั้งค่าคลิป': "Copy the clip's settings", 'วางการตั้งค่า': 'Paste settings', 'วางการตั้งค่าที่คลิปที่เลือก': 'Paste settings to the selected clips', 'ยังไม่ได้คัดลอกการตั้งค่า — เลือกคลิปแล้วกด คัดลอกการตั้งค่าคลิป ก่อน': "No settings copied yet — select a clip and press Copy the clip's settings first", 'เลือกคลิปที่จะคัดลอกการตั้งค่าก่อน (คลิกที่แถวของคลิป)': 'Select the clip whose settings to copy first (click its row)', 'เลือกคลิปปลายทางก่อน (เลือกหลายแถวได้: กด Shift หรือ Ctrl ค้างไว้)': 'Select the target clips first (several rows: hold Shift or Ctrl)'}.items():
+    EXACT.setdefault(_k, _v)
+for _k, _v in {'คัดลอกการตั้งค่าของคลิปลำดับ {0} แล้ว — เลือกคลิปปลายทางแล้วกด วางการตั้งค่า': 'Settings of clip no. {0} copied — select the target clips and press Paste settings', 'วางการตั้งค่าที่ {0} คลิปแล้ว': 'Settings pasted to {0} clip(s)'}.items():
+    TEMPLATES.setdefault(_k, _v)

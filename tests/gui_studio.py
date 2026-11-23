@@ -145,6 +145,61 @@ st.undo()
 check("a click on a corner without dragging only picks it", (lambda: (st.on_press("video")(v0[0], v0[1], ex, ey), st.on_release())[1])() is None and st.sel == nid
       and st.nodes[nid]["v"] == v0)
 
+# ---- Ctrl+Z / Ctrl+Y / Ctrl+X (1.60.14): by the key (the Thai keyboard too), also while a box has the focus
+def ctrl(widget, code, shift=False):
+    widget.focus_force()
+    root.update()
+    widget.event_generate("<Control-KeyPress>", keycode=code, state=(0x4 | (0x1 if shift else 0)))
+    root.update()
+
+
+n_before = len(st.nodes)
+nz = len(st.zones["Zone 2"])
+st.cur_zone = "Zone 6"
+for q in video_px([(40, 5), (48, 5), (48, 9)]):
+    vclick(*q)
+st.finish_zone()
+drawn = len(st.zones["Zone 6"]) == 3
+check("a zone was drawn (to be undone)", drawn)
+ctrl(st.vpane.canvas, 90)                                                    # Z
+check("Ctrl+Z (key code 90: any keyboard language) undoes the last step", len(st.zones["Zone 6"]) != 3, str(len(st.zones["Zone 6"])))
+ctrl(st.vpane.canvas, 89)                                                    # Y
+check("Ctrl+Y does it again", len(st.zones["Zone 6"]) == 3)
+ctrl(st.vpane.canvas, 90)
+ctrl(st.vpane.canvas, 88)                                                    # X
+check("Ctrl+X does it again too (as the user asked)", len(st.zones["Zone 6"]) == 3)
+ctrl(st.vpane.canvas, 90)
+ctrl(st.vpane.canvas, 90, shift=True)                                        # Shift+Z
+check("Ctrl+Shift+Z does it again too", len(st.zones["Zone 6"]) == 3)
+ents = []
+
+
+def find_ents(w_):
+    for c in w_.winfo_children():
+        if isinstance(c, m.ttk.Entry):
+            ents.append(c)
+        find_ents(c)
+
+
+find_ents(st.top)
+box = [e for e in ents if str(e.cget("textvariable")) == str(st.frame_var)][0]
+ctrl(box, 90)
+check("Ctrl+Z works although a box (the frame number) has the focus", len(st.zones["Zone 6"]) != 3, str(len(st.zones["Zone 6"])))
+ctrl(box, 89)
+check("Ctrl+Y works there too", len(st.zones["Zone 6"]) == 3)
+ctrl(box, 90)
+ctrl(box, 88)
+check("Ctrl+X in a box is the box's own (cut), it does not redo", len(st.zones["Zone 6"]) != 3, str(len(st.zones["Zone 6"])))
+ctrl(st.vpane.canvas, 89)
+st.vpane.canvas.focus_force()
+root.update()
+box.focus_force()
+root.update()
+st.vpane.canvas.event_generate("<ButtonPress-1>", x=3, y=3)
+root.update()
+check("a click on a picture takes the focus away from a box (so the window's keys work again)", st.top.focus_get() is st.vpane.canvas, str(st.top.focus_get()))
+st.cur_zone = "Zone 2"
+
 # ---- the scale from one real length: the plane comes out in metres
 rows = {r["label"]: r for r in st.edge_rows()}
 r14 = [r for r in rows.values() if r["label"].startswith("Zone 2: 1→2")][0]

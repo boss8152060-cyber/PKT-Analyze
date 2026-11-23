@@ -178,6 +178,63 @@ app.blank_paths_not_here()
 check("the drone picture of the Align that is not here is emptied; the scale stays", _json.loads(app.run3_align_var.get())["drone"]["path"] == "" and abs(_json.loads(app.run3_align_var.get())["scale"] - 0.05) < 1e-9
       and ("drone", "C:/gone/drone.png") in app.paths_emptied, str(app.paths_emptied))
 
+# ------------------------------------------------------------------ copy the settings of one clip to others (1.60.14)
+panel.clear()
+panel.add_videos(panel.bt.find_videos([os.path.join(tmp, "Site")]))
+panel.clips = panel.clips[:8]
+panel.refresh()
+panel.clips[1].update({"analysis_start_s": "0:10", "analysis_end_s": "0:40", "save_video": True, "xy_video": True, "drone_video": False, "xy_start_s": "0:15", "xy_end_s": "0:30",
+                       "continues_previous": True})
+panel.refresh()
+msgs2 = []
+m.messagebox.showinfo = lambda *a, **k: msgs2.append(a)
+panel.tree.selection_set(["1"])
+check("copy: the settings of clip 2 are kept", panel.copy_clip_settings() is True)
+mem = m.ClipListPanel._clip_memory
+check("... the part to analyse, the three recordings with their parts, and the continuation", mem.get("analysis_start_s") == "0:10" and mem.get("xy_end_s") == "0:30" and mem.get("save_video") is True
+      and mem.get("continues_previous") is True, str(mem))
+panel.tree.selection_set(["3", "4", "5"])
+check("paste on clips 4, 5, 6", panel.paste_clip_settings() is True)
+for i in (3, 4, 5):
+    c = panel.clips[i]
+    check(f"clip {i + 1} has the settings of clip 2", (c["analysis_start_s"], c["analysis_end_s"], c.get("xy_start_s"), c.get("save_video"), c.get("continues_previous")) == ("0:10", "0:40", "0:15", True, True), str(c))
+check("clips that were not selected are untouched", panel.clips[2].get("analysis_start_s", "") in ("", None) and panel.clips[6].get("analysis_start_s", "") in ("", None) and panel.clips[6].get("xy_start_s", "") in ("", None), str((panel.clips[2], panel.clips[6])))
+check("the selection stays (4, 5, 6) after the paste", panel.selected_indexes() == [3, 4, 5])
+panel.tree.selection_set(["0"])
+panel.paste_clip_settings()
+check("the first clip cannot continue anything: it gets the times, not the continuation", panel.clips[0]["analysis_start_s"] == "0:10" and not panel.clips[0].get("continues_previous"))
+m.ClipListPanel._clip_memory = None
+panel.tree.selection_set(["2"])
+msgs2.clear()
+check("paste with nothing copied says so", panel.paste_clip_settings() is False and len(msgs2) == 1)
+panel.tree.selection_set([])
+check("copy with no clip selected says so", panel.copy_clip_settings() is False)
+panel.tree.selection_set(["1"])
+panel.tree.focus_force()
+root.update()
+panel.tree.event_generate("<Control-KeyPress>", keycode=67, state=0x4)
+root.update()
+check("Ctrl+C (key code 67: any keyboard language) copies", m.ClipListPanel._clip_memory is not None and m.ClipListPanel._clip_memory.get("analysis_start_s") == "0:10")
+panel.tree.selection_set(["6"])
+panel.tree.event_generate("<Control-KeyPress>", keycode=86, state=0x4)
+root.update()
+check("Ctrl+V pastes", panel.clips[6].get("analysis_end_s") == "0:40")
+texts2 = []
+
+
+def walk2(w_):
+    for c in w_.winfo_children():
+        try:
+            texts2.append(str(c.cget("text")))
+        except tk.TclError:
+            pass
+        walk2(c)
+
+
+walk2(panel)
+check("the two buttons are outside, next to the others", "คัดลอกการตั้งค่าคลิป" in texts2 and "วางการตั้งค่าที่คลิปที่เลือก" in texts2)
+panel.clear()
+
 # ------------------------------------------------------------------ the clock of the work stops while it is paused (PAUSE, a disk that was lost)
 import time as _t
 t0 = app.work_time()
