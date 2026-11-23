@@ -56,6 +56,10 @@ ed = app.open_zone_line_editor()
 root.update()
 check("the window opens on a frame of the video with the 8 zones and 8 Lines listed", ed is not None and ed.img.shape[:2] == (CH, CW)
       and ed.zone_list.size() == 8 and ed.line_list.size() == 8, str(ed.img.shape if ed else ""))
+check("the draw window: frame 0 and time 0:00.0 to start with", ed.frame_var.get() == "0" and ed.time_var.get() == "0:00.0", str((ed.frame_var.get(), ed.time_var.get())))
+ed.frame_var.set("10")
+check("the draw window: a frame gives its time (the sample video is 10 fps or more)", ed.time_var.get() not in ("", "0:00.0") or m.video_fps(ed.video_path) == 0, ed.time_var.get())
+ed.frame_var.set("0")
 check("it starts on Zone 1 (nothing is drawn yet)", ed.cur_zone == "Zone 1" and not any(ed.zones.values()))
 
 

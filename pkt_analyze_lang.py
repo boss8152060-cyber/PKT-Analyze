@@ -2124,3 +2124,5 @@ for _k, _v in {'คัดลอกการตั้งค่า': 'Copy setting
     EXACT.setdefault(_k, _v)
 for _k, _v in {'คัดลอกการตั้งค่าของคลิปลำดับ {0} แล้ว — เลือกคลิปปลายทางแล้วกด วางการตั้งค่า': 'Settings of clip no. {0} copied — select the target clips and press Paste settings', 'วางการตั้งค่าที่ {0} คลิปแล้ว': 'Settings pasted to {0} clip(s)'}.items():
     TEMPLATES.setdefault(_k, _v)
+for _k, _v in {'(ถ้าเป็นวิดีโอ)': '(if it is a video)', 'เฟรม': 'Frame', 'เวลา': 'Time'}.items():
+    EXACT.setdefault(_k, _v)

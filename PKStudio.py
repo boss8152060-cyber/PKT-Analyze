@@ -1535,15 +1535,15 @@ def parse_clock_time(text):
 
 
 def frame_from_text(text, fps, total=0):
-    """The frame (counted from 1) for what was typed in a "frame" box: a whole number is the frame itself; a time - 0:12.5, 1:05, 12.5, 12.5s, 1:02:03 - is the frame at that time
-    (frame N is at the time (N-1)/fps). Kept inside the video when its length (`total`, frames) is known. None for nothing typed or something that is neither."""
+    """The frame (counted from 0: frame 0 is at the time 0:00.0) for what was typed in a "frame" box: a whole number is the frame itself; a time - 0:12.5, 1:05, 12.5, 12.5s, 1:02:03 -
+    is the frame at that time (frame N is at the time N/fps). Kept inside the video when its length (`total`, frames) is known. None for nothing typed or something that is neither."""
     t = str(text if text is not None else "").strip().lower()
     if t.endswith("s") and not t.endswith("ms"):
         t = t[:-1].strip()
     if not t:
         return None
     if t.isdigit():
-        n = max(1, int(t))
+        n = int(t)
     else:
         try:
             secs = parse_clock_time(t)
@@ -1551,9 +1551,9 @@ def frame_from_text(text, fps, total=0):
             return None
         if secs is None or not float(fps or 0) > 0:
             return None
-        n = int(round(secs * float(fps))) + 1
+        n = int(round(secs * float(fps)))
     if total and total > 0:
-        n = min(n, int(total))
+        n = min(n, int(total) - 1)
     return n
 
 
@@ -3281,7 +3281,7 @@ class ClipPlayerDialog:
 
 
 def frame_number_of(path, text):
-    """The frame number (from 1) that the text of a frame box means for this video (a number as it is, a time turned into the frame at it); None when nothing / nothing usable."""
+    """The frame number (from 0) that the text of a frame box means for this video (a number as it is, a time turned into the frame at it); None when nothing / nothing usable."""
     if not str(text if text is not None else "").strip():
         return None
     t = str(text).strip()
@@ -3296,6 +3296,72 @@ def frame_number_of(path, text):
         cap.release()
 
 
+_FPS_CACHE = {}
+
+
+def video_fps(path):
+    """The frames per second of a video file (0 for a picture or a file that cannot be read); asked once per file."""
+    key = str(path or "")
+    if key not in _FPS_CACHE:
+        fps = 0.0
+        if key and os.path.isfile(key) and os.path.splitext(key)[1].lower() in (".mp4", ".mov", ".avi", ".mkv", ".m4v"):
+            cap = cv2.VideoCapture(key)
+            try:
+                fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            finally:
+                cap.release()
+        _FPS_CACHE[key] = fps if fps == fps and fps > 0 else 0.0
+    return _FPS_CACHE[key]
+
+
+class FrameTimeLink:
+    """A box for the frame number and a box for the time that follow each other: type a frame and the time of it is written in the other box, type a time and the frame is.
+    `fps_of()` gives the frames per second of the video that is shown now (0 = not a video: nothing is written)."""
+
+    def __init__(self, frame_var, time_var, fps_of):
+        self.frame_var, self.time_var, self.fps_of, self._busy = frame_var, time_var, fps_of, False
+        frame_var.trace_add("write", lambda *_: self.from_frame())
+        time_var.trace_add("write", lambda *_: self.from_time())
+
+    def _put(self, var, text):
+        self._busy = True
+        try:
+            if var.get() != text:
+                var.set(text)
+        finally:
+            self._busy = False
+
+    def from_frame(self):
+        if self._busy:
+            return
+        t, fps = str(self.frame_var.get()).strip(), float(self.fps_of() or 0)
+        if t.isdigit() and fps > 0:
+            self._put(self.time_var, format_clock_time(int(t) / fps))
+
+    def from_time(self):
+        if self._busy:
+            return
+        t, fps = str(self.time_var.get()).strip(), float(self.fps_of() or 0)
+        if t and fps > 0:
+            n = frame_from_text(t, fps)
+            if n is not None:
+                self._put(self.frame_var, str(n))
+
+
+def frame_time_boxes(bar, T, frame_var, time_var, on_enter=None, pad=(10, 2)):
+    """The two boxes in a bar of a window: 'frame' (from 0) and 'time' (m:ss.s)."""
+    ttk.Label(bar, text=T("เฟรม")).pack(side="left", padx=pad)
+    e1 = ttk.Entry(bar, textvariable=frame_var, width=6)
+    e1.pack(side="left")
+    ttk.Label(bar, text=T("เวลา")).pack(side="left", padx=(8, 2))
+    e2 = ttk.Entry(bar, textvariable=time_var, width=9)
+    e2.pack(side="left")
+    if on_enter is not None:
+        for e in (e1, e2):
+            e.bind("<Return>", lambda ev: (on_enter(), "break")[1])
+    return e1, e2
+
+
 def read_picture_any(path, frame=None):
     """A picture file (any letters in the path) or a frame of a video -> BGR array or None."""
     if not path or not os.path.isfile(path):
@@ -3304,8 +3370,8 @@ def read_picture_any(path, frame=None):
         cap = cv2.VideoCapture(path)
         try:
             total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
-            n = frame_from_text(frame, cap.get(cv2.CAP_PROP_FPS) or 0, total)             # (a frame number, or a time: 0:12.5)
-            idx = max(0, min(total - 1, n - 1)) if n is not None else total // 2
+            n = frame_from_text(frame, cap.get(cv2.CAP_PROP_FPS) or 0, total)             # (a frame number from 0, or a time: 0:12.5)
+            idx = max(0, min(total - 1, n)) if n is not None else total // 2
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ok, fr = cap.read()
             return fr if ok else None
@@ -3491,11 +3557,13 @@ class ZoneLineEditor:
         self.top.dialog = self
         self.msg_var = tk.StringVar(value="")
         self.vpath_var = tk.StringVar(value=video_path)
-        self.frame_var = tk.StringVar(value="")
+        self.frame_var = tk.StringVar(value="0")
+        self.time_var = tk.StringVar(value="0:00.0")
+        self._frame_link = FrameTimeLink(self.frame_var, self.time_var, lambda: video_fps(self.video_path))
         self.mode_var = tk.StringVar(value="zone")
         self.snap_var = tk.BooleanVar(value=True)
         self.img = None
-        self.load_frame(None)
+        self.load_frame("0")
         self._build()
         self.pane.set_image(self.img)
         self._refresh_lists()
@@ -3555,6 +3623,7 @@ class ZoneLineEditor:
         self.video_path = path
         self.vpath_var.set(path)
         self.app.edit_video = path
+        self._frame_link.from_frame()
         self.load_frame(self.frame_var.get() or None)
         if self.img.shape[:2] != old_size and any(len(p) >= 3 for p in self.zones.values()):
             self.msg_var.set(self.T("ขนาดภาพของวิดีโอนี้ต่างจากเดิม — ตำแหน่งโซนที่วาดไว้อาจไม่ตรง ตรวจก่อนใช้"))
@@ -3949,8 +4018,7 @@ class ZoneLineEditor:
         ttk.Label(bar0, text=T("วิดีโอข้างทาง")).pack(side="left")
         ttk.Entry(bar0, textvariable=self.vpath_var, width=80, state="readonly").pack(side="left", padx=4)
         ttk.Button(bar0, text=T("เปลี่ยนวิดีโอ…"), command=self.change_video).pack(side="left")
-        ttk.Label(bar0, text=T("เฟรม / เวลา")).pack(side="left", padx=(14, 2))
-        ttk.Entry(bar0, textvariable=self.frame_var, width=7).pack(side="left")
+        frame_time_boxes(bar0, T, self.frame_var, self.time_var, on_enter=self.reload_frame, pad=(14, 2))
         ttk.Button(bar0, text=T("โหลดเฟรม"), command=self.reload_frame).pack(side="left", padx=4)
         ttk.Button(bar0, text=T("เปิดไฟล์โซน…"), command=self.open_file).pack(side="left", padx=(14, 0))
         body = ttk.Frame(top)
@@ -4073,12 +4141,13 @@ class SiteStudio:
             align = {}
         align = align if isinstance(align, dict) else {}
         self.align_data = align
-        self.video_img = read_picture_any(video_path, align.get("video_frame") or None)
+        self.start_frame = str(align.get("video_frame", "") or "").strip() or "0"           # (the first frame, 0:00.0, until another one is asked for)
+        self.video_img = read_picture_any(video_path, self.start_frame)
         if self.video_img is None:
             self.video_img = np.full((720, 1280, 3), 60, np.uint8)
         drone = align.get("drone") or {}
-        self.drone_path, self.drone_frame = str(drone.get("path", "") or ""), str(drone.get("frame", "") or "")
-        self.drone_img = read_picture_any(self.drone_path, self.drone_frame or None)
+        self.drone_path, self.drone_frame = str(drone.get("path", "") or ""), str(drone.get("frame", "") or "").strip() or "0"
+        self.drone_img = read_picture_any(self.drone_path, self.drone_frame)
         self.kind = align.get("kind") if align.get("kind") in ALIGN_KINDS else "lens"
         self.scale = float(align.get("scale") or 0.0)             # metres per drone pixel (0 = not set yet)
         self.rot_deg = float(align.get("rot_deg") or 0.0)
@@ -4109,9 +4178,15 @@ class SiteStudio:
         self.top.dialog = self
         self.msg_var = tk.StringVar(value="")
         self.vpath_var = tk.StringVar(value=video_path)
-        self.frame_var = tk.StringVar(value="")
+        self.frame_var = tk.StringVar(value=self.start_frame)
+        self.time_var = tk.StringVar(value="0:00.0")
         self.dpath_var = tk.StringVar(value=self.drone_path)
         self.dframe_var = tk.StringVar(value=self.drone_frame)
+        self.dtime_var = tk.StringVar(value="0:00.0")
+        self._frame_link = FrameTimeLink(self.frame_var, self.time_var, lambda: video_fps(self.video_path))       # (the frame box and the time box follow each other)
+        self._dframe_link = FrameTimeLink(self.dframe_var, self.dtime_var, lambda: video_fps(self.drone_path))
+        self._frame_link.from_frame()
+        self._dframe_link.from_frame()
         self.kind_var = tk.StringVar(value=ALIGN_KINDS[self.kind][1])
         self.scale_var = tk.StringVar(value=(f"{self.scale:.6g}" if self.scale > 0 else ""))
         self.snap_var = tk.BooleanVar(value=True)
@@ -4867,6 +4942,7 @@ class SiteStudio:
         self.video_path, self.video_img = path, img
         self.vpath_var.set(path)
         self.app.edit_video = path
+        self._frame_link.from_frame()
         self.vpane.set_image(img)
         return True
 
@@ -5533,8 +5609,7 @@ class SiteStudio:
         ttk.Label(bar0, text=T("วิดีโอข้างทาง")).pack(side="left")
         ttk.Entry(bar0, textvariable=self.vpath_var, width=70, state="readonly").pack(side="left", padx=4)
         ttk.Button(bar0, text=T("เปลี่ยนวิดีโอ…"), command=self.change_video).pack(side="left")
-        ttk.Label(bar0, text=T("เฟรม / เวลา")).pack(side="left", padx=(10, 2))
-        ttk.Entry(bar0, textvariable=self.frame_var, width=6).pack(side="left")
+        frame_time_boxes(bar0, T, self.frame_var, self.time_var, on_enter=self.reload_frame)
         ttk.Button(bar0, text=T("โหลดเฟรม"), command=self.reload_frame).pack(side="left", padx=4)
         ttk.Button(bar0, text=T("เปิดไฟล์โซน…"), command=self.open_file).pack(side="left", padx=(12, 0))
         bar1 = ttk.Frame(top)
@@ -5542,9 +5617,9 @@ class SiteStudio:
         ttk.Label(bar1, text=T("ภาพ/วิดีโอโดรน")).pack(side="left")
         ttk.Entry(bar1, textvariable=self.dpath_var, width=70, state="readonly").pack(side="left", padx=4)
         ttk.Button(bar1, text=T("เลือก…"), command=self.choose_drone).pack(side="left")
-        ttk.Label(bar1, text=T("เฟรม / เวลา (ถ้าเป็นวิดีโอ)")).pack(side="left", padx=(10, 2))
-        ttk.Entry(bar1, textvariable=self.dframe_var, width=6).pack(side="left")
+        frame_time_boxes(bar1, T, self.dframe_var, self.dtime_var, on_enter=lambda: self.load_drone(self.drone_path, self.dframe_var.get() or None))
         ttk.Button(bar1, text=T("โหลด"), command=lambda: self.load_drone(self.drone_path, self.dframe_var.get() or None)).pack(side="left", padx=4)
+        ttk.Label(bar1, text=T("(ถ้าเป็นวิดีโอ)"), foreground="#666666").pack(side="left")
         ttk.Label(bar1, text=T("แสดง:")).pack(side="left", padx=(14, 2))
         for key, text in (("video", "วิดีโอ"), ("drone", "โดรน"), ("plan", "ผัง X–Y")):
             ttk.Checkbutton(bar1, text=T(text), variable=self.show_vars[key], command=self._apply_layout).pack(side="left", padx=2)

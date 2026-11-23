@@ -599,20 +599,20 @@ class FrameOrTime(unittest.TestCase):
     def test_a_number_is_the_frame(self):
         self.assertEqual(self.f("45"), 45)
         self.assertEqual(self.f(" 7 "), 7)
-        self.assertEqual(self.f("0"), 1)                                       # frames count from 1
+        self.assertEqual(self.f("0"), 0)                                       # frames count from 0: frame 0 is at 0:00.0
 
     def test_a_time_is_the_frame_at_that_time(self):
-        self.assertEqual(self.f("0:03"), 91)                                   # 3.0 s at 30 fps: frame 91 (frame N is at (N-1)/fps)
-        self.assertEqual(self.f("3.0"), 91)
-        self.assertEqual(self.f("12.5"), 376)
-        self.assertEqual(self.f("12.5s"), 376)
-        self.assertEqual(self.f("1:05.5"), 1966)
-        self.assertEqual(self.f("1:02:03", 10.0), 37231)
-        self.assertEqual(self.f("0:00"), 1)
+        self.assertEqual(self.f("0:03"), 90)                                   # 3.0 s at 30 fps: frame 90 (frame N is at N/fps)
+        self.assertEqual(self.f("3.0"), 90)
+        self.assertEqual(self.f("12.5"), 375)
+        self.assertEqual(self.f("12.5s"), 375)
+        self.assertEqual(self.f("1:05.5"), 1965)
+        self.assertEqual(self.f("1:02:03", 10.0), 37230)
+        self.assertEqual(self.f("0:00"), 0)
 
     def test_kept_inside_the_video(self):
-        self.assertEqual(self.f("10:00", 30.0, 150), 150)
-        self.assertEqual(self.f("400", 30.0, 150), 150)
+        self.assertEqual(self.f("10:00", 30.0, 150), 149)
+        self.assertEqual(self.f("400", 30.0, 150), 149)
 
     def test_nothing_or_nonsense(self):
         self.assertIsNone(self.f(""))
