@@ -11,6 +11,7 @@ import csv
 import importlib.util
 import json
 import os
+import tempfile
 import sys
 import tkinter as tk
 
@@ -54,7 +55,7 @@ st = app.get_settings()
 for key in m.RUN3_GEOMETRY_KEYS:
     g[key].set("")
 app.set_settings(st)
-check("settings round-trip", [g[k].get() for k in m.RUN3_GEOMETRY_KEYS] == ["", "", "1.5", "3.25", "1.2", "3.0", "0"])
+check("settings round-trip", [g[k].get() for k in m.RUN3_GEOMETRY_KEYS] == ["0", "0", "1.5", "3.25", "1.2", "3.0", "0"])
 
 # --- the width of a side is one number (1.59.2); the four lanes are only for older projects ---
 check("without a width the side is its two lanes (older projects)", app.run3_widths() == (4.75, 4.2), str(app.run3_widths()))
@@ -173,7 +174,52 @@ app.clips_panel.clips[1].update({"analysis_start_s": "0:30.01", "analysis_end_s"
 app.clips_panel.refresh()
 _v = [tuple(app.clips_panel.tree.item(i, "values"))[1:] for i in app.clips_panel.tree.get_children()]          # (without the number of the clip)
 check("list: a continued clip still shows its own time range and recording, plus the continue mark",
-      _v[0][1] == "0:00 – 0:30" and _v[1][1] == "0:30.01 – 0:59.99" and _v[1][2] == "ตลอดช่วงวิเคราะห์" and _v[1][5].startswith("↳") and _v[0][5] == "" and _v[0][3] == "ตลอดช่วงวิเคราะห์" and _v[0][4] == "ไม่บันทึก", str(_v))
+      _v[0][1] == "0:00 – 0:30" and _v[1][1] == "0:30.01 – 0:59.99" and _v[1][2] == "ตลอดช่วงวิเคราะห์" and _v[1][5].startswith("↳") and _v[0][5] == "" and _v[0][3] == "ไม่บันทึก" and _v[0][4] == "ไม่บันทึก", str(_v))
+_nc = app.clips_panel._new_clip("C:/x/n.mp4", "S")
+check("a new clip: no recording of any kind (normal, X-Y, X-Y on the drone) and it continues the clip before",
+      not _nc["save_video"] and not _nc["xy_video"] and not _nc["drone_video"] and _nc["continues_previous"] is True, str(_nc))
+# the indicator pages offer only the zones of the site type
+app.run3_site_type_var.set("x_open")
+app.root.update()
+app.run3_speed_zone_vars[8].set(True)
+app.run3_site_type_var.set("t_small")
+app.root.update()
+_shown_z = sorted({z for b, z, v, _lk in app._zone_btns if b.grid_info()})
+check("site type 3-leg small: only Zone 1-4 are offered in the indicator pages", _shown_z == [1, 2, 3, 4], str(_shown_z))
+check("a zone that the site type has not got is off and cannot be ticked", not app.run3_speed_zone_vars[8].get())
+app.run3_site_type_var.set("x_open")
+app.root.update()
+check("another site type with the zone again: every zone that may be ticked is ticked", app.run3_speed_zone_vars[8].get() and all(app.run3_ttc_zone_vars[z].get() and app.run3_pet_zone_vars[z].get() for z in range(1, 9)) and all(app.run3_lc_zone_vars[z].get() for z in range(2, 8)) and not app.run3_lc_zone_vars[1].get() and not app.run3_lc_zone_vars[8].get() and sorted({z for b, z, v, _lk in app._zone_btns if b.grid_info()}) == list(range(1, 9)))
+app.run3_site_type_var.set("t_full")
+# the settings the program starts with (default_settings.json)
+import re as _re
+_raw = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "default_settings.json"), encoding="utf-8").read()
+check("default_settings.json points at no other place (no drive path, video, model or drone picture)", not _re.search(r'[A-Za-z]:[\\/]|\.mp4|\.pt"|/Users/', _raw), "")
+for _v in (app.video_var, app.model_var, app.output_var, app.zone_line_config_var):
+    _v.set("")                                              # (a fresh program has none of them: the defaults do not bring any)
+check("the defaults are applied", app.load_default_settings() is True)
+check("default settings: no video, model, output or zone file", not app.video_var.get() and not app.model_var.get() and not app.output_var.get() and not app.zone_line_config_var.get())
+check("default settings: the road width is 0 (the lane widths are used until it is filled in)", app.run3_geometry_vars["width_entry_m"].get() == "0" and app.run3_geometry_vars["width_opp_m"].get() == "0")
+check("default settings: Lateral Clearance does not start with Zone 1 and 8", not app.run3_lc_zone_vars[1].get() and not app.run3_lc_zone_vars[8].get() and not m.RUN3_DEFAULTS["lc_zones"].count(1) and not m.RUN3_DEFAULTS["lc_zones"].count(8))
+check("default settings: the indicators start with every zone of the site type ticked (as in the user's project)", all(sorted(z for z, v in vm.items() if v.get()) == [1, 2, 3, 4, 5, 6, 7] for vm in (app.run3_speed_zone_vars, app.run3_pet_zone_vars, app.run3_ttc_zone_vars)) and sorted(z for z, v in app.run3_lc_zone_vars.items() if v.get()) == [2, 3, 4, 5, 6, 7], "")
+check("default settings: the indicator settings of the user are there", app.run3_headway_enabled_var.get() is True and app.run3_ttc_decision_var.get() == "by_type", "")
+# the names offered when saving: Run_<code>_<day> / Zone_<code>_<day>, from the paths already chosen
+_site = os.path.join(tempfile.mkdtemp(prefix="pk_names_"), "Sites", "HIS_case_test")
+os.makedirs(os.path.join(_site, "Runs"))
+app.output_var.set(os.path.join(_site, "Runs"))
+app.clips_panel.clear()
+app.clips_panel.add_videos([("F:/x/Video/his/2026_09_03/20260903_074029A.mp4", "2026_09_03")])
+_pn, _zn, _fd = app.suggest_file_names()
+check("saving offers Run_<code>_<day>.json, Zone_<code>_<day>.json and the Config_Save folder of the day", (_pn, _zn) == ("Run_HIS_2026_09_03.json", "Zone_HIS_2026_09_03.json")
+      and _fd == os.path.join(_site, "Config_Save", "2026_09_03"), str((_pn, _zn, _fd)))
+app.clips_panel.clear()
+app.clips_panel.add_videos([("F:/x/20260907_073251A.mp4", "")])
+check("the day is read from the file name when the clip has no day folder", app.suggest_file_names()[0] == "Run_HIS_2026_09_07.json", app.suggest_file_names()[0])
+app.output_var.set("")
+app.zone_line_config_var.set("")
+app.video_var.set("")
+app.clips_panel.clear()
+check("nothing to go on: the old name", app.suggest_file_names()[0].endswith("_project.json") and app.suggest_file_names()[1] == "")
 app.clips_panel.clear()
 from tkinter import messagebox as _mb
 _shown = []

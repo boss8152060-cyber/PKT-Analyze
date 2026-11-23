@@ -143,6 +143,7 @@ class AnalyzePage(ttk.Frame):
         self.shell.pack(fill="both", expand=True)
         try:
             self.studio = payload.Run1App(self.shell)
+            self.studio.load_default_settings()             # the settings the program starts with (default_settings.json; nothing that points at another place)
         except Exception:
             self.shell.destroy()
             self.shell = None

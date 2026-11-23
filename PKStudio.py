@@ -391,7 +391,7 @@ DEFAULT_SETTINGS = {
     "device": "Auto",
     "precision": "Auto",
 
-    "frame_skip": "NO - Process every frame",
+    "frame_skip": "2 - Process every 3rd frame",
 
     "track_high": "0.25",
     "track_low": "0.10",
@@ -410,7 +410,7 @@ DEFAULT_SETTINGS = {
     "draw_trail": False,
     "trail_length": "30",
 
-    "save_video": True,
+    "save_video": False,                # the roadside result video is off at the start (each clip of the list has its own choice)
     "save_csv": True,
     "csv_flush": "100",
 
@@ -554,7 +554,7 @@ RUN3_DEFAULTS = {
     "gap_hold_min_duration_s": "0.30",      # ... for at least this long (s)
     "lateral_axis_angle_deg": "0.00",       # implementation starter value; verify per video
     "lc_heading_window_s": "0.50",          # centred window (s) used to get the heading of vehicle A
-    "topview_video": True,                  # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points); the clip list decides per clip (clip key xy_video)
+    "topview_video": False,                 # also write Tracking_Topview.mp4 (road-plane picture drawn from the metric points); the clip list decides per clip (clip key xy_video)
     "drone_video": False,                   # also write Tracking_Topview_Drone.mp4 (the same on the drone / top-view picture of the Align); per clip: clip key drone_video
     "lc_along_limit_m": "0",                # side-by-side window along the heading (m); 0 = auto (L_A + L_B) / 2
     "lc_max_lateral_m": "3.50",             # pairs further apart sideways than this (m) are unrelated; 0 = no limit
@@ -605,13 +605,13 @@ RUN3_DEFAULTS = {
     # V28: road geometry (m). Blank = not entered (never guessed).
     # W_entry = entry motorcycle lane + entry car lane (side with the side street: Zones 2-3-4)
     # W_opp   = opposite motorcycle lane + opposite car lane (Zones 5-6-7)
-    "width_entry_m": "",                    # the whole side with the side street (Zones 2-3-4), all lanes together
-    "width_opp_m": "",                      # the opposite side (Zones 5-6-7)
+    "width_entry_m": "0",                   # (0 = not entered yet) the whole side with the side street (Zones 2-3-4), all lanes together
+    "width_opp_m": "0",                     # (0 = not entered yet) the opposite side (Zones 5-6-7)
     "lane_entry_motorcycle_m": "",          # (before 1.59.2: kept for older projects)
     "lane_entry_car_m": "",
     "lane_opp_motorcycle_m": "",
     "lane_opp_car_m": "",
-    "median_m": "",                         # recorded only; not used in any indicator
+    "median_m": "0",                        # recorded only; not used in any indicator
     "ldp_smoothing_samples": "5",           # rolling median to suppress bbox jitter (1 = off)
     # Speed: user can select any of Zones 1–6. CSV assigns each selected zone
     # to the research role: Zone 1 = access mouth, 2/4 = approach, 3/5 = exit, 6 = middle/access.
@@ -620,7 +620,7 @@ RUN3_DEFAULTS = {
     "speed_frame_window_s": "0.50",        # the speed written for every frame (Detection_Records_Topview.csv) uses the vehicle positions within +-this/2 s
     "speed_max_kmh": "80",                  # Speed above this is flagged Speed_Above_Max and left out of the statistics (0 = off)
     "speed_stop_kmh": "5.0",                # 2_Speed.csv: frames slower than this = the vehicle stands (waits / parked box that flickers) and are left out of the speeds; same 5 km/h as Gap Acceptance (stopped) and TTC (minimum speed); 0 = off
-    "lc_zones": [2, 3, 4, 5, 6, 7, 8],
+    "lc_zones": [2, 3, 4, 5, 6, 7],
     "lc_motorcycle_pairs_only": False,      # False = every pair of vehicles; True = only pairs that include a motorcycle
     "pet_zone6": True,
     "pet_zones": [3, 6],
@@ -3218,6 +3218,11 @@ class _ZoomPane:
         self.zoom, self.view = 1.0, None
         self.refresh()
 
+    def reset_view(self):
+        """Back to the first view: the whole picture, no zoom, no pan."""
+        self.zoom, self.view = 1.0, None
+        self.refresh()
+
     def _fit(self):
         cw, ch = self.size()
         h, w = self.img.shape[:2]
@@ -3851,7 +3856,7 @@ class ZoneLineEditor:
             pass
 
 
-SITE_KIND_LABELS = {"3small": "สามแยกเล็ก (Zone 1–4)", "3full": "สามแยกเต็ม (Zone 1–7)", "4": "สี่แยก (Zone 1–8)"}
+SITE_KIND_LABELS = {"3small": "สามแยกทางเดียว One way (Zone 1–4)", "3full": "สามแยกสองทาง Two way (Zone 1–7)", "4": "สี่แยก (Zone 1–8)"}
 SITE_KIND_OF_TYPE = {"t_small": "3small", "t_full": "3full", "x_open": "4", "x_median": "4"}
 
 
@@ -3924,7 +3929,7 @@ class SiteStudio:
         drone = align.get("drone") or {}
         self.drone_path, self.drone_frame = str(drone.get("path", "") or ""), str(drone.get("frame", "") or "")
         self.drone_img = read_picture_any(self.drone_path, self.drone_frame or None)
-        self.kind = align.get("kind") if align.get("kind") in ALIGN_KINDS else "projective"
+        self.kind = align.get("kind") if align.get("kind") in ALIGN_KINDS else "lens"
         self.scale = float(align.get("scale") or 0.0)             # metres per drone pixel (0 = not set yet)
         self.rot_deg = float(align.get("rot_deg") or 0.0)
         self.frame_index = None
@@ -3936,9 +3941,12 @@ class SiteStudio:
         self.sel, self.drag = None, None
         self.undo_stack, self.redo_stack = [], []
         self.cfg, self.aligned = None, False
+        cur_zone_file = str(app.zone_line_config_var.get() or "")
+        self.file_path = cur_zone_file if (cur_zone_file.lower().endswith(".json") and os.path.isfile(cur_zone_file)
+                                           and not self._owned_by_data(cur_zone_file)) else ""     # the zone file this window keeps up to date
         self._load_from_app(align)
         self._init_streams()
-        self.cur_zone = next((z for z in ZONE_NAMES if len(self.zones[z]) < 3), ZONE_NAMES[0])
+        self.cur_zone = next((z for z in self._site_zone_names() if len(self.zones[z]) < 3), self._site_zone_names()[0])
         self.tab = "zone"
         self.cfg = self._fit_cfg()
         self.aligned = self._is_fitted
@@ -3970,7 +3978,8 @@ class SiteStudio:
                         ("<Delete>", self.delete_selected_corner), ("<Control-z>", self.undo), ("<Control-y>", self.redo)):
             self.top.bind(key, lambda e, f=fn: self._on_key(f))
         self.refresh_all()
-        self.msg_var.set(self._pin_message())
+        self.msg_var.set(self._pin_message() if any(len(self.zones[z]) >= 3 for z in ZONE_NAMES)
+                         else self.T("ยังไม่มีโซน — กด \"✏️ วาดโซนใหม่\" แล้วคลิกมุมของโซนบนวิดีโอข้างทาง"))
         if ask_drone and not self.drone_path:
             self.top.after(300, self.choose_drone)
 
@@ -4555,7 +4564,7 @@ class SiteStudio:
             return False
         self.zones[self.cur_zone] = list(self.draft)
         self.draft = []
-        self.cur_zone = next((z for z in ZONE_NAMES if len(self.zones[z]) < 3), self.cur_zone)       # on to the next zone that is not drawn yet
+        self.cur_zone = next((z for z in self._site_zone_names() if len(self.zones[z]) < 3), self.cur_zone)       # on to the next zone that is not drawn yet
         self.sel = self._next_pin(None)
         self._refit()
         self.msg_var.set(self.T("ปิดโซนแล้ว — ") + self._pin_message())
@@ -5034,7 +5043,23 @@ class SiteStudio:
         return rep
 
     # ------------------------------------------------------------------ result
+    def _show_file(self):
+        """The line above the buttons: the file "use in the analysis" writes (and uses)."""
+        if self.file_path:
+            self.file_var.set(self.T("ไฟล์โซนที่บันทึกและใช้: {0}").format(self.file_path))
+        else:
+            self.file_var.set(self.T("ยังไม่มีไฟล์โซน — กด \"บันทึกไฟล์โซน…\" เพื่อเลือกที่เก็บ หรือกด \"ใช้ในการวิเคราะห์\" ให้โปรแกรมสร้างไฟล์ให้"))
+
+    @staticmethod
+    def _owned_by_data(path):
+        """True for a file inside the data folder of PKT Data (its exports are never written over from here)."""
+        return "pkt-data" in os.path.normcase(os.path.abspath(path)).replace("\\", "/").split("/")
+
     def target_path(self):
+        """Where "use in the analysis" writes the zone file: the file the user is working on (the one opened, or saved with "save the zone file"), so that the
+        pins can be edited and used again and again without saving anywhere else; PKT Data's own exports are not written over (a copy is made in the data folder)."""
+        if self.file_path:
+            return self.file_path
         folder = os.path.join(_PK_STUDIO_DIR, "Zones")
         os.makedirs(folder, exist_ok=True)
         cur = str(self.app.zone_line_config_var.get() or "")
@@ -5050,7 +5075,8 @@ class SiteStudio:
 
     def zone_file_data(self):
         """The zone file (the format of PKT Data) of what is drawn here, or None when no zone is drawn."""
-        zone_pts = {z: [self.nodes[i]["v"] for i in ids] for z, ids in self.zones.items() if len(ids) >= 3}
+        keep = set(self._site_zone_names())                         # (a zone the site type has not got is not written: it is not analysed)
+        zone_pts = {z: [self.nodes[i]["v"] for i in ids] for z, ids in self.zones.items() if len(ids) >= 3 and z in keep}
         if not zone_pts:
             return None
         lines = {s["line"]: self.lines[s["line"]] for s in self.streams if s["mode"] == "drawn" and len(self.lines.get(s["line"], [])) == 2}
@@ -5076,6 +5102,8 @@ class SiteStudio:
             return None
         data, lines = made
         path = self.target_path()
+        self.file_path = path
+        self._show_file()
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -5095,12 +5123,24 @@ class SiteStudio:
         if made is None:
             messagebox.showerror(self.T("บันทึกไฟล์โซน"), self.T("ยังไม่มีโซนที่วาดครบ (อย่างน้อย 1 โซน 3 มุม)"), parent=self.top)
             return None
-        path = path or filedialog.asksaveasfilename(parent=self.top, title=self.T("บันทึกไฟล์โซน"), defaultextension=".json", filetypes=[("Zone JSON", "*.json")],
-                                                    initialfile=os.path.splitext(os.path.basename(self.video_path))[0] + "_zones.json")
+        ask = not path
+        if ask:
+            keep = self.file_path or str(self.app.zone_line_config_var.get() or "")
+            has_keep = keep.lower().endswith(".json")
+            _proj, zone_name, zone_dir = self.app.suggest_file_names()      # (Zone_<site code>_<day>.json in the Config_Save folder of the day, from the paths already chosen)
+            if zone_dir:
+                os.makedirs(zone_dir, exist_ok=True)
+            initial_dir = os.path.dirname(keep) if has_keep and os.path.isdir(os.path.dirname(keep)) else (zone_dir or None)
+            initial_file = os.path.basename(keep) if has_keep else (zone_name or os.path.splitext(os.path.basename(self.video_path))[0] + "_zones.json")
+            path = filedialog.asksaveasfilename(parent=self.top, title=self.T("บันทึกไฟล์โซน"), defaultextension=".json", filetypes=[("Zone JSON", "*.json")],
+                                                initialdir=initial_dir, initialfile=initial_file)
         if not path:
             return None
         with open(path, "w", encoding="utf-8") as f:
             json.dump(made[0], f, indent=2, ensure_ascii=False)
+        if ask:
+            self.file_path = path                                # "use in the analysis" now goes on writing (and using) this file
+            self._show_file()
         self.msg_var.set(self.T("บันทึกแล้ว: {0}").format(path))
         return path
 
@@ -5116,6 +5156,8 @@ class SiteStudio:
             messagebox.showerror(self.T("เปิดไฟล์โซน"), str(exc), parent=self.top)
             return False
         self._push_undo()
+        self.file_path = path if not self._owned_by_data(path) else ""     # (a file of PKT Data is only read: using it in the analysis makes a copy)
+        self._show_file()
         self.nodes, self.zones, self._next, self.real = {}, {z: [] for z in ZONE_NAMES}, 1, {}      # (new corner numbers: the real lengths of the old ones go)
         self.lines = {n: [] for n in LINE_NAMES}
         self._load_from_app({})
@@ -5270,15 +5312,28 @@ class SiteStudio:
             text += "\n" + self.T("ยังไม่ได้ตั้งสเกล — พิมพ์ค่าในช่องสเกล หรือกด วัดสเกล แล้วคลิก 2 จุดบนภาพโดรนที่รู้ระยะจริง")
         return text
 
+    def _site_zone_names(self):
+        """The zones the site type has (Zone 1-4 / 1-7 / 1-8): only these are offered for drawing."""
+        return [f"Zone {i}" for i in site_info(self.app.run3_site_type())["zones"]]
+
+    def _list_zone_names(self):
+        """The zones of the list: those of the site type, and (so that they can still be cleared) a zone that is drawn although the site type has not got it."""
+        base = self._site_zone_names()
+        return base + [z for z in ZONE_NAMES if z not in base and len(self.zones[z]) >= 3]
+
     def _refresh_lists(self):
         if not getattr(self, "zone_list", None):
             return
+        names, base = self._list_zone_names(), self._site_zone_names()
+        if self.cur_zone not in names:
+            self.cur_zone = names[0]
         self.zone_list.delete(0, "end")
-        for z in ZONE_NAMES:
+        for z in names:
             n = len(self.zones[z])
-            self.zone_list.insert("end", ("{0}   ✓ {1}".format(z, n) if n >= 3 else "{0}   —".format(z)))
+            tail = "" if z in base else self.T("   (ไม่มีในชนิดหน้างานนี้)")
+            self.zone_list.insert("end", ("{0}   ✓ {1}{2}".format(z, n, tail) if n >= 3 else "{0}   —".format(z)))
         self.zone_list.selection_clear(0, "end")
-        self.zone_list.selection_set(ZONE_NAMES.index(self.cur_zone))
+        self.zone_list.selection_set(names.index(self.cur_zone))
         c = self._pin_counts()
         self.pin_var.set(self.T("หมุดวางแล้ว {0} · ข้าม {1} · เหลือ {2}").format(c["done"], c["skip"], c["todo"]))
         for s in self.streams:
@@ -5345,6 +5400,7 @@ class SiteStudio:
         ttk.Label(bar1, text=T("แสดง:")).pack(side="left", padx=(14, 2))
         for key, text in (("video", "วิดีโอ"), ("drone", "โดรน"), ("plan", "ผัง X–Y")):
             ttk.Checkbutton(bar1, text=T(text), variable=self.show_vars[key], command=self._apply_layout).pack(side="left", padx=2)
+        ttk.Button(bar1, text=T("🔍 รีเซ็ตมุมมอง"), command=self.reset_views).pack(side="left", padx=(14, 0))
         main = ttk.Frame(top)
         main.pack(fill="both", expand=True, padx=8, pady=2)
         side = ttk.Frame(main, width=330)
@@ -5353,26 +5409,42 @@ class SiteStudio:
         nb = ttk.Notebook(side)
         nb.pack(fill="both", expand=True)
         # ---- tab 1: zones and pins
-        t1 = ttk.Frame(nb, padding=6)
-        nb.add(t1, text=T("โซนและหมุด"))
+        t1_outer = ttk.Frame(nb)                                          # (this page is taller than the window on a small screen: it scrolls)
+        nb.add(t1_outer, text=T("โซนและหมุด"))
+        t1_cv = tk.Canvas(t1_outer, highlightthickness=0, borderwidth=0, background=ttk.Style().lookup("TFrame", "background") or "#f0f0f0")
+        t1_sb = ttk.Scrollbar(t1_outer, orient="vertical", command=t1_cv.yview)
+        t1_cv.configure(yscrollcommand=t1_sb.set)
+        t1_sb.pack(side="right", fill="y")
+        t1_cv.pack(side="left", fill="both", expand=True)
+        t1 = ttk.Frame(t1_cv, padding=6)
+        t1_win = t1_cv.create_window((0, 0), window=t1, anchor="nw")
+        t1.bind("<Configure>", lambda e: t1_cv.configure(scrollregion=t1_cv.bbox("all")))
+        t1_cv.bind("<Configure>", lambda e: t1_cv.itemconfigure(t1_win, width=e.width))
         self.site_label_var = tk.StringVar(value="")                      # the site type is chosen at (2) in the main window; here it is only shown
-        ttk.Label(t1, textvariable=self.site_label_var, foreground="#555555", wraplength=300, justify="left").pack(anchor="w", pady=(0, 6))
+        ttk.Label(t1, textvariable=self.site_label_var, foreground="#555555", wraplength=275, justify="left").pack(anchor="w", pady=(0, 6))
         self._show_site_type()
         self._site_trace = self.app.run3_site_type_var.trace_add("write", self._on_site_type_changed)
-        ttk.Label(t1, text=T("วาดโซน: เลือกโซนในรายการ แล้วคลิกมุมบนวิดีโอทีละมุม")).pack(anchor="w")
+        ttk.Label(t1, text=T("สร้างโซนในหน้านี้ (ไม่ต้องไปสร้างใน PKT Data):"), font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+        ttk.Label(t1, text=T("① กด \"✏️ วาดโซนใหม่\" (หรือเลือกโซนที่ยังเป็น — ในรายการ)\n② คลิกมุมของโซนบนวิดีโอข้างทางทีละมุม แล้วกด จบโซน (Enter)\n"
+                             "③ วางหมุด: คลิกมุมบนวิดีโอ แล้วคลิกจุดเดียวกันบนภาพโดรน\n④ ลากหมุดให้ตรงกัน แล้วกด ✅ ใช้ในการวิเคราะห์"),
+                  wraplength=275, justify="left", foreground="#555555").pack(anchor="w", pady=(2, 4))
+        ttk.Button(t1, text=T("✏️ วาดโซนใหม่"), command=self.new_zone).pack(anchor="w", pady=(0, 4))
         self.zone_list = tk.Listbox(t1, height=8, exportselection=False, width=24)
         self.zone_list.pack(anchor="w", pady=(2, 4))
         self.zone_list.bind("<<ListboxSelect>>", lambda e: self._on_zone_pick())
         row = ttk.Frame(t1)
         row.pack(anchor="w")
         ttk.Button(row, text=T("จบโซน (Enter)"), command=self.finish_zone).pack(side="left")
-        ttk.Button(row, text=T("ล้างโซนนี้"), command=self.clear_current).pack(side="left", padx=4)
+        ttk.Button(row, text=T("ยกเลิกการวาด (Esc)"), command=self.cancel_draft).pack(side="left", padx=4)
+        row = ttk.Frame(t1)
+        row.pack(anchor="w", pady=(4, 0))
+        ttk.Button(row, text=T("ล้างโซนนี้"), command=self.clear_current).pack(side="left")
         ttk.Button(t1, text=T("ลบมุมที่เลือก (Delete)"), command=self.delete_selected_corner).pack(anchor="w", pady=(4, 0))
         ttk.Checkbutton(t1, text=T("ดูดติดมุม/ขอบโซนอื่น"), variable=self.snap_var).pack(anchor="w", pady=(4, 8))
         ttk.Separator(t1).pack(fill="x", pady=4)
         ttk.Label(t1, text=T("หมุด = มุมโซนที่ล็อกคู่ วิดีโอ ↔ ภาพโดรน"), font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
         ttk.Label(t1, text=T("คลิกมุมบนวิดีโอเพื่อเลือก แล้วคลิกตำแหน่งเดียวกันบนภาพโดรน · ลากหมุดบนวิดีโอ = ย้ายเฉพาะฝั่งวิดีโอ · ลากบนโดรน = ย้ายเฉพาะฝั่งโดรน"),
-                  wraplength=300, justify="left", foreground="#555555").pack(anchor="w", pady=(2, 4))
+                  wraplength=275, justify="left", foreground="#555555").pack(anchor="w", pady=(2, 4))
         ttk.Label(t1, textvariable=self.pin_var).pack(anchor="w")
         row = ttk.Frame(t1)
         row.pack(anchor="w", pady=4)
@@ -5380,6 +5452,18 @@ class SiteStudio:
         ttk.Button(row, text="◀", width=3, command=lambda: self.goto_pin(-1)).pack(side="left", padx=(6, 2))
         ttk.Button(row, text="▶", width=3, command=lambda: self.goto_pin(1)).pack(side="left")
         ttk.Button(t1, text=T("ยกหมุดโดรนออก (วางใหม่)"), command=self.unpin_selected).pack(anchor="w")
+
+        def _wheel_t1(e):                                                 # (bound on the widgets themselves: no application-wide binding is touched)
+            if t1.winfo_reqheight() > t1_cv.winfo_height():
+                t1_cv.yview_scroll(int(-e.delta / 120) or (-1 if e.delta > 0 else 1), "units")
+            return "break"
+
+        def _bind_tree(w):
+            w.bind("<MouseWheel>", _wheel_t1, add="+")
+            for c in w.winfo_children():
+                _bind_tree(c)
+        _bind_tree(t1)
+        t1_cv.bind("<MouseWheel>", _wheel_t1, add="+")
         # ---- tab 2: the Lines of the Gap Acceptance streams
         t2 = ttk.Frame(nb, padding=6)
         nb.add(t2, text=T("เส้น Gap"))
@@ -5446,6 +5530,9 @@ class SiteStudio:
         for c_, pane in enumerate((self.vpane, self.dpane, self.ppane)):
             pane.canvas.grid(row=1, column=c_, sticky="nsew", padx=2)
         self._apply_layout()
+        self.file_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self.file_var, anchor="w", foreground="#555").pack(fill="x", padx=10, pady=(2, 0))
+        self._show_file()
         foot = ttk.Frame(top)
         foot.pack(fill="x", padx=8, pady=(2, 6))
         ttk.Button(foot, text=T("ปิด"), command=self.close).pack(side="right")
@@ -5486,8 +5573,28 @@ class SiteStudio:
         if sel:
             self.draft = []
             self._prune()
-            self.cur_zone = ZONE_NAMES[sel[0]]
+            self.cur_zone = self._list_zone_names()[sel[0]]
             self.vpane.refresh()
+
+    def reset_views(self):
+        """The button "reset the view": every picture (video, drone, plane) goes back to the whole picture - after much zooming or panning."""
+        for pane in (self.vpane, self.dpane, self.ppane):
+            pane.reset_view()
+        self.msg_var.set(self.T("รีเซ็ตมุมมองแล้ว (ภาพเต็ม ไม่ซูม)"))
+
+    def new_zone(self):
+        """The button "draw a new zone": the first zone that is not drawn yet is ready - the next clicks on the video are its corners."""
+        z = next((z for z in self._site_zone_names() if len(self.zones[z]) < 3), None)
+        if z is None:
+            self.msg_var.set(self.T("ครบทุกโซนแล้ว — เลือกโซนในรายการแล้วกด \"ล้างโซนนี้\" เพื่อวาดใหม่"))
+            return False
+        self.draft = []
+        self._prune()
+        self.cur_zone = z
+        self._refresh_lists()
+        self.msg_var.set(self.T("{0}: คลิกมุมของโซนบนวิดีโอข้างทางทีละมุม แล้วกด Enter (หรือ จบโซน) เพื่อปิดโซน").format(z))
+        self.vpane.refresh()
+        return True
 
     def close(self):
         try:
@@ -7569,8 +7676,8 @@ class ClipListPanel(ttk.Frame):
 
     def _new_clip(self, video, rel_dir):
         return {"video": video, "rel_dir": rel_dir, "analysis_start_s": "", "analysis_end_s": "",
-                "save_video": False, "record_start_s": "", "record_end_s": "", "continues_previous": False,     # new clips: no roadside result video (faster, smaller)
-                "xy_video": True, "xy_start_s": "", "xy_end_s": "", "drone_video": False, "drone_start_s": "", "drone_end_s": ""}
+                "save_video": False, "record_start_s": "", "record_end_s": "", "continues_previous": True,      # new clips: no result video of any kind (faster, smaller), and the tracker goes on from the clip before
+                "xy_video": False, "xy_start_s": "", "xy_end_s": "", "drone_video": False, "drone_start_s": "", "drone_end_s": ""}
 
     def add_videos(self, found):
         have = {c["video"] for c in self.clips}
@@ -8225,6 +8332,9 @@ class Run1App:
                   foreground="#555555").grid(row=1, column=0, sticky="w")
         ttk.Button(header, text="เปิดโปรเจกต์…", command=self.load_settings).grid(row=0, column=1, rowspan=2, padx=4)
         ttk.Button(header, text="บันทึกโปรเจกต์…", command=self.save_settings).grid(row=0, column=2, rowspan=2, padx=4)
+        self.project_path = ""
+        self.project_var = tk.StringVar(value="โปรเจกต์ที่เปิดอยู่: (ยังไม่ได้เปิดหรือบันทึกโปรเจกต์)")
+        ttk.Label(header, textvariable=self.project_var, foreground="#1a5fb4").grid(row=2, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
         self._page_canvases = []
         self._sub_canvases = {}
@@ -8560,6 +8670,18 @@ class Run1App:
         ttk.Label(box, textvariable=self.measurement_status_var, foreground=gray, anchor="w").grid(row=1, column=0, columnspan=4, sticky="w")
         build_site_type_row(box, self).grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 2))
 
+        geo = self.section("ความกว้างถนน (m) — ใช้เป็นตัวหารของ LDP")
+        ttk.Label(geo, text="ความกว้างของถนนทั้งฝั่ง รวมทุกเลน (รวมเลนจักรยานยนต์ถ้ามี) — LDP หารด้วยค่านี้", foreground="#555555").grid(row=0, column=0, columnspan=5, sticky="w")
+        ttk.Label(geo, text="ฝั่งทางเข้า–ออก (Zone 2-3-4)").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(geo, textvariable=self.run3_geometry_vars["width_entry_m"], width=8).grid(row=1, column=1, sticky="w", padx=(4, 16))
+        ttk.Label(geo, textvariable=self.run3_w_entry_text, foreground="#0a5").grid(row=1, column=2, sticky="w")
+        ttk.Label(geo, text="ฝั่งตรงข้ามทางเชื่อม (Zone 5-6-7)").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(geo, textvariable=self.run3_geometry_vars["width_opp_m"], width=8).grid(row=2, column=1, sticky="w", padx=(4, 16))
+        ttk.Label(geo, textvariable=self.run3_w_opp_text, foreground="#0a5").grid(row=2, column=2, sticky="w")
+        ttk.Label(geo, text="ความกว้างเกาะกลาง (บันทึกไว้ ไม่ใช้คำนวณ)").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 2))
+        ttk.Entry(geo, textvariable=self.run3_geometry_vars["median_m"], width=8).grid(row=3, column=2, sticky="w", padx=(4, 16))
+        self._update_lane_totals()
+
         box = self.section("จุดที่ใช้ตัดสินว่ารถอยู่โซนไหน")
         ttk.Label(box, text="ตำแหน่งบนกรอบรถ").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         self.trajectory_position_combo = ttk.Combobox(
@@ -8590,25 +8712,11 @@ class Run1App:
         ttk.Spinbox(sm, from_=1, to=30, increment=1, textvariable=self.zone_confirm_frames_var, width=7).grid(row=3, column=1, sticky="w", padx=(6, 12))
         ttk.Label(sm, text="1 = ทันที; 3–5 ช่วยไม่ให้กรอบกระพริบตรงขอบโซน (เวลาเข้าโซนช้าลงเล็กน้อย)", foreground="#666666").grid(row=3, column=2, sticky="w")
 
-        geo = self.section("ความกว้างถนน (m) — ใช้เป็นตัวหารของ LDP")
-        ttk.Label(geo, text="ความกว้างของถนนทั้งฝั่ง รวมทุกเลน (รวมเลนจักรยานยนต์ถ้ามี) — LDP หารด้วยค่านี้", foreground="#555555").grid(row=0, column=0, columnspan=5, sticky="w")
-        ttk.Label(geo, text="ฝั่งทางเข้า–ออก (Zone 2-3-4)").grid(row=1, column=0, sticky="w", pady=2)
-        ttk.Entry(geo, textvariable=self.run3_geometry_vars["width_entry_m"], width=8).grid(row=1, column=1, sticky="w", padx=(4, 16))
-        ttk.Label(geo, textvariable=self.run3_w_entry_text, foreground="#0a5").grid(row=1, column=2, sticky="w")
-        ttk.Label(geo, text="ฝั่งตรงข้ามทางเชื่อม (Zone 5-6-7)").grid(row=2, column=0, sticky="w", pady=2)
-        ttk.Entry(geo, textvariable=self.run3_geometry_vars["width_opp_m"], width=8).grid(row=2, column=1, sticky="w", padx=(4, 16))
-        ttk.Label(geo, textvariable=self.run3_w_opp_text, foreground="#0a5").grid(row=2, column=2, sticky="w")
-        ttk.Label(geo, text="ความกว้างเกาะกลาง (บันทึกไว้ ไม่ใช้คำนวณ)").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 2))
-        ttk.Entry(geo, textvariable=self.run3_geometry_vars["median_m"], width=8).grid(row=3, column=2, sticky="w", padx=(4, 16))
-        self._update_lane_totals()
 
         cal = self.section("แปลงพิกัดภาพเป็นเมตร (จัดแนวกับภาพโดรน)")
         for col in (1, 3):
             cal.columnconfigure(col, weight=1)
-        r = 0
-        ttk.Label(cal, text="Site_ID").grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(cal, textvariable=self.run3_site_id_var, width=18).grid(row=r, column=1, sticky="w", pady=4)
-        r += 1
+        r = 0                                    # (no Site_ID box any more: the value stays in the project / CSV files as it was - "8" unless a project brings another)
         build_site_type_row(cal, self).grid(row=r, column=0, columnspan=4, sticky="w", pady=4)
         r += 1
         ttk.Label(cal, text="วิดีโอและภาพ X–Y: เปิด/ปิดและเลือกสิ่งที่วาดที่หน้า ④ (การแสดงผลและไฟล์)").grid(row=r, column=0, columnspan=2, sticky="w", pady=2)
@@ -8681,16 +8789,40 @@ class Run1App:
             ttk.Label(box, text=note, foreground="#555555", wraplength=900, justify="left").grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 4))
         return box
 
-    @staticmethod
-    def _zone_checks(box, var_map, row, label="โซนที่คำนวณ", locked=()):
-        """`locked` zones are shown greyed out and cannot be ticked (their variable is forced off)."""
+    def _zone_checks(self, box, var_map, row, label="โซนที่คำนวณ", locked=(), not_default=()):
+        """`locked` zones are shown greyed out and cannot be ticked (their variable is forced off). Only the zones of the site type chosen are shown."""
         ttk.Label(box, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
+        if not hasattr(self, "_zone_btns"):
+            self._zone_btns = []
+            self.run3_site_type_var.trace_add("write", lambda *_: self.apply_site_zone_checks(tick_all=True))
         for i, z in enumerate(sorted(var_map)):
             btn = ttk.Checkbutton(box, text=f"Zone {z}", variable=var_map[z])
             if z in locked:
                 var_map[z].set(False)
                 btn.state(["disabled"])
             btn.grid(row=row, column=1 + i, sticky="w", padx=(2, 10), pady=2)
+            if z not in locked and z not in not_default and z in set(site_info(self.run3_site_type())["zones"]):
+                var_map[z].set(True)                                # at the start every zone that may be ticked is ticked
+            self._zone_btns.append((btn, z, var_map[z], z in locked or z in not_default))
+        self.apply_site_zone_checks()
+
+    def apply_site_zone_checks(self, tick_all=False):
+        """Only the zones of the site type can be ticked: the others are not shown and are always off (nothing is remembered). tick_all (the user chose another
+        site type): every zone that may be ticked is ticked."""
+        if not hasattr(self, "_zone_btns"):
+            return
+        have = set(site_info(self.run3_site_type())["zones"])
+        for btn, z, var, locked in self._zone_btns:          # (locked here = not ticked by "tick all": the locked zones and the ones left unticked at the start)
+            try:
+                if z in have:
+                    btn.grid()
+                    if tick_all and not locked:
+                        var.set(True)
+                else:
+                    btn.grid_remove()
+                    var.set(False)
+            except tk.TclError:
+                pass
 
     @staticmethod
     def _entry_row(box, row, label, var, width=8, col=0, span=5):
@@ -8743,7 +8875,7 @@ class Run1App:
         mark("Lateral Clearance", self.run3_lc_enabled_var)
         box = self._indicator_box("Lateral Clearance", self.run3_lc_enabled_var,
                                   "คู่รถทิศทางเดียวกันในโซนเดียวกัน วัดตั้งฉากกับทิศที่รถ A เคลื่อนที่เมื่อกรอบรถซ้อนกันตามแนวยาว (ถ้ามีจักรยานยนต์ในคู่ จักรยานยนต์คือ A)")
-        self._zone_checks(box, self.run3_lc_zone_vars, 1)
+        self._zone_checks(box, self.run3_lc_zone_vars, 1, not_default=(1, 8))      # (Lateral Clearance: Zone 1 and 8 are not ticked at the start)
         ttk.Checkbutton(box, text="เฉพาะคู่ที่มีรถจักรยานยนต์ (ไม่ติ๊ก = ทุกคู่ของยานพาหนะทุกประเภท)", variable=self.run3_lc_motorcycle_pairs_only_var).grid(row=2, column=0, columnspan=8, sticky="w", pady=2)
         self._entry_row(box, 3, "หน้าต่างหาทิศ heading ของรถ A (s)", self.run3_lc_heading_window_var)
         self._entry_row(box, 4, "ช่วงเคียงข้างตามแนวยาว ±(m) — 0 = อัตโนมัติ (L_A+L_B)/2", self.run3_lc_along_limit_var)
@@ -10599,13 +10731,50 @@ class Run1App:
         data["project_version"] = 1
         return data
 
+    def suggest_file_names(self):
+        """(project name, zone file name, folder) to offer when saving, from the paths already chosen in the program: Run_<site code>_<day>.json and Zone_<site code>_<day>.json,
+        in the Config_Save/<day> folder of the site when the results folder is the Runs folder of a site (Sites/<CODE>_<case|control>_<name>/Runs). A part that cannot be
+        found is left out (nothing at all found: the old names)."""
+        code = ""
+        paths = [str(self.output_var.get() or ""), str(self.zone_line_config_var.get() or ""), str(self.video_var.get() or "")]
+        for path in paths:
+            for part in reversed(re.split(r"[\\/]+", path)):
+                m = re.match(r"^([A-Za-z]{2,5})_(?:case|control)(?:_|$)", part)
+                if m:
+                    code = m.group(1).upper()
+                    break
+            if code:
+                break
+        day = ""
+        clips = list(getattr(getattr(self, "clips_panel", None), "clips", None) or [])
+        texts = [str(c.get("rel_dir", "")) for c in clips[:1]] + [str(c.get("video", "")) for c in clips[:1]] + [str(self.video_var.get() or "")]
+        for text in texts:
+            m = re.search(r"(20\d{2})[_-](\d{2})[_-](\d{2})", text) or re.search(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)", text)
+            if m:
+                day = "_".join(m.groups())
+                break
+        tag = "_".join(x for x in (code, day) if x)
+        out = os.path.normpath(str(self.output_var.get() or "")) if str(self.output_var.get() or "").strip() else ""
+        folder = ""
+        if out and os.path.basename(out).lower() == "runs" and day:
+            cand = os.path.join(os.path.dirname(out), "Config_Save", day)
+            if os.path.isdir(os.path.dirname(out)):                     # (the site folder is there: Config_Save/<day> is made when saving)
+                folder = cand
+        if not tag:
+            return self.run_name_var.get() + "_project.json", "", folder
+        return f"Run_{tag}.json", f"Zone_{tag}.json", folder
+
     def save_settings(self):
         """Save the project (everything that can be adjusted, the chosen videos included)."""
+        proj_name, _zone_name, proj_dir = self.suggest_file_names()
+        if proj_dir:
+            os.makedirs(proj_dir, exist_ok=True)
         path = filedialog.asksaveasfilename(
             title="บันทึกโปรเจกต์ (การตั้งค่าทั้งหมด + โซน/Line + รายการคลิป)",
             defaultextension=".json",
             filetypes=[("PK Studio Project", "*.json"), ("All Files", "*.*")],
-            initialfile=self.run_name_var.get() + "_project.json"
+            initialfile=proj_name,
+            initialdir=proj_dir or None
         )
         if not path:
             return
@@ -10616,10 +10785,16 @@ class Run1App:
                 json.dump(project, f, indent=4, ensure_ascii=False, allow_nan=False)
             n = len((project.get("project") or {}).get("clips", []))
             self.status_var.set(f"บันทึกโปรเจกต์แล้ว: {os.path.basename(path)}")
+            self._set_project_path(path)
             messagebox.showinfo("บันทึกโปรเจกต์แล้ว",
                                 f"บันทึกการตั้งค่าทั้งหมด โซน/Line (ฝังในไฟล์) และรายการคลิป {n} คลิป (ช่วงเวลา + ตัวเลือกบันทึกวิดีโอ) แล้ว\n\n{path}")
         except Exception as e:
             messagebox.showerror("Save Error", f"Could not save the project:\n\n{e}")
+
+    def _set_project_path(self, path):
+        """The line under the title: which project file is open / was saved last (its whole path)."""
+        self.project_path = os.path.normpath(path)
+        self.project_var.set(self.tr_text("โปรเจกต์ที่เปิดอยู่: {0}").format(self.project_path))
 
     def load_settings(self):
         """Open a project file (or a settings file from before projects existed)."""
@@ -10639,6 +10814,7 @@ class Run1App:
             missing = self.set_settings(settings) or []
             emptied = list(getattr(self, "paths_emptied", []) or [])
             self.status_var.set(f"เปิดโปรเจกต์แล้ว: {os.path.basename(path)}")
+            self._set_project_path(path)
             n = len((settings.get("project") or {}).get("clips", []))
             msg = "โหลดการตั้งค่าทั้งหมดและโซน/Line แล้ว" + (f" พร้อมรายการคลิป {n} คลิป" if n else " (ไฟล์นี้เก่า ไม่มีรายการคลิป — รายการคลิปเดิมไม่เปลี่ยน)")
             if emptied:
@@ -10680,6 +10856,23 @@ class Run1App:
             pass
         self.paths_emptied = emptied
         return emptied
+
+    def load_default_settings(self):
+        """The settings the program starts with: default_settings.json (next to this file; made from the user's own settings, with everything that points at another
+        place taken out: no video, model, output folder, zone file or drone picture). The list of clips is not touched. Returns True when it was applied."""
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "default_settings.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return False
+            data = dict(data)
+            data.pop("project", None)
+            self.set_settings(data)
+        except (OSError, ValueError) as exc:
+            log.warning("default settings not applied: %s", exc)
+            return False
+        return True
 
     def set_settings(self, settings):
         """Apply settings and restore embedded Zone geometry first, without requiring the original Zone file."""
@@ -10956,6 +11149,7 @@ class Run1App:
         self.blank_paths_not_here()
         self.refresh_measurement_status()
         self.update_trajectory_position_controls()
+        self.apply_site_zone_checks()                              # (only the zones of the site type are shown in the indicator pages)
         # the project part: the list of clips (a settings file from before projects has none: the list is left as it is)
         proj = settings.get("project")
         if isinstance(proj, dict) and getattr(self, "clips_panel", None) is not None:
@@ -11197,7 +11391,7 @@ class Run1App:
 
         ctx = {"mode": "base", "drafts": {}}
         base_initial = current_data()
-        mode_labels = ["ทั้งภาพ (ฐาน)"] + [f"Zone {z}" for z in ZONE_IDS]
+        mode_labels = ["ทั้งภาพ (ฐาน)"] + [f"Zone {z}" for z in ZONE_IDS if z in site_info(self.run3_site_type())["zones"]]      # (the zones of the site type)
         mode_var = tk.StringVar(value=mode_labels[0])
         ttk.Label(controls, text="ปรับเทียบสำหรับ").grid(row=1, column=5, sticky="e", padx=(14, 4))
         mode_box = ttk.Combobox(controls, textvariable=mode_var, values=mode_labels, state="readonly", width=14)
@@ -11529,10 +11723,8 @@ class Run1App:
                 out_dir = str(self.output_var.get() or "").strip()
                 if out_dir:
                     os.makedirs(out_dir, exist_ok=True)
-                    site = re.sub(r"[^A-Za-z0-9_-]+", "_", self.run3_site_id_var.get().strip() or "Unknown")
-                    cal_path = os.path.join(out_dir, f"Site_{site}_Perspective_Calibration.json")
+                    cal_path = os.path.join(out_dir, "Perspective_Calibration.json")
                     payload = {
-                        "Site_ID": self.run3_site_id_var.get().strip(),
                         "video_path": video_path,
                         "frame_index_zero_based": state["frame_index"],
                         "frame_number_one_based": state["frame_index"] + 1,
@@ -11836,8 +12028,8 @@ class Run1App:
         if not any(enabled.values()):
             return True
 
-        if not self.run3_site_id_var.get().strip():
-            raise ValueError("Run 3 Site_ID is required when Run 3 is enabled.")
+        if not self.run3_site_id_var.get().strip():              # (there is no box for it any more: a project without one gets the standard value)
+            self.run3_site_id_var.set(RUN3_DEFAULTS["site_id"])
 
         if self.run3_align_enabled_var.get():
             self._run3_align_cfg(silent=False)
@@ -11895,7 +12087,7 @@ class Run1App:
         for key in RUN3_GEOMETRY_KEYS:
             text = str(self.run3_geometry_vars[key].get()).strip()
             if text:   # must be numeric when entered (lane widths are required when LDP is enabled)
-                self._run3_float(text, f"road geometry {key}", positive=(key not in ("median_m", "lane_entry_motorcycle_m", "lane_opp_motorcycle_m")))        # (a side may have no motorcycle lane: 0)
+                self._run3_float(text, f"road geometry {key}", positive=(key not in ("median_m", "lane_entry_motorcycle_m", "lane_opp_motorcycle_m", "width_entry_m", "width_opp_m")))        # (a side may have no motorcycle lane: 0)
         if enabled["ldp"]:
             need_zone(self.run3_ldp_zone_vars, "LDP")
             self._run3_float(self.run3_ldp_smoothing_var.get(), "LDP smoothing samples")
@@ -16265,7 +16457,6 @@ class Run1App:
                     tracks_by_zone[str(z)] += 1
         summary = {
             "program_version": "PK Studio V28",
-            "site_id": c["site_id"],
             "risk_level_limits": {k: list(v) for k, v in c["risk_limits"].items()},
             "inputs": {"detection": det_path, "id_zone_summary": id_path, "zone_summary": zone_path},
             "calibration": {"mode": self._run3_calibration_mode(c), "align": ({"kind": c["align"]["kind"], "pairs": c["align"]["n_pairs"], "m_per_drone_px": c["align"]["scale"]} if c.get("align") else None), "ppm": c["ppm"],

@@ -2099,3 +2099,19 @@ TEMPLATES.update({'ความยาวจริงระหว่างสอ�
 EXACT.update({'ตั้งทุกคลิปพร้อมกัน: บันทึกวิดีโอตลอดช่วงที่วิเคราะห์ / ไม่บันทึก': 'Set every clip at once: record the video over the analysed part / do not record', 'ทั้ง 3 วิดีโอ': 'All 3 videos', 'บันทึกทุกคลิป': 'Record every clip', 'ไม่บันทึกทุกคลิป': 'Do not record any clip', 'ลำดับ': 'No.', 'เลือกทั้งหมด': 'Select all'})
 for _k, _v in {'\n\nไม่พบในเครื่องนี้ จึงเว้นว่างไว้ให้เลือกใหม่:\n': '\n\nNot found on this computer, so they are left empty to be chosen again:\n', 'ที่มา': 'Source', 'โมเดล': 'Model', 'วิดีโอ': 'Video', 'ไฟล์โซน': 'Zone file', 'โฟลเดอร์ผลลัพธ์': 'Results folder', 'ภาพ/วิดีโอโดรน': 'Drone picture / video'}.items():
     EXACT.setdefault(_k, _v)
+
+for _k, _v in {'ไฟล์โซนที่บันทึกและใช้: {0}': 'Zone file saved and used: {0}', 'ยังไม่มีไฟล์โซน — กด "บันทึกไฟล์โซน…" เพื่อเลือกที่เก็บ หรือกด "ใช้ในการวิเคราะห์" ให้โปรแกรมสร้างไฟล์ให้': 'No zone file yet — press "Save zone file…" to choose where, or "Use in the analysis" and the program makes the file'}.items():
+    TEMPLATES.setdefault(_k, _v) if '{0}' in _k else EXACT.setdefault(_k, _v)
+for _k, _v in {'สร้างโซนในหน้านี้ (ไม่ต้องไปสร้างใน PKT Data):': 'Create the zones in this window (no need to make them in PKT Data):',
+               '① กด "✏️ วาดโซนใหม่" (หรือเลือกโซนที่ยังเป็น — ในรายการ)\n② คลิกมุมของโซนบนวิดีโอข้างทางทีละมุม แล้วกด จบโซน (Enter)\n③ วางหมุด: คลิกมุมบนวิดีโอ แล้วคลิกจุดเดียวกันบนภาพโดรน\n④ ลากหมุดให้ตรงกัน แล้วกด ✅ ใช้ในการวิเคราะห์': '① Press "✏️ Draw a new zone" (or pick a zone that still shows — in the list)\n② Click the corners of the zone on the roadside video one by one, then press Finish zone (Enter)\n③ Place the pins: click a corner on the video, then the same spot on the drone picture\n④ Drag the pins until they match, then press ✅ Use in the analysis',
+               '✏️ วาดโซนใหม่': '✏️ Draw a new zone', 'ยกเลิกการวาด (Esc)': 'Cancel drawing (Esc)',
+               'ครบทุกโซนแล้ว — เลือกโซนในรายการแล้วกด "ล้างโซนนี้" เพื่อวาดใหม่': 'All zones are drawn — pick a zone in the list and press "Clear this zone" to draw it again',
+               'ยังไม่มีโซน — กด "✏️ วาดโซนใหม่" แล้วคลิกมุมของโซนบนวิดีโอข้างทาง': 'No zones yet — press "✏️ Draw a new zone", then click the corners of the zone on the roadside video'}.items():
+    EXACT.setdefault(_k, _v)
+TEMPLATES.setdefault('{0}: คลิกมุมของโซนบนวิดีโอข้างทางทีละมุม แล้วกด Enter (หรือ จบโซน) เพื่อปิดโซน', '{0}: click the corners of the zone on the roadside video one by one, then press Enter (or Finish zone) to close it')
+for _k, _v in {'โปรเจกต์ที่เปิดอยู่: (ยังไม่ได้เปิดหรือบันทึกโปรเจกต์)': 'Open project: (no project opened or saved yet)',
+               '   (ไม่มีในชนิดหน้างานนี้)': '   (not in this site type)'}.items():
+    EXACT.setdefault(_k, _v)
+TEMPLATES.setdefault('โปรเจกต์ที่เปิดอยู่: {0}', 'Open project: {0}')
+EXACT.update({'สามแยกทางเดียว One way (Zone 1–4)': '3-leg junction, one way (Zone 1–4)', 'สามแยกสองทาง Two way (Zone 1–7)': '3-leg junction, two way (Zone 1–7)'})
+EXACT.update({'🔍 รีเซ็ตมุมมอง': '🔍 Reset the view', 'รีเซ็ตมุมมองแล้ว (ภาพเต็ม ไม่ซูม)': 'View reset (whole picture, no zoom)'})

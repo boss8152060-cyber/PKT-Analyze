@@ -173,7 +173,8 @@ def find_clip_folders(root):
     for dirpath, dirnames, _files in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d != COMBINED_DIR and d not in LAYOUT_DIRS)
         if summary_path(dirpath):
-            found.append((dirpath, os.path.relpath(dirpath, base_parent).replace("\\", "/")))
+            label = os.path.relpath(dirpath, base_parent).replace("\\", "/").split("/")
+            found.append((dirpath, "/".join(x for x in label[:-1] if x != "Clips") + ("/" if len(label) > 1 else "") + label[-1]))
     return found
 
 

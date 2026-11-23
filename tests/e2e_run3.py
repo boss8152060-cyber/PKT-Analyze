@@ -115,6 +115,7 @@ def run_scene(app, vehicles):
     write_csv(os.path.join(out, "Detection_Records.csv"), list(rows[0].keys()), rows)
     write_csv(os.path.join(out, "ID_Zone_Summary.csv"), ["track_id", "class_name"],
               [{"track_id": tid, "class_name": cls} for tid, cls, _ in vehicles])
+    app.run3_topview_video_var.set(True)                                         # (the X-Y video is off at the start of the program; these checks look at it)
     app._run3_cfg = app._run3_snapshot_config()
     app.run3_processing({}, out, "T")
     app.root.update_idletasks()

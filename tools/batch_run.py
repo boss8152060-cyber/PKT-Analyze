@@ -195,8 +195,28 @@ def summary_path(run_dir, name):
     return combine_clips.summary_path(run_dir, name)
 
 
+RUNS_DIR, CLIPS_DIR, REPORTS_DIR = "Runs", "Clips", "Reports"
+
+
+def uses_runs_layout(out_root):
+    """True when the output folder is a site's `Runs` folder: results then go to Runs/<day>/Clips/<clip> (+ Runs/<day>/All_Clips) and
+    Batch_Comparison.csv goes to the Reports folder next to Runs; any other output folder keeps the plain layout."""
+    return os.path.basename(os.path.normpath(out_root)).lower() == RUNS_DIR.lower()
+
+
+def comparison_path(out_root):
+    if uses_runs_layout(out_root):
+        folder = os.path.join(os.path.dirname(os.path.normpath(out_root)), REPORTS_DIR)
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, "Batch_Comparison.csv")
+    return os.path.join(out_root, "Batch_Comparison.csv")
+
+
 def run_dir_for(out_root, rel_dir, name):
-    return os.path.join(out_root, *[x for x in rel_dir.split("/") if x], name)
+    parts = [x for x in rel_dir.split("/") if x]
+    if uses_runs_layout(out_root) and parts:
+        return os.path.join(out_root, parts[0], CLIPS_DIR, *parts[1:], name)
+    return os.path.join(out_root, *parts, name)
 
 
 def collect_row(run_dir, run_name, video, rel_dir, overrides, error, seconds):
@@ -301,7 +321,7 @@ def finish_batch(out_root, runs, rows, log=print):
     """Batch_Comparison.csv in the output root (the rows of the clips just run replace their old rows, the rows of
     clips from earlier batches stay), then the combined CSV files (All_Clips folder) of every top folder that was
     imported - they are rebuilt from all clip folders found there, so earlier clips are included."""
-    path = os.path.join(out_root, "Batch_Comparison.csv")
+    path = comparison_path(out_root)
     old = {}
     if os.path.isfile(path):
         with open(path, newline="", encoding="utf-8-sig") as f:

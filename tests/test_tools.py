@@ -211,6 +211,34 @@ class CombineClips(unittest.TestCase):
         self.assertAlmostEqual(float(st["All"]["V50_Median"]), 40.0)
         self.assertEqual({r["Indicator"] for r in csv.DictReader(open(os.path.join(target, "9_Summary", "Statistics.csv"), newline="", encoding="utf-8-sig"))}, {"LDP"})   # ... but no Speed statistics
 
+    def test_runs_folder_layout_has_clips_all_clips_and_reports(self):
+        """Output folder named Runs: Runs/<day>/Clips/<clip>, Runs/<day>/All_Clips, and Batch_Comparison.csv in the Reports folder beside Runs."""
+        import combine_clips
+        runs = os.path.join(self.root, "Site", "Runs")
+        a = batch_run.run_dir_for(runs, "2026_09_13", "a")
+        b = batch_run.run_dir_for(runs, "2026_09_13", "b")
+        self.assertEqual(a, os.path.join(runs, "2026_09_13", "Clips", "a"))
+        self.assertEqual(batch_run.run_dir_for(runs, "Site8/2026_09_13", "a"), os.path.join(runs, "Site8", "Clips", "2026_09_13", "a"))
+        self.assertEqual(batch_run.run_dir_for(os.path.join(self.root, "out"), "d", "a"), os.path.join(self.root, "out", "d", "a"))   # any other folder: as before
+        for d, v in ((a, [30, 40]), (b, [50])):
+            os.makedirs(d)
+            with open(os.path.join(d, "Summary.json"), "w") as f:
+                f.write("{}")
+            with open(os.path.join(d, "LDP.csv"), "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow(["Vehicle_ID", "Zone", "Vehicle_Class", "LDP_percent", "QC_Flag"])
+                for i, x in enumerate(v, 1):
+                    w.writerow([i, "Zone 2", "Car", x, ""])
+        row = lambda run: {"Run": run, "Folder": "2026_09_13", "Overrides": "", "Status": "completed"}
+        batch_run.finish_batch(runs, [("v", "2026_09_13", {})], [row("a"), row("b")], log=lambda *_: None)
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "Site", "Reports", "Batch_Comparison.csv")))
+        self.assertFalse(os.path.exists(os.path.join(runs, "Batch_Comparison.csv")))
+        target = os.path.join(runs, "2026_09_13", "All_Clips")
+        self.assertTrue(os.path.isdir(target))
+        self.assertFalse(os.path.exists(os.path.join(runs, "2026_09_13", "Clips", "All_Clips")))
+        with open(os.path.join(target, "3_LDP.csv"), newline="", encoding="utf-8-sig") as f:
+            self.assertEqual([r["Clip"] for r in csv.DictReader(f)], ["2026_09_13/a", "2026_09_13/a", "2026_09_13/b"])
+
     def test_ids_that_restart_in_every_clip_get_a_unique_key(self):
         import combine_clips
         self._clip("Site/d1/20260907_084751A_", [30, 40])
