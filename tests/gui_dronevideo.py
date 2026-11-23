@@ -134,7 +134,7 @@ clip = app.clips_panel.clips[0]
 check("a new clip: X-Y on, drone off, roadside off", clip["xy_video"] is True and clip["drone_video"] is False and clip["save_video"] is False)
 clip.update({"drone_video": True, "drone_start_s": "0:10", "drone_end_s": "0:20", "xy_video": False})
 app.clips_panel.refresh()
-vals = app.clips_panel.tree.item(app.clips_panel.tree.get_children()[0], "values")
+vals = tuple(app.clips_panel.tree.item(app.clips_panel.tree.get_children()[0], "values"))[1:]          # (without the number of the clip)
 check("the list shows the three choices", vals[2] == "ไม่บันทึก" and vals[3] == "ไม่บันทึก" and vals[4] == "0:10 – 0:20", str(vals))
 app.clips_panel.set_all_record(True, ("save_video", "xy_video", "drone_video"))
 check("'all clips: record' turns the three on", clip["save_video"] and clip["xy_video"] and clip["drone_video"])

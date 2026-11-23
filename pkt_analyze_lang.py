@@ -2115,3 +2115,4 @@ for _k, _v in {'โปรเจกต์ที่เปิดอยู่: (ย�
 TEMPLATES.setdefault('โปรเจกต์ที่เปิดอยู่: {0}', 'Open project: {0}')
 EXACT.update({'สามแยกทางเดียว One way (Zone 1–4)': '3-leg junction, one way (Zone 1–4)', 'สามแยกสองทาง Two way (Zone 1–7)': '3-leg junction, two way (Zone 1–7)'})
 EXACT.update({'🔍 รีเซ็ตมุมมอง': '🔍 Reset the view', 'รีเซ็ตมุมมองแล้ว (ภาพเต็ม ไม่ซูม)': 'View reset (whole picture, no zoom)'})
+EXACT.update({'ติ๊ก "ใช้ผลการจัดแนวแทน PPM / Perspective" ไว้ แต่ยังไม่ได้จัดแนว (ตั้งค่าทางแยก → วางหมุดบนภาพโดรน) — รอบนี้ใช้ PPM / Perspective แทน': '"Use the Align result instead of PPM / Perspective" is ticked but no Align has been made yet (junction setup → place the pins on the drone picture) — PPM / Perspective is used this time'})

@@ -118,7 +118,7 @@ for _ in range(7):
 check("all 7 corners are pinned (every click went to the corner that was waiting)", st._pin_counts()["done"] == 7 and st.sel is None)
 check("the Align fits from 4 pins on and then follows every pin", st.aligned and st.cfg is not None)
 check("a click on the drone picture with nothing waiting does nothing", st._click_drone(100, 100) is False)
-check("no scale yet: not used for the analysis", st.scale == 0 and not app.run3_align_enabled_var.get())
+check("no scale yet: not used for the analysis (the box is ticked from the start, but there is no Align to use)", st.scale == 0 and app._run3_align_cfg(silent=True) is None)
 
 # ---- the pin is a locked pair: dragging on the video moves the video place only, on the drone picture the drone place only
 nid = [n for n in st.nodes if len(st._zones_of(n)) == 1 and "Zone 2" in st._zones_of(n)][0]

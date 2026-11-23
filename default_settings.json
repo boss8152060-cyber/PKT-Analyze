@@ -108,7 +108,7 @@
     "ldp_enabled": true,
     "ppm": "49.470322",
     "perspective_enabled": true,
-    "align_enabled": false,
+    "align_enabled": true,
     "perspective_p1": "625.975,343.900",
     "perspective_p2": "1620.000,278.640",
     "perspective_p3": "1879.200,423.360",

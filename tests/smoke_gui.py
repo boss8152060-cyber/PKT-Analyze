@@ -96,6 +96,19 @@ except ValueError:
     check("non-numeric width rejected", True)
 g["lane_entry_car_m"].set("3.25")
 check("warnings is a list", isinstance(app.collect_run3_warnings(), list))
+# --- 'use the Align instead of PPM / Perspective' is ticked from the start (1.59.6): with no Align yet nothing is refused and PPM / Perspective is used ---
+check("the Align is ticked from the start", m.RUN3_DEFAULTS["align_enabled"] is True and app.run3_align_enabled_var.get() is True)
+app.run3_align_var.set("")
+check("ticked and no Align yet: the validation does not refuse (nothing to refuse)", app.validate_run3_settings() is True)
+check("... the run uses no Align (PPM / Perspective instead)", app._run3_snapshot_config()["align"] is None)
+check("... and the user is told so (a warning, not an error)", any("ยังไม่ได้จัดแนว" in w for w in app.collect_run3_warnings()), str(app.collect_run3_warnings())[:200])
+app.run3_align_var.set(json.dumps({"pairs": [{"s": [0, 0], "d": [0, 0]}], "kind": "helmert", "scale": 0.05, "video_size": [1280, 720]}))
+try:
+    app.validate_run3_settings()
+    check("an Align that exists but cannot be built is still refused with its reason", False)
+except ValueError as exc:
+    check("an Align that exists but cannot be built is still refused with its reason", "Align" in str(exc), str(exc)[:100])
+app.run3_align_var.set("")
 
 # --- optional: Movement resolver on a real Detection_Records.csv ---
 if len(sys.argv) > 1:

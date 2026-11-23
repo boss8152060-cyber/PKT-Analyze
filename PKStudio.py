@@ -537,7 +537,7 @@ RUN3_DEFAULTS = {
     # Optional road-plane perspective calibration. Disabled by default because
     # image points and real dimensions are site/video-specific and were not
     # supplied in the research documents.
-    "align_enabled": False,                 # use the Align result (video pixels -> the drone's plane) instead of PPM / Perspective
+    "align_enabled": True,                  # use the Align result (video pixels -> the drone's plane) instead of PPM / Perspective (ticked from the start; with no Align yet PPM / Perspective is used)
     "align_data": "",                       # JSON of the Align result (the pairs of points, the kind of transformation, the scale)
     "perspective_enabled": False,
     "perspective_p1": "",
@@ -11924,6 +11924,13 @@ class Run1App:
         except Exception:
             return None
 
+    def _run3_align_has_pairs(self):
+        """An Align has been made (it has pairs of points)."""
+        try:
+            return bool((json.loads(self.run3_align_var.get() or "{}") or {}).get("pairs"))
+        except (ValueError, TypeError, AttributeError):
+            return False
+
     def _run3_align_cfg(self, silent=False, force=False):
         """The usable Align config (see align_build) when 'use the Align result' is ticked, else None. The pairs were clicked on a frame of
         a given size; for a video of another size the video points are scaled."""
@@ -12031,7 +12038,7 @@ class Run1App:
         if not self.run3_site_id_var.get().strip():              # (there is no box for it any more: a project without one gets the standard value)
             self.run3_site_id_var.set(RUN3_DEFAULTS["site_id"])
 
-        if self.run3_align_enabled_var.get():
+        if self.run3_align_enabled_var.get() and self._run3_align_has_pairs():       # (ticked but no Align made yet: PPM / Perspective is used, nothing to refuse)
             self._run3_align_cfg(silent=False)
         if self.run3_perspective_enabled_var.get():
             self._run3_get_perspective_matrix(silent=False)
@@ -12168,6 +12175,8 @@ class Run1App:
             warnings.append(
                 f"Trajectory Position = '{position}' (ขั้น ② ทางแยก): PPM / Perspective Calibration วัดบนพื้นถนน แต่จุดนี้ไม่ใช่จุดที่ล้อแตะพื้น "
                 "(เช่น Top = หัวคนขี่) ความเร็วและระยะจะเพี้ยน (โดยทั่วไปสูงเกินจริง) — แนะนำ Bottom")
+        if self.run3_align_enabled_var.get() and not self._run3_align_has_pairs():
+            warnings.append("ติ๊ก \"ใช้ผลการจัดแนวแทน PPM / Perspective\" ไว้ แต่ยังไม่ได้จัดแนว (ตั้งค่าทางแยก → วางหมุดบนภาพโดรน) — รอบนี้ใช้ PPM / Perspective แทน")
         defined = {z for z in ZONE_IDS if len(self.zones.get(f"Zone {z}", [])) >= 3}
         any_enabled = any(bool(getattr(self, f"run3_{k}_enabled_var").get())
                           for k in ("speed", "gap", "lc", "pet", "ttc", "ldp"))
