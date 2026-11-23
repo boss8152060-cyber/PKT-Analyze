@@ -116,6 +116,85 @@ check("cancel returns nothing", dlg4.result is None)
 
 # main window: the four fields exist, are saved and restored, are validated
 app.analysis_start_var.set("0:30")
+# ---- copy / paste a range of times, and take the analysed range (1.60.12)
+parse = m.parse_time_range_text
+check("a pasted range: the usual ways to write it", parse("0:10.0 – 0:20.0") == ("0:10.0", "0:20.0") and parse("0:10-0:20") == ("0:10", "0:20") and parse("10 to 20") == ("10", "20")
+      and parse("1:05, 2:00") == ("1:05", "2:00") and parse("10 20") == ("10", "20") and parse("10 - 20") == ("10", "20"), str([parse("0:10-0:20"), parse("10 - 20")]))
+check("a range with an empty side is kept (from the start / to the end)", parse(" – 0:20") == ("", "0:20") and parse("0:10 – ") == ("0:10", ""))
+check("text that is not a range of times is not one", parse("hello") is None and parse("") is None and parse("a - b") is None and parse("1 2 3") is None and parse(None) is None)
+dlg.a_start.set("0:30"); dlg.a_end.set("1:45"); dlg.r_start.set(""); dlg.r_end.set(""); dlg.xy_start.set(""); dlg.xy_end.set("")
+root.clipboard_clear()
+dlg.copy_range(dlg.a_start, dlg.a_end)
+check("copy: the clipboard has 'start – end'", root.clipboard_get() == "0:30 – 1:45", root.clipboard_get())
+dlg.paste_range(dlg.xy_start, dlg.xy_end)
+check("paste into another box: both times", (dlg.xy_start.get(), dlg.xy_end.get()) == ("0:30", "1:45"), str((dlg.xy_start.get(), dlg.xy_end.get())))
+root.clipboard_clear(); root.clipboard_append("2:00 – 2:30")
+dlg.paste_range(dlg.drone_start, dlg.drone_end)
+check("paste text copied from anywhere (a range of times)", (dlg.drone_start.get(), dlg.drone_end.get()) == ("2:00", "2:30"))
+root.clipboard_clear(); root.clipboard_append("nothing to do with times")
+dlg.paste_range(dlg.r_start, dlg.r_end)
+check("the clipboard holds other text: the range copied last in the program is pasted", (dlg.r_start.get(), dlg.r_end.get()) == ("0:30", "1:45"), str((dlg.r_start.get(), dlg.r_end.get())))
+dlg2 = m.ClipPlayerDialog(app, path, {}, modal=False)
+root.update()
+root.clipboard_clear()
+dlg2.paste_range(dlg2.xy_start, dlg2.xy_end)
+check("the range copied survives into the next clip's window", (dlg2.xy_start.get(), dlg2.xy_end.get()) == ("0:30", "1:45"))
+dlg2.close()
+dlg.a_start.set("0:10"); dlg.a_end.set("0:40")
+dlg.take_analysis_range(dlg.drone_start, dlg.drone_end)
+check("'= the analysed range': the box gets the analysed start and end", (dlg.drone_start.get(), dlg.drone_end.get()) == ("0:10", "0:40"))
+dlg.a_start.set(""); dlg.a_end.set("")
+dlg.take_analysis_range(dlg.drone_start, dlg.drone_end)
+check("... and an empty analysed range (the whole clip) is empty there too", (dlg.drone_start.get(), dlg.drone_end.get()) == ("", ""))
+dlg.drone_mode.set("none")
+dlg.a_start.set("0:10"); dlg.a_end.set("0:40")
+dlg.take_analysis_range(dlg.drone_start, dlg.drone_end, dlg.drone_mode)
+check("taking the analysed range into a box that says 'do not record' switches it to 'only this range'", dlg.drone_mode.get() == "range")
+dlg.xy_mode.set("none")
+root.clipboard_clear(); root.clipboard_append("0:05 – 0:15")
+dlg.paste_range(dlg.xy_start, dlg.xy_end, dlg.xy_mode)
+check("a pasted range switches the box to 'only this range'", dlg.xy_mode.get() == "range" and (dlg.xy_start.get(), dlg.xy_end.get()) == ("0:05", "0:15"))
+texts = []
+
+
+def walk(w_):
+    for c in w_.winfo_children():
+        try:
+            texts.append(str(c.cget("text")))
+        except tk.TclError:
+            pass
+        walk(c)
+
+
+walk(dlg.top)
+check("every box has the buttons: 4 x copy, 4 x paste, 3 x '= analysed range'", texts.count("คัดลอกช่วง") == 4 and texts.count("วางช่วง") == 4 and texts.count("= ช่วงวิเคราะห์") == 3, str((texts.count("คัดลอกช่วง"), texts.count("วางช่วง"))))
+# the keys of the player do not take over a time that is being typed
+ent = [c for c in dlg.top.winfo_children()[0:0]]
+entries = []
+
+
+def find_entries(w_):
+    for c in w_.winfo_children():
+        if isinstance(c, m.ttk.Entry):
+            entries.append(c)
+        find_entries(c)
+
+
+find_entries(dlg.top)
+dlg.top.update()
+pos_before, playing_before = dlg.pos, getattr(dlg, "playing", None)
+entries[0].focus_force()
+dlg.top.update()
+entries[0].event_generate("<space>")
+entries[0].event_generate("<Right>")
+dlg.top.update()
+check("space and the arrow keys in a time box do not play / step the video", dlg.pos == pos_before and getattr(dlg, "playing", None) == playing_before, f"{dlg.pos} {pos_before}")
+dlg.top.focus_force()
+dlg.canvas.focus_force()
+dlg.top.update()
+dlg.canvas.event_generate("<Right>")
+dlg.top.update()
+check("... but the arrow keys still step the video when no time box has the focus", dlg.pos == pos_before + 1, f"{dlg.pos} {pos_before}")
 app.analysis_end_var.set("2:15")
 app.record_start_var.set("1:00")
 app.record_end_var.set("1:30")

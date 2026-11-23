@@ -2421,6 +2421,40 @@ def clips_source_text(videos):
     return " | ".join(parts)
 
 
+def parse_time_range_text(text):
+    """A start and an end from text that was copied: "0:10.0 – 0:20.0", "0:10-0:20", "10 to 20", "1:05, 2:00", "10 20" -> (start_text, end_text) as typed
+    (each part checked as a time; an empty part is allowed: " – 0:20" = from the start, "0:10 – " = to the end). None when it is not a range of times."""
+    t = str(text or "").strip()
+    if not t:
+        return None
+    t = t.replace("\u2013", "|").replace("\u2014", "|").replace("\u2192", "|").replace("\t", "|").replace(";", "|").replace(" to ", "|").replace(" TO ", "|")
+    if "|" not in t:
+        for sep in (",", "\n"):
+            if sep in t:
+                t = t.replace(sep, "|", 1)
+                break
+    if "|" not in t:
+        parts = t.split()
+        if len(parts) == 2:
+            t = "|".join(parts)
+        elif len(parts) == 1 and parts[0].count("-") == 1 and not parts[0].startswith("-"):
+            t = parts[0].replace("-", "|")
+        elif len(parts) == 3 and parts[1] == "-":
+            t = parts[0] + "|" + parts[2]
+        else:
+            return None
+    pieces = [x.strip() for x in t.split("|")]
+    if len(pieces) != 2:
+        return None
+    for piece in pieces:
+        if piece:
+            try:
+                parse_clock_time(piece)
+            except ValueError:
+                return None
+    return pieces[0], pieces[1]
+
+
 def edge_scale_factor(pairs):
     """pairs = [(measured_m, real_m)] of zone edges whose real length the user knows. The factor f that the metres of the Align must be multiplied by so that the
     measured lengths fit the real ones best (least squares through the origin: f = sum(real * measured) / sum(measured^2)); None when there is nothing to fit."""
@@ -2963,6 +2997,7 @@ class ClipPlayerDialog:
         a_box.pack(side="left", fill="y", padx=(0, 4))
         self._time_row(a_box, 0, "เริ่ม", self.a_start)
         self._time_row(a_box, 1, "สิ้นสุด", self.a_end)
+        self._range_buttons(a_box, 3, self.a_start, self.a_end)
         ttk.Label(a_box, text="เลื่อนวิดีโอไปจุดที่ต้องการ\nแล้วกด \"ใช้เวลานี้\"", foreground="#666666").grid(row=2, column=0, columnspan=4, sticky="w")
 
         def rec_box(title, mode_var, v_start, v_end):
@@ -2973,6 +3008,7 @@ class ClipPlayerDialog:
             ttk.Radiobutton(box, text="เฉพาะช่วง:", value="range", variable=mode_var, command=self._redraw_timeline).grid(row=2, column=0, columnspan=4, sticky="w")
             self._time_row(box, 3, "เริ่ม", v_start)
             self._time_row(box, 4, "สิ้นสุด", v_end)
+            self._range_buttons(box, 5, v_start, v_end, from_analysis=True, mode_var=mode_var)
             return box
         rec_box("วิดีโอปกติ (ข้างทาง)", self.rec_mode, self.r_start, self.r_end)
         rec_box("วิดีโอ X–Y (ผังเมตร)", self.xy_mode, self.xy_start, self.xy_end)
@@ -2990,9 +3026,17 @@ class ClipPlayerDialog:
 
         for var in (self.a_start, self.a_end, self.r_start, self.r_end, self.xy_start, self.xy_end, self.drone_start, self.drone_end):
             var.trace_add("write", lambda *_: self._redraw_timeline())
-        self.top.bind("<Left>", lambda e: self.step(-1))
-        self.top.bind("<Right>", lambda e: self.step(1))
-        self.top.bind("<space>", lambda e: self.toggle_play())
+        def player_key(fn, keep_in_entry=False):
+            """A key of the player (arrows, space, Enter) does its job unless a time is being typed: then it is the text box's (the arrows move the cursor, space is a space)."""
+            def handler(e):
+                if isinstance(e.widget, (tk.Entry, ttk.Entry)) and not keep_in_entry:
+                    return None
+                fn()
+                return "break" if isinstance(e.widget, (tk.Entry, ttk.Entry)) else None
+            return handler
+        self.top.bind("<Left>", player_key(lambda: self.step(-1)))
+        self.top.bind("<Right>", player_key(lambda: self.step(1)))
+        self.top.bind("<space>", player_key(self.toggle_play))
         self.top.bind("<Return>", lambda e: self.apply())
         self.top.bind("<Escape>", lambda e: self.cancel())
 
@@ -3010,6 +3054,55 @@ class ClipPlayerDialog:
         ttk.Button(parent, text="ใช้เวลานี้", command=lambda v=var: v.set(format_clock_time(self.current_time()))).grid(
             row=row, column=2, padx=4)
         ttk.Button(parent, text="ล้าง", width=5, command=lambda v=var: v.set("")).grid(row=row, column=3)
+
+    _range_memory = ("", "")                    # the range copied last (kept for the next clip too)
+
+    def _range_buttons(self, parent, row, v0, v1, from_analysis=False, mode_var=None):
+        """Copy the two times of a box, paste them into it (from this program or from any text: "0:10 – 0:20"), and - in the boxes of the videos - take the analysed range."""
+        fr = ttk.Frame(parent)
+        fr.grid(row=row, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ttk.Button(fr, text="คัดลอกช่วง", width=11, command=lambda: self.copy_range(v0, v1)).pack(side="left", padx=(0, 3))
+        ttk.Button(fr, text="วางช่วง", width=8, command=lambda: self.paste_range(v0, v1, mode_var)).pack(side="left", padx=3)
+        if from_analysis:
+            ttk.Button(fr, text="= ช่วงวิเคราะห์", width=14, command=lambda: self.take_analysis_range(v0, v1, mode_var)).pack(side="left", padx=3)
+
+    def copy_range(self, v0, v1):
+        """The start and the end of a box go to the clipboard as "start – end" (and are kept here: pasting works in the next clip too)."""
+        a, b = v0.get().strip(), v1.get().strip()
+        ClipPlayerDialog._range_memory = (a, b)
+        try:
+            self.top.clipboard_clear()
+            self.top.clipboard_append(f"{a} – {b}")
+        except tk.TclError:
+            pass
+        return True
+
+    def paste_range(self, v0, v1, mode_var=None):
+        """Put a range into a box: the text on the clipboard when it is a range of times, else the range copied last. False when there is none."""
+        got = None
+        try:
+            got = parse_time_range_text(self.top.clipboard_get())
+        except tk.TclError:
+            got = None
+        if got is None:
+            mem = ClipPlayerDialog._range_memory
+            got = mem if (mem[0] or mem[1]) else None
+        if got is None:
+            messagebox.showinfo("วางช่วงเวลา", "ยังไม่มีช่วงเวลาให้วาง — กด \"คัดลอกช่วง\" ที่กล่องอื่นก่อน หรือคัดลอกข้อความเช่น 0:10 – 0:20", parent=self.top)
+            return False
+        v0.set(got[0])
+        v1.set(got[1])
+        if mode_var is not None and (got[0] or got[1]):
+            mode_var.set("range")                                  # (a range that was pasted is the range to record)
+        return True
+
+    def take_analysis_range(self, v0, v1, mode_var=None):
+        """The video is recorded over the analysed part: the box gets the analysed range (empty = the whole clip, as there)."""
+        v0.set(self.a_start.get())
+        v1.set(self.a_end.get())
+        if mode_var is not None:
+            mode_var.set("range" if (v0.get().strip() or v1.get().strip()) else "window")
+        return True
 
     @staticmethod
     def _seconds(text):
