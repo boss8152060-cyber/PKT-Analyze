@@ -2130,3 +2130,11 @@ for _k, _v in {'➕ จุดควบคุมเสริม': '➕ Control po
     EXACT.setdefault(_k, _v)
 for _k, _v in {'จุดควบคุม {0} — คลิกตำแหน่งเดียวกันบนภาพโดรน': 'Control point {0} — click the same spot on the drone picture', 'จุดควบคุม {0} วางแล้ว — คลิกจุดถัดไปบนวิดีโอ หรือกด Esc เพื่อจบ': 'Control point {0} placed — click the next one on the video, or press Esc to finish', 'จุดควบคุม {0} ที่ทำให้จัดแนวคลาดมากสุดถูกลบแล้ว': 'Control point {0}, which made the Align worst, was removed'}.items():
     TEMPLATES.setdefault(_k, _v)
+# PKT 1.61.0: indicators again from the raw data + Movement aliases
+for _k, _v in {'คำนวณตัวชี้วัดใหม่จากข้อมูลดิบเดิม (ไม่ตรวจจับซ้ำ ไม่ทำวิดีโอ)': 'Compute the indicators again from the existing raw data (no detection, no videos)',
+               'ไม่มีข้อมูลดิบของคลิปนี้ (Detection_Records.csv / ID_Zone_Summary.csv) — ต้องวิเคราะห์แบบปกติก่อน': 'This clip has no raw data (Detection_Records.csv / ID_Zone_Summary.csv) — analyse it the normal way first',
+               'คำนวณตัวชี้วัดใหม่': 'indicators computed again',
+               ', ตามตารางเส้นทางเทียบ ': ', by the Movement alias table '}.items():
+    EXACT.setdefault(_k, _v)
+for _k, _v in {'Batch {0}/{1}: {2} — คำนวณตัวชี้วัดใหม่จากข้อมูลดิบ': 'Batch {0}/{1}: {2} — computing the indicators again from the raw data'}.items():
+    TEMPLATES.setdefault(_k, _v)

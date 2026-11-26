@@ -507,6 +507,39 @@ class RobustMovement(unittest.TestCase):
         self.assertEqual(CORE["first_visit_order"]([4, 7, 6, 7, 6, 7, 1]), [4, 7, 6, 1])
 
 
+class MovementAliases(unittest.TestCase):
+    """PKT 1.61.0: zone sequences the team assigns to a Movement (SPEC section 3 rule 6)."""
+    f = staticmethod(lambda seq, site="t_full": CORE["classify_movement_robust"](seq, site))
+
+    def test_every_alias_of_a_3_leg_junction(self):
+        self.assertEqual(self.f([2, 1]), ("2-3-1", "Alias"))
+        self.assertEqual(self.f([1, 4]), ("1-3-4", "Alias"))
+        self.assertEqual(self.f([1, 3, 2, 7]), ("1-3-6-7", "Alias"))
+        self.assertEqual(self.f([5, 4, 3, 1]), ("5-6-3-1", "Alias"))
+        self.assertEqual(self.f([2, 3, 1, 3, 4]), ("2-3-4", "Alias"))
+        self.assertEqual(self.f([2, 7, 2, 3, 4]), ("2-3-4", "Alias"))
+
+    def test_alias_into_zone_8_only_where_the_site_has_it(self):
+        self.assertEqual(self.f([5, 8], "x_median"), ("5-6-8", "Alias"))
+        self.assertEqual(self.f([5, 8], "t_full"), ("", "Unclassified"))      # no Zone 8 / 5-6-8 at a 3-leg junction
+
+    def test_repeated_zones_are_dropped_before_the_lookup(self):
+        self.assertEqual(self.f([2, 2, 1, 1]), ("2-3-1", "Alias"))
+
+    def test_real_movements_are_never_replaced(self):
+        self.assertEqual(self.f([2, 3, 1]), ("2-3-1", "Exact"))
+        self.assertEqual(self.f([2, 3, 2, 3, 4]), ("2-3-4", "Exact_AfterDedupe"))
+        self.assertEqual(self.f([1, 3, 6]), ("1-3-6-7", "Partial"))
+
+    def test_sequences_not_in_the_table_stay_unclassified(self):
+        self.assertEqual(self.f([4, 3, 1]), ("", "Unclassified"))
+        self.assertEqual(self.f([7, 2, 3, 4]), ("", "Unclassified"))
+
+    def test_the_alias_status_is_not_exact(self):
+        # LDP keeps only Movements whose status starts with "Exact": an alias path is not the lane path of its Movement
+        self.assertFalse(self.f([2, 3, 1, 3, 4])[1].startswith("Exact"))
+
+
 class GapHoldAndIntervals(unittest.TestCase):
     def samples(self, plan, dt=1 / 60):
         """plan = [(n_samples, speed_ms, inside_bool), ...] -> [(t, x, y, inside)]"""

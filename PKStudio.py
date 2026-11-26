@@ -1271,13 +1271,41 @@ def first_visit_order(sequence):
     return out
 
 
+# ---- Movement aliases (PKT 1.61.0; team decision 2026-11-26, SPEC section 3 rule 6) ----
+# Zone sequences seen in real data that follow no Movement pattern although the vehicle clearly made that Movement
+# (it cut a corner, rode in the opposite lane for a moment or wobbled into a neighbouring zone). They are counted as the
+# Movement given here, with status "Alias" so they can be told apart. Only used when the sequence gives no
+# Exact/Partial answer, and only when the Movement exists in the site type.
+MOVEMENT_ALIASES = {
+    (2, 1): "2-3-1",
+    (1, 4): "1-3-4",
+    (1, 3, 2, 7): "1-3-6-7",
+    (5, 4, 3, 1): "5-6-3-1",
+    (2, 3, 1, 3, 4): "2-3-4",
+    (2, 7, 2, 3, 4): "2-3-4",
+    (5, 8): "5-6-8",
+}
+
+
+def movement_alias(sequence, site=SITE_TYPE_DEFAULT, aliases=None):
+    """The Movement a zone sequence is an alias of in this site type, else "". `sequence` = zone numbers (consecutive
+    duplicates are dropped first)."""
+    seq = []
+    for z in sequence:
+        z = int(z)
+        if not seq or seq[-1] != z:
+            seq.append(z)
+    target = (MOVEMENT_ALIASES if aliases is None else aliases).get(tuple(seq), "")
+    return target if target and target in site_movements(site) else ""
+
+
 def classify_movement_robust(sequence, site=SITE_TYPE_DEFAULT):
     """classify_movement on the cleaned zone sequence; when that gives no Exact/Partial
     answer, retry on the first-visit order so a vehicle that wobbles across a zone
     boundary (2-3-2-3-4) is still recognised. Returns (movement_id, status) with status
-    Exact | Partial | Exact_AfterDedupe | Partial_AfterDedupe | Ambiguous |
+    Exact | Partial | Exact_AfterDedupe | Partial_AfterDedupe | Alias | Ambiguous |
     Unclassified | Insufficient. An Exact/Partial answer of the plain sequence is never
-    changed."""
+    changed; a sequence in MOVEMENT_ALIASES that gives no other answer is "Alias"."""
     movement, status = classify_movement(sequence, site)
     if status in ("Exact", "Partial"):
         return movement, status
@@ -1292,6 +1320,9 @@ def classify_movement_robust(sequence, site=SITE_TYPE_DEFAULT):
             return movement2, "Exact_AfterDedupe"
         if status2 == "Partial":
             return movement2, "Partial_AfterDedupe"
+    alias = movement_alias(plain, site)
+    if alias:
+        return alias, "Alias"
     return movement, status
 
 
@@ -7833,6 +7864,7 @@ class ClipListPanel(ttk.Frame):
         self.clips = []
         self.keep_levels_var = tk.IntVar(value=0)
         self.skip_done_var = tk.BooleanVar(value=True)
+        self.indicators_only_var = tk.BooleanVar(value=False)
         self.columnconfigure(0, weight=1)
 
         bar = ttk.Frame(self)
@@ -7891,6 +7923,7 @@ class ClipListPanel(ttk.Frame):
         opts = ttk.Frame(self)
         opts.grid(row=4, column=0, sticky="w", pady=(4, 0))
         ttk.Checkbutton(opts, text="ข้ามคลิปที่วิเคราะห์เสร็จแล้ว (ดูจากโฟลเดอร์ผลลัพธ์ของคลิปนั้น)", variable=self.skip_done_var).pack(side="left")
+        ttk.Checkbutton(opts, text="คำนวณตัวชี้วัดใหม่จากข้อมูลดิบเดิม (ไม่ตรวจจับซ้ำ ไม่ทำวิดีโอ)", variable=self.indicators_only_var).pack(side="left", padx=(16, 0))
         link = ttk.Label(self, text="▸ คำแนะนำการใช้งานรายการคลิป", foreground="#1f4e79", cursor="hand2")
         link.grid(row=5, column=0, sticky="w", pady=(6, 0))
         tips = ttk.Label(self, foreground="#555555", justify="left",
@@ -8113,7 +8146,8 @@ class ClipListPanel(ttk.Frame):
     # ---- the project (settings + this list) ----
     def get_project(self):
         """Everything of the list that belongs in a project file: the clips (video, folder in the output, time range, what to record, continuation) and its two ticks."""
-        return {"clips": [dict(c) for c in self.clips], "keep_levels": self._levels(), "skip_done": bool(self.skip_done_var.get())}
+        return {"clips": [dict(c) for c in self.clips], "keep_levels": self._levels(), "skip_done": bool(self.skip_done_var.get()),
+                "indicators_only": bool(self.indicators_only_var.get())}
 
     def set_project(self, project):
         """Put a saved list back (a clip that is not there any more is kept, so that the list can be fixed); returns the videos that are missing on this computer."""
@@ -8131,6 +8165,7 @@ class ClipListPanel(ttk.Frame):
             pass
         if "skip_done" in (project or {}):
             self.skip_done_var.set(bool(project["skip_done"]))
+        self.indicators_only_var.set(bool((project or {}).get("indicators_only", False)))
         self.refresh()
         return [c["video"] for c in clips if not os.path.isfile(c["video"])]
 
@@ -8868,7 +8903,8 @@ class Run1App:
             self.notebook.select(0)
             messagebox.showerror("เริ่มวิเคราะห์", "ระบุโฟลเดอร์ผลลัพธ์")
             return
-        self.start_batch(clips, out_root, bool(self.clips_panel.skip_done_var.get()))
+        self.start_batch(clips, out_root, bool(self.clips_panel.skip_done_var.get()),
+                         indicators_only=bool(self.clips_panel.indicators_only_var.get()))
 
     # ---------------- tab 1: clips ----------------
     def build_clips_tab(self):
@@ -9699,9 +9735,10 @@ class Run1App:
     # BATCH (many clips: time range + recording per clip, mirrored output folders)
     # ========================================================
 
-    def start_batch(self, clips, out_root, skip_done):
+    def start_batch(self, clips, out_root, skip_done, indicators_only=False):
         """Validate like START RUN, then run all clips one after another in a worker thread.
-        Returns True when the batch was started."""
+        indicators_only: no detection — compute the indicators again (Run 3) from the raw data each clip folder already
+        has (Detection_Records + ID_Zone_Summary), e.g. after the Movement rules changed. Returns True when the batch was started."""
         if self.running:
             return False
         if not clips:
@@ -9767,7 +9804,7 @@ class Run1App:
             log.exception("Could not open the progress window")
             self.batch_win = None
         self.worker_thread = threading.Thread(
-            target=self._batch_worker, args=(settings, [dict(c) for c in clips], out_root, skip_done), daemon=True)
+            target=self._batch_worker, args=(settings, [dict(c) for c in clips], out_root, skip_done, indicators_only), daemon=True)
         self.worker_thread.start()
         return True
 
@@ -9831,7 +9868,32 @@ class Run1App:
         self.post_ui(lambda: self.pause_button.config(text="Ⅱ PAUSE"))
         return ok
 
-    def _batch_worker(self, base_settings, clips, out_root, skip_done):
+    def _rerun_indicators(self, settings, run_dir, name):
+        """Run 3 again on the raw data of a finished clip (Detection_Records.csv + ID_Zone_Summary.csv): the video is not
+        read and no video is made. The indicator files are replaced, the raw data and the videos stay. Returns "" or why
+        it could not run."""
+        cc = _tools_module("combine_clips")
+        if not cc.result_file(run_dir, "Detection_Records.csv", name) or not cc.result_file(run_dir, "ID_Zone_Summary.csv", name):
+            return "ไม่มีข้อมูลดิบของคลิปนี้ (Detection_Records.csv / ID_Zone_Summary.csv) — ต้องวิเคราะห์แบบปกติก่อน"
+        st = dict(settings, indicators_only=True)
+        self.run3_last_outputs = {}
+        self.run3_last_summary = {}
+        self.run3_last_outputs = self.run3_processing(st, run_dir, name)
+        run_summary = cc.result_file(run_dir, "Run_Summary.json", name)
+        if run_summary:
+            try:
+                with open(run_summary, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                data["run3"] = self.run3_last_summary
+                data["run3_recomputed_from_raw"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                with open(run_summary, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+            except Exception:
+                log.exception("Could not add the Run 3 result to %s", run_summary)
+        cc.arrange_clip_folder(run_dir)
+        return ""
+
+    def _batch_worker(self, base_settings, clips, out_root, skip_done, indicators_only=False):
         bt = _tools_module("batch_run")
         rows, runs, empties = [], [], []
         stopped = False
@@ -9861,6 +9923,26 @@ class Run1App:
                         break
                     self._batch_mark(i - 1, BatchProgressWindow.RUN)
                 os.makedirs(run_dir, exist_ok=True)
+                if indicators_only:
+                    t0 = self.work_time()
+                    self.update_ui(status=f"Batch {i}/{n}: {name} — คำนวณตัวชี้วัดใหม่จากข้อมูลดิบ")
+                    self._carry = None
+                    self._last_run_error = ""
+                    try:
+                        self._last_run_error = self._rerun_indicators(st, run_dir, name)
+                    except Exception as exc:
+                        log.exception("Recomputing the indicators failed: %s", name)
+                        self._last_run_error = str(exc)
+                    rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, self._last_run_error, self.work_time() - t0))
+                    reasons = ((self.run3_last_summary or {}).get("diagnostics", {}) or {}).get("empty_outputs", []) or []
+                    if reasons:
+                        empties.append((name, list(reasons)))
+                    self._batch_mark(i - 1, BatchProgressWindow.ERR if self._last_run_error else BatchProgressWindow.DONE,
+                                     self.work_time() - t0, self._last_run_error[:60] if self._last_run_error else "คำนวณตัวชี้วัดใหม่")
+                    if self.stop_event.is_set():
+                        stopped = True
+                        break
+                    continue
                 if skip_done and bt.run_complete(run_dir, name):
                     self._carry = None          # nothing was run, so there is no tracker to continue
                     rows.append(bt.collect_row(run_dir, name, c["video"], rel, {}, "", 0.0))
@@ -16846,7 +16928,7 @@ class Run1App:
                 "site_type": c.get("site_type") or SITE_TYPE_DEFAULT,
                 "movement_counts": {m: sum(1 for t in tracks if movement_by_id.get(str(t), "") == m) for m in site_movements(c.get("site_type") or SITE_TYPE_DEFAULT)},
                 "movement_status": {st: sum(1 for t in tracks if movement_source_by_id.get(str(t), "") == st)
-                                    for st in ("Exact", "Exact_AfterDedupe", "Partial", "Partial_AfterDedupe",
+                                    for st in ("Exact", "Exact_AfterDedupe", "Partial", "Partial_AfterDedupe", "Alias",
                                                "Ambiguous", "Unclassified", "Insufficient")},
                 "selected_zones": {k: sorted(c[k + "_zones"]) for k in ("speed", "lc", "pet", "ttc", "ldp")},
             },
@@ -17108,10 +17190,11 @@ class Run1App:
             topview_rows = self._run3_topview_rows(tracks, c)
             outputs["topview_records"] = write_csv("Detection_Records_Topview.csv", self.TOPVIEW_FIELDS, topview_rows)
             summary["diagnostics"]["topview"] = {"records": len(topview_rows), "calibration_mode": self._run3_calibration_mode(c)}
-            want_xy = bool((settings or {}).get("xy_video", c.get("topview_video")))
-            want_drone = bool((settings or {}).get("drone_video", c.get("drone_video")))
-            draw_ttc = bool(c.get("ttc_enabled") and c.get("ttc_show_boxes_video"))
-            draw_pet = bool(c.get("pet_enabled") and c.get("pet_show_point_video"))
+            no_video = bool((settings or {}).get("indicators_only"))     # recomputing from the raw data: the videos of the clip stay as they are
+            want_xy = not no_video and bool((settings or {}).get("xy_video", c.get("topview_video")))
+            want_drone = not no_video and bool((settings or {}).get("drone_video", c.get("drone_video")))
+            draw_ttc = not no_video and bool(c.get("ttc_enabled") and c.get("ttc_show_boxes_video"))
+            draw_pet = not no_video and bool(c.get("pet_enabled") and c.get("pet_show_point_video"))
             video_src = (settings or {}).get("video")
 
             tv_px = topview_px_setting((settings or {}).get("topview_max_px", ""))
@@ -17206,6 +17289,7 @@ class Run1App:
         mcount = summary["source_counts"]["movement_counts"]
         seen = (f"Movement ที่จับได้: ครบ {mstat['Exact'] + mstat['Exact_AfterDedupe']}, "
                 f"บางส่วน {mstat['Partial'] + mstat['Partial_AfterDedupe']}, "
+                f"ตามตารางเส้นทางเทียบ {mstat['Alias']}, "
                 f"ไม่ตรงแบบใด {mstat['Unclassified']}, เห็นไม่ครบ {mstat['Insufficient']} จาก {len(tracks)} คัน")
         layout_hint = " — ตรวจว่าไฟล์ Zone/วิดีโอเป็นชุดเดียวกับผังทางแยก (Movement ใหม่ 1-3-4, 2-3-1, 1-3-6-7, 5-6-3-1, 2-3-4, 5-6-7)"
         if c["ldp_enabled"] and row_counts.get("ldp") == 0:
