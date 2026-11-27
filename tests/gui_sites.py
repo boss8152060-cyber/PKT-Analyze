@@ -83,6 +83,10 @@ expect_open = {"2-3-4", "5-6-7", "5-6-3-1", "1-3-6-7", "2-3-1", "8-6-3-1", "1-3-
 check("4-leg junction: the streams that Zone 8 and the way across need as well", stream_set(st) == expect_open, str(sorted(stream_set(st))))
 check("every stream has its own Line, no Line is used twice, and there are Lines enough", len({s["line"] for s in st.streams}) == len(st.streams) and all(s["line"] in m.LINE_NAMES for s in st.streams))
 check("the Gap tab shows a box for each", set(st.stream_status_vars) == expect_open)
+app.run3_site_type_var.set("t_median")
+root.update()
+check("3-leg two-way junction with a physical median island: only the stream 2-3-4 needs a line (nothing crosses the island)", stream_set(st) == {"2-3-4"}, str(sorted(stream_set(st))))
+check("the window says the site has a physical median island", "เกาะกลางกายภาพ" in st.site_label_var.get(), st.site_label_var.get())
 app.run3_site_type_var.set("x_median")
 root.update()
 check("4-leg junction with a median island: the streams of the two 3-leg junctions (2-3-4 and 5-6-7)", stream_set(st) == {"2-3-4", "5-6-7"}, str(sorted(stream_set(st))))
@@ -96,6 +100,7 @@ check("closing the window takes its watch of the site type away (changing the ty
 # ------------------------------------------------------------------ what a run is told
 for site, gap_all, hw_all in (
         ("t_small", ["1-3-4"], ["1-3-4", "2-3-1", "2-3-4"]),
+        ("t_median", ["1-3-4"], ["1-3-4", "2-3-1", "2-3-4", "5-6-7"]),
         ("t_full", ["1-3-4", "1-3-6-7", "5-6-3-1"], ["1-3-4", "2-3-1", "1-3-6-7", "5-6-3-1", "2-3-4", "5-6-7"]),
         ("x_open", ["1-3-4", "1-3-6-7", "5-6-3-1", "8-6-7", "8-6-3-4", "1-3-6-8", "8-6-3-1"], None),
         ("x_median", ["1-3-4", "8-6-7"], ["1-3-4", "2-3-1", "2-3-4", "5-6-7", "5-6-8", "8-6-7"])):

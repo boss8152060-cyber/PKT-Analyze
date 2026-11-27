@@ -573,7 +573,7 @@ RUN3_DEFAULTS = {
     "pet_include_crossing": True,          # PET counts pairs of conflict type Crossing   (the angle limits are TTC's: ttc_angle_rear_end_deg / ttc_angle_crossing_deg)
     "headway_enabled": True,               # Headway.csv: time headway / time gap of consecutive vehicles of each Movement (extra file, no risk level)
     "headway_movements": ["1-3-4", "2-3-1", "1-3-6-7", "5-6-3-1", "2-3-4", "5-6-7", "8-6-7", "5-6-8", "8-6-3-4", "1-3-6-8", "8-6-3-1"],   # Movements analysed by Headway (of these only the Movements of the site type exist)
-    "site_type": "t_full",                 # 1.59.0: t_small / t_full / x_open / x_median (SITE_TYPES)
+    "site_type": "t_full",                 # 1.59.0: t_small / t_full / t_median / x_open / x_median (SITE_TYPES)
     "headway_max_s": "",                   # blank = no limit: a follower is paired with the nearest leader in its path, however long ago the leader passed
     "headway_line_mapping": "",            # Site_ID|Movement|Line N for Headway only; a Movement left out uses the Reference Line Mapping of Gap Acceptance, then the origin zone
     "reference_line_source": "zone_edge",   # reference line of a Movement: "zone_edge" = the edge two zones share (ZONE_EDGE_DEFAULT) / "drawn" = the Line of the Reference Line Mapping / "per_stream" = each stream as chosen in the Line window (an `Edge a-b` or a `Line N` row of the mapping)
@@ -766,12 +766,16 @@ MOVEMENT_IDS = list(MOVEMENT_PATTERNS)
 # ---- Site types (1.59.0): which zones and which Movements a site has. Only the Movements of the type are recognised, so a 3-leg junction behaves exactly as before.
 #   t_small = 3-leg junction, Zone 1-4;  t_full = 3-leg junction, Zone 1-7 (the default: what every run before 1.59.0 was);  x_open = 4-leg junction, Zone 1-8;
 #   x_median = 4-leg junction with a median island: two 3-leg junctions (Zone 1-4 and Zone 5-8), nothing that crosses the median is analysed.
+#   t_median = 3-leg two-way junction with a PHYSICAL median island (1.61.2): the traffic of Zone 5-6-7 can only go straight on; no turn crosses the island
+#              (1-3-6-7 and 5-6-3-1 cannot happen), so the junction has 1-3-4, 2-3-1, 2-3-4 and 5-6-7.
 SITE_TYPE_DEFAULT = "t_full"
 SITE_TYPES = {
     "t_small":  {"zones": (1, 2, 3, 4),
                  "movements": ("1-3-4", "2-3-1", "2-3-4")},
     "t_full":   {"zones": (1, 2, 3, 4, 5, 6, 7),
                  "movements": ("1-3-4", "2-3-1", "1-3-6-7", "5-6-3-1", "2-3-4", "5-6-7")},
+    "t_median": {"zones": (1, 2, 3, 4, 5, 6, 7),
+                 "movements": ("1-3-4", "2-3-1", "2-3-4", "5-6-7")},
     "x_open":   {"zones": (1, 2, 3, 4, 5, 6, 7, 8),
                  "movements": ("1-3-4", "2-3-1", "1-3-6-7", "5-6-3-1", "2-3-4", "5-6-7", "8-6-7", "5-6-8", "8-6-3-4", "1-3-6-8", "8-6-3-1")},
     "x_median": {"zones": (1, 2, 3, 4, 5, 6, 7, 8),
@@ -786,6 +790,7 @@ _GAP_CONFLICTS_T = {
 GAP_CONFLICTS_BY_SITE = {
     "t_small": {"1-3-4": ["2-3-4"]},
     "t_full": _GAP_CONFLICTS_T,
+    "t_median": {"1-3-4": ["2-3-4"]},                      # (only the left turn out of the side street waits: nothing crosses the island)
     "x_open": {**_GAP_CONFLICTS_T,
                "8-6-7": ["5-6-7"],
                "8-6-3-4": ["5-6-7", "2-3-4", "2-3-1"],
@@ -796,13 +801,16 @@ GAP_CONFLICTS_BY_SITE = {
 
 
 def site_key(kind, median=False):
-    """The site type from the choice of the user: kind "3small" / "3full" / "4" (4-leg) and, for a 4-leg junction, whether it has a median island."""
+    """The site type from the choice of the user: kind "3small" / "3full" / "4" (4-leg) and, for a two-way 3-leg junction or a 4-leg junction, whether it has a
+    physical median island."""
     kind = str(kind or "")
     if kind in SITE_TYPES:
         return kind
     if kind in ("4", "x", "4leg"):
         return "x_median" if median else "x_open"
-    return "t_small" if kind in ("3small", "small") else SITE_TYPE_DEFAULT
+    if kind in ("3small", "small"):
+        return "t_small"
+    return "t_median" if median else SITE_TYPE_DEFAULT
 
 
 def site_info(site):
@@ -4085,7 +4093,12 @@ class ZoneLineEditor:
 
 
 SITE_KIND_LABELS = {"3small": "สามแยกทางเดียว One way (Zone 1–4)", "3full": "สามแยกสองทาง Two way (Zone 1–7)", "4": "สี่แยก (Zone 1–8)"}
-SITE_KIND_OF_TYPE = {"t_small": "3small", "t_full": "3full", "x_open": "4", "x_median": "4"}
+SITE_KIND_OF_TYPE = {"t_small": "3small", "t_full": "3full", "t_median": "3full", "x_open": "4", "x_median": "4"}
+SITE_MEDIAN_TYPES = ("t_median", "x_median")          # the site types with a physical median island
+SITE_MEDIAN_NOTES = {
+    "3full": "มีเกาะกลางกายภาพ: รถฝั่ง Zone 5-6-7 วิ่งตรงอย่างเดียว ไม่คิดการเลี้ยวข้ามเกาะ (1-3-6-7, 5-6-3-1) — คิดเฉพาะ 1-3-4, 2-3-1, 2-3-4, 5-6-7",
+    "4": "สี่แยกที่มีเกาะกลางกายภาพ คิดเป็นสามแยก 2 แห่ง (Zone 1–4 และ Zone 5–8) ไม่คิดเส้นทางที่ข้ามเกาะ",
+}
 
 
 def bind_undo_keys(top, undo, redo, in_text=None):
@@ -4118,19 +4131,21 @@ def build_site_type_row(parent, app, translate=None):
     kind_var, median_var = tk.StringVar(), tk.BooleanVar()
     labels = {k: T(v) for k, v in SITE_KIND_LABELS.items()}
     back = {v: k for k, v in labels.items()}
-    cb = ttk.Combobox(fr, textvariable=kind_var, values=list(labels.values()), state="readonly", width=24)
+    cb = ttk.Combobox(fr, textvariable=kind_var, values=list(labels.values()), state="readonly", width=34)
     cb.grid(row=0, column=1, sticky="w")
-    chk = ttk.Checkbutton(fr, text=T("มีเกาะกลาง"), variable=median_var)
+    chk = ttk.Checkbutton(fr, text=T("มีเกาะกลางกายภาพ"), variable=median_var)
     chk.grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
-    ttk.Label(fr, text=T("สี่แยกที่มีเกาะกลาง คิดเป็นสามแยก 2 แห่ง (Zone 1–4 และ Zone 5–8) ไม่คิดเส้นทางที่ข้ามเกาะ"), foreground="#555555", wraplength=300,
-              justify="left").grid(row=2, column=0, columnspan=2, sticky="w")
+    note_var = tk.StringVar(value="")
+    ttk.Label(fr, textvariable=note_var, foreground="#555555", wraplength=300, justify="left").grid(row=2, column=0, columnspan=2, sticky="w")
 
     def from_type(*_):
         try:
             key = app.run3_site_type()
-            kind_var.set(labels[SITE_KIND_OF_TYPE[key]])
-            median_var.set(key == "x_median")
-            chk.state(["!disabled"] if key in ("x_open", "x_median") else ["disabled"])
+            kind = SITE_KIND_OF_TYPE[key]
+            kind_var.set(labels[kind])
+            median_var.set(key in SITE_MEDIAN_TYPES)
+            chk.state(["!disabled"] if kind in SITE_MEDIAN_NOTES else ["disabled"])
+            note_var.set(T(SITE_MEDIAN_NOTES[kind]) if kind in SITE_MEDIAN_NOTES else "")
         except tk.TclError:
             pass
 
@@ -4638,7 +4653,7 @@ class SiteStudio:
 
     def _show_site_type(self):
         key = self.app.run3_site_type()
-        text = self.T(SITE_KIND_LABELS[SITE_KIND_OF_TYPE[key]]) + (" · " + self.T("มีเกาะกลาง") if key == "x_median" else "")
+        text = self.T(SITE_KIND_LABELS[SITE_KIND_OF_TYPE[key]]) + (" · " + self.T("มีเกาะกลางกายภาพ") if key in SITE_MEDIAN_TYPES else "")
         self.site_label_var.set(self.T("ประเภทหน้างาน") + ": " + text + "  (" + self.T("เปลี่ยนที่ ② ทางแยก") + ")")
 
     def _on_site_type_changed(self, *_):

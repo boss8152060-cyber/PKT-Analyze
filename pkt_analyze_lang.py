@@ -2138,3 +2138,5 @@ for _k, _v in {'คำนวณตัวชี้วัดใหม่จาก�
     EXACT.setdefault(_k, _v)
 for _k, _v in {'Batch {0}/{1}: {2} — คำนวณตัวชี้วัดใหม่จากข้อมูลดิบ': 'Batch {0}/{1}: {2} — computing the indicators again from the raw data'}.items():
     TEMPLATES.setdefault(_k, _v)
+for _k, _v in {'มีเกาะกลางกายภาพ': 'Physical median island', 'มีเกาะกลางกายภาพ: รถฝั่ง Zone 5-6-7 วิ่งตรงอย่างเดียว ไม่คิดการเลี้ยวข้ามเกาะ (1-3-6-7, 5-6-3-1) — คิดเฉพาะ 1-3-4, 2-3-1, 2-3-4, 5-6-7': 'Physical median island: the traffic of Zone 5-6-7 can only go straight on; no turn across the island is analysed (1-3-6-7, 5-6-3-1) — only 1-3-4, 2-3-1, 2-3-4, 5-6-7', 'สี่แยกที่มีเกาะกลางกายภาพ คิดเป็นสามแยก 2 แห่ง (Zone 1–4 และ Zone 5–8) ไม่คิดเส้นทางที่ข้ามเกาะ': 'A 4-leg junction with a physical median island is analysed as two 3-leg junctions (Zone 1–4 and Zone 5–8); the ways across the island are not analysed', ' — คำนวณตัวชี้วัดใหม่จากข้อมูลดิบ': ' — indicators computed again from the raw data'}.items():
+    EXACT.setdefault(_k, _v)

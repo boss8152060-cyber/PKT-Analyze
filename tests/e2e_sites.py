@@ -142,6 +142,14 @@ def main():
     mc3 = summary3["source_counts"]["movement_counts"]
     check("[t_full] the 3-leg junction counts its 6 Movements only, as before", set(mc3) == set(m.site_movements("t_full")), str(sorted(mc3)))
     check("[t_full] the cars of Zone 8 are not given a Movement", mc3.get("2-3-4") == 1 and mc3.get("5-6-7") == 2 and mc3.get("1-3-6-7") == 1 and mc3.get("5-6-3-1") == 1, str(mc3))
+    app.run3_site_type_var.set("t_median")
+    out5, summary5 = run_scene(app, veh)
+    mc5 = summary5["source_counts"]["movement_counts"]
+    check("[t_median] a two-way 3-leg junction with a physical median island counts 1-3-4, 2-3-1, 2-3-4, 5-6-7 only", set(mc5) == {"1-3-4", "2-3-1", "2-3-4", "5-6-7"}, str(mc5))
+    sp5 = read_csv(os.path.join(out5, "Speed.csv"))
+    check("[t_median] the turns across the island (1-3-6-7, 5-6-3-1) are not given a Movement", all(r["Movement"] == "" for r in sp5 if r["Vehicle_ID"] in ("12", "13")),
+          str({r["Vehicle_ID"]: r["Movement"] for r in sp5 if r["Vehicle_ID"] in ("12", "13") and r["Movement"]}))
+    check("[t_median] the traffic of Zone 5-6-7 goes straight on: 5-6-7 = 2", mc5.get("5-6-7") == 2 and mc5.get("2-3-4") == 1, str(mc5))
     app.run3_site_type_var.set("t_small")
     out4, summary4 = run_scene(app, veh)
     mc4 = summary4["source_counts"]["movement_counts"]

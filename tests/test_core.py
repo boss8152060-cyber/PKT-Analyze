@@ -690,7 +690,7 @@ class SiteTypes(unittest.TestCase):
     sites = CORE["SITE_TYPES"]
 
     def test_the_four_types(self):
-        self.assertEqual(set(self.sites), {"t_small", "t_full", "x_open", "x_median"})
+        self.assertEqual(set(self.sites), {"t_small", "t_full", "t_median", "x_open", "x_median"})
         self.assertEqual(CORE["SITE_TYPE_DEFAULT"], "t_full")                   # what every run before 1.59.0 was
         self.assertEqual(self.sites["t_small"]["zones"], (1, 2, 3, 4))
         self.assertEqual(self.sites["t_full"]["zones"], tuple(range(1, 8)))
@@ -701,6 +701,8 @@ class SiteTypes(unittest.TestCase):
     def test_choice_to_type(self):
         k = CORE["site_key"]
         self.assertEqual((k("3small"), k("3full"), k("4"), k("4", True), k("")), ("t_small", "t_full", "x_open", "x_median", "t_full"))
+        self.assertEqual(k("3full", True), "t_median")                         # a two-way 3-leg junction with a physical median island
+        self.assertEqual(k("3small", True), "t_small")                          # (a one-way 3-leg junction has no island to tick)
         self.assertEqual(k("x_median"), "x_median")
 
     def test_the_movements_of_each_type(self):
@@ -711,6 +713,18 @@ class SiteTypes(unittest.TestCase):
         self.assertEqual(set(m("x_median")), {"2-3-4", "2-3-1", "1-3-4", "5-6-7", "5-6-8", "8-6-7"})
         for crossing in ("1-3-6-7", "1-3-6-8", "8-6-3-4", "8-6-3-1", "5-6-3-1"):
             self.assertNotIn(crossing, m("x_median"))
+
+    def test_a_3_leg_junction_with_a_median_island(self):
+        # 1.61.2: the traffic of Zone 5-6-7 can only go straight on; no turn crosses the island
+        self.assertEqual(self.sites["t_median"]["zones"], tuple(range(1, 8)))
+        self.assertEqual(set(CORE["site_movements"]("t_median")), {"1-3-4", "2-3-1", "2-3-4", "5-6-7"})
+        for crossing in ("1-3-6-7", "5-6-3-1"):
+            self.assertNotIn(crossing, CORE["site_movements"]("t_median"))
+        self.assertEqual(CORE["site_gap_conflicts"]("t_median"), {"1-3-4": ["2-3-4"]})
+        self.assertEqual(classify((5, 6, 3, 1), "t_median"), ("", "Unclassified"))          # a turn across the island is not one of its Movements
+        self.assertEqual(classify((5, 6, 7), "t_median"), ("5-6-7", "Exact"))
+        self.assertEqual(classify((6, 3), "t_median")[1], "Unclassified")
+        self.assertEqual(classify((1, 3), "t_median"), ("1-3-4", "Partial"))                 # (with no 1-3-6-7 a fragment 1-3 is the left turn only)
 
     def test_the_second_junction_mirrors_the_first(self):
         mirror = {1: 8, 2: 5, 3: 6, 4: 7, 5: 2, 6: 3, 7: 4, 8: 1}
