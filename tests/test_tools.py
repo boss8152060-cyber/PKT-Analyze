@@ -351,6 +351,19 @@ class CombineClips(unittest.TestCase):
         with open(os.path.join(bad, "9_Summary", "Run_Summary.json"), encoding="utf-8") as f:
             self.assertEqual(json.load(f)["rezoned_from_raw"]["routes_changed"], 1)
 
+    def test_stabilize_maps_points_back_into_the_reference_view(self):
+        import numpy as np
+        import stabilize_clip
+        shift = np.array([[1, 0, -40], [0, 1, -20], [0, 0, 1]], dtype=float)   # the view moved 40 px left, 20 px up
+        samples = [[0.0, np.eye(3), 500], [10.0, shift, 500]]
+        rows = [{"timestamp": "1.0", "trajectory_x": "100", "trajectory_y": "100", "bbox_x1": "90", "bbox_y1": "80", "bbox_x2": "110", "bbox_y2": "100"},
+                {"timestamp": "11.0", "trajectory_x": "60", "trajectory_y": "80", "bbox_x1": "50", "bbox_y1": "60", "bbox_x2": "70", "bbox_y2": "80"}]
+        out = stabilize_clip.stabilize_rows(rows, samples)
+        self.assertEqual((out[0]["trajectory_x"], out[0]["trajectory_y"]), ("100", "100"))      # before the move: unchanged
+        self.assertEqual((out[1]["trajectory_x"], out[1]["trajectory_y"]), ("100", "100"))      # after it: back where it was
+        self.assertEqual((out[1]["bbox_x1"], out[1]["bbox_y2"]), ("90", "100"))
+        self.assertEqual(stabilize_clip.shift_px(shift), (-40.0, -20.0))
+
     def test_old_run_3_names_are_still_read(self):
         import combine_clips
         self._clip("Site/d1/a", [30], old_names=True)

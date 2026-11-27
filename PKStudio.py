@@ -950,7 +950,7 @@ def rezone_detection_records(rows, zones, confirm_frames=1):
             classes[r.get("class_name", "")] = classes.get(r.get("class_name", ""), 0) + 1
         first, last = min(ts), max(ts)
         id_rows.append({
-            "track_id": tid, "class_name": rs[-1].get("class_name", ""),
+            "track_id": tid, "class_name": rs[0].get("class_name", ""),     # the class of the first detection, as Run 1
             "first_seen_timestamp": f"{first:.6f}", "last_seen_timestamp": f"{last:.6f}",
             "track_duration_seconds": f"{max(0.0, last - first):.6f}", "first_zone": seq[0], "last_zone": seq[-1],
             "zone_sequence": " > ".join(seq), "unique_zones_visited": " | ".join(uniq), "zone_transition_count": len(seq) - 1,
