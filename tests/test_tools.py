@@ -319,6 +319,38 @@ class CombineClips(unittest.TestCase):
         self.assertEqual((data["video_start"], data["video_start_method"], data["status"]), ("2026-09-05 08:00:00", "modified - length", "completed"))
         self.assertEqual(combine_clips.clip_start(d, "Results/2026_09_05/GX010111"), "2026-09-05 08:00:00")
 
+    def test_rezone_clip_takes_zones_and_geometry_from_another_clip(self):
+        import rezone_clip
+        def clip(rel, zones, run3):
+            d = os.path.join(self.root, *rel.split("/"))
+            os.makedirs(os.path.join(d, "0_Raw"))
+            os.makedirs(os.path.join(d, "9_Summary"))
+            with open(os.path.join(d, "9_Summary", "Settings.json"), "w", encoding="utf-8") as f:
+                json.dump({"video": rel + ".MP4", "zone_snapshot": {"zones": zones}, "run3": run3, "zone_file": rel}, f)
+            with open(os.path.join(d, "9_Summary", "Run_Summary.json"), "w", encoding="utf-8") as f:
+                json.dump({"status": "completed"}, f)
+            with open(os.path.join(d, "0_Raw", "Detection_Records.csv"), "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow(["frame", "timestamp", "track_id", "class_name", "trajectory_x", "trajectory_y", "zone"])
+                for i, x in enumerate((5, 15, 25)):
+                    w.writerow([i + 1, i * 0.5, 1, "Car", x, 5, "Zone 7"])
+            with open(os.path.join(d, "1_ID_Zone.csv"), "w", newline="", encoding="utf-8-sig") as f:
+                f.write("track_id,zone_sequence" + chr(10) + "1,Zone 7" + chr(10))
+            return d
+        sq = lambda x0: [[x0, 0], [x0 + 10, 0], [x0 + 10, 10], [x0, 10]]  # noqa: E731
+        good = clip("S/d/A", {"Zone 1": sq(0), "Zone 3": sq(10), "Zone 4": sq(20)}, {"cal": "A"})
+        bad = clip("S/d/B", {"Zone 7": sq(0)}, {"cal": "other camera"})
+        rezone_clip.rezone_clip(bad, good, log=lambda *_: None)
+        with open(os.path.join(bad, "1_ID_Zone.csv"), encoding="utf-8-sig") as f:
+            self.assertEqual(next(csv.DictReader(f))["zone_sequence"], "Zone 1 > Zone 3 > Zone 4")
+        with open(os.path.join(bad, "9_Summary", "Settings.json"), encoding="utf-8") as f:
+            st = json.load(f)
+        self.assertEqual((st["run3"], st["video"], st["zone_file"]), ({"cal": "A"}, "S/d/B.MP4", "S/d/A"))
+        self.assertTrue(os.path.isfile(os.path.join(bad, "0_Raw", "Detection_Records_before_rezone.csv")))
+        self.assertTrue(os.path.isfile(os.path.join(bad, "9_Summary", "Settings_before_rezone.json")))
+        with open(os.path.join(bad, "9_Summary", "Run_Summary.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["rezoned_from_raw"]["routes_changed"], 1)
+
     def test_old_run_3_names_are_still_read(self):
         import combine_clips
         self._clip("Site/d1/a", [30], old_names=True)

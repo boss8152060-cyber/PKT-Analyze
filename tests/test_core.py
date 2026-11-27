@@ -567,6 +567,36 @@ class MovementAliases(unittest.TestCase):
         self.assertFalse(self.f([2, 3, 1, 3, 4])[1].startswith("Exact"))
 
 
+class RezoneFromRaw(unittest.TestCase):
+    """PKT 1.61.8: zones given again from the trajectory points of Detection_Records (no detection)."""
+    zones = {"Zone 1": [(0, 0), (10, 0), (10, 10), (0, 10)], "Zone 3": [(10, 0), (20, 0), (20, 10), (10, 10)],
+             "Zone 4": [(20, 0), (30, 0), (30, 10), (20, 10)]}
+
+    def rows(self, track, xs, cls="Car", t0=0.0):
+        return [{"frame": str(i + 1), "timestamp": f"{t0 + i * 0.5:.6f}", "track_id": str(track), "class_name": cls,
+                 "trajectory_x": str(x), "trajectory_y": "5", "zone": "Zone 9"} for i, x in enumerate(xs)]
+
+    def test_point_in_polygon_counts_the_edge(self):
+        f = CORE["point_in_polygon"]
+        self.assertTrue(f(5, 5, self.zones["Zone 1"]))
+        self.assertTrue(f(10, 5, self.zones["Zone 1"]))          # on the edge, as cv2.pointPolygonTest >= 0
+        self.assertFalse(f(11, 5, self.zones["Zone 1"]))
+
+    def test_zones_and_route_come_from_the_new_polygons(self):
+        rows = self.rows(7, [5, 6, 15, 16, 25, 26, 40])
+        new, ids, zones = CORE["rezone_detection_records"](rows, self.zones)
+        self.assertEqual([r["zone"] for r in new], ["Zone 1", "Zone 1", "Zone 3", "Zone 3", "Zone 4", "Zone 4", ""])
+        self.assertEqual(ids[0]["zone_sequence"], "Zone 1 > Zone 3 > Zone 4")
+        self.assertEqual((ids[0]["first_zone"], ids[0]["last_zone"], ids[0]["zone_transition_count"]), ("Zone 1", "Zone 4", 2))
+        self.assertEqual([z["zone"] for z in zones], ["Zone 1", "Zone 3", "Zone 4"])
+        self.assertEqual(rows[0]["zone"], "Zone 9")                # the input rows are not changed
+
+    def test_untracked_detections_have_no_route(self):
+        new, ids, _ = CORE["rezone_detection_records"](self.rows(-1, [5, 15]) + self.rows(2, [15, 25]), self.zones)
+        self.assertEqual([r["track_id"] for r in ids], ["2"])
+        self.assertEqual(new[0]["zone"], "Zone 1")                 # the detection still gets its zone
+
+
 class GapHoldAndIntervals(unittest.TestCase):
     def samples(self, plan, dt=1 / 60):
         """plan = [(n_samples, speed_ms, inside_bool), ...] -> [(t, x, y, inside)]"""

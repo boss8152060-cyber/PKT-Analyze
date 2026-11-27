@@ -859,6 +859,120 @@ def zone_sequence_from_samples(samples, merge_gap_s=ZONE_FLICKER_MERGE_S):
     return seq
 
 
+def point_in_polygon(x, y, poly):
+    """True when (x, y) is inside or on the edge of the polygon [(x, y), ...] (same answer as cv2.pointPolygonTest >= 0)."""
+    n = len(poly)
+    if n < 3:
+        return False
+    inside = False
+    for i in range(n):
+        x1, y1 = float(poly[i][0]), float(poly[i][1])
+        x2, y2 = float(poly[(i + 1) % n][0]), float(poly[(i + 1) % n][1])
+        cross = (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1)
+        if abs(cross) < 1e-9 and min(x1, x2) - 1e-9 <= x <= max(x1, x2) + 1e-9 and min(y1, y2) - 1e-9 <= y <= max(y1, y2) + 1e-9:
+            return True                                   # on an edge
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+    return inside
+
+
+def rezone_detection_records(rows, zones, confirm_frames=1):
+    """PKT 1.61.8: give every detection row its zone again from its trajectory point and a NEW set of zones, without
+    detecting again. rows = Detection_Records rows (frame, timestamp, track_id, class_name, trajectory_x, trajectory_y,
+    zone ...); zones = {"Zone 1": [(x, y), ...], ...} in drawing order (the first zone that holds the point wins, as in
+    Run 1); confirm_frames = Run 1's "zone_confirm_frames": a new zone counts only after that many frames in a row, and
+    the track leaves its zone after that many frames outside every zone.
+    Returns (rows with a new "zone" = the zone that holds the point, as Run 1 writes Detection_Records; ID_Zone_Summary
+    rows made of the confirmed zones; Zone_Summary rows) in Run 1's formats."""
+    confirm_frames = max(1, int(confirm_frames or 1))
+    polys = [(name, [(float(x), float(y)) for x, y in pts]) for name, pts in zones.items() if len(pts) >= 3]
+    state = {}
+    out = []
+    order = sorted(range(len(rows)), key=lambda i: (float(rows[i].get("frame") or 0), i))
+    new_zone = [""] * len(rows)
+    for i in order:
+        r = rows[i]
+        try:
+            x, y = float(r.get("trajectory_x")), float(r.get("trajectory_y"))
+            cand = next((name for name, poly in polys if point_in_polygon(x, y, poly)), None)
+        except (TypeError, ValueError):
+            cand = None
+        st = state.setdefault(str(r.get("track_id")), {"cand": None, "count": 0, "out": 0, "zone": None})
+        if cand is None:
+            st["cand"], st["count"] = None, 0
+            st["out"] += 1
+            if st["out"] >= confirm_frames:
+                st["zone"] = None
+        else:
+            st["out"] = 0
+            st["count"] = st["count"] + 1 if cand == st["cand"] else 1
+            st["cand"] = cand
+            if st["count"] >= confirm_frames:
+                st["zone"] = cand
+        new_zone[i] = (cand or "", st["zone"] or "")
+    for i, r in enumerate(rows):
+        r2 = dict(r)
+        r2["zone"] = new_zone[i][0]                       # Detection_Records keep the zone of the point itself (as Run 1 writes it)
+        r2["_confirmed"] = new_zone[i][1]                 # the confirmed zone: what the route summary is made of
+        out.append(r2)
+    tracks = {}
+    for i in order:
+        r = out[i]
+        tracks.setdefault(str(r.get("track_id")), []).append(r)
+    id_rows, agg = [], {}
+    def tid_key(t):
+        try:
+            return (0, int(t))
+        except ValueError:
+            return (1, t)
+    for tid in sorted(tracks, key=tid_key):
+        if tid_key(tid)[0] == 0 and int(tid) < 0 or tid in ("", "None"):
+            continue                                      # untracked detections (track -1) have no route, as in Run 1
+        rs = tracks[tid]
+        ts = [float(r.get("timestamp") or 0) for r in rs]
+        samples = []
+        for r, t in zip(rs, ts):
+            z = str(r["_confirmed"]).replace("Zone", "").strip()
+            samples.append((t, int(z) if z.isdigit() else None))
+        visits = [(f"Zone {z}", a, b) for z, a, b in zone_visits_from_samples(samples)]
+        if not visits:
+            continue
+        seq = []
+        for z, _a, _b in visits:
+            if not seq or seq[-1] != z:
+                seq.append(z)
+        uniq = []
+        for z in seq:
+            if z not in uniq:
+                uniq.append(z)
+        classes = {}
+        for r in rs:
+            classes[r.get("class_name", "")] = classes.get(r.get("class_name", ""), 0) + 1
+        first, last = min(ts), max(ts)
+        id_rows.append({
+            "track_id": tid, "class_name": rs[-1].get("class_name", ""),
+            "first_seen_timestamp": f"{first:.6f}", "last_seen_timestamp": f"{last:.6f}",
+            "track_duration_seconds": f"{max(0.0, last - first):.6f}", "first_zone": seq[0], "last_zone": seq[-1],
+            "zone_sequence": " > ".join(seq), "unique_zones_visited": " | ".join(uniq), "zone_transition_count": len(seq) - 1,
+            "total_zone_time_seconds": f"{sum(max(0.0, b - a) for _z, a, b in visits):.6f}",
+        })
+        for z, a, b in visits:
+            g = agg.setdefault(z, {"ids": set(), "d": [], "first": a, "last": a})
+            g["ids"].add(tid)
+            g["d"].append(max(0.0, b - a))
+            g["first"], g["last"] = min(g["first"], a), max(g["last"], a)
+    zone_rows = []
+    for z in sorted(agg, key=lambda n: int(n.replace("Zone", "").strip() or 0)):
+        g = agg[z]
+        zone_rows.append({"zone": z, "unique_ids": len(g["ids"]), "total_entries": len(g["d"]),
+                          "average_duration_seconds": f"{sum(g['d']) / len(g['d']):.6f}", "min_duration_seconds": f"{min(g['d']):.6f}",
+                          "max_duration_seconds": f"{max(g['d']):.6f}", "first_entry_timestamp": f"{g['first']:.6f}",
+                          "last_entry_timestamp": f"{g['last']:.6f}"})
+    for r in out:
+        r.pop("_confirmed", None)
+    return out, id_rows, zone_rows
+
+
 def zone_on_path(visits, zone, t, tol=0.0):
     """True when the vehicle with these visits is in `zone` at time t or enters it later (the zone is on its way); False when it never goes there or
     has already left it. `visits` = zone_visits_from_samples(...)."""
