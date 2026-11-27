@@ -1296,6 +1296,10 @@ MOVEMENT_ALIASES = {
     (4, 5, 6, 7): "5-6-7",          # SCB: cars of 5-6-7 pass Zone 4 first (about 2,000 a day)
     (5, 4, 5, 6, 7): "5-6-7",
     (7, 2, 3, 4): "2-3-4",          # PUM weekend / LA: the box of a car touches Zone 7 for a few frames
+    # 1.61.4 (team, 2026-11-27): paths the team assigns to the Movement they take
+    (4, 3, 1): "5-6-3-1",
+    (1, 3, 2): "1-3-6-7",
+    (4, 3, 6, 7): "5-6-7",
 }
 
 

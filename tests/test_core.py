@@ -526,6 +526,12 @@ class MovementAliases(unittest.TestCase):
         self.assertEqual(self.f([7, 7, 2, 3, 3, 4]), ("2-3-4", "Alias"))
         self.assertEqual(self.f([4, 5, 6, 7], "t_median"), ("5-6-7", "Alias"))    # 5-6-7 exists with a median island too
 
+    def test_aliases_added_in_1_61_4(self):
+        self.assertEqual(self.f([4, 3, 1]), ("5-6-3-1", "Alias"))
+        self.assertEqual(self.f([1, 3, 2]), ("1-3-6-7", "Alias"))
+        self.assertEqual(self.f([4, 3, 6, 7]), ("5-6-7", "Alias"))
+        self.assertEqual(self.f([4, 3, 1], "t_median"), ("", "Unclassified"))      # no 5-6-3-1 across a median island
+
     def test_alias_into_zone_8_only_where_the_site_has_it(self):
         self.assertEqual(self.f([5, 8], "x_median"), ("5-6-8", "Alias"))
         self.assertEqual(self.f([5, 8], "t_full"), ("", "Unclassified"))      # no Zone 8 / 5-6-8 at a 3-leg junction
@@ -539,9 +545,8 @@ class MovementAliases(unittest.TestCase):
         self.assertEqual(self.f([1, 3, 6]), ("1-3-6-7", "Partial"))
 
     def test_sequences_not_in_the_table_stay_unclassified(self):
-        self.assertEqual(self.f([4, 3, 1]), ("", "Unclassified"))      # riding against the traffic: kept apart on purpose
-        self.assertEqual(self.f([1, 3, 2]), ("", "Unclassified"))
         self.assertEqual(self.f([4, 1]), ("", "Unclassified"))
+        self.assertEqual(self.f([6, 5, 4]), ("", "Unclassified"))
 
     def test_the_alias_status_is_not_exact(self):
         # LDP keeps only Movements whose status starts with "Exact": an alias path is not the lane path of its Movement
