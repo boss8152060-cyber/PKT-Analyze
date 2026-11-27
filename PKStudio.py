@@ -14579,6 +14579,10 @@ class Run1App:
             else:
                 stop_reason = "Stopped: processing loop ended"
             self._run_end = {"status": end_status, "disk_lost": bool(disk_lost), "frame": int(frame_index), "of": int(total_frames), "reason": stop_reason}
+            try:      # clock time the video starts: Clip_Start of the combined files (CSV times are seconds from here)
+                video_start, video_start_method = _tools_module("combine_clips").video_start_time(video_path)
+            except Exception:
+                video_start, video_start_method = "", ""
 
             run_summary = {
                 "run_name": run_name,
@@ -14589,6 +14593,8 @@ class Run1App:
                           "first_frame": int(first_frame), "video_lost": bool(disk_lost), "disk_pauses": int(getattr(self, "_disk_pauses", 0))},
                 "model": model_path,
                 "video": video_path,
+                "video_start": video_start,
+                "video_start_method": video_start_method,
                 "output_directory": output_dir,
                 "device": device,
                 "precision": "FP16" if use_fp16 else "FP32",

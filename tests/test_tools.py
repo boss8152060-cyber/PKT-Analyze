@@ -265,6 +265,60 @@ class CombineClips(unittest.TestCase):
         self.assertEqual(f("S/DJI_0426"), "")
         self.assertEqual(f("S/20261399_999999"), "")                             # impossible date/time is not a time
 
+    def _fake_mp4(self, path, seconds, scale=1000):
+        """A file with only a moov/mvhd box (version 0) holding the given length."""
+        import struct
+        mvhd = struct.pack(">I4s", 8 + 4 + 16 + 80, b"mvhd") + bytes(4) + struct.pack(">IIII", 0, 0, scale, int(seconds * scale)) + bytes(80)
+        moov = struct.pack(">I4s", 8 + len(mvhd), b"moov") + mvhd
+        ftyp = struct.pack(">I4s", 16, b"ftyp") + b"isom" + bytes(4)
+        with open(path, "wb") as f:
+            f.write(ftyp + moov)
+
+    def test_video_start_from_name_else_modified_minus_length(self):
+        import combine_clips
+        import time
+        p = os.path.join(self.root, "20260907_084751A.mp4")
+        self._fake_mp4(p, 25 * 60)
+        self.assertEqual(combine_clips.video_start_time(p), ("2026-09-07 08:47:51", "file name"))
+        g = os.path.join(self.root, "GX030111.MP4")
+        self._fake_mp4(g, 4868.2)
+        self.assertAlmostEqual(combine_clips.mp4_length_s(g), 4868.2, places=3)
+        end = time.mktime((2026, 9, 5, 11, 23, 0, 0, 0, -1))
+        os.utime(g, (end, end))
+        self.assertEqual(combine_clips.video_start_time(g), ("2026-09-05 10:01:52", "modified - length"))
+        self.assertEqual(combine_clips.video_start_time(os.path.join(self.root, "missing.mp4")), ("", ""))
+
+    def test_clip_start_comes_from_run_summary_when_the_name_has_no_time(self):
+        import combine_clips
+        d = self._clip("Site/d1/GX010111", [30])
+        with open(os.path.join(d, "Run_Summary.json"), "w", encoding="utf-8") as f:
+            json.dump({"video_start": "2026-09-05 07:20:30"}, f)
+        self._clip("Site/d1/GX020111", [40])
+        combine_clips.combine_top_folders(self.root, ["Site"], log=lambda *_: None)
+        with open(os.path.join(self.root, "Site", "All_Clips", "3_LDP.csv"), newline="", encoding="utf-8-sig") as f:
+            starts = {r["Clip"]: r["Clip_Start"] for r in csv.DictReader(f)}
+        self.assertEqual(starts, {"Site/d1/GX010111": "2026-09-05 07:20:30", "Site/d1/GX020111": ""})
+
+    def test_set_clip_start_finds_the_video_by_name_and_day(self):
+        import combine_clips
+        import set_clip_start
+        import time
+        d = self._clip("Results/2026_09_05/GX010111", [30])
+        with open(os.path.join(d, "Run_Summary.json"), "w", encoding="utf-8") as f:
+            json.dump({"status": "completed"}, f)
+        vids = os.path.join(self.root, "Video")
+        for day, stamp in (("2026_09_04", (2026, 9, 4, 9, 0, 0)), ("2026_09_05", (2026, 9, 5, 9, 0, 0))):
+            os.makedirs(os.path.join(vids, day))
+            v = os.path.join(vids, day, "GX010111.MP4")
+            self._fake_mp4(v, 3600)
+            t = time.mktime(stamp + (0, 0, -1))
+            os.utime(v, (t, t))
+        set_clip_start.main([os.path.join(self.root, "Results"), vids])
+        with open(os.path.join(d, "Run_Summary.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual((data["video_start"], data["video_start_method"], data["status"]), ("2026-09-05 08:00:00", "modified - length", "completed"))
+        self.assertEqual(combine_clips.clip_start(d, "Results/2026_09_05/GX010111"), "2026-09-05 08:00:00")
+
     def test_old_run_3_names_are_still_read(self):
         import combine_clips
         self._clip("Site/d1/a", [30], old_names=True)
