@@ -1309,7 +1309,7 @@ MOVEMENT_ALIASES = {
     # 1.61.6 (team, 2026-11-27): half paths (the vehicle is seen at only one end of its Movement)
     (6, 7): "5-6-7",
     (5, 6): "5-6-7",
-    (3, 4): "1-3-4",
+    (3, 4): "2-3-4",                # 1.61.7 (was 1-3-4 in 1.61.6): at PUM ~90 % of these start in Zone 3 where 2-3-4 vehicles do
 }
 
 

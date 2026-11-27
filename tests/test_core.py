@@ -494,7 +494,7 @@ class RobustMovement(unittest.TestCase):
         self.assertEqual(self.f([2, 3, 4]), ("2-3-4", "Exact"))
         self.assertEqual(self.f([1, 3, 6]), ("1-3-6-7", "Partial"))
         self.assertEqual(self.f([2, 3]), ("", "Ambiguous"))
-        self.assertEqual(self.f([3, 4]), ("1-3-4", "Alias"))          # 1.61.6: the team counts this half path as 1-3-4
+        self.assertEqual(self.f([3, 4]), ("2-3-4", "Alias"))          # 1.61.7: the team counts this half path as 2-3-4
         self.assertEqual(self.f([3]), ("", "Insufficient"))
 
     def test_partial_after_dedupe(self):
@@ -543,7 +543,7 @@ class MovementAliases(unittest.TestCase):
     def test_aliases_added_in_1_61_6(self):
         self.assertEqual(self.f([6, 7]), ("5-6-7", "Alias"))
         self.assertEqual(self.f([5, 6]), ("5-6-7", "Alias"))
-        self.assertEqual(self.f([3, 4]), ("1-3-4", "Alias"))
+        self.assertEqual(self.f([3, 4]), ("2-3-4", "Alias"))
         self.assertEqual(self.f([2, 3]), ("", "Ambiguous"))          # other half paths are not counted
 
     def test_alias_into_zone_8_only_where_the_site_has_it(self):
