@@ -620,6 +620,37 @@ root.update()
 check("opened again the scale is there although nothing is pinned", abs(st.scale - 0.05) < 1e-9 and not st.aligned, str(st.scale))
 st.close()
 
+# ---- a short window: the buttons of 'make perpendicular' stay in sight (the table of the edges shrinks instead) (1.61.10)
+st = app.open_site_studio(ask_drone=False)
+root.update()
+import tkinter.ttk as _ttk
+
+
+def _find_nb(w_):
+    if isinstance(w_, _ttk.Notebook):
+        return w_
+    for c_ in w_.winfo_children():
+        r_ = _find_nb(c_)
+        if r_:
+            return r_
+
+
+st.fit_text = lambda: chr(10).join(["a line of the text of the fit"] * 9)          # (a long text of the fit, as with many pins: it used to push the buttons out)
+st.refresh_all()
+st.edge_msg_var.set(chr(10).join("abc"))
+for hgt in (640, 900):
+    st.top.geometry(f"1400x{hgt}+0+0")
+    nb_ = _find_nb(st.top)
+    nb_.select(2)
+    for _ in range(6):
+        root.update()
+    b_ = st.perp_button
+    bottom_of_button = b_.winfo_rooty() + b_.winfo_height()
+    bottom_of_tab = nb_.winfo_rooty() + nb_.winfo_height()
+    check(f"window {hgt} px high: 'make perpendicular' is shown inside the tab, whole (not squeezed)", b_.winfo_ismapped() and b_.winfo_height() >= b_.winfo_reqheight() - 1 and bottom_of_button <= bottom_of_tab + 1,
+          f"button bottom {bottom_of_button}, tab bottom {bottom_of_tab}, mapped {b_.winfo_ismapped()}")
+st.close()
+
 root.destroy()
 print("FAILED: " + ", ".join(failures) if failures else "ALL OK")
 sys.exit(1 if failures else 0)
